@@ -1,0 +1,397 @@
+import React from "react";
+import {
+    ActivityIndicator,
+    StyleProp,
+    StyleSheet,
+    Text,
+    TextInput,
+    TextInputProps,
+    TextStyle,
+    TouchableOpacity,
+    View,
+    ViewStyle,
+} from "react-native";
+import { Strings } from "../../core/localization";
+import {
+    BorderRadius,
+    Colors,
+    Shadows,
+    Spacing,
+    Typography,
+} from "../../core/theme";
+import { ConnectivityState } from "../types";
+
+// ==========================================
+// 1. AppButton
+// ==========================================
+interface AppButtonProps {
+  title: string;
+  onPress: () => void;
+  variant?: "primary" | "secondary" | "outline" | "danger" | "success";
+  size?: "sm" | "md" | "lg";
+  loading?: boolean;
+  disabled?: boolean;
+  style?: StyleProp<ViewStyle>;
+  textStyle?: StyleProp<TextStyle>;
+  icon?: React.ReactNode;
+}
+
+export const AppButton: React.FC<AppButtonProps> = ({
+  title,
+  onPress,
+  variant = "primary",
+  size = "md",
+  loading = false,
+  disabled = false,
+  style,
+  textStyle,
+  icon,
+}) => {
+  const getBackgroundColor = () => {
+    if (disabled) return Colors.slate200;
+    switch (variant) {
+      case "primary":
+        return Colors.primary;
+      case "secondary":
+        return Colors.secondary;
+      case "danger":
+        return Colors.danger;
+      case "success":
+        return Colors.success;
+      case "outline":
+        return Colors.transparent;
+      default:
+        return Colors.primary;
+    }
+  };
+
+  const getTextColor = () => {
+    if (disabled) return Colors.slate400;
+    if (variant === "outline") return Colors.primary;
+    return Colors.white;
+  };
+
+  const getHeight = () => {
+    switch (size) {
+      case "sm":
+        return 38;
+      case "lg":
+        return 54;
+      default:
+        return 48; // comfortable touch target
+    }
+  };
+
+  return (
+    <TouchableOpacity
+      activeOpacity={0.7}
+      onPress={onPress}
+      disabled={disabled || loading}
+      style={[
+        styles.buttonBase,
+        {
+          backgroundColor: getBackgroundColor(),
+          height: getHeight(),
+          borderColor:
+            variant === "outline" ? Colors.primary : Colors.transparent,
+          borderWidth: variant === "outline" ? 1.5 : 0,
+        },
+        variant !== "outline" && !disabled ? Shadows.subtle : null,
+        style,
+      ]}
+    >
+      {loading ? (
+        <ActivityIndicator color={getTextColor()} size="small" />
+      ) : (
+        <View style={styles.buttonContent}>
+          {icon ? <View style={styles.buttonIcon}>{icon}</View> : null}
+          <Text
+            style={[styles.buttonText, { color: getTextColor() }, textStyle]}
+          >
+            {title}
+          </Text>
+        </View>
+      )}
+    </TouchableOpacity>
+  );
+};
+
+// ==========================================
+// 2. AppInput
+// ==========================================
+interface AppInputProps extends TextInputProps {
+  label?: string;
+  error?: string;
+  containerStyle?: StyleProp<ViewStyle>;
+}
+
+export const AppInput: React.FC<AppInputProps> = ({
+  label,
+  error,
+  containerStyle,
+  style,
+  ...props
+}) => {
+  return (
+    <View style={[styles.inputContainer, containerStyle]}>
+      {label ? <Text style={styles.inputLabel}>{label}</Text> : null}
+      <TextInput
+        style={[styles.textInput, error ? styles.inputError : null, style]}
+        placeholderTextColor={Colors.slate400}
+        textAlign="right"
+        {...props}
+      />
+      {error ? <Text style={styles.errorText}>{error}</Text> : null}
+    </View>
+  );
+};
+
+// ==========================================
+// 3. AppCard
+// ==========================================
+interface AppCardProps {
+  children: React.ReactNode;
+  style?: StyleProp<ViewStyle>;
+  onPress?: () => void;
+}
+
+export const AppCard: React.FC<AppCardProps> = ({
+  children,
+  style,
+  onPress,
+}) => {
+  if (onPress) {
+    return (
+      <TouchableOpacity
+        activeOpacity={0.75}
+        onPress={onPress}
+        style={[styles.card, Shadows.card, style]}
+      >
+        {children}
+      </TouchableOpacity>
+    );
+  }
+  return <View style={[styles.card, Shadows.card, style]}>{children}</View>;
+};
+
+// ==========================================
+// 4. StatusBadge
+// ==========================================
+interface StatusBadgeProps {
+  text: string;
+  type?: "success" | "warning" | "danger" | "info" | "neutral";
+  style?: StyleProp<ViewStyle>;
+}
+
+export const StatusBadge: React.FC<StatusBadgeProps> = ({
+  text,
+  type = "info",
+  style,
+}) => {
+  const getColors = () => {
+    switch (type) {
+      case "success":
+        return { bg: Colors.successLight, text: Colors.successText };
+      case "warning":
+        return { bg: Colors.warningLight, text: Colors.warningText };
+      case "danger":
+        return { bg: Colors.dangerLight, text: Colors.dangerText };
+      case "neutral":
+        return { bg: Colors.slate100, text: Colors.slate600 };
+      default:
+        return { bg: Colors.primaryLight, text: Colors.primaryDark };
+    }
+  };
+
+  const c = getColors();
+
+  return (
+    <View style={[styles.badge, { backgroundColor: c.bg }, style]}>
+      <Text style={[Typography.badge, { color: c.text }]}>{text}</Text>
+    </View>
+  );
+};
+
+// ==========================================
+// 5. SyncIndicator
+// ==========================================
+interface SyncIndicatorProps {
+  connectivity: ConnectivityState;
+  pendingCount: number;
+  onPress?: () => void;
+}
+
+export const SyncIndicator: React.FC<SyncIndicatorProps> = ({
+  connectivity,
+  pendingCount,
+  onPress,
+}) => {
+  let label = Strings.statusOnline;
+  let bg = Colors.successLight;
+  let fg = Colors.successText;
+
+  if (connectivity === "offline") {
+    label =
+      pendingCount > 0 ? `${pendingCount} في الانتظار` : Strings.statusOffline;
+    bg = Colors.warningLight;
+    fg = Colors.warningText;
+  } else if (connectivity === "syncing") {
+    label = Strings.statusSyncing;
+    bg = Colors.primaryLight;
+    fg = Colors.primaryDark;
+  } else if (connectivity === "degraded") {
+    label = "الخادم غير متاح";
+    bg = Colors.dangerLight;
+    fg = Colors.dangerText;
+  }
+
+  return (
+    <TouchableOpacity
+      activeOpacity={0.8}
+      onPress={onPress}
+      disabled={!onPress}
+      style={[styles.syncBadge, { backgroundColor: bg }]}
+    >
+      <View style={[styles.syncDot, { backgroundColor: fg }]} />
+      <Text style={[styles.syncText, { color: fg }]}>{label}</Text>
+    </TouchableOpacity>
+  );
+};
+
+// ==========================================
+// 6. LoadingState / EmptyState / ErrorState
+// ==========================================
+export const LoadingState: React.FC<{ message?: string }> = ({
+  message = Strings.loading,
+}) => (
+  <View style={styles.centerContainer}>
+    <ActivityIndicator size="large" color={Colors.primary} />
+    <Text style={styles.stateMessage}>{message}</Text>
+  </View>
+);
+
+export const EmptyState: React.FC<{
+  message?: string;
+  actionTitle?: string;
+  onAction?: () => void;
+}> = ({ message = Strings.emptyData, actionTitle, onAction }) => (
+  <View style={styles.centerContainer}>
+    <Text style={styles.stateMessage}>{message}</Text>
+    {actionTitle && onAction ? (
+      <AppButton
+        title={actionTitle}
+        onPress={onAction}
+        size="sm"
+        style={{ marginTop: Spacing.md }}
+      />
+    ) : null}
+  </View>
+);
+
+export const ErrorState: React.FC<{
+  message?: string;
+  onRetry?: () => void;
+}> = ({ message = Strings.errorTitle, onRetry }) => (
+  <View style={styles.centerContainer}>
+    <Text style={[styles.stateMessage, { color: Colors.dangerText }]}>
+      {message}
+    </Text>
+    {onRetry ? (
+      <AppButton
+        title={Strings.retryButton}
+        onPress={onRetry}
+        variant="outline"
+        size="sm"
+        style={{ marginTop: Spacing.md }}
+      />
+    ) : null}
+  </View>
+);
+
+const styles = StyleSheet.create({
+  buttonBase: {
+    borderRadius: BorderRadius.md,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: Spacing.lg,
+  },
+  buttonContent: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  buttonIcon: {
+    marginLeft: Spacing.sm,
+  },
+  buttonText: {
+    ...Typography.bodyBold,
+  },
+  inputContainer: {
+    marginBottom: Spacing.md,
+  },
+  inputLabel: {
+    ...Typography.captionBold,
+    color: Colors.slate700,
+    marginBottom: Spacing.xs,
+  },
+  textInput: {
+    backgroundColor: Colors.white,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    borderRadius: BorderRadius.md,
+    height: 48,
+    paddingHorizontal: Spacing.md,
+    fontSize: 15,
+    color: Colors.textPrimary,
+  },
+  inputError: {
+    borderColor: Colors.danger,
+  },
+  errorText: {
+    ...Typography.caption,
+    color: Colors.dangerText,
+    marginTop: Spacing.xs,
+  },
+  card: {
+    backgroundColor: Colors.cardBackground,
+    borderRadius: BorderRadius.lg,
+    padding: Spacing.lg,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    marginBottom: Spacing.md,
+  },
+  badge: {
+    paddingHorizontal: Spacing.sm,
+    paddingVertical: 3,
+    borderRadius: BorderRadius.full,
+    alignSelf: "flex-start",
+  },
+  syncBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingHorizontal: Spacing.sm,
+    paddingVertical: 4,
+    borderRadius: BorderRadius.full,
+  },
+  syncDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 4,
+    marginLeft: 6,
+  },
+  syncText: {
+    fontSize: 12,
+    fontWeight: "600",
+  },
+  centerContainer: {
+    padding: Spacing.xxl,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  stateMessage: {
+    ...Typography.body,
+    color: Colors.textSecondary,
+    marginTop: Spacing.md,
+    textAlign: "center",
+  },
+});

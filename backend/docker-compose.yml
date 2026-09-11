@@ -1,0 +1,22 @@
+version: "3.8"
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: fixion-backend-api
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - PORT=3000
+      - APP_ENV=production
+      - DATABASE_URL=${DATABASE_URL}
+      - JWT_SECRET=${JWT_SECRET}
+      - CORS_ORIGIN=*
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/v1/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

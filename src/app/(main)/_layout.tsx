@@ -1,0 +1,120 @@
+import { Ionicons } from "@expo/vector-icons";
+import { Tabs } from "expo-router";
+import { StyleSheet, View } from "react-native";
+import { Strings } from "../../core/localization";
+import { Colors } from "../../core/theme";
+
+export default function MainLayout() {
+  return (
+    <Tabs
+      screenOptions={{
+        headerShown: false,
+        tabBarActiveTintColor: Colors.primary,
+        tabBarInactiveTintColor: Colors.slate400,
+        tabBarStyle: {
+          height: 64,
+          paddingBottom: 8,
+          paddingTop: 8,
+          backgroundColor: Colors.white,
+          borderTopColor: Colors.border,
+        },
+        tabBarLabelStyle: {
+          fontSize: 12,
+          fontWeight: "600",
+        },
+      }}
+    >
+      <Tabs.Screen
+        name="index"
+        options={{
+          title: Strings.tabDashboard,
+          tabBarIcon: ({ color, size }) => (
+            <Ionicons name="home-outline" size={size} color={color} />
+          ),
+        }}
+      />
+      <Tabs.Screen
+        name="scanner"
+        options={{
+          title: Strings.tabScanner,
+          tabBarIcon: ({ color, focused }) => (
+            <View
+              style={[
+                styles.scannerTabIcon,
+                focused ? styles.scannerTabIconActive : null,
+              ]}
+            >
+              <Ionicons name="qr-code" size={24} color={Colors.white} />
+            </View>
+          ),
+        }}
+      />
+      <Tabs.Screen
+        name="students"
+        options={{
+          title: Strings.tabStudents,
+          tabBarIcon: ({ color, size }) => (
+            <Ionicons name="people-outline" size={size} color={color} />
+          ),
+        }}
+      />
+      <Tabs.Screen
+        name="academic"
+        options={{
+          title: Strings.tabAcademic,
+          tabBarIcon: ({ color, size }) => (
+            <Ionicons name="school-outline" size={size} color={color} />
+          ),
+        }}
+      />
+      <Tabs.Screen
+        name="closing"
+        options={{
+          title: "الإغلاق",
+          tabBarIcon: ({ color, size }) => (
+            <Ionicons name="lock-closed-outline" size={size} color={color} />
+          ),
+        }}
+      />
+      <Tabs.Screen
+        name="notifications"
+        options={{
+          title: "الإشعارات",
+          tabBarIcon: ({ color, size }) => (
+            <Ionicons name="notifications-outline" size={size} color={color} />
+          ),
+        }}
+      />
+      <Tabs.Screen
+        name="reports"
+        options={{
+          title: "التقارير",
+          tabBarIcon: ({ color, size }) => (
+            <Ionicons name="bar-chart-outline" size={size} color={color} />
+          ),
+        }}
+      />
+    </Tabs>
+  );
+}
+
+const styles = StyleSheet.create({
+  scannerTabIcon: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: Colors.primary,
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: 8,
+    shadowColor: Colors.primary,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 6,
+    elevation: 4,
+  },
+  scannerTabIconActive: {
+    backgroundColor: Colors.primaryDark,
+    transform: [{ scale: 1.05 }],
+  },
+});

@@ -1,0 +1,1219 @@
+import { Ionicons } from "@expo/vector-icons";
+import { useEffect, useState } from "react";
+import {
+    Alert,
+    FlatList,
+    Modal,
+    SafeAreaView,
+    ScrollView,
+    StyleSheet,
+    Text,
+    TouchableOpacity,
+    View,
+} from "react-native";
+import { Strings } from "../../core/localization";
+import { PermissionService } from "../../core/permissions";
+import { Colors, Spacing, Typography } from "../../core/theme";
+import { useAuthStore } from "../../features/auth/useAuthStore";
+import { GroupRepository } from "../../features/groups/GroupRepository";
+import { GroupScheduleRepository } from "../../features/groups/GroupScheduleRepository";
+import { SessionGenerationService } from "../../features/sessions/SessionGenerationService";
+import { SubjectRepository } from "../../features/subjects/SubjectRepository";
+import { TeacherRepository } from "../../features/teachers/TeacherRepository";
+import { TeacherSubjectRepository } from "../../features/teachers/TeacherSubjectRepository";
+import {
+    AppButton,
+    AppCard,
+    AppInput,
+    EmptyState,
+    StatusBadge,
+} from "../../shared/components";
+import {
+    Group,
+    GroupSchedule,
+    Session,
+    Subject,
+    Teacher,
+} from "../../shared/types";
+
+type AcademicTab = "teachers" | "subjects" | "groups" | "sessions";
+
+const DAYS_OF_WEEK = [
+  "الأحد",
+  "الإثنين",
+  "الثلاثاء",
+  "الأربعاء",
+  "الخميس",
+  "الجمعة",
+  "السبت",
+];
+
+export default function AcademicScreen() {
+  const currentUser = useAuthStore((s) => s.currentUser);
+  const permissions = currentUser?.permissions || [];
+
+  const [activeTab, setActiveTab] = useState<AcademicTab>("teachers");
+
+  // Data lists
+  const [teachers, setTeachers] = useState<Teacher[]>([]);
+  const [subjects, setSubjects] = useState<Subject[]>([]);
+  const [groups, setGroups] = useState<Group[]>([]);
+  const [todaySessions, setTodaySessions] = useState<Session[]>([]);
+
+  // Selection & Modals
+  const [isAddTeacherOpen, setIsAddTeacherOpen] = useState(false);
+  const [isAddSubjectOpen, setIsAddSubjectOpen] = useState(false);
+  const [isAddGroupOpen, setIsAddGroupOpen] = useState(false);
+  const [selectedGroup, setSelectedGroup] = useState<Group | null>(null);
+  const [groupSchedules, setGroupSchedules] = useState<GroupSchedule[]>([]);
+  const [isAddScheduleOpen, setIsAddScheduleOpen] = useState(false);
+
+  // Forms State
+  const [teacherName, setTeacherName] = useState("");
+  const [teacherPhone, setTeacherPhone] = useState("");
+  const [teacherNotes, setTeacherNotes] = useState("");
+
+  const [subjectName, setSubjectName] = useState("");
+  const [subjectCode, setSubjectCode] = useState("");
+
+  const [groupName, setGroupName] = useState("");
+  const [groupTeacherId, setGroupTeacherId] = useState("");
+  const [groupSubjectId, setGroupSubjectId] = useState("");
+  const [groupGrade, setGroupGrade] = useState("الصف الثالث الثانوي");
+  const [groupSessionPrice, setGroupSessionPrice] = useState("100");
+  const [groupMonthlyPrice, setGroupMonthlyPrice] = useState("400");
+  const [groupDuration, setGroupDuration] = useState("120");
+  const [groupLateThreshold, setGroupLateThreshold] = useState("15");
+
+  const [schedDay, setSchedDay] = useState(0);
+  const [schedStart, setSchedStart] = useState("14:00");
+  const [schedEnd, setSchedEnd] = useState("16:00");
+
+  // Session Generation State
+  const todayStr = new Date().toISOString().split("T")[0];
+  const nextWeekStr = new Date(Date.now() + 7 * 86400000)
+    .toISOString()
+    .split("T")[0];
+  const [genFromDate, setGenFromDate] = useState(todayStr);
+  const [genToDate, setGenToDate] = useState(nextWeekStr);
+  const [generatedSessions, setGeneratedSessions] = useState<Session[]>([]);
+
+  const loadData = () => {
+    try {
+      setTeachers(TeacherRepository.getAll());
+      setSubjects(SubjectRepository.getAll());
+      setGroups(GroupRepository.getAll());
+      setTodaySessions(SessionGenerationService.getSessionsForDate(todayStr));
+    } catch (e: any) {
+      console.error(e);
+    }
+  };
+
+  useEffect(() => {
+    loadData();
+  }, []);
+
+  // 1. Teachers Actions
+  const handleCreateTeacher = () => {
+    if (!teacherName.trim()) {
+      Alert.alert("تنبيه", "اسم المعلم مطلوب.");
+      return;
+    }
+    try {
+      TeacherRepository.createTeacher({
+        name: teacherName.trim(),
+        phone: teacherPhone.trim() || undefined,
+        notes: teacherNotes.trim() || undefined,
+      });
+      Alert.alert("تم بنجاح", "تم إضافة المعلم بنجاح.");
+      setIsAddTeacherOpen(false);
+      setTeacherName("");
+      setTeacherPhone("");
+      setTeacherNotes("");
+      loadData();
+    } catch (e: any) {
+      Alert.alert("خطأ", e?.message || "فشل إضافة المعلم");
+    }
+  };
+
+  // 2. Subjects Actions
+  const handleCreateSubject = () => {
+    if (!subjectName.trim() || !subjectCode.trim()) {
+      Alert.alert("تنبيه", "اسم المادة وكود المادة مطلوبان.");
+      return;
+    }
+    try {
+      SubjectRepository.createSubject({
+        name: subjectName.trim(),
+        code: subjectCode.trim(),
+      });
+      Alert.alert("تم بنجاح", "تم إضافة المادة الدراسية بنجاح.");
+      setIsAddSubjectOpen(false);
+      setSubjectName("");
+      setSubjectCode("");
+      loadData();
+    } catch (e: any) {
+      Alert.alert("خطأ", e?.message || "فشل إضافة المادة");
+    }
+  };
+
+  // 3. Groups Actions
+  const handleCreateGroup = () => {
+    if (!groupName.trim() || !groupTeacherId || !groupSubjectId) {
+      Alert.alert("تنبيه", "يرجى استكمال جميع بيانات المجموعة المطلوبة.");
+      return;
+    }
+
+    try {
+      // First ensure teacher is assigned to subject
+      if (
+        !TeacherSubjectRepository.isTeacherAssignedToSubject(
+          groupTeacherId,
+          groupSubjectId,
+        )
+      ) {
+        TeacherSubjectRepository.assignTeacherToSubject(
+          groupTeacherId,
+          groupSubjectId,
+        );
+      }
+
+      GroupRepository.createGroup({
+        name: groupName.trim(),
+        teacherId: groupTeacherId,
+        subjectId: groupSubjectId,
+        grade: groupGrade.trim(),
+        sessionPrice: parseFloat(groupSessionPrice) || 0,
+        monthlyPrice: parseFloat(groupMonthlyPrice) || 0,
+        sessionDurationMinutes: parseInt(groupDuration, 10) || 120,
+        lateAfterMinutes: parseInt(groupLateThreshold, 10) || 15,
+      });
+
+      Alert.alert("تم بنجاح", "تم إنشاء المجموعة بنجاح.");
+      setIsAddGroupOpen(false);
+      setGroupName("");
+      loadData();
+    } catch (e: any) {
+      Alert.alert("خطأ", e?.message || "فشل إنشاء المجموعة");
+    }
+  };
+
+  const openGroupSchedules = (group: Group) => {
+    setSelectedGroup(group);
+    try {
+      const scheds = GroupScheduleRepository.getSchedulesForGroup(group.id);
+      setGroupSchedules(scheds);
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const handleCreateSchedule = () => {
+    if (!selectedGroup) return;
+    if (schedEnd <= schedStart) {
+      Alert.alert("خطأ", "وقت الانتهاء يجب أن يكون بعد وقت البدء.");
+      return;
+    }
+
+    try {
+      GroupScheduleRepository.createSchedule({
+        groupId: selectedGroup.id,
+        dayOfWeek: schedDay,
+        startTime: schedStart,
+        endTime: schedEnd,
+      });
+
+      Alert.alert("تم بنجاح", "تم إضافة الموعد الأسبوعي بنجاح.");
+      setIsAddScheduleOpen(false);
+      openGroupSchedules(selectedGroup);
+    } catch (e: any) {
+      Alert.alert("خطأ", e?.message || "فشل إضافة الموعد");
+    }
+  };
+
+  // 4. Session Generation Actions
+  const handleGenerateSessions = () => {
+    try {
+      const created = SessionGenerationService.generateSessionsForRange(
+        genFromDate,
+        genToDate,
+      );
+      setGeneratedSessions(created);
+      Alert.alert(
+        "تم بنجاح",
+        `تم توليد (${created.length}) حصة للفترة المحددة بنجاح.`,
+      );
+      loadData();
+    } catch (e: any) {
+      Alert.alert("خطأ", e?.message || "فشل توليد الحصص");
+    }
+  };
+
+  const handleCancelSession = (sessionId: string) => {
+    Alert.alert("تأكيد الإلغاء", "هل أنت متأكد من رغبتك في إلغاء هذه الحصة؟", [
+      { text: "تراجع", style: "cancel" },
+      {
+        text: "نعم، إلغاء الحصة",
+        style: "destructive",
+        onPress: () => {
+          try {
+            SessionGenerationService.cancelSession(sessionId);
+            loadData();
+          } catch (e: any) {
+            Alert.alert("خطأ", e?.message || "فشل إلغاء الحصة");
+          }
+        },
+      },
+    ]);
+  };
+
+  const canCreateTeacher = PermissionService.hasPermission(
+    permissions,
+    "teachers.create",
+  );
+  const canCreateSubject = PermissionService.hasPermission(
+    permissions,
+    "subjects.create",
+  );
+  const canCreateGroup = PermissionService.hasPermission(
+    permissions,
+    "groups.create",
+  );
+  const canGenSessions = PermissionService.hasPermission(
+    permissions,
+    "sessions.generate",
+  );
+
+  return (
+    <SafeAreaView style={styles.safeArea}>
+      <View style={styles.header}>
+        <Text style={styles.headerTitle}>{Strings.tabAcademic}</Text>
+      </View>
+
+      {/* Segmented Control Bar */}
+      <View style={styles.tabBar}>
+        <TouchableOpacity
+          style={[
+            styles.tabButton,
+            activeTab === "teachers" && styles.tabButtonActive,
+          ]}
+          onPress={() => setActiveTab("teachers")}
+        >
+          <Text
+            style={[
+              styles.tabButtonText,
+              activeTab === "teachers" && styles.tabButtonTextActive,
+            ]}
+          >
+            المعلمون
+          </Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[
+            styles.tabButton,
+            activeTab === "subjects" && styles.tabButtonActive,
+          ]}
+          onPress={() => setActiveTab("subjects")}
+        >
+          <Text
+            style={[
+              styles.tabButtonText,
+              activeTab === "subjects" && styles.tabButtonTextActive,
+            ]}
+          >
+            المواد
+          </Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[
+            styles.tabButton,
+            activeTab === "groups" && styles.tabButtonActive,
+          ]}
+          onPress={() => setActiveTab("groups")}
+        >
+          <Text
+            style={[
+              styles.tabButtonText,
+              activeTab === "groups" && styles.tabButtonTextActive,
+            ]}
+          >
+            المجموعات
+          </Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[
+            styles.tabButton,
+            activeTab === "sessions" && styles.tabButtonActive,
+          ]}
+          onPress={() => setActiveTab("sessions")}
+        >
+          <Text
+            style={[
+              styles.tabButtonText,
+              activeTab === "sessions" && styles.tabButtonTextActive,
+            ]}
+          >
+            الحصص
+          </Text>
+        </TouchableOpacity>
+      </View>
+
+      <View style={styles.content}>
+        {/* TAB 1: TEACHERS */}
+        {activeTab === "teachers" && (
+          <View style={{ flex: 1 }}>
+            <View style={styles.tabActionHeader}>
+              <Text style={styles.tabActionTitle}>
+                قائمة المعلمين ({teachers.length})
+              </Text>
+              {canCreateTeacher && (
+                <TouchableOpacity
+                  style={styles.addButton}
+                  onPress={() => setIsAddTeacherOpen(true)}
+                >
+                  <Ionicons name="add" size={18} color={Colors.white} />
+                  <Text style={styles.addButtonText}>إضافة معلم</Text>
+                </TouchableOpacity>
+              )}
+            </View>
+
+            <FlatList
+              data={teachers}
+              keyExtractor={(item) => item.id}
+              ListEmptyComponent={
+                <EmptyState message="لا يوجد معلمون مسجلون" />
+              }
+              renderItem={({ item }) => (
+                <AppCard style={styles.itemCard}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.itemName}>{item.name}</Text>
+                    <Text style={styles.itemMeta}>
+                      {item.phone || "بدون رقم هاتف"}
+                    </Text>
+                    {item.notes && (
+                      <Text style={styles.itemNotes}>{item.notes}</Text>
+                    )}
+                  </View>
+                  <StatusBadge
+                    text={item.status === "active" ? "نشط" : "معطل"}
+                    type={item.status === "active" ? "success" : "neutral"}
+                  />
+                </AppCard>
+              )}
+            />
+          </View>
+        )}
+
+        {/* TAB 2: SUBJECTS */}
+        {activeTab === "subjects" && (
+          <View style={{ flex: 1 }}>
+            <View style={styles.tabActionHeader}>
+              <Text style={styles.tabActionTitle}>
+                المواد الدراسية ({subjects.length})
+              </Text>
+              {canCreateSubject && (
+                <TouchableOpacity
+                  style={styles.addButton}
+                  onPress={() => setIsAddSubjectOpen(true)}
+                >
+                  <Ionicons name="add" size={18} color={Colors.white} />
+                  <Text style={styles.addButtonText}>إضافة مادة</Text>
+                </TouchableOpacity>
+              )}
+            </View>
+
+            <FlatList
+              data={subjects}
+              keyExtractor={(item) => item.id}
+              ListEmptyComponent={<EmptyState message="لا توجد مواد مسجلة" />}
+              renderItem={({ item }) => (
+                <AppCard style={styles.itemCard}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.itemName}>{item.name}</Text>
+                    <Text style={styles.codeBadge}>الكود: {item.code}</Text>
+                  </View>
+                  <StatusBadge
+                    text={item.status === "active" ? "نشطة" : "معطلة"}
+                    type={item.status === "active" ? "success" : "neutral"}
+                  />
+                </AppCard>
+              )}
+            />
+          </View>
+        )}
+
+        {/* TAB 3: GROUPS */}
+        {activeTab === "groups" && (
+          <View style={{ flex: 1 }}>
+            <View style={styles.tabActionHeader}>
+              <Text style={styles.tabActionTitle}>
+                المجموعات الدراسية ({groups.length})
+              </Text>
+              {canCreateGroup && (
+                <TouchableOpacity
+                  style={styles.addButton}
+                  onPress={() => setIsAddGroupOpen(true)}
+                >
+                  <Ionicons name="add" size={18} color={Colors.white} />
+                  <Text style={styles.addButtonText}>مجموعة جديدة</Text>
+                </TouchableOpacity>
+              )}
+            </View>
+
+            <FlatList
+              data={groups}
+              keyExtractor={(item) => item.id}
+              ListEmptyComponent={
+                <EmptyState message="لا توجد مجموعات مسجلة" />
+              }
+              renderItem={({ item }) => (
+                <TouchableOpacity
+                  activeOpacity={0.8}
+                  onPress={() => openGroupSchedules(item)}
+                >
+                  <AppCard style={styles.itemCard}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.itemName}>{item.name}</Text>
+                      <Text style={styles.itemMeta}>
+                        {item.teacherName} • {item.subjectName} • {item.grade}
+                      </Text>
+                      <View style={styles.priceRow}>
+                        <Text style={styles.priceTag}>
+                          حصة: {item.sessionPrice} ج.م
+                        </Text>
+                        <Text style={styles.priceTag}>
+                          شهر: {item.monthlyPrice} ج.م
+                        </Text>
+                        <Text style={styles.priceTag}>
+                          تأخير: {item.lateAfterMinutes} د
+                        </Text>
+                      </View>
+                    </View>
+                    <Ionicons
+                      name="chevron-back"
+                      size={20}
+                      color={Colors.slate400}
+                    />
+                  </AppCard>
+                </TouchableOpacity>
+              )}
+            />
+          </View>
+        )}
+
+        {/* TAB 4: SESSIONS & GENERATION */}
+        {activeTab === "sessions" && (
+          <ScrollView style={{ flex: 1 }}>
+            {/* Session Generation Box */}
+            <AppCard style={styles.generatorCard}>
+              <View style={styles.generatorHeader}>
+                <Ionicons
+                  name="calendar-outline"
+                  size={20}
+                  color={Colors.primary}
+                />
+                <Text style={styles.generatorTitle}>
+                  توليد الحصص والمحاضرات آلياً
+                </Text>
+              </View>
+              <Text style={styles.generatorDesc}>
+                يتم توليد الحصص بناءً على جداول المجموعات وتثبيت لقطة تاريخية
+                للمادة، المعلم، الأسعار، وقائمة الطلاب المتوقعين.
+              </Text>
+
+              <View
+                style={{
+                  flexDirection: "row",
+                  gap: 10,
+                  marginVertical: Spacing.sm,
+                }}
+              >
+                <AppInput
+                  label="من تاريخ"
+                  value={genFromDate}
+                  onChangeText={setGenFromDate}
+                  containerStyle={{ flex: 1 }}
+                />
+                <AppInput
+                  label="إلى تاريخ"
+                  value={genToDate}
+                  onChangeText={setGenToDate}
+                  containerStyle={{ flex: 1 }}
+                />
+              </View>
+
+              {canGenSessions && (
+                <AppButton
+                  title="توليد حصص الفترة المحددة"
+                  onPress={handleGenerateSessions}
+                  style={{ marginTop: Spacing.xs }}
+                />
+              )}
+            </AppCard>
+
+            {/* Today's Sessions List */}
+            <View style={{ marginTop: Spacing.lg }}>
+              <Text style={styles.sectionHeaderTitle}>
+                حصص اليوم ({todaySessions.length})
+              </Text>
+              {todaySessions.length === 0 ? (
+                <EmptyState message="لا توجد حصص مجدولة لليوم" />
+              ) : (
+                todaySessions.map((s) => (
+                  <AppCard key={s.id} style={styles.sessionCard}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.sessionGroupName}>{s.groupName}</Text>
+                      <Text style={styles.sessionMeta}>
+                        {s.teacherName} • {s.subjectName}
+                      </Text>
+                      <Text style={styles.sessionTime}>
+                        الموعد: {s.startTime} - {s.endTime} • السعر:{" "}
+                        {s.sessionPrice} ج.م
+                      </Text>
+                    </View>
+                    <View style={{ alignItems: "flex-end", gap: 8 }}>
+                      <StatusBadge
+                        text={
+                          s.status === "open"
+                            ? "مفتوحة"
+                            : s.status === "cancelled"
+                              ? "ملغاة"
+                              : "مغلقة"
+                        }
+                        type={
+                          s.status === "open"
+                            ? "success"
+                            : s.status === "cancelled"
+                              ? "danger"
+                              : "neutral"
+                        }
+                      />
+                      {s.status === "open" && (
+                        <TouchableOpacity
+                          onPress={() => handleCancelSession(s.id)}
+                          style={styles.cancelSessionBtn}
+                        >
+                          <Text style={styles.cancelSessionBtnText}>
+                            إلغاء الحصة
+                          </Text>
+                        </TouchableOpacity>
+                      )}
+                    </View>
+                  </AppCard>
+                ))
+              )}
+            </View>
+          </ScrollView>
+        )}
+      </View>
+
+      {/* Add Teacher Modal */}
+      <Modal visible={isAddTeacherOpen} animationType="slide" transparent>
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>إضافة معلم جديد</Text>
+            <AppInput
+              label="اسم المعلم *"
+              placeholder="مثال: أ/ حسام البدري"
+              value={teacherName}
+              onChangeText={setTeacherName}
+              containerStyle={styles.formField}
+            />
+            <AppInput
+              label="رقم الهاتف"
+              placeholder="010xxxxxxxx"
+              value={teacherPhone}
+              onChangeText={setTeacherPhone}
+              keyboardType="phone-pad"
+              containerStyle={styles.formField}
+            />
+            <AppInput
+              label="ملاحظات"
+              placeholder="ملاحظات..."
+              value={teacherNotes}
+              onChangeText={setTeacherNotes}
+              containerStyle={styles.formField}
+            />
+            <View
+              style={{ flexDirection: "row", gap: 8, marginTop: Spacing.md }}
+            >
+              <AppButton
+                title="حفظ"
+                onPress={handleCreateTeacher}
+                style={{ flex: 1 }}
+              />
+              <AppButton
+                title="إلغاء"
+                variant="outline"
+                onPress={() => setIsAddTeacherOpen(false)}
+                style={{ flex: 1 }}
+              />
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Add Subject Modal */}
+      <Modal visible={isAddSubjectOpen} animationType="slide" transparent>
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>إضافة مادة دراسية</Text>
+            <AppInput
+              label="اسم المادة *"
+              placeholder="مثال: كيمياء"
+              value={subjectName}
+              onChangeText={setSubjectName}
+              containerStyle={styles.formField}
+            />
+            <AppInput
+              label="كود المادة *"
+              placeholder="مثال: CHEM"
+              value={subjectCode}
+              onChangeText={setSubjectCode}
+              containerStyle={styles.formField}
+            />
+            <View
+              style={{ flexDirection: "row", gap: 8, marginTop: Spacing.md }}
+            >
+              <AppButton
+                title="حفظ"
+                onPress={handleCreateSubject}
+                style={{ flex: 1 }}
+              />
+              <AppButton
+                title="إلغاء"
+                variant="outline"
+                onPress={() => setIsAddSubjectOpen(false)}
+                style={{ flex: 1 }}
+              />
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Add Group Modal */}
+      <Modal visible={isAddGroupOpen} animationType="slide" transparent>
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalCard}>
+            <ScrollView style={{ maxHeight: 520 }}>
+              <Text style={styles.modalTitle}>إنشاء مجموعة دراسية جديدة</Text>
+
+              <AppInput
+                label="اسم المجموعة *"
+                placeholder="مثال: فيزياء - 3 ثانوي (مجموعة أ)"
+                value={groupName}
+                onChangeText={setGroupName}
+                containerStyle={styles.formField}
+              />
+
+              <Text style={styles.inputLabel}>المعلم المسؤول *:</Text>
+              <ScrollView horizontal style={{ marginBottom: Spacing.sm }}>
+                {teachers.map((t) => (
+                  <TouchableOpacity
+                    key={t.id}
+                    style={[
+                      styles.chip,
+                      groupTeacherId === t.id && styles.chipActive,
+                    ]}
+                    onPress={() => setGroupTeacherId(t.id)}
+                  >
+                    <Text
+                      style={[
+                        styles.chipText,
+                        groupTeacherId === t.id && styles.chipTextActive,
+                      ]}
+                    >
+                      {t.name}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+
+              <Text style={styles.inputLabel}>المادة الدراسية *:</Text>
+              <ScrollView horizontal style={{ marginBottom: Spacing.sm }}>
+                {subjects.map((s) => (
+                  <TouchableOpacity
+                    key={s.id}
+                    style={[
+                      styles.chip,
+                      groupSubjectId === s.id && styles.chipActive,
+                    ]}
+                    onPress={() => setGroupSubjectId(s.id)}
+                  >
+                    <Text
+                      style={[
+                        styles.chipText,
+                        groupSubjectId === s.id && styles.chipTextActive,
+                      ]}
+                    >
+                      {s.name}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+
+              <AppInput
+                label="المرحلة الدراسية *"
+                value={groupGrade}
+                onChangeText={setGroupGrade}
+                containerStyle={styles.formField}
+              />
+
+              <View style={{ flexDirection: "row", gap: 8 }}>
+                <AppInput
+                  label="سعر الحصة (ج.م)"
+                  value={groupSessionPrice}
+                  onChangeText={setGroupSessionPrice}
+                  keyboardType="numeric"
+                  containerStyle={{ flex: 1 }}
+                />
+                <AppInput
+                  label="الاشتراك الشهري (ج.م)"
+                  value={groupMonthlyPrice}
+                  onChangeText={setGroupMonthlyPrice}
+                  keyboardType="numeric"
+                  containerStyle={{ flex: 1 }}
+                />
+              </View>
+
+              <View
+                style={{ flexDirection: "row", gap: 8, marginTop: Spacing.sm }}
+              >
+                <AppInput
+                  label="مدة الحصة (دقيقة)"
+                  value={groupDuration}
+                  onChangeText={setGroupDuration}
+                  keyboardType="numeric"
+                  containerStyle={{ flex: 1 }}
+                />
+                <AppInput
+                  label="مهلة التأخير (دقيقة)"
+                  value={groupLateThreshold}
+                  onChangeText={setGroupLateThreshold}
+                  keyboardType="numeric"
+                  containerStyle={{ flex: 1 }}
+                />
+              </View>
+            </ScrollView>
+
+            <View
+              style={{ flexDirection: "row", gap: 8, marginTop: Spacing.md }}
+            >
+              <AppButton
+                title="إنشاء المجموعة"
+                onPress={handleCreateGroup}
+                style={{ flex: 1 }}
+              />
+              <AppButton
+                title="إلغاء"
+                variant="outline"
+                onPress={() => setIsAddGroupOpen(false)}
+                style={{ flex: 1 }}
+              />
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Group Details & Weekly Schedules Modal */}
+      {selectedGroup && (
+        <Modal visible={!!selectedGroup} animationType="slide" transparent>
+          <View style={styles.modalOverlay}>
+            <View style={styles.modalCard}>
+              <View style={styles.modalHeader}>
+                <View>
+                  <Text style={styles.modalTitle}>{selectedGroup.name}</Text>
+                  <Text style={styles.modalSubtitle}>
+                    {selectedGroup.teacherName} • {selectedGroup.subjectName}
+                  </Text>
+                </View>
+                <TouchableOpacity onPress={() => setSelectedGroup(null)}>
+                  <Ionicons name="close" size={24} color={Colors.slate500} />
+                </TouchableOpacity>
+              </View>
+
+              <View
+                style={{
+                  flexDirection: "row",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  marginBottom: Spacing.sm,
+                }}
+              >
+                <Text style={styles.sectionHeaderTitle}>
+                  المواعيد الأسبوعية
+                </Text>
+                <TouchableOpacity
+                  style={styles.smallActionBtn}
+                  onPress={() => setIsAddScheduleOpen(true)}
+                >
+                  <Ionicons name="add" size={14} color={Colors.white} />
+                  <Text style={styles.smallActionBtnText}>إضافة موعد</Text>
+                </TouchableOpacity>
+              </View>
+
+              <ScrollView style={{ maxHeight: 250 }}>
+                {groupSchedules.length === 0 ? (
+                  <Text style={styles.emptyText}>
+                    لم يتم تحديد مواعيد أسبوعية لهذه المجموعة بعد.
+                  </Text>
+                ) : (
+                  groupSchedules.map((sched) => (
+                    <View key={sched.id} style={styles.schedItem}>
+                      <Text style={styles.schedDay}>
+                        {DAYS_OF_WEEK[sched.dayOfWeek]}
+                      </Text>
+                      <Text style={styles.schedTime}>
+                        {sched.startTime} - {sched.endTime}
+                      </Text>
+                    </View>
+                  ))
+                )}
+              </ScrollView>
+            </View>
+          </View>
+        </Modal>
+      )}
+
+      {/* Add Schedule Modal */}
+      <Modal visible={isAddScheduleOpen} animationType="fade" transparent>
+        <View style={styles.modalOverlay}>
+          <View style={styles.smallModalCard}>
+            <Text style={styles.modalTitle}>إضافة موعد أسبوعي</Text>
+            <Text style={styles.inputLabel}>يوم الأسبوع:</Text>
+            <ScrollView horizontal style={{ marginBottom: Spacing.md }}>
+              {DAYS_OF_WEEK.map((day, idx) => (
+                <TouchableOpacity
+                  key={idx}
+                  style={[styles.chip, schedDay === idx && styles.chipActive]}
+                  onPress={() => setSchedDay(idx)}
+                >
+                  <Text
+                    style={[
+                      styles.chipText,
+                      schedDay === idx && styles.chipTextActive,
+                    ]}
+                  >
+                    {day}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+
+            <View
+              style={{ flexDirection: "row", gap: 8, marginBottom: Spacing.md }}
+            >
+              <AppInput
+                label="وقت البدء (HH:MM)"
+                value={schedStart}
+                onChangeText={setSchedStart}
+                containerStyle={{ flex: 1 }}
+              />
+              <AppInput
+                label="وقت الانتهاء (HH:MM)"
+                value={schedEnd}
+                onChangeText={setSchedEnd}
+                containerStyle={{ flex: 1 }}
+              />
+            </View>
+
+            <View style={{ flexDirection: "row", gap: 8 }}>
+              <AppButton
+                title="إضافة الموعد"
+                onPress={handleCreateSchedule}
+                style={{ flex: 1 }}
+              />
+              <AppButton
+                title="إلغاء"
+                variant="outline"
+                onPress={() => setIsAddScheduleOpen(false)}
+                style={{ flex: 1 }}
+              />
+            </View>
+          </View>
+        </View>
+      </Modal>
+    </SafeAreaView>
+  );
+}
+
+const styles = StyleSheet.create({
+  safeArea: {
+    flex: 1,
+    backgroundColor: Colors.background,
+  },
+  header: {
+    paddingHorizontal: Spacing.lg,
+    paddingVertical: Spacing.md,
+    backgroundColor: Colors.white,
+    borderBottomWidth: 1,
+    borderBottomColor: Colors.border,
+  },
+  headerTitle: {
+    ...Typography.h2,
+    color: Colors.slate900,
+    fontWeight: "700",
+  },
+  tabBar: {
+    flexDirection: "row",
+    backgroundColor: Colors.white,
+    borderBottomWidth: 1,
+    borderBottomColor: Colors.border,
+    paddingHorizontal: Spacing.sm,
+  },
+  tabButton: {
+    flex: 1,
+    paddingVertical: Spacing.sm,
+    alignItems: "center",
+    borderBottomWidth: 2,
+    borderBottomColor: "transparent",
+  },
+  tabButtonActive: {
+    borderBottomColor: Colors.primary,
+  },
+  tabButtonText: {
+    fontSize: 13,
+    color: Colors.slate500,
+    fontWeight: "600",
+  },
+  tabButtonTextActive: {
+    color: Colors.primary,
+    fontWeight: "700",
+  },
+  content: {
+    flex: 1,
+    padding: Spacing.lg,
+  },
+  tabActionHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: Spacing.md,
+  },
+  tabActionTitle: {
+    fontSize: 15,
+    fontWeight: "700",
+    color: Colors.slate800,
+  },
+  addButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: Colors.primary,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 8,
+    gap: 4,
+  },
+  addButtonText: {
+    color: Colors.white,
+    fontSize: 12,
+    fontWeight: "600",
+  },
+  itemCard: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    padding: Spacing.md,
+    marginBottom: Spacing.sm,
+  },
+  itemName: {
+    fontSize: 14,
+    fontWeight: "700",
+    color: Colors.slate900,
+  },
+  itemMeta: {
+    fontSize: 12,
+    color: Colors.slate500,
+    marginTop: 2,
+  },
+  itemNotes: {
+    fontSize: 11,
+    color: Colors.slate400,
+    marginTop: 2,
+  },
+  codeBadge: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: Colors.primary,
+    backgroundColor: Colors.primaryLight + "20",
+    alignSelf: "flex-start",
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+    marginTop: 4,
+  },
+  priceRow: {
+    flexDirection: "row",
+    gap: 8,
+    marginTop: 6,
+  },
+  priceTag: {
+    fontSize: 11,
+    color: Colors.slate600,
+    backgroundColor: Colors.slate100,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+  },
+  generatorCard: {
+    padding: Spacing.md,
+    backgroundColor: Colors.white,
+    borderColor: Colors.primaryLight + "40",
+  },
+  generatorHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    marginBottom: 4,
+  },
+  generatorTitle: {
+    fontSize: 14,
+    fontWeight: "700",
+    color: Colors.primaryDark,
+  },
+  generatorDesc: {
+    fontSize: 12,
+    color: Colors.slate600,
+    lineHeight: 18,
+    marginBottom: Spacing.sm,
+  },
+  sectionHeaderTitle: {
+    fontSize: 14,
+    fontWeight: "700",
+    color: Colors.slate800,
+    marginBottom: Spacing.sm,
+  },
+  sessionCard: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    padding: Spacing.md,
+    marginBottom: Spacing.sm,
+  },
+  sessionGroupName: {
+    fontSize: 14,
+    fontWeight: "700",
+    color: Colors.slate900,
+  },
+  sessionMeta: {
+    fontSize: 12,
+    color: Colors.slate500,
+    marginTop: 2,
+  },
+  sessionTime: {
+    fontSize: 11,
+    color: Colors.slate700,
+    fontWeight: "600",
+    marginTop: 4,
+  },
+  cancelSessionBtn: {
+    backgroundColor: Colors.dangerLight,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+  },
+  cancelSessionBtnText: {
+    color: Colors.danger,
+    fontSize: 11,
+    fontWeight: "600",
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.5)",
+    justifyContent: "center",
+    alignItems: "center",
+    padding: Spacing.lg,
+  },
+  modalCard: {
+    width: "100%",
+    backgroundColor: Colors.white,
+    borderRadius: 16,
+    padding: Spacing.lg,
+  },
+  smallModalCard: {
+    width: "100%",
+    backgroundColor: Colors.white,
+    borderRadius: 16,
+    padding: Spacing.lg,
+  },
+  modalTitle: {
+    ...Typography.h2,
+    fontWeight: "700",
+    color: Colors.slate900,
+    marginBottom: Spacing.md,
+  },
+  modalSubtitle: {
+    fontSize: 12,
+    color: Colors.slate500,
+  },
+  modalHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: Spacing.md,
+  },
+  formField: {
+    marginBottom: Spacing.sm,
+  },
+  inputLabel: {
+    fontSize: 12,
+    fontWeight: "600",
+    color: Colors.slate700,
+    marginBottom: 4,
+  },
+  chip: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 8,
+    backgroundColor: Colors.slate100,
+    marginRight: 6,
+  },
+  chipActive: {
+    backgroundColor: Colors.primary,
+  },
+  chipText: {
+    fontSize: 12,
+    color: Colors.slate700,
+  },
+  chipTextActive: {
+    color: Colors.white,
+    fontWeight: "700",
+  },
+  smallActionBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: Colors.primary,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+    gap: 4,
+  },
+  smallActionBtnText: {
+    color: Colors.white,
+    fontSize: 11,
+    fontWeight: "600",
+  },
+  emptyText: {
+    fontSize: 12,
+    color: Colors.slate400,
+    fontStyle: "italic",
+    marginVertical: 8,
+  },
+  schedItem: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    backgroundColor: Colors.slate50,
+    padding: 10,
+    borderRadius: 8,
+    marginBottom: 6,
+  },
+  schedDay: {
+    fontSize: 13,
+    fontWeight: "700",
+    color: Colors.slate800,
+  },
+  schedTime: {
+    fontSize: 13,
+    color: Colors.slate600,
+  },
+});

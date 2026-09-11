@@ -1,0 +1,192 @@
+import { create } from "zustand";
+import { ApiClient } from "../../core/api";
+import { AuditService } from "../../core/audit";
+import { DeviceRepository, DeviceService } from "../../core/device";
+import { ForbiddenError } from "../../core/errors";
+import { SecureStorageService } from "../../core/storage";
+import { Center, User } from "../../shared/types";
+import { AuthRepository } from "./AuthRepository";
+
+// Automatically logout when receiving a 401 Unauthorized from API
+ApiClient.setUnauthorizedHandler(async () => {
+  await useAuthStore.getState().logout();
+});
+
+interface AuthState {
+  currentUser: User | null;
+  activeCenterId: string | null;
+  activeCenter: Center | null;
+  availableCenters: Center[];
+  isAuthenticated: boolean;
+  isLoading: boolean;
+  error: string | null;
+
+  login: (phone: string, password?: string) => Promise<boolean>;
+  logout: () => Promise<void>;
+  selectCenter: (centerId: string) => Promise<void>;
+  restoreSession: () => Promise<boolean>;
+  clearError: () => void;
+}
+
+export const useAuthStore = create<AuthState>((set, get) => ({
+  currentUser: null,
+  activeCenterId: null,
+  activeCenter: null,
+  availableCenters: [],
+  isAuthenticated: false,
+  isLoading: true,
+  error: null,
+
+  login: async (phone: string, password?: string) => {
+    set({ isLoading: true, error: null });
+    try {
+      const { user } = await AuthRepository.login(phone, password);
+      const centers = AuthRepository.getCentersForUser(user.centerIds);
+
+      let activeCenterId: string | null = null;
+      let activeCenter: Center | null = null;
+
+      // If user has exactly one center, select it automatically
+      if (centers.length === 1) {
+        activeCenterId = centers[0].id;
+        activeCenter = centers[0];
+        await SecureStorageService.setItem("active_center_id", activeCenterId);
+      } else if (centers.length > 1) {
+        // Check if there was a previously remembered active center
+        const savedCenterId =
+          await SecureStorageService.getItem("active_center_id");
+        const found = centers.find((c) => c.id === savedCenterId);
+        if (found) {
+          activeCenterId = found.id;
+          activeCenter = found;
+        }
+      }
+
+      const deviceId = await DeviceService.getDeviceId();
+      if (activeCenterId) {
+        DeviceRepository.registerOrGetDevice({
+          centerId: activeCenterId,
+          userId: user.id,
+        });
+
+        AuditService.recordEvent({
+          operationId: `op-auth-${Date.now()}`,
+          centerId: activeCenterId,
+          userId: user.id,
+          deviceId,
+          entityType: "user",
+          entityId: user.id,
+          action: "user.login",
+          payload: { role: user.role },
+        });
+      }
+
+      set({
+        currentUser: user,
+        availableCenters: centers,
+        activeCenterId,
+        activeCenter,
+        isAuthenticated: true,
+        isLoading: false,
+      });
+
+      return true;
+    } catch (err: any) {
+      set({
+        error: err?.userMessage || err?.message || "فشل تسجيل الدخول",
+        isLoading: false,
+      });
+      return false;
+    }
+  },
+
+  selectCenter: async (centerId: string) => {
+    const { availableCenters, currentUser } = get();
+    if (!currentUser || !currentUser.centerIds.includes(centerId)) {
+      throw new ForbiddenError("المركز المحدد غير متاح لهذا المستخدم");
+    }
+
+    const center = availableCenters.find((c) => c.id === centerId);
+    if (!center) {
+      throw new ForbiddenError("المركز المحدد غير متاح لهذا المستخدم");
+    }
+
+    await SecureStorageService.setItem("active_center_id", centerId);
+
+    const deviceId = DeviceService.getDeviceIdSync();
+    DeviceRepository.registerOrGetDevice({
+      centerId,
+      userId: currentUser.id,
+    });
+
+    AuditService.recordEvent({
+      operationId: `op-center-${Date.now()}`,
+      centerId,
+      userId: currentUser.id,
+      deviceId,
+      entityType: "center",
+      entityId: centerId,
+      action: "center.switch",
+      payload: { centerName: center.name },
+    });
+
+    set({
+      activeCenterId: centerId,
+      activeCenter: center,
+    });
+  },
+
+  logout: async () => {
+    set({ isLoading: true });
+    await AuthRepository.logout();
+    set({
+      currentUser: null,
+      activeCenterId: null,
+      activeCenter: null,
+      availableCenters: [],
+      isAuthenticated: false,
+      isLoading: false,
+      error: null,
+    });
+  },
+
+  restoreSession: async () => {
+    set({ isLoading: true });
+    try {
+      const session = await AuthRepository.restoreSession();
+      if (!session) {
+        set({ isAuthenticated: false, isLoading: false });
+        return false;
+      }
+
+      const centers = AuthRepository.getCentersForUser(session.user.centerIds);
+      const savedCenterId =
+        await SecureStorageService.getItem("active_center_id");
+      let activeCenter = centers.find((c) => c.id === savedCenterId) || null;
+
+      if (!activeCenter && centers.length === 1) {
+        activeCenter = centers[0];
+      }
+
+      set({
+        currentUser: session.user,
+        availableCenters: centers,
+        activeCenterId: activeCenter ? activeCenter.id : null,
+        activeCenter,
+        isAuthenticated: true,
+        isLoading: false,
+      });
+      return true;
+    } catch {
+      set({ isAuthenticated: false, isLoading: false });
+      return false;
+    }
+  },
+
+  clearError: () => set({ error: null }),
+}));
+
+// Automatically logout when receiving a 401 Unauthorized from API
+ApiClient.setUnauthorizedHandler(async () => {
+  await useAuthStore.getState().logout();
+});

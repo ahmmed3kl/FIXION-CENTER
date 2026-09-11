@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: fixion-backend
+    env: node
+    plan: free
+    rootDir: backend
+    buildCommand: npm install --omit=dev
+    startCommand: npm start
+    healthCheckPath: /v1/health
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: DATABASE_URL
+        sync: false
+      - key: JWT_SECRET
+        generateValue: true
+      - key: CORS_ORIGIN
+        value: "*"

@@ -1,0 +1,41 @@
+{
+  "expo": {
+    "name": "FIXION",
+    "slug": "fixion",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/images/icon.png",
+    "scheme": "fixion",
+    "userInterfaceStyle": "light",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.fixion.center",
+      "supportsRTL": true
+    },
+    "android": {
+      "package": "com.fixion.center",
+      "adaptiveIcon": {
+        "backgroundColor": "#1E293B",
+        "foregroundImage": "./assets/images/android-icon-foreground.png"
+      },
+      "supportsRTL": true
+    },
+    "plugins": [
+      "expo-router",
+      "expo-sqlite",
+      "expo-secure-store",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "السماح بالوصول للكاميرا لمسح كروت الطلاب"
+        }
+      ]
+    ],
+    "extra": {
+      "supportsRTL": true,
+      "eas": {
+        "projectId": ""
+      }
+    }
+  }
+}

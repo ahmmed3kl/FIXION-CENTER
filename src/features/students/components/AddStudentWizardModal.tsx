@@ -1,0 +1,1587 @@
+import { Ionicons } from "@expo/vector-icons";
+import { CameraView, useCameraPermissions } from "expo-camera";
+import React, { useEffect, useState } from "react";
+import {
+    Alert,
+    Modal,
+    SafeAreaView,
+    ScrollView,
+    StyleSheet,
+    Text,
+    TouchableOpacity,
+    View
+} from "react-native";
+import { formatCurrency, formatTimeArabic } from "../../../core/localization";
+import {
+    BorderRadius,
+    Colors,
+    Shadows,
+    Spacing
+} from "../../../core/theme";
+import {
+    AppButton,
+    AppCard,
+    AppInput
+} from "../../../shared/components";
+import { Group, GroupSchedule } from "../../../shared/types";
+import { formatDisplayIdentifier } from "../../../shared/utils/formatters";
+import { GroupRepository } from "../../groups/GroupRepository";
+import { GroupScheduleRepository } from "../../groups/GroupScheduleRepository";
+import { TeacherRepository } from "../../teachers/TeacherRepository";
+import { StudentCardRepository } from "../StudentCardRepository";
+import { StudentRepository } from "../StudentRepository";
+
+const DAYS_OF_WEEK = [
+  "الأحد",
+  "الإثنين",
+  "الثلاثاء",
+  "الأربعاء",
+  "الخميس",
+  "الجمعة",
+  "السبت",
+];
+
+interface AddStudentWizardModalProps {
+  visible: boolean;
+  onClose: () => void;
+  onStudentCreated: () => void;
+}
+
+type WizardStep = 1 | 2 | 3 | 4 | 5;
+
+export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({
+  visible,
+  onClose,
+  onStudentCreated,
+}) => {
+  const [step, setStep] = useState<WizardStep>(1);
+
+  // Step 1: Card scanning & manual fallback
+  const [permission, requestPermission] = useCameraPermissions();
+  const [isCameraActive, setIsCameraActive] = useState(false);
+  const [torchEnabled, setTorchEnabled] = useState(false);
+  const [scannedCardCode, setScannedCardCode] = useState("");
+  const [manualCardInput, setManualCardInput] = useState("");
+  const [scanError, setScanError] = useState<string | null>(null);
+
+  // Step 2: Student information
+  const [fullName, setFullName] = useState("");
+  const [phone, setPhone] = useState("");
+  const [parentPhone, setParentPhone] = useState("");
+  const [grade, setGrade] = useState("الصف الثالث الثانوي");
+  const [notes, setNotes] = useState("");
+  const [step2Errors, setStep2Errors] = useState<{
+    fullName?: string;
+    phone?: string;
+    parentPhone?: string;
+  }>({});
+
+  // Step 3: Group enrollments
+  const [availableGroups, setAvailableGroups] = useState<Group[]>([]);
+  const [groupSchedules, setGroupSchedules] = useState<
+    Record<string, GroupSchedule[]>
+  >({});
+  const [teachersMap, setTeachersMap] = useState<Record<string, string>>({});
+  const [selectedGroupIds, setSelectedGroupIds] = useState<string[]>([]);
+
+  // Step 4 & 5: Submission & creation
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // Load groups, schedules, and teachers when opening wizard
+  useEffect(() => {
+    if (visible) {
+      loadContextData();
+    }
+  }, [visible]);
+
+  const loadContextData = () => {
+    try {
+      const groups = GroupRepository.getAll();
+      setAvailableGroups(groups);
+
+      // Load active schedules
+      try {
+        const schedules = GroupScheduleRepository.getAllActiveSchedules();
+        const schedMap: Record<string, GroupSchedule[]> = {};
+        for (const s of schedules) {
+          if (!schedMap[s.groupId]) schedMap[s.groupId] = [];
+          schedMap[s.groupId].push(s);
+        }
+        setGroupSchedules(schedMap);
+      } catch (err) {
+        console.warn("Could not load group schedules:", err);
+      }
+
+      // Load teachers
+      try {
+        const teachers = TeacherRepository.getAll();
+        const tMap: Record<string, string> = {};
+        for (const t of teachers) {
+          tMap[t.id] = t.name;
+        }
+        setTeachersMap(tMap);
+      } catch (err) {
+        console.warn("Could not load teachers:", err);
+      }
+    } catch (err) {
+      console.error("Error loading context data in wizard:", err);
+    }
+  };
+
+  const resetForm = () => {
+    setStep(1);
+    setIsCameraActive(false);
+    setTorchEnabled(false);
+    setScannedCardCode("");
+    setManualCardInput("");
+    setScanError(null);
+    setFullName("");
+    setPhone("");
+    setParentPhone("");
+    setGrade("الصف الثالث الثانوي");
+    setNotes("");
+    setStep2Errors({});
+    setSelectedGroupIds([]);
+    setIsSubmitting(false);
+  };
+
+  const handleClose = () => {
+    if (step === 5) {
+      resetForm();
+      onClose();
+      return;
+    }
+
+    if (scannedCardCode || fullName.trim()) {
+      Alert.alert(
+        "إلغاء إضافة الطالب",
+        "هل أنت متأكد من الخروج؟ سيتم فقد البيانات المدخلة.",
+        [
+          { text: "متابعة الإدخال", style: "cancel" },
+          {
+            text: "خروج",
+            style: "destructive",
+            onPress: () => {
+              resetForm();
+              onClose();
+            },
+          },
+        ],
+      );
+    } else {
+      resetForm();
+      onClose();
+    }
+  };
+
+  // Card validation logic (preserves leading zeros)
+  const validateAndSetCard = (code: string): boolean => {
+    const raw = code.trim();
+    if (!raw) {
+      setScanError("يرجى إدخال أو مسح كود الكارت.");
+      return false;
+    }
+
+    // Check if card is already assigned to a student in this center
+    try {
+      const existingCard = StudentCardRepository.findByCardCode(raw);
+      if (existingCard) {
+        setScanError(`الكارت (${raw}) مستخدم بالفعل لطالب آخر في هذا المركز.`);
+        return false;
+      }
+
+      const existingStudent = StudentRepository.findByStudentCode(raw);
+      if (existingStudent) {
+        setScanError(
+          `كود الطالب/الكارت (${raw}) مسجل بالفعل لطالب آخر في هذا المركز.`,
+        );
+        return false;
+      }
+    } catch (err: any) {
+      console.error("Error validating card code:", err);
+    }
+
+    setScannedCardCode(raw);
+    setManualCardInput(raw);
+    setScanError(null);
+    setIsCameraActive(false);
+    return true;
+  };
+
+  const handleBarcodeScanned = ({ data }: { data: string }) => {
+    if (!data) return;
+    const ok = validateAndSetCard(data);
+    if (ok) {
+      // Advance to step 2 directly after valid scan
+      setStep(2);
+    }
+  };
+
+  const handleManualCardSubmit = () => {
+    const ok = validateAndSetCard(manualCardInput);
+    if (ok) {
+      setStep(2);
+    }
+  };
+
+  const handleStep2Next = () => {
+    const errors: {
+      fullName?: string;
+      phone?: string;
+      parentPhone?: string;
+    } = {};
+
+    if (!fullName.trim()) {
+      errors.fullName = "اسم الطالب مطلوب.";
+    }
+    if (!phone.trim()) {
+      errors.phone = "رقم هاتف الطالب مطلوب.";
+    }
+    if (!parentPhone.trim()) {
+      errors.parentPhone = "رقم هاتف ولي الأمر مطلوب.";
+    }
+
+    if (Object.keys(errors).length > 0) {
+      setStep2Errors(errors);
+      return;
+    }
+
+    setStep2Errors({});
+    setStep(3);
+  };
+
+  const toggleGroupSelection = (groupId: string) => {
+    setSelectedGroupIds((prev) =>
+      prev.includes(groupId)
+        ? prev.filter((id) => id !== groupId)
+        : [...prev, groupId],
+    );
+  };
+
+  const handleConfirmAddStudent = () => {
+    setIsSubmitting(true);
+    try {
+      StudentRepository.createStudent({
+        studentCode: scannedCardCode,
+        cardCode: scannedCardCode,
+        fullName: fullName.trim(),
+        phone: phone.trim(),
+        parentPhone: parentPhone.trim(),
+        grade: grade.trim(),
+        notes: notes.trim() || undefined,
+        groupIds: selectedGroupIds,
+      });
+
+      setIsSubmitting(false);
+      setStep(5);
+      onStudentCreated();
+    } catch (err: any) {
+      setIsSubmitting(false);
+      Alert.alert("خطأ أثناء الإضافة", err?.message || "فشل تسجيل الطالب");
+    }
+  };
+
+  const calculateTotalMonthly = () => {
+    return selectedGroupIds.reduce((sum, gId) => {
+      const grp = availableGroups.find((g) => g.id === gId);
+      return sum + (grp?.monthlyPrice || 0);
+    }, 0);
+  };
+
+  return (
+    <Modal visible={visible} animationType="slide" transparent>
+      <View style={styles.modalOverlay}>
+        <SafeAreaView style={styles.modalContainer}>
+          {/* Header */}
+          <View style={styles.header}>
+            <View style={styles.headerLeft}>
+              {step > 1 && step < 5 ? (
+                <TouchableOpacity
+                  onPress={() =>
+                    setStep((prev) => Math.max(1, prev - 1) as WizardStep)
+                  }
+                  style={styles.backButton}
+                >
+                  <Ionicons
+                    name="chevron-forward"
+                    size={22}
+                    color={Colors.slate700}
+                  />
+                  <Text style={styles.backButtonText}>السابق</Text>
+                </TouchableOpacity>
+              ) : null}
+            </View>
+
+            <Text style={styles.headerTitle}>
+              {step === 1 && "مسح كارت الطالب"}
+              {step === 2 && "بيانات الطالب"}
+              {step === 3 && "مجموعات الطالب"}
+              {step === 4 && "مراجعة وتأكيد"}
+              {step === 5 && "تمت الإضافة بنجاح"}
+            </Text>
+
+            <TouchableOpacity onPress={handleClose} style={styles.closeButton}>
+              <Ionicons name="close" size={24} color={Colors.slate600} />
+            </TouchableOpacity>
+          </View>
+
+          {/* Stepper Progress Bar (Steps 1 to 4) */}
+          {step < 5 && (
+            <View style={styles.stepperContainer}>
+              {[
+                { s: 1, title: "الكارت" },
+                { s: 2, title: "البيانات" },
+                { s: 3, title: "المجموعات" },
+                { s: 4, title: "المراجعة" },
+              ].map((item, index) => {
+                const isActive = step === item.s;
+                const isCompleted = step > item.s;
+                return (
+                  <React.Fragment key={item.s}>
+                    <View style={styles.stepItem}>
+                      <View
+                        style={[
+                          styles.stepBadge,
+                          isActive && styles.stepBadgeActive,
+                          isCompleted && styles.stepBadgeCompleted,
+                        ]}
+                      >
+                        {isCompleted ? (
+                          <Ionicons
+                            name="checkmark"
+                            size={14}
+                            color={Colors.white}
+                          />
+                        ) : (
+                          <Text
+                            style={[
+                              styles.stepBadgeText,
+                              isActive && styles.stepBadgeTextActive,
+                            ]}
+                          >
+                            {item.s}
+                          </Text>
+                        )}
+                      </View>
+                      <Text
+                        style={[
+                          styles.stepTitle,
+                          isActive && styles.stepTitleActive,
+                          isCompleted && styles.stepTitleCompleted,
+                        ]}
+                      >
+                        {item.title}
+                      </Text>
+                    </View>
+                    {index < 3 && (
+                      <View
+                        style={[
+                          styles.stepConnector,
+                          step > item.s && styles.stepConnectorActive,
+                        ]}
+                      />
+                    )}
+                  </React.Fragment>
+                );
+              })}
+            </View>
+          )}
+
+          {/* Body Content */}
+          <ScrollView
+            contentContainerStyle={styles.scrollContent}
+            keyboardShouldPersistTaps="handled"
+          >
+            {/* ============================================================ */}
+            {/* STEP 1: SCAN CARD */}
+            {/* ============================================================ */}
+            {step === 1 && (
+              <View style={styles.stepContent}>
+                {isCameraActive ? (
+                  <View style={styles.cameraBox}>
+                    {permission?.granted ? (
+                      <View style={styles.cameraWrapper}>
+                        <CameraView
+                          style={styles.camera}
+                          enableTorch={torchEnabled}
+                          barcodeScannerSettings={{
+                            barcodeTypes: [
+                              "qr",
+                              "code128",
+                              "ean13",
+                              "upc_a",
+                              "code39",
+                            ],
+                          }}
+                          onBarcodeScanned={handleBarcodeScanned}
+                        />
+
+                        {/* Scanner Viewport Overlay */}
+                        <View style={styles.scannerOverlay}>
+                          <View style={styles.scannerControls}>
+                            <TouchableOpacity
+                              style={styles.scannerControlBtn}
+                              onPress={() => setTorchEnabled((prev) => !prev)}
+                            >
+                              <Ionicons
+                                name={torchEnabled ? "flash" : "flash-outline"}
+                                size={22}
+                                color={
+                                  torchEnabled ? Colors.warning : Colors.white
+                                }
+                              />
+                            </TouchableOpacity>
+                            <TouchableOpacity
+                              style={styles.scannerControlBtn}
+                              onPress={() => setIsCameraActive(false)}
+                            >
+                              <Ionicons
+                                name="close"
+                                size={22}
+                                color={Colors.white}
+                              />
+                            </TouchableOpacity>
+                          </View>
+
+                          <View style={styles.scannerTargetFrame}>
+                            <View
+                              style={[
+                                styles.cornerBorder,
+                                styles.cornerTopRight,
+                              ]}
+                            />
+                            <View
+                              style={[
+                                styles.cornerBorder,
+                                styles.cornerTopLeft,
+                              ]}
+                            />
+                            <View
+                              style={[
+                                styles.cornerBorder,
+                                styles.cornerBottomRight,
+                              ]}
+                            />
+                            <View
+                              style={[
+                                styles.cornerBorder,
+                                styles.cornerBottomLeft,
+                              ]}
+                            />
+                          </View>
+
+                          <Text style={styles.scannerHint}>
+                            قم بتوجيه الكاميرا نحو باركود أو QR كارت الطالب
+                          </Text>
+                        </View>
+                      </View>
+                    ) : (
+                      <View style={styles.permissionContainer}>
+                        <Ionicons
+                          name="camera-outline"
+                          size={48}
+                          color={Colors.slate400}
+                        />
+                        <Text style={styles.permissionTitle}>
+                          إذن الكاميرا مطلوب
+                        </Text>
+                        <Text style={styles.permissionSubtitle}>
+                          يلزم السماح لتطبيق فيكسيون باستخدام الكاميرا لمسح كارت
+                          الطالب.
+                        </Text>
+                        <AppButton
+                          title="منح إذن الكاميرا"
+                          onPress={requestPermission}
+                          style={{ marginTop: Spacing.md }}
+                        />
+                        <AppButton
+                          title="إلغاء واستخدام الإدخال اليدوي"
+                          variant="outline"
+                          onPress={() => setIsCameraActive(false)}
+                          style={{ marginTop: Spacing.sm }}
+                        />
+                      </View>
+                    )}
+                  </View>
+                ) : (
+                  <View>
+                    {/* Scanned Card Success Badge */}
+                    {scannedCardCode ? (
+                      <AppCard style={styles.scannedSuccessCard}>
+                        <View style={styles.scannedSuccessRow}>
+                          <Ionicons
+                            name="checkmark-circle"
+                            size={36}
+                            color={Colors.success}
+                          />
+                          <View style={{ marginRight: Spacing.md, flex: 1 }}>
+                            <Text style={styles.scannedSuccessTitle}>
+                              تم قراءة الكارت بنجاح
+                            </Text>
+                            <Text style={styles.scannedSuccessCode}>
+                              كود الكارت:{" "}
+                              {formatDisplayIdentifier(scannedCardCode)}
+                            </Text>
+                          </View>
+                        </View>
+                        <View style={styles.scannedActions}>
+                          <AppButton
+                            title="التالي: إدخال البيانات"
+                            onPress={() => setStep(2)}
+                            style={{ flex: 1 }}
+                          />
+                          <TouchableOpacity
+                            style={styles.rescanButton}
+                            onPress={() => {
+                              setScannedCardCode("");
+                              setIsCameraActive(true);
+                            }}
+                          >
+                            <Ionicons
+                              name="scan-outline"
+                              size={18}
+                              color={Colors.primary}
+                            />
+                            <Text style={styles.rescanText}>إعادة المسح</Text>
+                          </TouchableOpacity>
+                        </View>
+                      </AppCard>
+                    ) : (
+                      <View>
+                        {/* Error Alert Box */}
+                        {scanError && (
+                          <View style={styles.errorBanner}>
+                            <Ionicons
+                              name="alert-circle"
+                              size={20}
+                              color={Colors.danger}
+                            />
+                            <Text style={styles.errorBannerText}>
+                              {scanError}
+                            </Text>
+                          </View>
+                        )}
+
+                        {/* Scan Button Card */}
+                        <AppCard style={styles.heroScanCard}>
+                          <View style={styles.heroIconBox}>
+                            <Ionicons
+                              name="qr-code"
+                              size={48}
+                              color={Colors.primary}
+                            />
+                          </View>
+                          <Text style={styles.heroScanTitle}>
+                            مسح كارت الطالب الذكي
+                          </Text>
+                          <Text style={styles.heroScanDesc}>
+                            وجّه كاميرا الجهاز نحو بطاقة الطالب لقراءة الكود
+                            تلقائياً
+                          </Text>
+                          <AppButton
+                            title="مسح كارت الطالب"
+                            size="lg"
+                            icon={
+                              <Ionicons
+                                name="camera"
+                                size={20}
+                                color={Colors.white}
+                              />
+                            }
+                            onPress={() => {
+                              setScanError(null);
+                              setIsCameraActive(true);
+                            }}
+                            style={{ width: "100%", marginTop: Spacing.md }}
+                          />
+                        </AppCard>
+
+                        {/* Divider */}
+                        <View style={styles.dividerRow}>
+                          <View style={styles.dividerLine} />
+                          <Text style={styles.dividerText}>
+                            أو الإدخال اليدوي
+                          </Text>
+                          <View style={styles.dividerLine} />
+                        </View>
+
+                        {/* Manual Entry Fallback */}
+                        <AppCard style={styles.manualEntryCard}>
+                          <AppInput
+                            label="كود الكارت يدوياً *"
+                            placeholder="مثال: 00126"
+                            value={manualCardInput}
+                            onChangeText={(text) => {
+                              setManualCardInput(text);
+                              setScanError(null);
+                            }}
+                            keyboardType="default"
+                            autoCapitalize="none"
+                            containerStyle={{ marginBottom: Spacing.sm }}
+                          />
+                          <Text style={styles.leadingZerosHint}>
+                            * يتم الاحتفاظ بالأصفار البادئة (مثلاً 00126) دون أي
+                            تعديل.
+                          </Text>
+                          <AppButton
+                            title="تأكيد كود الكارت والمتابعة"
+                            variant="secondary"
+                            onPress={handleManualCardSubmit}
+                            disabled={!manualCardInput.trim()}
+                            style={{ marginTop: Spacing.sm }}
+                          />
+                        </AppCard>
+                      </View>
+                    )}
+                  </View>
+                )}
+              </View>
+            )}
+
+            {/* ============================================================ */}
+            {/* STEP 2: STUDENT INFORMATION */}
+            {/* ============================================================ */}
+            {step === 2 && (
+              <View style={styles.stepContent}>
+                <View style={styles.cardIndicatorRow}>
+                  <Ionicons
+                    name="card-outline"
+                    size={18}
+                    color={Colors.primary}
+                  />
+                  <Text style={styles.cardIndicatorText}>
+                    كود الكارت المحدد:{" "}
+                    <Text style={{ fontWeight: "700" }}>
+                      {formatDisplayIdentifier(scannedCardCode)}
+                    </Text>
+                  </Text>
+                </View>
+
+                <AppInput
+                  label="اسم الطالب ثلاثي / رباعي *"
+                  placeholder="مثال: يوسف أحمد علي"
+                  value={fullName}
+                  onChangeText={(val) => {
+                    setFullName(val);
+                    if (step2Errors.fullName)
+                      setStep2Errors((e) => ({ ...e, fullName: undefined }));
+                  }}
+                  error={step2Errors.fullName}
+                  containerStyle={styles.formField}
+                />
+
+                <AppInput
+                  label="رقم هاتف الطالب *"
+                  placeholder="مثال: 01012345678"
+                  value={phone}
+                  onChangeText={(val) => {
+                    setPhone(val);
+                    if (step2Errors.phone)
+                      setStep2Errors((e) => ({ ...e, phone: undefined }));
+                  }}
+                  keyboardType="phone-pad"
+                  error={step2Errors.phone}
+                  containerStyle={styles.formField}
+                />
+
+                <AppInput
+                  label="رقم هاتف ولي الأمر *"
+                  placeholder="مثال: 01198765432"
+                  value={parentPhone}
+                  onChangeText={(val) => {
+                    setParentPhone(val);
+                    if (step2Errors.parentPhone)
+                      setStep2Errors((e) => ({ ...e, parentPhone: undefined }));
+                  }}
+                  keyboardType="phone-pad"
+                  error={step2Errors.parentPhone}
+                  containerStyle={styles.formField}
+                />
+
+                <AppInput
+                  label="المرحلة الدراسية"
+                  placeholder="الصف الثالث الثانوي"
+                  value={grade}
+                  onChangeText={setGrade}
+                  containerStyle={styles.formField}
+                />
+
+                <AppInput
+                  label="ملاحظات إضافية (اختياري)"
+                  placeholder="أي تفاصيل خاصة بالطالب..."
+                  value={notes}
+                  onChangeText={setNotes}
+                  multiline
+                  numberOfLines={2}
+                  containerStyle={styles.formField}
+                />
+
+                <View style={styles.stepNavRow}>
+                  <AppButton
+                    title="السابق"
+                    variant="outline"
+                    onPress={() => setStep(1)}
+                    style={{ flex: 1, marginLeft: Spacing.sm }}
+                  />
+                  <AppButton
+                    title="التالي: اختيار المجموعات"
+                    onPress={handleStep2Next}
+                    style={{ flex: 2 }}
+                  />
+                </View>
+              </View>
+            )}
+
+            {/* ============================================================ */}
+            {/* STEP 3: GROUP ENROLLMENTS */}
+            {/* ============================================================ */}
+            {step === 3 && (
+              <View style={styles.stepContent}>
+                <Text style={styles.stepSubtitle}>
+                  اختر المجموعات التي سينضم إليها الطالب (يمكنك اختيار أكثر من
+                  مجموعة):
+                </Text>
+
+                {availableGroups.length === 0 ? (
+                  <AppCard style={styles.emptyGroupsCard}>
+                    <Ionicons
+                      name="people-outline"
+                      size={42}
+                      color={Colors.slate400}
+                    />
+                    <Text style={styles.emptyGroupsText}>
+                      لا توجد مجموعات نشطة في هذا المركز حالياً.
+                    </Text>
+                    <Text style={styles.emptyGroupsSubtext}>
+                      يمكنك متابعة تسجيل الطالب بدون مجموعات، ثم تسجيله لاحقاً.
+                    </Text>
+                  </AppCard>
+                ) : (
+                  <View style={{ marginBottom: Spacing.md }}>
+                    {availableGroups.map((grp) => {
+                      const isSelected = selectedGroupIds.includes(grp.id);
+                      const teacherName =
+                        teachersMap[grp.teacherId] || "غير محدد";
+                      const schedules = groupSchedules[grp.id] || [];
+
+                      return (
+                        <TouchableOpacity
+                          key={grp.id}
+                          activeOpacity={0.8}
+                          onPress={() => toggleGroupSelection(grp.id)}
+                        >
+                          <AppCard
+                            style={[
+                              styles.groupSelectCard,
+                              isSelected && styles.groupSelectCardActive,
+                            ]}
+                          >
+                            <View style={styles.groupCardHeader}>
+                              <View style={styles.checkboxIcon}>
+                                <Ionicons
+                                  name={
+                                    isSelected ? "checkbox" : "square-outline"
+                                  }
+                                  size={24}
+                                  color={
+                                    isSelected
+                                      ? Colors.primary
+                                      : Colors.slate400
+                                  }
+                                />
+                              </View>
+                              <View
+                                style={{ flex: 1, marginRight: Spacing.sm }}
+                              >
+                                <Text style={styles.groupCardName}>
+                                  {grp.name}
+                                </Text>
+                                <Text style={styles.groupCardTeacher}>
+                                  المعلم: {teacherName} • {grp.grade}
+                                </Text>
+                              </View>
+                              <View style={styles.groupPriceBadge}>
+                                <Text style={styles.groupPriceText}>
+                                  {formatCurrency(grp.monthlyPrice)} / شهر
+                                </Text>
+                              </View>
+                            </View>
+
+                            {/* Schedule info */}
+                            {schedules.length > 0 ? (
+                              <View style={styles.groupScheduleBox}>
+                                <Ionicons
+                                  name="time-outline"
+                                  size={14}
+                                  color={Colors.slate500}
+                                />
+                                <Text style={styles.groupScheduleText}>
+                                  {schedules
+                                    .map(
+                                      (s) =>
+                                        `${DAYS_OF_WEEK[s.dayOfWeek]} (${formatTimeArabic(s.startTime)} - ${formatTimeArabic(s.endTime)})`,
+                                    )
+                                    .join(" • ")}
+                                </Text>
+                              </View>
+                            ) : null}
+                          </AppCard>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </View>
+                )}
+
+                <View style={styles.stepNavRow}>
+                  <AppButton
+                    title="السابق"
+                    variant="outline"
+                    onPress={() => setStep(2)}
+                    style={{ flex: 1, marginLeft: Spacing.sm }}
+                  />
+                  <AppButton
+                    title={`التالي: المراجعة (${selectedGroupIds.length})`}
+                    onPress={() => setStep(4)}
+                    style={{ flex: 2 }}
+                  />
+                </View>
+              </View>
+            )}
+
+            {/* ============================================================ */}
+            {/* STEP 4: REVIEW & CONFIRMATION */}
+            {/* ============================================================ */}
+            {step === 4 && (
+              <View style={styles.stepContent}>
+                <Text style={styles.stepSubtitle}>
+                  تأكد من صحة بيانات الطالب قبل الحفظ النهائي:
+                </Text>
+
+                <AppCard style={styles.reviewCard}>
+                  {/* Card Identifier */}
+                  <View style={styles.reviewRow}>
+                    <Text style={styles.reviewLabel}>كود الكارت / الطالب:</Text>
+                    <View style={styles.codeTag}>
+                      <Ionicons name="card" size={14} color={Colors.primary} />
+                      <Text style={styles.codeTagText}>
+                        {formatDisplayIdentifier(scannedCardCode)}
+                      </Text>
+                    </View>
+                  </View>
+
+                  <View style={styles.reviewDivider} />
+
+                  {/* Student Details */}
+                  <View style={styles.reviewRow}>
+                    <Text style={styles.reviewLabel}>اسم الطالب:</Text>
+                    <Text style={styles.reviewValue}>{fullName}</Text>
+                  </View>
+
+                  <View style={styles.reviewRow}>
+                    <Text style={styles.reviewLabel}>المرحلة الدراسية:</Text>
+                    <Text style={styles.reviewValue}>{grade}</Text>
+                  </View>
+
+                  <View style={styles.reviewRow}>
+                    <Text style={styles.reviewLabel}>هاتف الطالب:</Text>
+                    <Text style={styles.reviewValue}>{phone}</Text>
+                  </View>
+
+                  <View style={styles.reviewRow}>
+                    <Text style={styles.reviewLabel}>هاتف ولي الأمر:</Text>
+                    <Text style={styles.reviewValue}>{parentPhone}</Text>
+                  </View>
+
+                  {notes ? (
+                    <View style={styles.reviewRow}>
+                      <Text style={styles.reviewLabel}>ملاحظات:</Text>
+                      <Text style={styles.reviewValue}>{notes}</Text>
+                    </View>
+                  ) : null}
+
+                  <View style={styles.reviewDivider} />
+
+                  {/* Selected Groups */}
+                  <View style={{ marginTop: Spacing.xs }}>
+                    <Text style={styles.reviewLabel}>
+                      المجموعات المختارة ({selectedGroupIds.length}):
+                    </Text>
+                    {selectedGroupIds.length === 0 ? (
+                      <Text style={styles.noGroupsReview}>
+                        لم يتم اختيار مجموعات حالياً.
+                      </Text>
+                    ) : (
+                      selectedGroupIds.map((gId) => {
+                        const grp = availableGroups.find((g) => g.id === gId);
+                        if (!grp) return null;
+                        return (
+                          <View key={gId} style={styles.selectedGroupItem}>
+                            <Ionicons
+                              name="checkmark-circle"
+                              size={16}
+                              color={Colors.success}
+                            />
+                            <Text style={styles.selectedGroupName}>
+                              {grp.name}
+                            </Text>
+                            <Text style={styles.selectedGroupPrice}>
+                              {formatCurrency(grp.monthlyPrice)}
+                            </Text>
+                          </View>
+                        );
+                      })
+                    )}
+
+                    {selectedGroupIds.length > 0 && (
+                      <View style={styles.totalMonthlyRow}>
+                        <Text style={styles.totalMonthlyLabel}>
+                          إجمالي الرسوم الشهرية:
+                        </Text>
+                        <Text style={styles.totalMonthlyValue}>
+                          {formatCurrency(calculateTotalMonthly())}
+                        </Text>
+                      </View>
+                    )}
+                  </View>
+                </AppCard>
+
+                <View style={styles.stepNavRow}>
+                  <AppButton
+                    title="تعديل البيانات"
+                    variant="outline"
+                    onPress={() => setStep(3)}
+                    style={{ flex: 1, marginLeft: Spacing.sm }}
+                    disabled={isSubmitting}
+                  />
+                  <AppButton
+                    title="إضافة الطالب"
+                    onPress={handleConfirmAddStudent}
+                    loading={isSubmitting}
+                    style={{ flex: 2 }}
+                  />
+                </View>
+              </View>
+            )}
+
+            {/* ============================================================ */}
+            {/* STEP 5: SUCCESS CONFIRMATION */}
+            {/* ============================================================ */}
+            {step === 5 && (
+              <View style={styles.successContainer}>
+                <View style={styles.successIconCircle}>
+                  <Ionicons name="checkmark" size={48} color={Colors.white} />
+                </View>
+
+                <Text style={styles.successTitle}>تم إضافة الطالب بنجاح!</Text>
+                <Text style={styles.successSubtitle}>
+                  تم تسجيل بيانات الطالب وتفعيل الكارت الذكي والاشتراك في
+                  المجموعات المختارة.
+                </Text>
+
+                <AppCard style={styles.successSummaryCard}>
+                  <View style={styles.successSummaryRow}>
+                    <Text style={styles.successSummaryLabel}>اسم الطالب:</Text>
+                    <Text style={styles.successSummaryValue}>{fullName}</Text>
+                  </View>
+                  <View style={styles.successSummaryRow}>
+                    <Text style={styles.successSummaryLabel}>كود الكارت:</Text>
+                    <Text style={styles.successSummaryValue}>
+                      {formatDisplayIdentifier(scannedCardCode)}
+                    </Text>
+                  </View>
+                  <View style={styles.successSummaryRow}>
+                    <Text style={styles.successSummaryLabel}>
+                      المجموعات المسجل بها:
+                    </Text>
+                    <Text style={styles.successSummaryValue}>
+                      {selectedGroupIds.length} مجموعات
+                    </Text>
+                  </View>
+                </AppCard>
+
+                <AppButton
+                  title="العودة لقائمة الطلاب"
+                  size="lg"
+                  onPress={() => {
+                    resetForm();
+                    onClose();
+                  }}
+                  style={{ width: "100%", marginBottom: Spacing.sm }}
+                />
+
+                <AppButton
+                  title="إضافة طالب آخر"
+                  variant="outline"
+                  size="md"
+                  onPress={resetForm}
+                  style={{ width: "100%" }}
+                />
+              </View>
+            )}
+          </ScrollView>
+        </SafeAreaView>
+      </View>
+    </Modal>
+  );
+};
+
+const styles = StyleSheet.create({
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(15, 23, 42, 0.65)",
+    justifyContent: "flex-end",
+  },
+  modalContainer: {
+    backgroundColor: Colors.background,
+    borderTopLeftRadius: BorderRadius.xl,
+    borderTopRightRadius: BorderRadius.xl,
+    maxHeight: "92%",
+    minHeight: "75%",
+    ...Shadows.elevated,
+  },
+  header: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingHorizontal: Spacing.lg,
+    paddingVertical: Spacing.md,
+    borderBottomWidth: 1,
+    borderBottomColor: Colors.slate200,
+  },
+  headerLeft: {
+    minWidth: 70,
+  },
+  backButton: {
+    flexDirection: "row",
+    alignItems: "center",
+  },
+  backButtonText: {
+    fontSize: 14,
+    color: Colors.slate700,
+    fontWeight: "600",
+    marginRight: 2,
+  },
+  headerTitle: {
+    fontSize: 18,
+    fontWeight: "700",
+    color: Colors.slate800,
+    textAlign: "center",
+  },
+  closeButton: {
+    minWidth: 70,
+    alignItems: "flex-start",
+  },
+  stepperContainer: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: Spacing.lg,
+    paddingVertical: Spacing.sm,
+    backgroundColor: Colors.slate50,
+    borderBottomWidth: 1,
+    borderBottomColor: Colors.slate200,
+  },
+  stepItem: {
+    flexDirection: "row",
+    alignItems: "center",
+  },
+  stepBadge: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: Colors.slate200,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  stepBadgeActive: {
+    backgroundColor: Colors.primary,
+  },
+  stepBadgeCompleted: {
+    backgroundColor: Colors.success,
+  },
+  stepBadgeText: {
+    fontSize: 12,
+    fontWeight: "700",
+    color: Colors.slate600,
+  },
+  stepBadgeTextActive: {
+    color: Colors.white,
+  },
+  stepTitle: {
+    fontSize: 13,
+    color: Colors.slate500,
+    marginRight: 6,
+    fontWeight: "500",
+  },
+  stepTitleActive: {
+    color: Colors.primary,
+    fontWeight: "700",
+  },
+  stepTitleCompleted: {
+    color: Colors.slate700,
+    fontWeight: "600",
+  },
+  stepConnector: {
+    flex: 1,
+    height: 2,
+    backgroundColor: Colors.slate200,
+    marginHorizontal: Spacing.xs,
+  },
+  stepConnectorActive: {
+    backgroundColor: Colors.success,
+  },
+  scrollContent: {
+    padding: Spacing.lg,
+    paddingBottom: Spacing.xl * 2,
+  },
+  stepContent: {
+    width: "100%",
+  },
+  stepSubtitle: {
+    fontSize: 14,
+    color: Colors.slate600,
+    marginBottom: Spacing.md,
+    textAlign: "right",
+  },
+  // Step 1 Styles
+  cameraBox: {
+    height: 380,
+    borderRadius: BorderRadius.lg,
+    overflow: "hidden",
+    backgroundColor: Colors.slate900,
+  },
+  cameraWrapper: {
+    flex: 1,
+    position: "relative",
+  },
+  camera: {
+    flex: 1,
+  },
+  scannerOverlay: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: "rgba(0, 0, 0, 0.45)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  scannerControls: {
+    position: "absolute",
+    top: Spacing.md,
+    left: Spacing.md,
+    right: Spacing.md,
+    flexDirection: "row",
+    justifyContent: "space-between",
+  },
+  scannerControlBtn: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: "rgba(0, 0, 0, 0.6)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  scannerTargetFrame: {
+    width: 240,
+    height: 180,
+    position: "relative",
+  },
+  cornerBorder: {
+    position: "absolute",
+    width: 28,
+    height: 28,
+    borderColor: Colors.primary,
+  },
+  cornerTopRight: {
+    top: 0,
+    right: 0,
+    borderTopWidth: 4,
+    borderRightWidth: 4,
+    borderTopRightRadius: 6,
+  },
+  cornerTopLeft: {
+    top: 0,
+    left: 0,
+    borderTopWidth: 4,
+    borderLeftWidth: 4,
+    borderTopLeftRadius: 6,
+  },
+  cornerBottomRight: {
+    bottom: 0,
+    right: 0,
+    borderBottomWidth: 4,
+    borderRightWidth: 4,
+    borderBottomRightRadius: 6,
+  },
+  cornerBottomLeft: {
+    bottom: 0,
+    left: 0,
+    borderBottomWidth: 4,
+    borderLeftWidth: 4,
+    borderBottomLeftRadius: 6,
+  },
+  scannerHint: {
+    color: Colors.white,
+    fontSize: 14,
+    marginTop: Spacing.lg,
+    textAlign: "center",
+    fontWeight: "600",
+    paddingHorizontal: Spacing.md,
+  },
+  permissionContainer: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    padding: Spacing.lg,
+    backgroundColor: Colors.white,
+  },
+  permissionTitle: {
+    fontSize: 18,
+    fontWeight: "700",
+    color: Colors.slate800,
+    marginTop: Spacing.sm,
+  },
+  permissionSubtitle: {
+    fontSize: 14,
+    color: Colors.slate500,
+    textAlign: "center",
+    marginTop: Spacing.xs,
+  },
+  heroScanCard: {
+    alignItems: "center",
+    padding: Spacing.lg,
+    marginBottom: Spacing.md,
+  },
+  heroIconBox: {
+    width: 80,
+    height: 80,
+    borderRadius: 40,
+    backgroundColor: Colors.slate50,
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: Spacing.sm,
+  },
+  heroScanTitle: {
+    fontSize: 18,
+    fontWeight: "700",
+    color: Colors.slate800,
+    marginBottom: 4,
+  },
+  heroScanDesc: {
+    fontSize: 14,
+    color: Colors.slate500,
+    textAlign: "center",
+  },
+  dividerRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginVertical: Spacing.md,
+  },
+  dividerLine: {
+    flex: 1,
+    height: 1,
+    backgroundColor: Colors.slate200,
+  },
+  dividerText: {
+    paddingHorizontal: Spacing.md,
+    fontSize: 12,
+    color: Colors.slate400,
+    fontWeight: "600",
+  },
+  manualEntryCard: {
+    padding: Spacing.md,
+  },
+  leadingZerosHint: {
+    fontSize: 12,
+    color: Colors.slate500,
+    marginBottom: Spacing.xs,
+    textAlign: "right",
+  },
+  scannedSuccessCard: {
+    padding: Spacing.lg,
+    backgroundColor: "#F0FDF4",
+    borderColor: "#BBF7D0",
+    borderWidth: 1,
+  },
+  scannedSuccessRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginBottom: Spacing.md,
+  },
+  scannedSuccessTitle: {
+    fontSize: 16,
+    fontWeight: "700",
+    color: Colors.success,
+    textAlign: "right",
+  },
+  scannedSuccessCode: {
+    fontSize: 14,
+    color: Colors.slate700,
+    marginTop: 2,
+    textAlign: "right",
+  },
+  scannedActions: {
+    flexDirection: "row",
+    alignItems: "center",
+  },
+  rescanButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.sm,
+    marginLeft: Spacing.sm,
+  },
+  rescanText: {
+    fontSize: 14,
+    color: Colors.primary,
+    fontWeight: "600",
+    marginRight: 4,
+  },
+  errorBanner: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "#FEF2F2",
+    borderColor: "#FECACA",
+    borderWidth: 1,
+    borderRadius: BorderRadius.md,
+    padding: Spacing.md,
+    marginBottom: Spacing.md,
+  },
+  errorBannerText: {
+    color: Colors.danger,
+    fontSize: 14,
+    fontWeight: "600",
+    marginRight: Spacing.sm,
+    flex: 1,
+    textAlign: "right",
+  },
+  // Step 2 Styles
+  cardIndicatorRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: Colors.slate100,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.sm,
+    borderRadius: BorderRadius.md,
+    marginBottom: Spacing.md,
+  },
+  cardIndicatorText: {
+    fontSize: 14,
+    color: Colors.slate700,
+    marginRight: Spacing.sm,
+  },
+  formField: {
+    marginBottom: Spacing.md,
+  },
+  stepNavRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginTop: Spacing.lg,
+  },
+  // Step 3 Styles
+  emptyGroupsCard: {
+    alignItems: "center",
+    padding: Spacing.xl,
+    marginBottom: Spacing.md,
+  },
+  emptyGroupsText: {
+    fontSize: 16,
+    fontWeight: "700",
+    color: Colors.slate700,
+    marginTop: Spacing.sm,
+    textAlign: "center",
+  },
+  emptyGroupsSubtext: {
+    fontSize: 14,
+    color: Colors.slate500,
+    marginTop: 4,
+    textAlign: "center",
+  },
+  groupSelectCard: {
+    marginBottom: Spacing.sm,
+    padding: Spacing.md,
+    borderWidth: 1.5,
+    borderColor: Colors.slate200,
+  },
+  groupSelectCardActive: {
+    borderColor: Colors.primary,
+    backgroundColor: "#F8FAFC",
+  },
+  groupCardHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+  },
+  checkboxIcon: {
+    marginLeft: Spacing.sm,
+  },
+  groupCardName: {
+    fontSize: 16,
+    fontWeight: "700",
+    color: Colors.slate800,
+    textAlign: "right",
+  },
+  groupCardTeacher: {
+    fontSize: 13,
+    color: Colors.slate500,
+    marginTop: 2,
+    textAlign: "right",
+  },
+  groupPriceBadge: {
+    backgroundColor: Colors.slate100,
+    paddingHorizontal: Spacing.sm,
+    paddingVertical: 4,
+    borderRadius: BorderRadius.sm,
+  },
+  groupPriceText: {
+    fontSize: 13,
+    fontWeight: "700",
+    color: Colors.primary,
+  },
+  groupScheduleBox: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginTop: Spacing.sm,
+    paddingTop: Spacing.xs,
+    borderTopWidth: 1,
+    borderTopColor: Colors.slate100,
+  },
+  groupScheduleText: {
+    fontSize: 11,
+    color: Colors.slate500,
+    marginRight: 4,
+  },
+  // Step 4 Styles
+  reviewCard: {
+    padding: Spacing.lg,
+    marginBottom: Spacing.md,
+  },
+  reviewRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: Spacing.sm,
+  },
+  reviewLabel: {
+    fontSize: 14,
+    color: Colors.slate500,
+  },
+  reviewValue: {
+    fontSize: 14,
+    fontWeight: "600",
+    color: Colors.slate800,
+  },
+  codeTag: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: Colors.slate100,
+    paddingHorizontal: Spacing.sm,
+    paddingVertical: 3,
+    borderRadius: BorderRadius.sm,
+  },
+  codeTagText: {
+    fontSize: 14,
+    fontWeight: "700",
+    color: Colors.primary,
+    marginRight: 4,
+  },
+  reviewDivider: {
+    height: 1,
+    backgroundColor: Colors.slate100,
+    marginVertical: Spacing.sm,
+  },
+  noGroupsReview: {
+    fontSize: 14,
+    color: Colors.slate400,
+    fontStyle: "italic",
+    marginTop: 4,
+    textAlign: "right",
+  },
+  selectedGroupItem: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingVertical: 4,
+  },
+  selectedGroupName: {
+    fontSize: 14,
+    color: Colors.slate700,
+    flex: 1,
+    marginRight: Spacing.xs,
+    textAlign: "right",
+  },
+  selectedGroupPrice: {
+    fontSize: 14,
+    fontWeight: "600",
+    color: Colors.primary,
+  },
+  totalMonthlyRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginTop: Spacing.sm,
+    paddingTop: Spacing.sm,
+    borderTopWidth: 1,
+    borderTopColor: Colors.slate200,
+  },
+  totalMonthlyLabel: {
+    fontSize: 14,
+    fontWeight: "700",
+    color: Colors.slate700,
+  },
+  totalMonthlyValue: {
+    fontSize: 17,
+    fontWeight: "800",
+    color: Colors.primary,
+  },
+  // Step 5 Styles
+  successContainer: {
+    alignItems: "center",
+    paddingVertical: Spacing.xl,
+  },
+  successIconCircle: {
+    width: 84,
+    height: 84,
+    borderRadius: 42,
+    backgroundColor: Colors.success,
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: Spacing.lg,
+    ...Shadows.card,
+  },
+  successTitle: {
+    fontSize: 22,
+    fontWeight: "800",
+    color: Colors.slate900,
+    marginBottom: Spacing.xs,
+    textAlign: "center",
+  },
+  successSubtitle: {
+    fontSize: 14,
+    color: Colors.slate500,
+    textAlign: "center",
+    paddingHorizontal: Spacing.md,
+    marginBottom: Spacing.lg,
+  },
+  successSummaryCard: {
+    width: "100%",
+    padding: Spacing.md,
+    marginBottom: Spacing.xl,
+  },
+  successSummaryRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    paddingVertical: 6,
+  },
+  successSummaryLabel: {
+    fontSize: 14,
+    color: Colors.slate500,
+  },
+  successSummaryValue: {
+    fontSize: 14,
+    fontWeight: "700",
+    color: Colors.slate800,
+  },
+});
