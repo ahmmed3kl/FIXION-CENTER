@@ -8,6 +8,7 @@
 ## الخطوة 1: رفع الكود إلى مستودع GitHub
 
 تأكد من عمل Commit و Push للكود إلى المستودع:
+
 ```bash
 git add .
 git commit -m "feat: setup cloud deployment for render and neon"
@@ -31,16 +32,16 @@ git push -u origin main
 
 املأ الحقول في شاشة الإعداد كما يلي:
 
-| الحقل | القيمة المطلوبة | ملاحظات هامة |
-| :--- | :--- | :--- |
-| **Name** | `fixion-backend` | اسم الخدمة على Render |
-| **Region** | `Ohio (US East)` | **مهم جداً**: لتكون في نفس منطقة قاعدة بيانات Neon (us-east-2) لتقليل زمن الاستجابة (Latency) |
-| **Branch** | `main` | الفرع المعتمد |
-| **Root Directory** | `backend` | **هام للغاية**: يحدد أن كود السيرفر موجود داخل مجلد `backend` |
-| **Runtime** | `Node` | بيئة التشغيل |
-| **Build Command** | `npm install --omit=dev` | لتثبيت حزم الإنتاج فقط وتوفير المساحة والوقت |
-| **Start Command** | `npm start` | يشغّل الخادم `node src/server.js` |
-| **Instance Type** | `Free` | مجاني تماماً |
+| الحقل              | القيمة المطلوبة          | ملاحظات هامة                                                                                  |
+| :----------------- | :----------------------- | :-------------------------------------------------------------------------------------------- |
+| **Name**           | `fixion-backend`         | اسم الخدمة على Render                                                                         |
+| **Region**         | `Ohio (US East)`         | **مهم جداً**: لتكون في نفس منطقة قاعدة بيانات Neon (us-east-2) لتقليل زمن الاستجابة (Latency) |
+| **Branch**         | `main`                   | الفرع المعتمد                                                                                 |
+| **Root Directory** | `backend`                | **هام للغاية**: يحدد أن كود السيرفر موجود داخل مجلد `backend`                                 |
+| **Runtime**        | `Node`                   | بيئة التشغيل                                                                                  |
+| **Build Command**  | `npm install --omit=dev` | لتثبيت حزم الإنتاج فقط وتوفير المساحة والوقت                                                  |
+| **Start Command**  | `npm start`              | يشغّل الخادم `node src/server.js`                                                             |
+| **Instance Type**  | `Free`                   | مجاني تماماً                                                                                  |
 
 ---
 
@@ -65,13 +66,14 @@ git push -u origin main
    *
    ```
 
-*(ملاحظة: يقوم Render بتمرير المنفذ `PORT` تلقائياً، وخادمنا يقرأه تلقائياً).*
+_(ملاحظة: يقوم Render بتمرير المنفذ `PORT` تلقائياً، وخادمنا يقرأه تلقائياً)._
 
 ---
 
 ## الخطوة 5: إعداد فحص الصحة (Health Check)
 
 في قسم **Advanced**، ستجد حقل **Health Check Path**:
+
 - ضع فيه: `/v1/health`
 
 اضغط على زر **Create Web Service** في أسفل الصفحة.
@@ -87,6 +89,7 @@ git push -u origin main
 `https://fixion-backend.onrender.com/v1/health`
 
 ستظهر لك الاستجابة الرسمية التالية:
+
 ```json
 {
   "status": "ok",
@@ -112,4 +115,4 @@ git push -u origin main
    ```bash
    npx expo start
    ```
-سيتصل التطبيق مباشرة بالسحابة وبقاعدة بيانات Neon من أي مكان في العالم!
+   سيتصل التطبيق مباشرة بالسحابة وبقاعدة بيانات Neon من أي مكان في العالم!

@@ -14,10 +14,7 @@ const pool = new Pool({
 });
 
 pool.on("error", (err) => {
-  console.warn(
-    "Transient idle client error in PostgreSQL pool:",
-    err.message,
-  );
+  console.warn("Transient idle client error in PostgreSQL pool:", err.message);
 });
 
 /**
