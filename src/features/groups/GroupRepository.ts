@@ -8,7 +8,7 @@ import {
     ValidationError,
 } from "../../core/errors";
 import { PermissionService } from "../../core/permissions";
-import { SyncRepository } from "../../core/sync";
+import { SyncEngine, SyncRepository } from "../../core/sync";
 import { Group } from "../../shared/types";
 import { useAuthStore } from "../auth/useAuthStore";
 import { SubjectRepository } from "../subjects/SubjectRepository";
@@ -203,10 +203,16 @@ export class GroupRepository {
       entityType: "group",
       entityId: groupId,
       payload: {
+        id: groupId,
+        groupId,
         name,
         teacherId: dto.teacherId,
+        teacher_id: dto.teacherId,
         subjectId: dto.subjectId,
+        subject_id: dto.subjectId,
         grade: dto.grade.trim(),
+        default_fee: defaultFee,
+        defaultFee,
         sessionPrice,
         monthlyPrice,
         sessionDurationMinutes,
@@ -214,6 +220,10 @@ export class GroupRepository {
         status: "active",
         createdAt: now,
       },
+    });
+
+    SyncEngine.syncCenterNow(centerId).catch((err) => {
+      console.warn("Auto-sync group notice:", err);
     });
 
     return {
@@ -322,9 +332,13 @@ export class GroupRepository {
       entityType: "group",
       entityId: groupId,
       payload: {
+        id: groupId,
+        groupId,
         name,
         teacherId,
+        teacher_id: teacherId,
         subjectId,
+        subject_id: subjectId,
         grade,
         sessionPrice,
         monthlyPrice,
@@ -333,6 +347,10 @@ export class GroupRepository {
         status,
         updatedAt: now,
       },
+    });
+
+    SyncEngine.syncCenterNow(centerId).catch((err) => {
+      console.warn("Auto-sync group update notice:", err);
     });
 
     return {

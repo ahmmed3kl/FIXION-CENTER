@@ -9,7 +9,7 @@ import {
     ValidationError,
 } from "../../core/errors";
 import { PermissionService } from "../../core/permissions";
-import { SyncRepository } from "../../core/sync";
+import { SyncEngine, SyncRepository } from "../../core/sync";
 import { Subject } from "../../shared/types";
 import { useAuthStore } from "../auth/useAuthStore";
 
@@ -143,7 +143,11 @@ export class SubjectRepository {
       operationType: "CREATE",
       entityType: "subject",
       entityId: subjectId,
-      payload: { name, code: trimmedCode, status: "active", createdAt: now },
+      payload: { id: subjectId, subjectId, name, code: trimmedCode, status: "active", createdAt: now },
+    });
+
+    SyncEngine.syncCenterNow(centerId).catch((err) => {
+      console.warn("Auto-sync subject notice:", err);
     });
 
     return {
@@ -212,7 +216,11 @@ export class SubjectRepository {
       operationType: "UPDATE",
       entityType: "subject",
       entityId: subjectId,
-      payload: { name, code, status, updatedAt: now },
+      payload: { id: subjectId, subjectId, name, code, status, updatedAt: now },
+    });
+
+    SyncEngine.syncCenterNow(centerId).catch((err) => {
+      console.warn("Auto-sync subject update notice:", err);
     });
 
     return {

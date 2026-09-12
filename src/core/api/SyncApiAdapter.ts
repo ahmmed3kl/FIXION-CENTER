@@ -16,6 +16,7 @@ export interface BootstrapResponse {
   groups: any[];
   teachers: any[];
   subjects: any[];
+  teacherSubjects?: any[];
   sessions: any[];
   enrollments: any[];
   latestServerSeq: number;
@@ -104,20 +105,6 @@ export class HttpSyncApiAdapter implements ISyncApiAdapter {
         err?.message?.includes("device") ||
         err?.userMessage?.includes("الجهاز");
 
-      if (isDeviceErr) {
-        await this.ensureDeviceRegistered(centerId, deviceId);
-        const retryResponse = await client.post<PushSyncResponse>(
-          "/sync/push",
-          requestBody,
-          {
-            headers: {
-              "X-Center-Id": centerId,
-              "X-Device-Id": deviceId,
-            },
-          },
-        );
-        return retryResponse.data;
-      }
       throw err;
     }
   }

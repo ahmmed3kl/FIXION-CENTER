@@ -8,7 +8,7 @@ import {
     ValidationError,
 } from "../../core/errors";
 import { PermissionService } from "../../core/permissions";
-import { SyncRepository } from "../../core/sync";
+import { SyncEngine, SyncRepository } from "../../core/sync";
 import { Teacher } from "../../shared/types";
 import { useAuthStore } from "../auth/useAuthStore";
 
@@ -121,7 +121,11 @@ export class TeacherRepository {
       operationType: "CREATE",
       entityType: "teacher",
       entityId: teacherId,
-      payload: { name, phone, notes, status: "active", createdAt: now },
+      payload: { id: teacherId, teacherId, name, phone, notes, status: "active", createdAt: now },
+    });
+
+    SyncEngine.syncCenterNow(centerId).catch((err) => {
+      console.warn("Auto-sync teacher notice:", err);
     });
 
     return {
@@ -184,7 +188,11 @@ export class TeacherRepository {
       operationType: "UPDATE",
       entityType: "teacher",
       entityId: teacherId,
-      payload: { name, phone, notes, status, updatedAt: now },
+      payload: { id: teacherId, teacherId, name, phone, notes, status, updatedAt: now },
+    });
+
+    SyncEngine.syncCenterNow(centerId).catch((err) => {
+      console.warn("Auto-sync teacher update notice:", err);
     });
 
     return {

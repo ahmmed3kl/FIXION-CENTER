@@ -209,29 +209,34 @@ export class AuthRepository {
 
         // Proactively ensure device is registered on the live backend during restore
         if (!env.enableMockData && token && user.centerId) {
-          DeviceService.getDeviceId().then(async (deviceId) => {
-            try {
-              const client = ApiClient.getInstance();
-              await client.post(
-                "/devices/register",
-                {
-                  deviceId,
-                  deviceName: `${Platform.OS.toUpperCase()}-Device-${deviceId.slice(-4)}`,
-                  platform: Platform.OS,
-                  appVersion: env.appVersion,
-                },
-                {
-                  headers: {
-                    Authorization: `Bearer ${token}`,
-                    "X-Center-Id": user.centerId,
-                    "X-Device-Id": deviceId,
+          DeviceService.getDeviceId()
+            .then(async (deviceId) => {
+              try {
+                const client = ApiClient.getInstance();
+                await client.post(
+                  "/devices/register",
+                  {
+                    deviceId,
+                    deviceName: `${Platform.OS.toUpperCase()}-Device-${deviceId.slice(-4)}`,
+                    platform: Platform.OS,
+                    appVersion: env.appVersion,
                   },
-                },
-              );
-            } catch (regErr) {
-              console.warn("Device registration on restoreSession notice:", regErr);
-            }
-          }).catch(() => {});
+                  {
+                    headers: {
+                      Authorization: `Bearer ${token}`,
+                      "X-Center-Id": user.centerId,
+                      "X-Device-Id": deviceId,
+                    },
+                  },
+                );
+              } catch (regErr) {
+                console.warn(
+                  "Device registration on restoreSession notice:",
+                  regErr,
+                );
+              }
+            })
+            .catch(() => {});
         }
 
         return { user, token };

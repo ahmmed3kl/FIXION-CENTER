@@ -4,6 +4,7 @@ import {
     Alert,
     FlatList,
     Modal,
+    RefreshControl,
     SafeAreaView,
     ScrollView,
     StyleSheet,
@@ -13,6 +14,7 @@ import {
 } from "react-native";
 import { Strings } from "../../core/localization";
 import { PermissionService } from "../../core/permissions";
+import { SyncEngine } from "../../core/sync";
 import { Colors, Spacing, Typography } from "../../core/theme";
 import { useAuthStore } from "../../features/auth/useAuthStore";
 import { GroupRepository } from "../../features/groups/GroupRepository";
@@ -50,11 +52,13 @@ const DAYS_OF_WEEK = [
 
 export default function AcademicScreen() {
   const currentUser = useAuthStore((s) => s.currentUser);
+  const activeCenterId = useAuthStore((s) => s.activeCenterId);
   const permissions = Array.isArray(currentUser?.permissions)
     ? currentUser.permissions
     : [];
 
   const [activeTab, setActiveTab] = useState<AcademicTab>("teachers");
+  const [refreshing, setRefreshing] = useState(false);
 
   // Data lists
   const [teachers, setTeachers] = useState<Teacher[]>([]);
@@ -107,13 +111,34 @@ export default function AcademicScreen() {
       setGroups(GroupRepository.getAll());
       setTodaySessions(SessionGenerationService.getSessionsForDate(todayStr));
     } catch (e: any) {
-      console.error(e);
+      console.error("Academic loadData error:", e);
+    }
+  };
+
+  const onRefresh = async () => {
+    setRefreshing(true);
+    try {
+      if (activeCenterId) {
+        await SyncEngine.syncCenterNow(activeCenterId);
+      }
+    } catch (e) {
+      console.warn("Academic onRefresh sync notice:", e);
+    } finally {
+      loadData();
+      setRefreshing(false);
     }
   };
 
   useEffect(() => {
     loadData();
-  }, []);
+    if (activeCenterId) {
+      SyncEngine.syncCenterNow(activeCenterId)
+        .then(() => {
+          loadData();
+        })
+        .catch(() => {});
+    }
+  }, [activeCenterId]);
 
   // 1. Teachers Actions
   const handleCreateTeacher = () => {
@@ -382,6 +407,14 @@ export default function AcademicScreen() {
             <FlatList
               data={teachers}
               keyExtractor={(item) => item.id}
+              refreshControl={
+                <RefreshControl
+                  refreshing={refreshing}
+                  onRefresh={onRefresh}
+                  colors={[Colors.primary]}
+                  tintColor={Colors.primary}
+                />
+              }
               ListEmptyComponent={
                 <EmptyState message="لا يوجد معلمون مسجلون" />
               }
@@ -427,6 +460,14 @@ export default function AcademicScreen() {
             <FlatList
               data={subjects}
               keyExtractor={(item) => item.id}
+              refreshControl={
+                <RefreshControl
+                  refreshing={refreshing}
+                  onRefresh={onRefresh}
+                  colors={[Colors.primary]}
+                  tintColor={Colors.primary}
+                />
+              }
               ListEmptyComponent={<EmptyState message="لا توجد مواد مسجلة" />}
               renderItem={({ item }) => (
                 <AppCard style={styles.itemCard}>
@@ -465,6 +506,14 @@ export default function AcademicScreen() {
             <FlatList
               data={groups}
               keyExtractor={(item) => item.id}
+              refreshControl={
+                <RefreshControl
+                  refreshing={refreshing}
+                  onRefresh={onRefresh}
+                  colors={[Colors.primary]}
+                  tintColor={Colors.primary}
+                />
+              }
               ListEmptyComponent={
                 <EmptyState message="لا توجد مجموعات مسجلة" />
               }

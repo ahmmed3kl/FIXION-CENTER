@@ -8,7 +8,7 @@ import {
     UnauthorizedError,
 } from "../../core/errors";
 import { PermissionService } from "../../core/permissions";
-import { SyncRepository } from "../../core/sync";
+import { SyncEngine, SyncRepository } from "../../core/sync";
 import { Subject, Teacher, TeacherSubject } from "../../shared/types";
 import { useAuthStore } from "../auth/useAuthStore";
 import { SubjectRepository } from "../subjects/SubjectRepository";
@@ -110,7 +110,11 @@ export class TeacherSubjectRepository {
       operationType: "CREATE",
       entityType: "teacher_subject",
       entityId: id,
-      payload: { teacherId, subjectId, createdAt: now },
+      payload: { id, teacherId, subjectId, createdAt: now },
+    });
+
+    SyncEngine.syncCenterNow(centerId).catch((err) => {
+      console.warn("Auto-sync teacher_subject notice:", err);
     });
 
     return {

@@ -25,6 +25,7 @@ router.get(
         groupsRes,
         teachersRes,
         subjectsRes,
+        teacherSubjectsRes,
         sessionsRes,
         enrollmentsRes,
         maxSeqRes,
@@ -36,6 +37,9 @@ router.get(
         db.query("SELECT * FROM groups WHERE center_id = $1", [centerId]),
         db.query("SELECT * FROM teachers WHERE center_id = $1", [centerId]),
         db.query("SELECT * FROM subjects WHERE center_id = $1", [centerId]),
+        db.query("SELECT * FROM teacher_subjects WHERE center_id = $1", [
+          centerId,
+        ]),
         db.query("SELECT * FROM sessions WHERE center_id = $1", [centerId]),
         db.query(
           "SELECT * FROM student_group_enrollments WHERE center_id = $1",
@@ -54,6 +58,7 @@ router.get(
         groups: groupsRes.rows,
         teachers: teachersRes.rows,
         subjects: subjectsRes.rows,
+        teacherSubjects: teacherSubjectsRes.rows,
         sessions: sessionsRes.rows,
         enrollments: enrollmentsRes.rows,
         latestServerSeq: parseInt(maxSeqRes.rows[0]?.max_seq || 0, 10),

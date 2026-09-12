@@ -332,8 +332,17 @@ export class SyncEngine {
       if (Array.isArray(data.teachers)) {
         for (const t of data.teachers) {
           db.runSync(
-            `INSERT OR REPLACE INTO teachers (id, center_id, name, phone) VALUES (?, ?, ?, ?)`,
-            [t.id, t.center_id || centerId, t.name, t.phone || null],
+            `INSERT OR REPLACE INTO teachers (id, center_id, name, phone, status, notes, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              t.id,
+              t.center_id || centerId,
+              t.name,
+              t.phone || null,
+              t.status || "active",
+              t.notes || null,
+              t.created_at || new Date().toISOString(),
+              t.updated_at || new Date().toISOString(),
+            ],
           );
         }
       }
@@ -342,8 +351,32 @@ export class SyncEngine {
       if (Array.isArray(data.subjects)) {
         for (const s of data.subjects) {
           db.runSync(
-            `INSERT OR REPLACE INTO subjects (id, center_id, name, code) VALUES (?, ?, ?, ?)`,
-            [s.id, s.center_id || centerId, s.name, s.code || s.name],
+            `INSERT OR REPLACE INTO subjects (id, center_id, name, code, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            [
+              s.id,
+              s.center_id || centerId,
+              s.name,
+              s.code || s.name,
+              s.status || "active",
+              s.created_at || new Date().toISOString(),
+              s.updated_at || new Date().toISOString(),
+            ],
+          );
+        }
+      }
+
+      // Upsert Teacher Subjects Link
+      if (Array.isArray(data.teacherSubjects)) {
+        for (const ts of data.teacherSubjects) {
+          db.runSync(
+            `INSERT OR REPLACE INTO teacher_subjects (id, center_id, teacher_id, subject_id, created_at) VALUES (?, ?, ?, ?, ?)`,
+            [
+              ts.id || `ts-${centerId}-${ts.teacher_id}-${ts.subject_id}`,
+              ts.center_id || centerId,
+              ts.teacher_id || ts.teacherId,
+              ts.subject_id || ts.subjectId,
+              ts.created_at || new Date().toISOString(),
+            ],
           );
         }
       }
@@ -351,18 +384,46 @@ export class SyncEngine {
       // Upsert Groups
       if (Array.isArray(data.groups)) {
         for (const g of data.groups) {
+          const defaultFee = Number(g.default_fee || g.defaultFee || 0);
+          const sessionPrice = Number(g.session_price || g.sessionPrice || defaultFee);
+          const monthlyPrice = Number(g.monthly_price || g.monthlyPrice || (defaultFee * 4));
+          const duration = Number(g.session_duration_minutes || g.sessionDurationMinutes || 120);
+          const lateAfter = Number(g.late_after_minutes || g.lateAfterMinutes || 15);
           db.runSync(
-            `INSERT OR REPLACE INTO groups (id, center_id, name, teacher_id, subject_id, grade, default_fee) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            `INSERT OR REPLACE INTO groups (id, center_id, name, teacher_id, subject_id, grade, default_fee, session_price, monthly_price, session_duration_minutes, late_after_minutes, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
               g.id,
               g.center_id || centerId,
               g.name,
-              g.teacher_id,
-              g.subject_id,
+              g.teacher_id || g.teacherId,
+              g.subject_id || g.subjectId,
               g.grade,
-              Number(g.default_fee || 0),
+              defaultFee,
+              sessionPrice,
+              monthlyPrice,
+              duration,
+              lateAfter,
+              g.status || "active",
+              g.created_at || new Date().toISOString(),
+              g.updated_at || new Date().toISOString(),
             ],
           );
+
+          // Auto-link teacher to subject if not present
+          if ((g.teacher_id || g.teacherId) && (g.subject_id || g.subjectId)) {
+            try {
+              db.runSync(
+                `INSERT OR IGNORE INTO teacher_subjects (id, center_id, teacher_id, subject_id, created_at) VALUES (?, ?, ?, ?, ?)`,
+                [
+                  `ts-${centerId}-${g.teacher_id || g.teacherId}-${g.subject_id || g.subjectId}`,
+                  centerId,
+                  g.teacher_id || g.teacherId,
+                  g.subject_id || g.subjectId,
+                  new Date().toISOString(),
+                ],
+              );
+            } catch {}
+          }
         }
       }
 
@@ -518,6 +579,88 @@ export class SyncEngine {
             );
           }
         } else if (
+          entityType === "teacher" ||
+          entityType === "teacher_created" ||
+          entityType === "teacher_updated"
+        ) {
+          const t = data.teacher || data;
+          const teacherId = t.id || change.entityId;
+          db.runSync(
+            `INSERT OR REPLACE INTO teachers (id, center_id, name, phone, status, notes, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              teacherId,
+              centerId,
+              t.name || "معلم",
+              t.phone || null,
+              t.status || "active",
+              t.notes || null,
+              t.created_at || new Date().toISOString(),
+              t.updated_at || new Date().toISOString(),
+            ],
+          );
+        } else if (
+          entityType === "subject" ||
+          entityType === "subject_created" ||
+          entityType === "subject_updated"
+        ) {
+          const s = data.subject || data;
+          const subjectId = s.id || change.entityId;
+          db.runSync(
+            `INSERT OR REPLACE INTO subjects (id, center_id, name, code, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            [
+              subjectId,
+              centerId,
+              s.name || "مادة",
+              s.code || s.name || "SUBJ",
+              s.status || "active",
+              s.created_at || new Date().toISOString(),
+              s.updated_at || new Date().toISOString(),
+            ],
+          );
+        } else if (
+          entityType === "group" ||
+          entityType === "group_created" ||
+          entityType === "group_updated"
+        ) {
+          const g = data.group || data;
+          const groupId = g.id || change.entityId;
+          const defaultFee = Number(g.default_fee || g.defaultFee || 0);
+          const sessionPrice = Number(g.session_price || g.sessionPrice || defaultFee);
+          const monthlyPrice = Number(g.monthly_price || g.monthlyPrice || (defaultFee * 4));
+          db.runSync(
+            `INSERT OR REPLACE INTO groups (id, center_id, name, teacher_id, subject_id, grade, default_fee, session_price, monthly_price, session_duration_minutes, late_after_minutes, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              groupId,
+              centerId,
+              g.name || "مجموعة",
+              g.teacher_id || g.teacherId,
+              g.subject_id || g.subjectId,
+              g.grade || "الصف الثالث الثانوي",
+              defaultFee,
+              sessionPrice,
+              monthlyPrice,
+              Number(g.session_duration_minutes || 120),
+              Number(g.late_after_minutes || 15),
+              g.status || "active",
+              g.created_at || new Date().toISOString(),
+              g.updated_at || new Date().toISOString(),
+            ],
+          );
+          if ((g.teacher_id || g.teacherId) && (g.subject_id || g.subjectId)) {
+            try {
+              db.runSync(
+                `INSERT OR IGNORE INTO teacher_subjects (id, center_id, teacher_id, subject_id, created_at) VALUES (?, ?, ?, ?, ?)`,
+                [
+                  `ts-${centerId}-${g.teacher_id || g.teacherId}-${g.subject_id || g.subjectId}`,
+                  centerId,
+                  g.teacher_id || g.teacherId,
+                  g.subject_id || g.subjectId,
+                  new Date().toISOString(),
+                ],
+              );
+            } catch {}
+          }
+        } else if (
           entityType === "attendance" ||
           entityType === "attendance_marked"
         ) {
@@ -567,7 +710,7 @@ export class SyncEngine {
    * Executes bidirectional synchronization for a center:
    * 1. Validates device status.
    * 2. Checks network connectivity.
-   * 3. Performs initial bootstrap if cursor is 0.
+   * 3. Performs initial bootstrap if cursor is 0 or local academic records are empty.
    * 4. Pulls new server changes using monotonic cursor and applies them to local SQLite.
    * 5. Batches and pushes pending local operations in priority order.
    * 6. Handles conflicts and retries gracefully.
@@ -620,9 +763,19 @@ export class SyncEngine {
     let conflicts = 0;
 
     try {
-      // 3. Monotonic Cursor Check: Bootstrap if 0
+      // 3. Monotonic Cursor Check: Bootstrap if 0 OR if local teachers/groups are empty
+      const db = DatabaseService.getDb();
+      let localTeachersCount = 0;
+      try {
+        const row = db.getFirstSync<{ count: number }>(
+          `SELECT COUNT(*) as count FROM teachers WHERE center_id = ? AND status = 'active'`,
+          [centerId],
+        );
+        localTeachersCount = row?.count || 0;
+      } catch {}
+
       let currentCursor = SyncRepository.getServerCursor(centerId);
-      if (currentCursor === "0") {
+      if (currentCursor === "0" || localTeachersCount === 0) {
         await this.bootstrapCenter(centerId);
         currentCursor = SyncRepository.getServerCursor(centerId);
       }

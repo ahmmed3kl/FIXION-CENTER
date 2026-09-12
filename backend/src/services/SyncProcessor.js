@@ -59,6 +59,7 @@ class SyncProcessor {
           continue;
         }
 
+        await client.query("SAVEPOINT op_savepoint");
         try {
           // 3. Dispatch and apply domain mutation atomically
           await SyncProcessor.applyDomainMutation(client, {
@@ -116,8 +117,10 @@ class SyncProcessor {
             ],
           );
 
+          await client.query("RELEASE SAVEPOINT op_savepoint");
           syncedOperationIds.push(operationId);
         } catch (opErr) {
+          await client.query("ROLLBACK TO SAVEPOINT op_savepoint");
           // If domain mutation failed with conflict or validation
           conflicts.push({
             operationId,
@@ -364,6 +367,126 @@ class SyncProcessor {
             sess.start_time || sess.startTime,
             sess.end_time || sess.endTime,
             sess.status || "open",
+          ],
+        );
+        break;
+      }
+
+      case "teacher":
+      case "teacher_created":
+      case "teacher_updated": {
+        const tch = payload.teacher || payload;
+        const teacherId = tch.id || tch.teacherId || context.entityId;
+        await client.query(
+          `INSERT INTO teachers (id, center_id, name, phone, status, notes, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
+           ON CONFLICT (id) DO UPDATE SET
+             name = EXCLUDED.name,
+             phone = EXCLUDED.phone,
+             status = EXCLUDED.status,
+             notes = EXCLUDED.notes,
+             updated_at = NOW();`,
+          [
+            teacherId,
+            centerId,
+            tch.name || "معلم بدون اسم",
+            tch.phone || null,
+            tch.status || "active",
+            tch.notes || null,
+          ],
+        );
+        break;
+      }
+
+      case "subject":
+      case "subject_created":
+      case "subject_updated": {
+        const subj = payload.subject || payload;
+        const subjectId = subj.id || subj.subjectId || context.entityId;
+        await client.query(
+          `INSERT INTO subjects (id, center_id, name, code, status, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
+           ON CONFLICT (id) DO UPDATE SET
+             name = EXCLUDED.name,
+             code = EXCLUDED.code,
+             status = EXCLUDED.status,
+             updated_at = NOW();`,
+          [
+            subjectId,
+            centerId,
+            subj.name || "مادة دراسية",
+            subj.code || subj.name || "SUBJ",
+            subj.status || "active",
+          ],
+        );
+        break;
+      }
+
+      case "teacher_subject":
+      case "teacher_subject_assigned": {
+        const ts = payload;
+        const tsId = ts.id || `ts-${centerId}-${ts.teacherId || ts.teacher_id}-${ts.subjectId || ts.subject_id}`;
+        await client.query(
+          `INSERT INTO teacher_subjects (id, center_id, teacher_id, subject_id, created_at)
+           VALUES ($1, $2, $3, $4, NOW())
+           ON CONFLICT (center_id, teacher_id, subject_id) DO NOTHING;`,
+          [
+            tsId,
+            centerId,
+            ts.teacherId || ts.teacher_id,
+            ts.subjectId || ts.subject_id,
+          ],
+        );
+        break;
+      }
+
+      case "group":
+      case "group_created":
+      case "group_updated": {
+        const grp = payload.group || payload;
+        const groupId = grp.id || grp.groupId || context.entityId;
+        await client.query(
+          `INSERT INTO groups (id, center_id, name, teacher_id, subject_id, grade, default_fee, status, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())
+           ON CONFLICT (id) DO UPDATE SET
+             name = EXCLUDED.name,
+             teacher_id = EXCLUDED.teacher_id,
+             subject_id = EXCLUDED.subject_id,
+             grade = EXCLUDED.grade,
+             default_fee = EXCLUDED.default_fee,
+             status = EXCLUDED.status,
+             updated_at = NOW();`,
+          [
+            groupId,
+            centerId,
+            grp.name || "مجموعة دراسية",
+            grp.teacher_id || grp.teacherId,
+            grp.subject_id || grp.subjectId,
+            grp.grade || "الصف الثالث الثانوي",
+            parseFloat(grp.default_fee || grp.defaultFee || grp.session_price || grp.sessionPrice || 0),
+            grp.status || "active",
+          ],
+        );
+        break;
+      }
+
+      case "group_schedule": {
+        const sched = payload;
+        const schedId = sched.id || `sched-${Date.now()}`;
+        await client.query(
+          `INSERT INTO group_schedules (id, center_id, group_id, day_of_week, start_time, end_time, created_at)
+           VALUES ($1, $2, $3, $4, $5, $6, NOW())
+           ON CONFLICT (id) DO UPDATE SET
+             day_of_week = EXCLUDED.day_of_week,
+             start_time = EXCLUDED.start_time,
+             end_time = EXCLUDED.end_time;`,
+          [
+            schedId,
+            centerId,
+            sched.group_id || sched.groupId,
+            parseInt(sched.day_of_week || sched.dayOfWeek, 10),
+            sched.start_time || sched.startTime,
+            sched.end_time || sched.endTime,
           ],
         );
         break;

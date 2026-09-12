@@ -110,7 +110,10 @@ export class ApiClient {
           } else if (typeof serverErr === "string") {
             serverMessage = serverErr;
           } else if (serverData?.message) {
-            serverMessage = typeof serverData.message === "object" ? JSON.stringify(serverData.message) : String(serverData.message);
+            serverMessage =
+              typeof serverData.message === "object"
+                ? JSON.stringify(serverData.message)
+                : String(serverData.message);
           }
 
           if (status === 401) {
@@ -122,7 +125,8 @@ export class ApiClient {
             return Promise.reject(
               new UnauthorizedError(
                 serverMessage,
-                serverUserMessage || "انتهت صلاحية الجلسة أو تم تسجيل الخروج. يرجى إعادة تسجيل الدخول.",
+                serverUserMessage ||
+                  "انتهت صلاحية الجلسة أو تم تسجيل الخروج. يرجى إعادة تسجيل الدخول.",
               ),
             );
           }
@@ -131,7 +135,8 @@ export class ApiClient {
             return Promise.reject(
               new ForbiddenError(
                 serverMessage,
-                serverUserMessage || "ليس لديك الصلاحية الكافية لإتمام هذا الإجراء.",
+                serverUserMessage ||
+                  "ليس لديك الصلاحية الكافية لإتمام هذا الإجراء.",
               ),
             );
           }
@@ -149,7 +154,8 @@ export class ApiClient {
             return Promise.reject(
               new ConflictError(
                 serverMessage,
-                serverUserMessage || "يوجد تضارب في البيانات المسجلة على الخادم.",
+                serverUserMessage ||
+                  "يوجد تضارب في البيانات المسجلة على الخادم.",
               ),
             );
           }
@@ -158,7 +164,9 @@ export class ApiClient {
             return Promise.reject(
               new ValidationError(
                 serverMessage,
-                serverUserMessage || serverMessage || "البيانات المدخلة غير صحيحة.",
+                serverUserMessage ||
+                  serverMessage ||
+                  "البيانات المدخلة غير صحيحة.",
               ),
             );
           }
@@ -168,7 +176,8 @@ export class ApiClient {
               new AppError(
                 serverMessage,
                 `HTTP_${status}`,
-                serverUserMessage || "حدث خطأ في الخادم أثناء معالجة الطلب. يرجى المحاولة لاحقاً.",
+                serverUserMessage ||
+                  "حدث خطأ في الخادم أثناء معالجة الطلب. يرجى المحاولة لاحقاً.",
               ),
             );
           }
