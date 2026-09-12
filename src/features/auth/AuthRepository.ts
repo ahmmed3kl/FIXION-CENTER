@@ -198,9 +198,8 @@ export class AuthRepository {
         const normalizedPermissions: typeof parsed.permissions =
           Array.isArray(storedPermissions) && storedPermissions.length > 0
             ? storedPermissions
-            : RolePermissions[
-                parsed.role as keyof typeof RolePermissions
-              ] || RolePermissions.admin;
+            : RolePermissions[parsed.role as keyof typeof RolePermissions] ||
+              RolePermissions.admin;
 
         const user: User = { ...parsed, permissions: normalizedPermissions };
         return { user, token };

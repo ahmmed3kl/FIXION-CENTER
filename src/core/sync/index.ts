@@ -628,21 +628,34 @@ export class SyncEngine {
       }
 
       // 4. Pull Changes from Server with Monotonic Cursor
-      const pullResponse = await this.adapter.pullChanges(
-        centerId,
-        currentCursor,
-        pullLimit,
-      );
+      try {
+        const pullResponse = await this.adapter.pullChanges(
+          centerId,
+          currentCursor,
+          pullLimit,
+        );
 
-      if (pullResponse.changes && pullResponse.changes.length > 0) {
-        this.applyServerChanges(centerId, pullResponse.changes);
-      }
+        if (pullResponse.changes && pullResponse.changes.length > 0) {
+          this.applyServerChanges(centerId, pullResponse.changes);
+        }
 
-      if (
-        pullResponse.nextCursor &&
-        pullResponse.nextCursor !== currentCursor
-      ) {
-        SyncRepository.setServerCursor(centerId, pullResponse.nextCursor);
+        if (
+          pullResponse.nextCursor &&
+          pullResponse.nextCursor !== currentCursor
+        ) {
+          SyncRepository.setServerCursor(centerId, pullResponse.nextCursor);
+        }
+      } catch (pullErr: any) {
+        // Pull failure is non-fatal — log it and continue to push phase.
+        // The device may be behind but we should still push pending ops.
+        errors++;
+        Logger.warn("sync", "pull_failed", {
+          centerId,
+          error:
+            pullErr?.userMessage ||
+            pullErr?.message ||
+            JSON.stringify(pullErr),
+        });
       }
 
       // 5. Push Prioritized Local Operations

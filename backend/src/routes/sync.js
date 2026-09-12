@@ -134,19 +134,25 @@ router.get("/pull", authMiddleware, deviceGuard, async (req, res, next) => {
 
     // Update per-device checkpoint independently without modifying global server sequence
     if (returnedRows.length > 0) {
-      await db.query(
-        `INSERT INTO sync_checkpoints (id, center_id, device_id, last_pulled_seq, updated_at)
-         VALUES ($1, $2, $3, $4, NOW())
-         ON CONFLICT (center_id, device_id) DO UPDATE SET
-           last_pulled_seq = EXCLUDED.last_pulled_seq,
-           updated_at = NOW();`,
-        [
-          `chk-${req.centerId}-${req.deviceId}`,
-          req.centerId,
-          req.deviceId,
-          parseInt(nextCursor, 10),
-        ],
-      );
+      try {
+        await db.query(
+          `INSERT INTO sync_checkpoints (id, center_id, device_id, last_pulled_seq, updated_at)
+           VALUES ($1, $2, $3, $4, NOW())
+           ON CONFLICT (center_id, device_id) DO UPDATE SET
+             last_pulled_seq = EXCLUDED.last_pulled_seq,
+             updated_at = NOW();`,
+          [
+            `chk-${req.centerId}-${req.deviceId}`,
+            req.centerId,
+            req.deviceId,
+            parseInt(nextCursor, 10),
+          ],
+        );
+      } catch (checkpointErr) {
+        // Non-fatal: checkpoint update failed (e.g. device FK not yet registered).
+        // The pull data is still valid and will be returned.
+        console.warn("sync_checkpoints upsert skipped:", checkpointErr?.message);
+      }
     }
 
     return res.json({

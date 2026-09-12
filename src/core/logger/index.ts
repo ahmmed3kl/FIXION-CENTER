@@ -104,7 +104,22 @@ export class Logger {
     error: unknown,
     data?: Partial<LogPayload>,
   ): void {
-    const errorMsg = error instanceof Error ? error.message : String(error);
+    let errorMsg: string;
+    if (error instanceof Error) {
+      // AppError subclasses expose a userMessage; prefer that for clarity
+      const anyErr = error as any;
+      errorMsg = anyErr.userMessage
+        ? `[${anyErr.code || error.name}] ${anyErr.userMessage} | ${error.message}`
+        : error.message;
+    } else if (error !== null && typeof error === "object") {
+      try {
+        errorMsg = JSON.stringify(error);
+      } catch {
+        errorMsg = String(error);
+      }
+    } else {
+      errorMsg = String(error);
+    }
     this.log("error", { category, action, error: errorMsg, ...data });
   }
 
