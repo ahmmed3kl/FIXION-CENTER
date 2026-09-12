@@ -1,12 +1,25 @@
 import { env } from "../../config/env";
 import { DeviceService } from "../device";
 import {
-    PullSyncResponse,
-    PushSyncRequest,
-    PushSyncResponse,
-    SyncOperationPayload
+  PullSyncResponse,
+  PushSyncRequest,
+  PushSyncResponse,
+  SyncOperationPayload,
 } from "./contracts";
 import { ApiClient } from "./index";
+
+export interface BootstrapResponse {
+  centerId: string;
+  students: any[];
+  cards: any[];
+  groups: any[];
+  teachers: any[];
+  subjects: any[];
+  sessions: any[];
+  enrollments: any[];
+  latestServerSeq: number;
+  timestamp: string;
+}
 
 export interface ISyncApiAdapter {
   pushOperations(
@@ -19,12 +32,15 @@ export interface ISyncApiAdapter {
     cursor: string,
     limit?: number,
   ): Promise<PullSyncResponse>;
+
+  bootstrapCenter(centerId: string): Promise<BootstrapResponse>;
 }
 
 /**
  * Real HTTP Axios adapter connecting to FIXION backend contracts:
  * POST /sync/push
  * GET  /sync/pull?cursor=...&limit=...
+ * GET  /sync/bootstrap?centerId=...
  */
 export class HttpSyncApiAdapter implements ISyncApiAdapter {
   async pushOperations(
@@ -32,7 +48,7 @@ export class HttpSyncApiAdapter implements ISyncApiAdapter {
     operations: SyncOperationPayload[],
   ): Promise<PushSyncResponse> {
     const client = ApiClient.getInstance();
-    const deviceId = DeviceService.getDeviceIdSync();
+    const deviceId = await DeviceService.getDeviceId();
 
     const requestBody: PushSyncRequest = {
       centerId,
@@ -44,6 +60,12 @@ export class HttpSyncApiAdapter implements ISyncApiAdapter {
     const response = await client.post<PushSyncResponse>(
       "/sync/push",
       requestBody,
+      {
+        headers: {
+          "X-Center-Id": centerId,
+          "X-Device-Id": deviceId,
+        },
+      },
     );
     return response.data;
   }
@@ -54,11 +76,31 @@ export class HttpSyncApiAdapter implements ISyncApiAdapter {
     limit: number = 50,
   ): Promise<PullSyncResponse> {
     const client = ApiClient.getInstance();
+    const deviceId = await DeviceService.getDeviceId();
+
     const response = await client.get<PullSyncResponse>("/sync/pull", {
       params: {
         centerId,
         cursor,
         limit,
+      },
+      headers: {
+        "X-Center-Id": centerId,
+        "X-Device-Id": deviceId,
+      },
+    });
+    return response.data;
+  }
+
+  async bootstrapCenter(centerId: string): Promise<BootstrapResponse> {
+    const client = ApiClient.getInstance();
+    const deviceId = await DeviceService.getDeviceId();
+
+    const response = await client.get<BootstrapResponse>("/sync/bootstrap", {
+      params: { centerId },
+      headers: {
+        "X-Center-Id": centerId,
+        "X-Device-Id": deviceId,
       },
     });
     return response.data;
@@ -132,6 +174,21 @@ export class MockSyncApiAdapter implements ISyncApiAdapter {
       nextCursor: cursor || `srv_seq_${this.currentCursorSeq}`,
       hasMore: false,
       serverTimestamp: new Date().toISOString(),
+    };
+  }
+
+  async bootstrapCenter(centerId: string): Promise<BootstrapResponse> {
+    return {
+      centerId,
+      students: [],
+      cards: [],
+      groups: [],
+      teachers: [],
+      subjects: [],
+      sessions: [],
+      enrollments: [],
+      latestServerSeq: 1000,
+      timestamp: new Date().toISOString(),
     };
   }
 }

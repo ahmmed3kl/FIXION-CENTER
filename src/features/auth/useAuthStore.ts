@@ -4,6 +4,7 @@ import { AuditService } from "../../core/audit";
 import { DeviceRepository, DeviceService } from "../../core/device";
 import { ForbiddenError } from "../../core/errors";
 import { SecureStorageService } from "../../core/storage";
+import { SyncEngine } from "../../core/sync";
 import { Center, User } from "../../shared/types";
 import { AuthRepository } from "./AuthRepository";
 
@@ -69,6 +70,11 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           entityId: user.id,
           action: "user.login",
           payload: { role: user.role, centerId: resolvedCenterId },
+        });
+
+        // Trigger immediate background sync/bootstrap so Neon data populates the device instantly
+        SyncEngine.syncCenterNow(resolvedCenterId).catch((err) => {
+          console.warn("Immediate login sync notice:", err);
         });
       }
 
@@ -166,6 +172,13 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         isAuthenticated: true,
         isLoading: false,
       });
+
+      if (activeCenter?.id) {
+        SyncEngine.syncCenterNow(activeCenter.id).catch((err) => {
+          console.warn("Restore session background sync notice:", err);
+        });
+      }
+
       return true;
     } catch {
       set({ isAuthenticated: false, isLoading: false });

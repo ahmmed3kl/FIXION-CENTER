@@ -316,21 +316,299 @@ export class SyncEngine {
     return ARABIC_SYNC_STATES[this.currentState] || "متصل";
   }
 
-  /**
-   * Calculates exponential backoff milliseconds for retry count.
-   * delay = min(1000 * 2^retryCount, 60000)
-   */
   static getBackoffDelayMs(retryCount: number): number {
     return Math.min(1000 * Math.pow(2, retryCount), 60000);
   }
 
   /**
+   * Authoritative Bootstrap: Pulls full center data from Neon and populates local SQLite.
+   */
+  static async bootstrapCenter(centerId: string): Promise<void> {
+    try {
+      const data = await this.adapter.bootstrapCenter(centerId);
+      const db = DatabaseService.getDb();
+
+      // Upsert Teachers
+      if (Array.isArray(data.teachers)) {
+        for (const t of data.teachers) {
+          db.runSync(
+            `INSERT INTO teachers (id, center_id, name, phone) VALUES (?, ?, ?, ?)
+             ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, phone = EXCLUDED.phone;`,
+            [t.id, t.center_id || centerId, t.name, t.phone || null],
+          );
+        }
+      }
+
+      // Upsert Subjects
+      if (Array.isArray(data.subjects)) {
+        for (const s of data.subjects) {
+          db.runSync(
+            `INSERT INTO subjects (id, center_id, name, code) VALUES (?, ?, ?, ?)
+             ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, code = EXCLUDED.code;`,
+            [s.id, s.center_id || centerId, s.name, s.code || s.name],
+          );
+        }
+      }
+
+      // Upsert Groups
+      if (Array.isArray(data.groups)) {
+        for (const g of data.groups) {
+          db.runSync(
+            `INSERT INTO groups (id, center_id, name, teacher_id, subject_id, grade, default_fee) VALUES (?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, default_fee = EXCLUDED.default_fee;`,
+            [
+              g.id,
+              g.center_id || centerId,
+              g.name,
+              g.teacher_id,
+              g.subject_id,
+              g.grade,
+              Number(g.default_fee || 0),
+            ],
+          );
+        }
+      }
+
+      // Upsert Students
+      if (Array.isArray(data.students)) {
+        for (const std of data.students) {
+          const studentCode =
+            std.student_code ||
+            std.studentCode ||
+            std.card_code ||
+            std.cardCode ||
+            "";
+          const cardCode = std.card_code || std.cardCode || studentCode;
+          db.runSync(
+            `INSERT INTO students (id, center_id, student_code, full_name, card_code, phone, parent_phone, grade, status, student_type, notes, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT (id) DO UPDATE SET
+               student_code = EXCLUDED.student_code,
+               full_name = EXCLUDED.full_name,
+               card_code = EXCLUDED.card_code,
+               phone = EXCLUDED.phone,
+               parent_phone = EXCLUDED.parent_phone,
+               grade = EXCLUDED.grade,
+               status = EXCLUDED.status,
+               student_type = EXCLUDED.student_type,
+               notes = EXCLUDED.notes,
+               updated_at = EXCLUDED.updated_at;`,
+            [
+              std.id,
+              std.center_id || centerId,
+              studentCode,
+              std.full_name || std.fullName || "",
+              cardCode,
+              std.phone || "",
+              std.parent_phone || std.parentPhone || "",
+              std.grade || "",
+              std.status || "active",
+              std.student_type || std.studentType || "registered",
+              std.notes || null,
+              std.created_at || new Date().toISOString(),
+              std.updated_at || new Date().toISOString(),
+            ],
+          );
+        }
+      }
+
+      // Upsert Student Cards
+      if (Array.isArray(data.cards)) {
+        for (const card of data.cards) {
+          db.runSync(
+            `INSERT INTO student_cards (id, center_id, student_id, card_code, status, issued_at, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT (id) DO UPDATE SET card_code = EXCLUDED.card_code, status = EXCLUDED.status;`,
+            [
+              card.id,
+              card.center_id || centerId,
+              card.student_id || card.studentId,
+              card.card_code || card.cardCode,
+              card.status || "active",
+              card.issued_at || new Date().toISOString(),
+              card.created_at || new Date().toISOString(),
+            ],
+          );
+        }
+      }
+
+      // Upsert Sessions
+      if (Array.isArray(data.sessions)) {
+        for (const sess of data.sessions) {
+          db.runSync(
+            `INSERT INTO sessions (id, center_id, group_id, session_date, start_time, end_time, status)
+             VALUES (?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT (id) DO UPDATE SET status = EXCLUDED.status;`,
+            [
+              sess.id,
+              sess.center_id || centerId,
+              sess.group_id || sess.groupId,
+              sess.session_date || sess.sessionDate,
+              sess.start_time || sess.startTime,
+              sess.end_time || sess.endTime,
+              sess.status || "open",
+            ],
+          );
+        }
+      }
+
+      // Upsert Enrollments
+      if (Array.isArray(data.enrollments)) {
+        for (const enr of data.enrollments) {
+          db.runSync(
+            `INSERT INTO student_group_enrollments (id, center_id, student_id, group_id, start_date, status, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT (id) DO UPDATE SET status = EXCLUDED.status;`,
+            [
+              enr.id,
+              enr.center_id || centerId,
+              enr.student_id || enr.studentId,
+              enr.group_id || enr.groupId,
+              enr.start_date ||
+                enr.joined_at ||
+                new Date().toISOString().slice(0, 10),
+              enr.status || "active",
+              enr.created_at || new Date().toISOString(),
+            ],
+          );
+        }
+      }
+
+      if (data.latestServerSeq > 0) {
+        SyncRepository.setServerCursor(centerId, String(data.latestServerSeq));
+      }
+    } catch (bootstrapErr) {
+      console.warn("Bootstrap center error:", bootstrapErr);
+    }
+  }
+
+  /**
+   * Applies server stream changes incrementally to local SQLite.
+   */
+  static applyServerChanges(centerId: string, changes: any[]): void {
+    const db = DatabaseService.getDb();
+    for (const change of changes) {
+      try {
+        const entityType = change.entityType;
+        const data = change.data || {};
+
+        if (entityType === "student" || entityType === "student_created") {
+          const s = data.student || data;
+          const studentId = s.id || change.entityId;
+          const studentCode =
+            s.student_code ||
+            s.studentCode ||
+            s.card_code ||
+            s.cardCode ||
+            "";
+          const cardCode = s.card_code || s.cardCode || studentCode;
+
+          db.runSync(
+            `INSERT INTO students (id, center_id, student_code, full_name, card_code, phone, parent_phone, grade, status, student_type, notes, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT (id) DO UPDATE SET
+               student_code = EXCLUDED.student_code,
+               full_name = EXCLUDED.full_name,
+               card_code = EXCLUDED.card_code,
+               phone = EXCLUDED.phone,
+               parent_phone = EXCLUDED.parent_phone,
+               grade = EXCLUDED.grade,
+               status = EXCLUDED.status,
+               student_type = EXCLUDED.student_type,
+               notes = EXCLUDED.notes,
+               updated_at = EXCLUDED.updated_at;`,
+            [
+              studentId,
+              centerId,
+              studentCode,
+              s.full_name || s.fullName || "",
+              cardCode,
+              s.phone || "",
+              s.parent_phone || s.parentPhone || "",
+              s.grade || "",
+              s.status || "active",
+              s.student_type || s.studentType || "registered",
+              s.notes || null,
+              s.created_at || new Date().toISOString(),
+              s.updated_at || new Date().toISOString(),
+            ],
+          );
+
+          if (cardCode) {
+            db.runSync(
+              `INSERT INTO student_cards (id, center_id, student_id, card_code, status, issued_at, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT (id) DO UPDATE SET card_code = EXCLUDED.card_code, status = EXCLUDED.status;`,
+              [
+                `card-${studentId}`,
+                centerId,
+                studentId,
+                cardCode,
+                s.status || "active",
+                new Date().toISOString(),
+                new Date().toISOString(),
+              ],
+            );
+          }
+        } else if (
+          entityType === "attendance" ||
+          entityType === "attendance_marked"
+        ) {
+          const att = data;
+          const attId = att.id || change.entityId;
+          db.runSync(
+            `INSERT INTO attendance (id, center_id, student_id, session_id, check_in_time, status, is_late, attendance_type, original_absence_id, operation_id)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT (session_id, student_id) DO UPDATE SET
+               status = EXCLUDED.status,
+               is_late = EXCLUDED.is_late,
+               check_in_time = EXCLUDED.check_in_time;`,
+            [
+              attId,
+              centerId,
+              att.student_id || att.studentId,
+              att.session_id || att.sessionId,
+              att.check_in_time || att.checkInTime || new Date().toISOString(),
+              att.status || "present",
+              att.is_late || att.isLate ? 1 : 0,
+              att.attendance_type || att.attendanceType || "present",
+              att.original_absence_id || att.originalAbsenceId || null,
+              `srv-op-${change.sequenceNumber || Date.now()}`,
+            ],
+          );
+        } else if (entityType === "payment") {
+          const pay = data;
+          const payId = pay.id || change.entityId;
+          db.runSync(
+            `INSERT INTO payments (id, operation_id, center_id, student_id, amount, payment_type, created_at, user_id)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT (id) DO UPDATE SET amount = EXCLUDED.amount;`,
+            [
+              payId,
+              pay.operation_id || `srv-pay-${payId}`,
+              centerId,
+              pay.student_id || pay.studentId,
+              parseFloat(pay.amount || 0),
+              pay.payment_type || pay.paymentType || "session",
+              pay.created_at || new Date().toISOString(),
+              pay.user_id || "system",
+            ],
+          );
+        }
+      } catch (applyErr) {
+        console.warn("Failed to apply change:", change, applyErr);
+      }
+    }
+  }
+
+  /**
    * Executes bidirectional synchronization for a center:
-   * 1. Validates device status (inactive device halts sync).
+   * 1. Validates device status.
    * 2. Checks network connectivity.
-   * 3. Pulls new server changes using monotonic cursor.
-   * 4. Batches and pushes pending local operations in priority order.
-   * 5. Handles conflicts and retries with backoff gracefully.
+   * 3. Performs initial bootstrap if cursor is 0.
+   * 4. Pulls new server changes using monotonic cursor and applies them to local SQLite.
+   * 5. Batches and pushes pending local operations in priority order.
+   * 6. Handles conflicts and retries gracefully.
    */
   static async syncCenterNow(
     centerId: string,
@@ -380,13 +658,23 @@ export class SyncEngine {
     let conflicts = 0;
 
     try {
-      // 3. Pull Changes from Server with Monotonic Cursor
-      const currentCursor = SyncRepository.getServerCursor(centerId);
+      // 3. Monotonic Cursor Check: Bootstrap if 0
+      let currentCursor = SyncRepository.getServerCursor(centerId);
+      if (currentCursor === "0") {
+        await this.bootstrapCenter(centerId);
+        currentCursor = SyncRepository.getServerCursor(centerId);
+      }
+
+      // 4. Pull Changes from Server with Monotonic Cursor
       const pullResponse = await this.adapter.pullChanges(
         centerId,
         currentCursor,
         pullLimit,
       );
+
+      if (pullResponse.changes && pullResponse.changes.length > 0) {
+        this.applyServerChanges(centerId, pullResponse.changes);
+      }
 
       if (
         pullResponse.nextCursor &&
@@ -395,14 +683,13 @@ export class SyncEngine {
         SyncRepository.setServerCursor(centerId, pullResponse.nextCursor);
       }
 
-      // 4. Push Prioritized Local Operations
+      // 5. Push Prioritized Local Operations
       const pendingOps = SyncRepository.getPendingOperations(
         centerId,
         batchSize,
       );
 
       if (pendingOps.length > 0) {
-        // Mark all as syncing
         for (const op of pendingOps) {
           SyncRepository.markAsSyncing(op.operationId);
         }
@@ -449,7 +736,6 @@ export class SyncEngine {
             SyncRepository.setServerCursor(centerId, pushResponse.serverCursor);
           }
         } catch (pushErr: any) {
-          // Push failed: mark each item as failed with backoff increment
           for (const op of pendingOps) {
             SyncRepository.markAsFailed(
               op.operationId,

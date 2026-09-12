@@ -9,7 +9,7 @@ import {
     ValidationError,
 } from "../../core/errors";
 import { PermissionService } from "../../core/permissions";
-import { SyncRepository } from "../../core/sync";
+import { SyncEngine, SyncRepository } from "../../core/sync";
 import { Student } from "../../shared/types";
 import { useAuthStore } from "../auth/useAuthStore";
 import { EnrollmentRepository } from "../enrollments/EnrollmentRepository";
@@ -283,6 +283,10 @@ export class StudentRepository {
       },
     });
 
+    SyncEngine.syncCenterNow(centerId).catch((e) => {
+      console.warn("Background auto-sync student create notice:", e);
+    });
+
     return {
       id: studentId,
       centerId,
@@ -372,6 +376,10 @@ export class StudentRepository {
       },
     });
 
+    SyncEngine.syncCenterNow(centerId).catch((e) => {
+      console.warn("Background auto-sync student update notice:", e);
+    });
+
     const activeCard =
       StudentCardRepository.getActiveCardByStudentId(studentId);
     return {
@@ -439,6 +447,10 @@ export class StudentRepository {
       entityType: "student",
       entityId: studentId,
       payload: { status: "inactive", updatedAt: now },
+    });
+
+    SyncEngine.syncCenterNow(centerId).catch((e) => {
+      console.warn("Background auto-sync student deactivate notice:", e);
     });
   }
 

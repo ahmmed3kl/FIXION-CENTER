@@ -7,7 +7,7 @@ import {
     UnauthorizedError,
 } from "../../core/errors";
 import { PermissionService } from "../../core/permissions";
-import { SyncRepository } from "../../core/sync";
+import { SyncEngine, SyncRepository } from "../../core/sync";
 import { Attendance, AttendanceType } from "../../shared/types";
 import { useAuthStore } from "../auth/useAuthStore";
 
@@ -233,6 +233,10 @@ export class AttendanceRepository {
       entityId: attendanceId,
       payload: attendanceRecord,
       operationId,
+    });
+
+    SyncEngine.syncCenterNow(centerId).catch((e) => {
+      console.warn("Background auto-sync attendance notice:", e);
     });
 
     // 4. Create audit log

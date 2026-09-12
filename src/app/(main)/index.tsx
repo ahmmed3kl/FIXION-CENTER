@@ -64,6 +64,9 @@ export default function DashboardScreen() {
 
   const onRefresh = async () => {
     setRefreshing(true);
+    if (activeCenter) {
+      await SyncEngine.syncCenterNow(activeCenter.id).catch(console.error);
+    }
     loadData();
     setRefreshing(false);
   };
