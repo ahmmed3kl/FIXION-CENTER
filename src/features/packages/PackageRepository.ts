@@ -8,9 +8,9 @@ import {
     UnauthorizedError,
     ValidationError,
 } from "../../core/errors";
-import { PermissionService } from "../../core/permissions";
+import { PermissionService, RolePermissions } from "../../core/permissions";
 import { SyncRepository } from "../../core/sync";
-import { Package, PackageSubject } from "../../shared/types";
+import { Package, PackageSubject, Permission } from "../../shared/types";
 import { useAuthStore } from "../auth/useAuthStore";
 import { SubjectRepository } from "../subjects/SubjectRepository";
 import { TeacherRepository } from "../teachers/TeacherRepository";
@@ -32,13 +32,13 @@ export class PackageRepository {
         "يجب تسجيل الدخول وتحديد المركز لإدارة الباقات.",
       );
     }
-    // Normalize permissions — they may be missing/malformed after JSON.parse from SecureStorage
-    const user = {
-      ...currentUser,
-      permissions: Array.isArray(currentUser.permissions)
-        ? currentUser.permissions
-        : [],
-    };
+    const rawPermissions = currentUser.permissions;
+    const permissions: Permission[] =
+      Array.isArray(rawPermissions) && rawPermissions.length > 0
+        ? rawPermissions
+        : RolePermissions[currentUser.role as keyof typeof RolePermissions] ||
+          RolePermissions.admin;
+    const user = { ...currentUser, permissions };
     return { centerId: activeCenterId, user };
   }
 

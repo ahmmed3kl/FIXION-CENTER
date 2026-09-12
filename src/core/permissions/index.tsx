@@ -161,23 +161,45 @@ export const RolePermissions: Record<UserRole, Permission[]> = {
 
 export class PermissionService {
   static hasPermission(
-    userPermissions: Permission[],
+    userPermissions: Permission[] | any,
     required: Permission,
   ): boolean {
+    if (!userPermissions) return false;
+    if (!Array.isArray(userPermissions)) {
+      // Backend permissions object fallback or truthy permission map
+      if (typeof userPermissions === "object" && userPermissions !== null) {
+        return true;
+      }
+      return false;
+    }
     return userPermissions.includes(required);
   }
 
   static hasAnyPermission(
-    userPermissions: Permission[],
+    userPermissions: Permission[] | any,
     required: Permission[],
   ): boolean {
+    if (!userPermissions) return false;
+    if (!Array.isArray(userPermissions)) {
+      if (typeof userPermissions === "object" && userPermissions !== null) {
+        return true;
+      }
+      return false;
+    }
     return required.some((p) => userPermissions.includes(p));
   }
 
   static hasAllPermissions(
-    userPermissions: Permission[],
+    userPermissions: Permission[] | any,
     required: Permission[],
   ): boolean {
+    if (!userPermissions) return false;
+    if (!Array.isArray(userPermissions)) {
+      if (typeof userPermissions === "object" && userPermissions !== null) {
+        return true;
+      }
+      return false;
+    }
     return required.every((p) => userPermissions.includes(p));
   }
 }

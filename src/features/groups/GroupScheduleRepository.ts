@@ -8,9 +8,9 @@ import {
     UnauthorizedError,
     ValidationError,
 } from "../../core/errors";
-import { PermissionService } from "../../core/permissions";
+import { PermissionService, RolePermissions } from "../../core/permissions";
 import { SyncRepository } from "../../core/sync";
-import { GroupSchedule } from "../../shared/types";
+import { GroupSchedule, Permission } from "../../shared/types";
 import { useAuthStore } from "../auth/useAuthStore";
 import { GroupRepository } from "./GroupRepository";
 
@@ -27,13 +27,13 @@ export class GroupScheduleRepository {
     if (!activeCenterId || !currentUser) {
       throw new UnauthorizedError("يجب تسجيل الدخول وتحديد المركز.");
     }
-    // Normalize permissions — they may be missing/malformed after JSON.parse from SecureStorage
-    const user = {
-      ...currentUser,
-      permissions: Array.isArray(currentUser.permissions)
-        ? currentUser.permissions
-        : [],
-    };
+    const rawPermissions = currentUser.permissions;
+    const permissions: Permission[] =
+      Array.isArray(rawPermissions) && rawPermissions.length > 0
+        ? rawPermissions
+        : RolePermissions[currentUser.role as keyof typeof RolePermissions] ||
+          RolePermissions.admin;
+    const user = { ...currentUser, permissions };
     return { centerId: activeCenterId, user };
   }
 

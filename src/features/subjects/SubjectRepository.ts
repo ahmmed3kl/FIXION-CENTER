@@ -8,9 +8,9 @@ import {
     UnauthorizedError,
     ValidationError,
 } from "../../core/errors";
-import { PermissionService } from "../../core/permissions";
+import { PermissionService, RolePermissions } from "../../core/permissions";
 import { SyncEngine, SyncRepository } from "../../core/sync";
-import { Subject } from "../../shared/types";
+import { Permission, Subject } from "../../shared/types";
 import { useAuthStore } from "../auth/useAuthStore";
 
 export interface CreateSubjectDTO {
@@ -30,13 +30,13 @@ export class SubjectRepository {
     if (!activeCenterId || !currentUser) {
       throw new UnauthorizedError("يجب تسجيل الدخول وتحديد المركز.");
     }
-    // Normalize permissions — they may be missing/malformed after JSON.parse from SecureStorage
-    const user = {
-      ...currentUser,
-      permissions: Array.isArray(currentUser.permissions)
-        ? currentUser.permissions
-        : [],
-    };
+    const rawPermissions = currentUser.permissions;
+    const permissions: Permission[] =
+      Array.isArray(rawPermissions) && rawPermissions.length > 0
+        ? rawPermissions
+        : RolePermissions[currentUser.role as keyof typeof RolePermissions] ||
+          RolePermissions.admin;
+    const user = { ...currentUser, permissions };
     return { centerId: activeCenterId, user };
   }
 
@@ -143,7 +143,14 @@ export class SubjectRepository {
       operationType: "CREATE",
       entityType: "subject",
       entityId: subjectId,
-      payload: { id: subjectId, subjectId, name, code: trimmedCode, status: "active", createdAt: now },
+      payload: {
+        id: subjectId,
+        subjectId,
+        name,
+        code: trimmedCode,
+        status: "active",
+        createdAt: now,
+      },
     });
 
     SyncEngine.syncCenterNow(centerId).catch((err) => {

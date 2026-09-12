@@ -79,8 +79,15 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         });
       }
 
+      const resolvedPermissions =
+        Array.isArray(user.permissions) && user.permissions.length > 0
+          ? user.permissions
+          : RolePermissions[user.role as keyof typeof RolePermissions] ||
+            RolePermissions.admin;
+      const normalizedUser = { ...user, permissions: resolvedPermissions };
+
       set({
-        currentUser: user,
+        currentUser: normalizedUser,
         availableCenters: centers,
         activeCenterId: resolvedCenterId,
         activeCenter: resolvedCenter,
@@ -165,8 +172,15 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       let activeCenter =
         centers.find((c) => c.id === savedCenterId) || centers[0] || null;
 
+      const resolvedPermissions =
+        Array.isArray(session.user.permissions) && session.user.permissions.length > 0
+          ? session.user.permissions
+          : RolePermissions[session.user.role as keyof typeof RolePermissions] ||
+            RolePermissions.admin;
+      const normalizedUser = { ...session.user, permissions: resolvedPermissions };
+
       set({
-        currentUser: session.user,
+        currentUser: normalizedUser,
         availableCenters: centers,
         activeCenterId: activeCenter ? activeCenter.id : null,
         activeCenter,
@@ -197,7 +211,11 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 const _origGetState = useAuthStore.getState.bind(useAuthStore);
 useAuthStore.getState = () => {
   const state = _origGetState();
-  if (state.currentUser && !Array.isArray(state.currentUser.permissions)) {
+  if (
+    state.currentUser &&
+    (!Array.isArray(state.currentUser.permissions) ||
+      state.currentUser.permissions.length === 0)
+  ) {
     const fallback =
       RolePermissions[state.currentUser.role as keyof typeof RolePermissions] ||
       RolePermissions.admin;

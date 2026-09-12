@@ -7,9 +7,9 @@ import {
     UnauthorizedError,
     ValidationError,
 } from "../../core/errors";
-import { PermissionService } from "../../core/permissions";
+import { PermissionService, RolePermissions } from "../../core/permissions";
 import { SyncEngine, SyncRepository } from "../../core/sync";
-import { Teacher } from "../../shared/types";
+import { Permission, Teacher } from "../../shared/types";
 import { useAuthStore } from "../auth/useAuthStore";
 
 export interface CreateTeacherDTO {
@@ -31,13 +31,13 @@ export class TeacherRepository {
     if (!activeCenterId || !currentUser) {
       throw new UnauthorizedError("يجب تسجيل الدخول وتحديد المركز.");
     }
-    // Normalize permissions — they may be missing/malformed after JSON.parse from SecureStorage
-    const user = {
-      ...currentUser,
-      permissions: Array.isArray(currentUser.permissions)
-        ? currentUser.permissions
-        : [],
-    };
+    const rawPermissions = currentUser.permissions;
+    const permissions: Permission[] =
+      Array.isArray(rawPermissions) && rawPermissions.length > 0
+        ? rawPermissions
+        : RolePermissions[currentUser.role as keyof typeof RolePermissions] ||
+          RolePermissions.admin;
+    const user = { ...currentUser, permissions };
     return { centerId: activeCenterId, user };
   }
 
@@ -121,7 +121,15 @@ export class TeacherRepository {
       operationType: "CREATE",
       entityType: "teacher",
       entityId: teacherId,
-      payload: { id: teacherId, teacherId, name, phone, notes, status: "active", createdAt: now },
+      payload: {
+        id: teacherId,
+        teacherId,
+        name,
+        phone,
+        notes,
+        status: "active",
+        createdAt: now,
+      },
     });
 
     SyncEngine.syncCenterNow(centerId).catch((err) => {
@@ -188,7 +196,15 @@ export class TeacherRepository {
       operationType: "UPDATE",
       entityType: "teacher",
       entityId: teacherId,
-      payload: { id: teacherId, teacherId, name, phone, notes, status, updatedAt: now },
+      payload: {
+        id: teacherId,
+        teacherId,
+        name,
+        phone,
+        notes,
+        status,
+        updatedAt: now,
+      },
     });
 
     SyncEngine.syncCenterNow(centerId).catch((err) => {

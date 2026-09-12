@@ -425,7 +425,9 @@ class SyncProcessor {
       case "teacher_subject":
       case "teacher_subject_assigned": {
         const ts = payload;
-        const tsId = ts.id || `ts-${centerId}-${ts.teacherId || ts.teacher_id}-${ts.subjectId || ts.subject_id}`;
+        const tsId =
+          ts.id ||
+          `ts-${centerId}-${ts.teacherId || ts.teacher_id}-${ts.subjectId || ts.subject_id}`;
         await client.query(
           `INSERT INTO teacher_subjects (id, center_id, teacher_id, subject_id, created_at)
            VALUES ($1, $2, $3, $4, NOW())
@@ -463,7 +465,13 @@ class SyncProcessor {
             grp.teacher_id || grp.teacherId,
             grp.subject_id || grp.subjectId,
             grp.grade || "الصف الثالث الثانوي",
-            parseFloat(grp.default_fee || grp.defaultFee || grp.session_price || grp.sessionPrice || 0),
+            parseFloat(
+              grp.default_fee ||
+                grp.defaultFee ||
+                grp.session_price ||
+                grp.sessionPrice ||
+                0,
+            ),
             grp.status || "active",
           ],
         );

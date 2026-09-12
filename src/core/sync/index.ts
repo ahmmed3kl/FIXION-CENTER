@@ -385,10 +385,18 @@ export class SyncEngine {
       if (Array.isArray(data.groups)) {
         for (const g of data.groups) {
           const defaultFee = Number(g.default_fee || g.defaultFee || 0);
-          const sessionPrice = Number(g.session_price || g.sessionPrice || defaultFee);
-          const monthlyPrice = Number(g.monthly_price || g.monthlyPrice || (defaultFee * 4));
-          const duration = Number(g.session_duration_minutes || g.sessionDurationMinutes || 120);
-          const lateAfter = Number(g.late_after_minutes || g.lateAfterMinutes || 15);
+          const sessionPrice = Number(
+            g.session_price || g.sessionPrice || defaultFee,
+          );
+          const monthlyPrice = Number(
+            g.monthly_price || g.monthlyPrice || defaultFee * 4,
+          );
+          const duration = Number(
+            g.session_duration_minutes || g.sessionDurationMinutes || 120,
+          );
+          const lateAfter = Number(
+            g.late_after_minutes || g.lateAfterMinutes || 15,
+          );
           db.runSync(
             `INSERT OR REPLACE INTO groups (id, center_id, name, teacher_id, subject_id, grade, default_fee, session_price, monthly_price, session_duration_minutes, late_after_minutes, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
@@ -625,8 +633,12 @@ export class SyncEngine {
           const g = data.group || data;
           const groupId = g.id || change.entityId;
           const defaultFee = Number(g.default_fee || g.defaultFee || 0);
-          const sessionPrice = Number(g.session_price || g.sessionPrice || defaultFee);
-          const monthlyPrice = Number(g.monthly_price || g.monthlyPrice || (defaultFee * 4));
+          const sessionPrice = Number(
+            g.session_price || g.sessionPrice || defaultFee,
+          );
+          const monthlyPrice = Number(
+            g.monthly_price || g.monthlyPrice || defaultFee * 4,
+          );
           db.runSync(
             `INSERT OR REPLACE INTO groups (id, center_id, name, teacher_id, subject_id, grade, default_fee, session_price, monthly_price, session_duration_minutes, late_after_minutes, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
@@ -776,8 +788,18 @@ export class SyncEngine {
 
       let currentCursor = SyncRepository.getServerCursor(centerId);
       if (currentCursor === "0" || localTeachersCount === 0) {
-        await this.bootstrapCenter(centerId);
-        currentCursor = SyncRepository.getServerCursor(centerId);
+        try {
+          await this.bootstrapCenter(centerId);
+          currentCursor = SyncRepository.getServerCursor(centerId);
+        } catch (bootErr: any) {
+          Logger.warn("sync", "bootstrap_skipped", {
+            centerId,
+            error:
+              bootErr?.userMessage ||
+              bootErr?.message ||
+              "Bootstrap endpoint skipped, falling back to incremental stream pull and push",
+          });
+        }
       }
 
       // 4. Pull Changes from Server with Monotonic Cursor

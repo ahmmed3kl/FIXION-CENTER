@@ -88,6 +88,18 @@ export class AuthRepository {
             : RolePermissions[data.user.role as keyof typeof RolePermissions] ||
               RolePermissions.admin;
 
+        const demoMatch = DEMO_USERS.find(
+          (u) =>
+            u.id === data.user.id ||
+            (u.email && u.email.toLowerCase() === data.user.email?.toLowerCase()) ||
+            u.phone === data.user.phone,
+        );
+        const resolvedCenterIds =
+          demoMatch?.centerIds ||
+          (data.user.role === "admin"
+            ? ["center-1", "center-2"]
+            : [data.user.centerId]);
+
         const user: User = {
           id: data.user.id,
           fullName: data.user.fullName,
@@ -95,7 +107,7 @@ export class AuthRepository {
           phone: data.user.phone,
           role: data.user.role,
           centerId: data.user.centerId,
-          centerIds: [data.user.centerId],
+          centerIds: resolvedCenterIds,
           permissions: resolvedPermissions,
         };
 

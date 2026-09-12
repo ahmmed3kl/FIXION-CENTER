@@ -3169,6 +3169,7 @@ export class DatabaseService {
 
       this.runMigrations();
       this.seedData();
+      this.ensureAcademicSchema();
     } catch (e: any) {
       console.warn(
         "Database initialization fallback to in-memory:",
@@ -3177,6 +3178,55 @@ export class DatabaseService {
       this.db = new InMemorySqliteMock();
       this.runMigrations();
       this.seedData();
+      this.ensureAcademicSchema();
+    }
+  }
+
+  /**
+   * Unconditionally guarantees all academic columns and tables exist in SQLite,
+   * protecting against partial migration runs or legacy SQLite state.
+   */
+  static ensureAcademicSchema(): void {
+    const db = this.getDb();
+    const defensiveStatements = [
+      // 1. Teachers
+      "ALTER TABLE teachers ADD COLUMN status TEXT NOT NULL DEFAULT 'active';",
+      "ALTER TABLE teachers ADD COLUMN notes TEXT;",
+      "ALTER TABLE teachers ADD COLUMN created_at TEXT;",
+      "ALTER TABLE teachers ADD COLUMN updated_at TEXT;",
+      // 2. Subjects
+      "ALTER TABLE subjects ADD COLUMN status TEXT NOT NULL DEFAULT 'active';",
+      "ALTER TABLE subjects ADD COLUMN created_at TEXT;",
+      "ALTER TABLE subjects ADD COLUMN updated_at TEXT;",
+      // 3. Teacher Subjects
+      `CREATE TABLE IF NOT EXISTS teacher_subjects (
+        id TEXT PRIMARY KEY,
+        center_id TEXT NOT NULL,
+        teacher_id TEXT NOT NULL,
+        subject_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        CONSTRAINT uq_teacher_subject UNIQUE (center_id, teacher_id, subject_id)
+      );`,
+      // 4. Groups
+      "ALTER TABLE groups ADD COLUMN session_price REAL NOT NULL DEFAULT 0;",
+      "ALTER TABLE groups ADD COLUMN monthly_price REAL NOT NULL DEFAULT 0;",
+      "ALTER TABLE groups ADD COLUMN session_duration_minutes INTEGER NOT NULL DEFAULT 120;",
+      "ALTER TABLE groups ADD COLUMN late_after_minutes INTEGER NOT NULL DEFAULT 15;",
+      "ALTER TABLE groups ADD COLUMN status TEXT NOT NULL DEFAULT 'active';",
+      "ALTER TABLE groups ADD COLUMN created_at TEXT;",
+      "ALTER TABLE groups ADD COLUMN updated_at TEXT;",
+      // 5. Group Schedules
+      "ALTER TABLE group_schedules ADD COLUMN center_id TEXT;",
+      "ALTER TABLE group_schedules ADD COLUMN status TEXT NOT NULL DEFAULT 'active';",
+      "ALTER TABLE group_schedules ADD COLUMN created_at TEXT;",
+      "ALTER TABLE group_schedules ADD COLUMN updated_at TEXT;",
+    ];
+    for (const sql of defensiveStatements) {
+      try {
+        db.execSync(sql);
+      } catch {
+        // Safe to ignore if column/table already exists
+      }
     }
   }
 
