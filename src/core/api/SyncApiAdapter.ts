@@ -1,10 +1,10 @@
 import { env } from "../../config/env";
 import { DeviceService } from "../device";
 import {
-  PullSyncResponse,
-  PushSyncRequest,
-  PushSyncResponse,
-  SyncOperationPayload,
+    PullSyncResponse,
+    PushSyncRequest,
+    PushSyncResponse,
+    SyncOperationPayload,
 } from "./contracts";
 import { ApiClient } from "./index";
 

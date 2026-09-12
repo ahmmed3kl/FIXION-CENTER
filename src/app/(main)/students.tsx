@@ -43,7 +43,9 @@ import { formatDisplayIdentifier } from "../../shared/utils/formatters";
 
 export default function StudentsScreen() {
   const currentUser = useAuthStore((s) => s.currentUser);
-  const permissions = currentUser?.permissions || [];
+  const permissions = Array.isArray(currentUser?.permissions)
+    ? currentUser.permissions
+    : [];
 
   const [students, setStudents] = useState<Student[]>([]);
   const [searchQuery, setSearchQuery] = useState("");

@@ -50,7 +50,9 @@ const DAYS_OF_WEEK = [
 
 export default function AcademicScreen() {
   const currentUser = useAuthStore((s) => s.currentUser);
-  const permissions = currentUser?.permissions || [];
+  const permissions = Array.isArray(currentUser?.permissions)
+    ? currentUser.permissions
+    : [];
 
   const [activeTab, setActiveTab] = useState<AcademicTab>("teachers");
 

@@ -109,8 +109,7 @@ export class AuthRepository {
         try {
           const db = DatabaseService.getDb();
           db.runSync(
-            `INSERT INTO centers (id, name, code) VALUES (?, ?, ?)
-             ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, code = EXCLUDED.code;`,
+            `INSERT OR REPLACE INTO centers (id, name, code) VALUES (?, ?, ?);`,
             [
               data.user.centerId,
               data.user.centerName || "المركز التعليمي",
@@ -190,7 +189,20 @@ export class AuthRepository {
 
     if (token && userJson) {
       try {
-        const user = JSON.parse(userJson) as User;
+        const parsed = JSON.parse(userJson) as User;
+
+        // Normalize permissions: ensure it's always a valid Permission[] array.
+        // The stored JSON may have missing / malformed permissions if the backend
+        // didn't return them or a previous version of the app saved an incomplete object.
+        const storedPermissions = parsed.permissions;
+        const normalizedPermissions: typeof parsed.permissions =
+          Array.isArray(storedPermissions) && storedPermissions.length > 0
+            ? storedPermissions
+            : RolePermissions[
+                parsed.role as keyof typeof RolePermissions
+              ] || RolePermissions.admin;
+
+        const user: User = { ...parsed, permissions: normalizedPermissions };
         return { user, token };
       } catch {
         return null;

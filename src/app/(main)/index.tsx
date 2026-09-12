@@ -25,10 +25,7 @@ import {
     DashboardService,
     DashboardSummary,
 } from "../../features/dashboard/DashboardService";
-import {
-    AppCard,
-    SyncIndicator
-} from "../../shared/components";
+import { AppCard, SyncIndicator } from "../../shared/components";
 import { ConnectivityState } from "../../shared/types";
 
 export default function DashboardScreen() {
