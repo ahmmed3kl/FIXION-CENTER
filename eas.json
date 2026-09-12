@@ -1,0 +1,35 @@
+{
+  "cli": {
+    "version": ">= 14.0.0"
+  },
+  "build": {
+    "development": {
+      "developmentClient": true,
+      "distribution": "internal"
+    },
+    "preview": {
+      "distribution": "internal",
+      "android": {
+        "buildType": "apk"
+      },
+      "env": {
+        "EXPO_PUBLIC_API_URL": "https://fixion-center.onrender.com/v1",
+        "EXPO_PUBLIC_APP_ENV": "production",
+        "EXPO_PUBLIC_ENABLE_MOCK_DATA": "false"
+      }
+    },
+    "production": {
+      "android": {
+        "buildType": "apk"
+      },
+      "env": {
+        "EXPO_PUBLIC_API_URL": "https://fixion-center.onrender.com/v1",
+        "EXPO_PUBLIC_APP_ENV": "production",
+        "EXPO_PUBLIC_ENABLE_MOCK_DATA": "false"
+      }
+    }
+  },
+  "submit": {
+    "production": {}
+  }
+}

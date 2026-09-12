@@ -54,7 +54,8 @@
     "test": "jest",
     "lint": "expo lint",
     "backend:start": "node backend/src/server.js",
-    "backend:test": "node backend/tests/backend_integration.test.js"
+    "backend:test": "node backend/tests/backend_integration.test.js",
+    "build:apk": "eas-cli build --platform android --profile preview"
   },
   "overrides": {
     "update-browserslist-db": "1.3.1"
