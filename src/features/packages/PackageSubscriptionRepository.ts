@@ -8,7 +8,7 @@ import {
     UnauthorizedError,
     ValidationError,
 } from "../../core/errors";
-import { PermissionService, RolePermissions } from "../../core/permissions";
+import { PermissionService, RolePermissions, resolveUserPermissions } from "../../core/permissions";
 import { SyncRepository } from "../../core/sync";
 import {
     PackageTeacherOverride,
@@ -36,12 +36,7 @@ export class PackageSubscriptionRepository {
     if (!activeCenterId || !currentUser) {
       throw new UnauthorizedError("يجب تسجيل الدخول وتحديد المركز.");
     }
-    const rawPermissions = currentUser.permissions;
-    const permissions: Permission[] =
-      Array.isArray(rawPermissions) && rawPermissions.length > 0
-        ? rawPermissions
-        : RolePermissions[currentUser.role as keyof typeof RolePermissions] ||
-          RolePermissions.admin;
+    const permissions = resolveUserPermissions(currentUser);
     const user = { ...currentUser, permissions };
     return { centerId: activeCenterId, user };
   }

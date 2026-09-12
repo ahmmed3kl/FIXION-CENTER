@@ -14,7 +14,9 @@ export const env = envSchema.parse({
   apiUrl:
     process.env.EXPO_PUBLIC_API_URL || "https://fixion-center.onrender.com/v1",
   appEnv: (process.env.EXPO_PUBLIC_APP_ENV as any) || "production",
-  enableMockData: process.env.EXPO_PUBLIC_ENABLE_MOCK_DATA === "true",
+  enableMockData:
+    process.env.EXPO_PUBLIC_ENABLE_MOCK_DATA === "true" ||
+    process.env.NODE_ENV === "test",
   appVersion: "1.0.0",
   minSupportedVersion: "1.0.0",
 });

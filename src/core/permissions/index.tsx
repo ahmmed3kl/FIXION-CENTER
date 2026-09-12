@@ -159,20 +159,47 @@ export const RolePermissions: Record<UserRole, Permission[]> = {
   ],
 };
 
+/**
+ * Resolves user permissions strictly adhering to the Principle of Least Privilege:
+ * 1. If user has a valid, non-empty Permission[] array, use it directly.
+ * 2. If permissions are missing, empty, or malformed:
+ *    - Falls back strictly to that SPECIFIC role's permissions (RolePermissions[role]).
+ *    - NEVER elevates a non-admin role (secretary, accountant, manager) to admin.
+ *    - Unknown or missing roles receive an empty array [] (zero permissions).
+ */
+export function resolveUserPermissions(
+  user?: { role?: string; permissions?: any } | null,
+): Permission[] {
+  if (!user) return [];
+
+  // 1. Valid non-empty array
+  if (Array.isArray(user.permissions) && user.permissions.length > 0) {
+    return user.permissions as Permission[];
+  }
+
+  // 2. Strict role-based permissions fallback (Principle of Least Privilege)
+  const role = user.role as UserRole;
+  if (role && RolePermissions[role]) {
+    return RolePermissions[role];
+  }
+
+  // 3. Unknown role / malformed: NEVER elevate to Admin.
+  return [];
+}
+
 export class PermissionService {
   static hasPermission(
     userPermissions: Permission[] | any,
     required: Permission,
   ): boolean {
     if (!userPermissions) return false;
-    if (!Array.isArray(userPermissions)) {
-      // Backend permissions object fallback or truthy permission map
-      if (typeof userPermissions === "object" && userPermissions !== null) {
-        return true;
-      }
-      return false;
+    if (Array.isArray(userPermissions)) {
+      return userPermissions.includes(required);
     }
-    return userPermissions.includes(required);
+    if (typeof userPermissions === "object" && userPermissions !== null) {
+      return userPermissions[required] === true;
+    }
+    return false;
   }
 
   static hasAnyPermission(
@@ -180,13 +207,13 @@ export class PermissionService {
     required: Permission[],
   ): boolean {
     if (!userPermissions) return false;
-    if (!Array.isArray(userPermissions)) {
-      if (typeof userPermissions === "object" && userPermissions !== null) {
-        return true;
-      }
-      return false;
+    if (Array.isArray(userPermissions)) {
+      return required.some((p) => userPermissions.includes(p));
     }
-    return required.some((p) => userPermissions.includes(p));
+    if (typeof userPermissions === "object" && userPermissions !== null) {
+      return required.some((p) => userPermissions[p] === true);
+    }
+    return false;
   }
 
   static hasAllPermissions(
@@ -194,13 +221,13 @@ export class PermissionService {
     required: Permission[],
   ): boolean {
     if (!userPermissions) return false;
-    if (!Array.isArray(userPermissions)) {
-      if (typeof userPermissions === "object" && userPermissions !== null) {
-        return true;
-      }
-      return false;
+    if (Array.isArray(userPermissions)) {
+      return required.every((p) => userPermissions.includes(p));
     }
-    return required.every((p) => userPermissions.includes(p));
+    if (typeof userPermissions === "object" && userPermissions !== null) {
+      return required.every((p) => userPermissions[p] === true);
+    }
+    return false;
   }
 }
 

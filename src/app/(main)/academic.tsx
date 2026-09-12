@@ -13,7 +13,7 @@ import {
     View,
 } from "react-native";
 import { Strings } from "../../core/localization";
-import { PermissionService, RolePermissions } from "../../core/permissions";
+import { PermissionService, RolePermissions, resolveUserPermissions } from "../../core/permissions";
 import { SyncEngine } from "../../core/sync";
 import { Colors, Spacing, Typography } from "../../core/theme";
 import { useAuthStore } from "../../features/auth/useAuthStore";
@@ -53,14 +53,7 @@ const DAYS_OF_WEEK = [
 export default function AcademicScreen() {
   const currentUser = useAuthStore((s) => s.currentUser);
   const activeCenterId = useAuthStore((s) => s.activeCenterId);
-  const rawPermissions = currentUser?.permissions;
-  const permissions =
-    Array.isArray(rawPermissions) && rawPermissions.length > 0
-      ? rawPermissions
-      : currentUser?.role
-        ? RolePermissions[currentUser.role as keyof typeof RolePermissions] ||
-          RolePermissions.admin
-        : RolePermissions.admin;
+  const permissions = resolveUserPermissions(currentUser);
 
   const [activeTab, setActiveTab] = useState<AcademicTab>("teachers");
   const [refreshing, setRefreshing] = useState(false);

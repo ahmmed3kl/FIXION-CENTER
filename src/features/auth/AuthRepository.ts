@@ -4,7 +4,7 @@ import { ApiClient } from "../../core/api";
 import { DatabaseService } from "../../core/database";
 import { DeviceService } from "../../core/device";
 import { UnauthorizedError } from "../../core/errors";
-import { RolePermissions } from "../../core/permissions";
+import { RolePermissions, resolveUserPermissions } from "../../core/permissions";
 import { SecureStorageService } from "../../core/storage";
 import { Center, User } from "../../shared/types";
 
@@ -81,17 +81,13 @@ export class AuthRepository {
         });
 
         const data = response.data;
-        const rawPermissions = data.user.permissions;
-        const resolvedPermissions: User["permissions"] =
-          Array.isArray(rawPermissions) && rawPermissions.length > 0
-            ? rawPermissions
-            : RolePermissions[data.user.role as keyof typeof RolePermissions] ||
-              RolePermissions.admin;
+        const resolvedPermissions = resolveUserPermissions(data.user);
 
         const demoMatch = DEMO_USERS.find(
           (u) =>
             u.id === data.user.id ||
-            (u.email && u.email.toLowerCase() === data.user.email?.toLowerCase()) ||
+            (u.email &&
+              u.email.toLowerCase() === data.user.email?.toLowerCase()) ||
             u.phone === data.user.phone,
         );
         const resolvedCenterIds =
@@ -191,6 +187,7 @@ export class AuthRepository {
 
     const token = `tok-${user.id}-${Date.now()}`;
     await SecureStorageService.setItem("session_token", token);
+    await SecureStorageService.setItem("user_session", JSON.stringify(user));
     await SecureStorageService.setItem(
       "active_center_id",
       user.centerId || user.centerIds?.[0] || "center-1",
@@ -207,16 +204,7 @@ export class AuthRepository {
       try {
         const parsed = JSON.parse(userJson) as User;
 
-        // Normalize permissions: ensure it's always a valid Permission[] array.
-        // The stored JSON may have missing / malformed permissions if the backend
-        // didn't return them or a previous version of the app saved an incomplete object.
-        const storedPermissions = parsed.permissions;
-        const normalizedPermissions: typeof parsed.permissions =
-          Array.isArray(storedPermissions) && storedPermissions.length > 0
-            ? storedPermissions
-            : RolePermissions[parsed.role as keyof typeof RolePermissions] ||
-              RolePermissions.admin;
-
+        const normalizedPermissions = resolveUserPermissions(parsed);
         const user: User = { ...parsed, permissions: normalizedPermissions };
 
         // Proactively ensure device is registered on the live backend during restore

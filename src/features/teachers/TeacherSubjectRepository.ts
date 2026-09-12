@@ -7,9 +7,14 @@ import {
     NotFoundError,
     UnauthorizedError,
 } from "../../core/errors";
-import { PermissionService, RolePermissions } from "../../core/permissions";
+import { PermissionService, RolePermissions, resolveUserPermissions } from "../../core/permissions";
 import { SyncEngine, SyncRepository } from "../../core/sync";
-import { Permission, Subject, Teacher, TeacherSubject } from "../../shared/types";
+import {
+    Permission,
+    Subject,
+    Teacher,
+    TeacherSubject,
+} from "../../shared/types";
 import { useAuthStore } from "../auth/useAuthStore";
 import { SubjectRepository } from "../subjects/SubjectRepository";
 import { TeacherRepository } from "./TeacherRepository";
@@ -20,12 +25,7 @@ export class TeacherSubjectRepository {
     if (!activeCenterId || !currentUser) {
       throw new UnauthorizedError("يجب تسجيل الدخول وتحديد المركز.");
     }
-    const rawPermissions = currentUser.permissions;
-    const permissions: Permission[] =
-      Array.isArray(rawPermissions) && rawPermissions.length > 0
-        ? rawPermissions
-        : RolePermissions[currentUser.role as keyof typeof RolePermissions] ||
-          RolePermissions.admin;
+    const permissions = resolveUserPermissions(currentUser);
     const user = { ...currentUser, permissions };
     return { centerId: activeCenterId, user };
   }

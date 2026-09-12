@@ -3,7 +3,7 @@ import { ApiClient } from "../../core/api";
 import { AuditService } from "../../core/audit";
 import { DeviceRepository, DeviceService } from "../../core/device";
 import { ForbiddenError } from "../../core/errors";
-import { RolePermissions } from "../../core/permissions";
+import { RolePermissions, resolveUserPermissions } from "../../core/permissions";
 import { SecureStorageService } from "../../core/storage";
 import { SyncEngine } from "../../core/sync";
 import { Center, User } from "../../shared/types";
@@ -79,11 +79,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         });
       }
 
-      const resolvedPermissions =
-        Array.isArray(user.permissions) && user.permissions.length > 0
-          ? user.permissions
-          : RolePermissions[user.role as keyof typeof RolePermissions] ||
-            RolePermissions.admin;
+      const resolvedPermissions = resolveUserPermissions(user);
       const normalizedUser = { ...user, permissions: resolvedPermissions };
 
       set({
@@ -172,12 +168,11 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       let activeCenter =
         centers.find((c) => c.id === savedCenterId) || centers[0] || null;
 
-      const resolvedPermissions =
-        Array.isArray(session.user.permissions) && session.user.permissions.length > 0
-          ? session.user.permissions
-          : RolePermissions[session.user.role as keyof typeof RolePermissions] ||
-            RolePermissions.admin;
-      const normalizedUser = { ...session.user, permissions: resolvedPermissions };
+      const resolvedPermissions = resolveUserPermissions(session.user);
+      const normalizedUser = {
+        ...session.user,
+        permissions: resolvedPermissions,
+      };
 
       set({
         currentUser: normalizedUser,
@@ -216,9 +211,7 @@ useAuthStore.getState = () => {
     (!Array.isArray(state.currentUser.permissions) ||
       state.currentUser.permissions.length === 0)
   ) {
-    const fallback =
-      RolePermissions[state.currentUser.role as keyof typeof RolePermissions] ||
-      RolePermissions.admin;
+    const fallback = resolveUserPermissions(state.currentUser);
     return {
       ...state,
       currentUser: { ...state.currentUser, permissions: fallback },
