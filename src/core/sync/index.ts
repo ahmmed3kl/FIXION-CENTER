@@ -184,7 +184,7 @@ export class SyncRepository {
               payload, status, created_at as createdAt, synced_at as syncedAt, retry_count as retryCount,
               last_error as lastError
        FROM sync_operations
-       WHERE center_id = ? AND status = 'pending'`,
+       WHERE center_id = ? AND (status = 'pending' OR (status = 'failed' AND retry_count < 10))`,
       [centerId],
     );
 
