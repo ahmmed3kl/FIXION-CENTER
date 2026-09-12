@@ -1,13 +1,13 @@
 import { useState } from "react";
 import {
-  Image,
-  KeyboardAvoidingView,
-  Platform,
-  SafeAreaView,
-  ScrollView,
-  StyleSheet,
-  Text,
-  View,
+    Image,
+    KeyboardAvoidingView,
+    Platform,
+    SafeAreaView,
+    ScrollView,
+    StyleSheet,
+    Text,
+    View,
 } from "react-native";
 import { Strings } from "../../core/localization";
 import { BorderRadius, Colors, Spacing, Typography } from "../../core/theme";

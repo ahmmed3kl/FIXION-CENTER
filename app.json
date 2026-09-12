@@ -18,7 +18,11 @@
         "backgroundColor": "#000000",
         "foregroundImage": "./assets/images/android-icon-foreground.png"
       },
-      "supportsRTL": true
+      "supportsRTL": true,
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO"
+      ]
     },
     "plugins": [
       "expo-router",
@@ -34,8 +38,9 @@
     "extra": {
       "supportsRTL": true,
       "eas": {
-        "projectId": ""
-      }
+        "projectId": "4ba5c4e1-945d-42f3-80b5-c6dfd9f8e7ee"
+      },
+      "router": {}
     }
   }
 }
