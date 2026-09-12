@@ -81,6 +81,14 @@ export class AuthRepository {
         });
 
         const data = response.data;
+        const rawPermissions = data.user.permissions;
+        const resolvedPermissions: User["permissions"] =
+          Array.isArray(rawPermissions) && rawPermissions.length > 0
+            ? rawPermissions
+            : RolePermissions[
+                data.user.role as keyof typeof RolePermissions
+              ] || RolePermissions.admin;
+
         const user: User = {
           id: data.user.id,
           fullName: data.user.fullName,
@@ -89,10 +97,7 @@ export class AuthRepository {
           role: data.user.role,
           centerId: data.user.centerId,
           centerIds: [data.user.centerId],
-          permissions:
-            data.user.permissions ||
-            RolePermissions[data.user.role as keyof typeof RolePermissions] ||
-            RolePermissions.admin,
+          permissions: resolvedPermissions,
         };
 
         await SecureStorageService.setItem("session_token", data.token);

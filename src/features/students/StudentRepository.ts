@@ -44,7 +44,14 @@ export class StudentRepository {
         "يجب تسجيل الدخول وتحديد المركز للوصول إلى بيانات الطلاب.",
       );
     }
-    return { centerId: activeCenterId, user: currentUser };
+    // Normalize permissions — they may be missing/malformed after JSON.parse
+    const user = {
+      ...currentUser,
+      permissions: Array.isArray(currentUser.permissions)
+        ? currentUser.permissions
+        : [],
+    };
+    return { centerId: activeCenterId, user };
   }
 
   static findByCardCode(normalizedCardCode: string): Student | null {

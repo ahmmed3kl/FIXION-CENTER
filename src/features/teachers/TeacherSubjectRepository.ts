@@ -20,7 +20,14 @@ export class TeacherSubjectRepository {
     if (!activeCenterId || !currentUser) {
       throw new UnauthorizedError("يجب تسجيل الدخول وتحديد المركز.");
     }
-    return { centerId: activeCenterId, user: currentUser };
+    // Normalize permissions — they may be missing/malformed after JSON.parse from SecureStorage
+    const user = {
+      ...currentUser,
+      permissions: Array.isArray(currentUser.permissions)
+        ? currentUser.permissions
+        : [],
+    };
+    return { centerId: activeCenterId, user };
   }
 
   static isTeacherAssignedToSubject(

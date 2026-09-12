@@ -151,7 +151,10 @@ router.get("/pull", authMiddleware, deviceGuard, async (req, res, next) => {
       } catch (checkpointErr) {
         // Non-fatal: checkpoint update failed (e.g. device FK not yet registered).
         // The pull data is still valid and will be returned.
-        console.warn("sync_checkpoints upsert skipped:", checkpointErr?.message);
+        console.warn(
+          "sync_checkpoints upsert skipped:",
+          checkpointErr?.message,
+        );
       }
     }
 

@@ -3,6 +3,7 @@ import { ApiClient } from "../../core/api";
 import { AuditService } from "../../core/audit";
 import { DeviceRepository, DeviceService } from "../../core/device";
 import { ForbiddenError } from "../../core/errors";
+import { RolePermissions } from "../../core/permissions";
 import { SecureStorageService } from "../../core/storage";
 import { SyncEngine } from "../../core/sync";
 import { Center, User } from "../../shared/types";
@@ -188,6 +189,25 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
   clearError: () => set({ error: null }),
 }));
+
+// ─── Permissions safety patch ───────────────────────────────────────────────
+// Intercept state reads so currentUser.permissions is always a valid array,
+// even when the stored JSON was serialised without permissions (e.g. older
+// backend responses or SecureStorage migration issues).
+const _origGetState = useAuthStore.getState.bind(useAuthStore);
+useAuthStore.getState = () => {
+  const state = _origGetState();
+  if (state.currentUser && !Array.isArray(state.currentUser.permissions)) {
+    const fallback =
+      RolePermissions[state.currentUser.role as keyof typeof RolePermissions] ||
+      RolePermissions.admin;
+    return {
+      ...state,
+      currentUser: { ...state.currentUser, permissions: fallback },
+    };
+  }
+  return state;
+};
 
 // Automatically logout when receiving a 401 Unauthorized from API
 ApiClient.setUnauthorizedHandler(async () => {

@@ -652,9 +652,7 @@ export class SyncEngine {
         Logger.warn("sync", "pull_failed", {
           centerId,
           error:
-            pullErr?.userMessage ||
-            pullErr?.message ||
-            JSON.stringify(pullErr),
+            pullErr?.userMessage || pullErr?.message || JSON.stringify(pullErr),
         });
       }
 
