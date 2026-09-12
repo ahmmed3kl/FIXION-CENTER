@@ -332,8 +332,7 @@ export class SyncEngine {
       if (Array.isArray(data.teachers)) {
         for (const t of data.teachers) {
           db.runSync(
-            `INSERT INTO teachers (id, center_id, name, phone) VALUES (?, ?, ?, ?)
-             ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, phone = EXCLUDED.phone;`,
+            `INSERT OR REPLACE INTO teachers (id, center_id, name, phone) VALUES (?, ?, ?, ?)`,
             [t.id, t.center_id || centerId, t.name, t.phone || null],
           );
         }
@@ -343,8 +342,7 @@ export class SyncEngine {
       if (Array.isArray(data.subjects)) {
         for (const s of data.subjects) {
           db.runSync(
-            `INSERT INTO subjects (id, center_id, name, code) VALUES (?, ?, ?, ?)
-             ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, code = EXCLUDED.code;`,
+            `INSERT OR REPLACE INTO subjects (id, center_id, name, code) VALUES (?, ?, ?, ?)`,
             [s.id, s.center_id || centerId, s.name, s.code || s.name],
           );
         }
@@ -354,8 +352,7 @@ export class SyncEngine {
       if (Array.isArray(data.groups)) {
         for (const g of data.groups) {
           db.runSync(
-            `INSERT INTO groups (id, center_id, name, teacher_id, subject_id, grade, default_fee) VALUES (?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, default_fee = EXCLUDED.default_fee;`,
+            `INSERT OR REPLACE INTO groups (id, center_id, name, teacher_id, subject_id, grade, default_fee) VALUES (?, ?, ?, ?, ?, ?, ?)`,
             [
               g.id,
               g.center_id || centerId,
@@ -380,19 +377,8 @@ export class SyncEngine {
             "";
           const cardCode = std.card_code || std.cardCode || studentCode;
           db.runSync(
-            `INSERT INTO students (id, center_id, student_code, full_name, card_code, phone, parent_phone, grade, status, student_type, notes, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT (id) DO UPDATE SET
-               student_code = EXCLUDED.student_code,
-               full_name = EXCLUDED.full_name,
-               card_code = EXCLUDED.card_code,
-               phone = EXCLUDED.phone,
-               parent_phone = EXCLUDED.parent_phone,
-               grade = EXCLUDED.grade,
-               status = EXCLUDED.status,
-               student_type = EXCLUDED.student_type,
-               notes = EXCLUDED.notes,
-               updated_at = EXCLUDED.updated_at;`,
+            `INSERT OR REPLACE INTO students (id, center_id, student_code, full_name, card_code, phone, parent_phone, grade, status, student_type, notes, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
               std.id,
               std.center_id || centerId,
@@ -416,9 +402,8 @@ export class SyncEngine {
       if (Array.isArray(data.cards)) {
         for (const card of data.cards) {
           db.runSync(
-            `INSERT INTO student_cards (id, center_id, student_id, card_code, status, issued_at, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT (id) DO UPDATE SET card_code = EXCLUDED.card_code, status = EXCLUDED.status;`,
+            `INSERT OR REPLACE INTO student_cards (id, center_id, student_id, card_code, status, issued_at, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`,
             [
               card.id,
               card.center_id || centerId,
@@ -436,9 +421,8 @@ export class SyncEngine {
       if (Array.isArray(data.sessions)) {
         for (const sess of data.sessions) {
           db.runSync(
-            `INSERT INTO sessions (id, center_id, group_id, session_date, start_time, end_time, status)
-             VALUES (?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT (id) DO UPDATE SET status = EXCLUDED.status;`,
+            `INSERT OR REPLACE INTO sessions (id, center_id, group_id, session_date, start_time, end_time, status)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`,
             [
               sess.id,
               sess.center_id || centerId,
@@ -456,9 +440,8 @@ export class SyncEngine {
       if (Array.isArray(data.enrollments)) {
         for (const enr of data.enrollments) {
           db.runSync(
-            `INSERT INTO student_group_enrollments (id, center_id, student_id, group_id, start_date, status, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT (id) DO UPDATE SET status = EXCLUDED.status;`,
+            `INSERT OR REPLACE INTO student_group_enrollments (id, center_id, student_id, group_id, start_date, status, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`,
             [
               enr.id,
               enr.center_id || centerId,
@@ -496,27 +479,12 @@ export class SyncEngine {
           const s = data.student || data;
           const studentId = s.id || change.entityId;
           const studentCode =
-            s.student_code ||
-            s.studentCode ||
-            s.card_code ||
-            s.cardCode ||
-            "";
+            s.student_code || s.studentCode || s.card_code || s.cardCode || "";
           const cardCode = s.card_code || s.cardCode || studentCode;
 
           db.runSync(
-            `INSERT INTO students (id, center_id, student_code, full_name, card_code, phone, parent_phone, grade, status, student_type, notes, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT (id) DO UPDATE SET
-               student_code = EXCLUDED.student_code,
-               full_name = EXCLUDED.full_name,
-               card_code = EXCLUDED.card_code,
-               phone = EXCLUDED.phone,
-               parent_phone = EXCLUDED.parent_phone,
-               grade = EXCLUDED.grade,
-               status = EXCLUDED.status,
-               student_type = EXCLUDED.student_type,
-               notes = EXCLUDED.notes,
-               updated_at = EXCLUDED.updated_at;`,
+            `INSERT OR REPLACE INTO students (id, center_id, student_code, full_name, card_code, phone, parent_phone, grade, status, student_type, notes, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
               studentId,
               centerId,
@@ -536,9 +504,8 @@ export class SyncEngine {
 
           if (cardCode) {
             db.runSync(
-              `INSERT INTO student_cards (id, center_id, student_id, card_code, status, issued_at, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)
-               ON CONFLICT (id) DO UPDATE SET card_code = EXCLUDED.card_code, status = EXCLUDED.status;`,
+              `INSERT OR REPLACE INTO student_cards (id, center_id, student_id, card_code, status, issued_at, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)`,
               [
                 `card-${studentId}`,
                 centerId,
@@ -557,12 +524,8 @@ export class SyncEngine {
           const att = data;
           const attId = att.id || change.entityId;
           db.runSync(
-            `INSERT INTO attendance (id, center_id, student_id, session_id, check_in_time, status, is_late, attendance_type, original_absence_id, operation_id)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT (session_id, student_id) DO UPDATE SET
-               status = EXCLUDED.status,
-               is_late = EXCLUDED.is_late,
-               check_in_time = EXCLUDED.check_in_time;`,
+            `INSERT OR REPLACE INTO attendance (id, center_id, student_id, session_id, check_in_time, status, is_late, attendance_type, original_absence_id, operation_id)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
               attId,
               centerId,
@@ -580,9 +543,8 @@ export class SyncEngine {
           const pay = data;
           const payId = pay.id || change.entityId;
           db.runSync(
-            `INSERT INTO payments (id, operation_id, center_id, student_id, amount, payment_type, created_at, user_id)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT (id) DO UPDATE SET amount = EXCLUDED.amount;`,
+            `INSERT OR REPLACE INTO payments (id, operation_id, center_id, student_id, amount, payment_type, created_at, user_id)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
             [
               payId,
               pay.operation_id || `srv-pay-${payId}`,

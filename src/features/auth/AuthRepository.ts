@@ -96,8 +96,14 @@ export class AuthRepository {
         };
 
         await SecureStorageService.setItem("session_token", data.token);
-        await SecureStorageService.setItem("user_session", JSON.stringify(user));
-        await SecureStorageService.setItem("active_center_id", data.user.centerId);
+        await SecureStorageService.setItem(
+          "user_session",
+          JSON.stringify(user),
+        );
+        await SecureStorageService.setItem(
+          "active_center_id",
+          data.user.centerId,
+        );
 
         // Ensure center exists in local SQLite
         try {
@@ -207,7 +213,10 @@ export class AuthRepository {
 
     return centerIds.map((id) => ({
       id,
-      name: id === "center-2" ? "الفرع الثاني - مدينة نصر" : "الفرع الرئيسي - مصر الجديدة",
+      name:
+        id === "center-2"
+          ? "الفرع الثاني - مدينة نصر"
+          : "الفرع الرئيسي - مصر الجديدة",
       code: id,
     }));
   }
