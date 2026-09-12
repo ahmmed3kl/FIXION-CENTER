@@ -8,6 +8,57 @@ const SyncProcessor = require("../services/SyncProcessor");
 const router = express.Router();
 
 /**
+ * Full snapshot bootstrap for center
+ * Supplies all authoritative domain tables directly from PostgreSQL
+ */
+router.get("/bootstrap", authMiddleware, deviceGuard, async (req, res, next) => {
+  try {
+    const centerId = req.centerId;
+
+    const [
+      studentsRes,
+      cardsRes,
+      groupsRes,
+      teachersRes,
+      subjectsRes,
+      sessionsRes,
+      enrollmentsRes,
+      maxSeqRes,
+    ] = await Promise.all([
+      db.query("SELECT * FROM students WHERE center_id = $1", [centerId]),
+      db.query("SELECT * FROM student_cards WHERE center_id = $1", [centerId]),
+      db.query("SELECT * FROM groups WHERE center_id = $1", [centerId]),
+      db.query("SELECT * FROM teachers WHERE center_id = $1", [centerId]),
+      db.query("SELECT * FROM subjects WHERE center_id = $1", [centerId]),
+      db.query("SELECT * FROM sessions WHERE center_id = $1", [centerId]),
+      db.query(
+        "SELECT * FROM student_group_enrollments WHERE center_id = $1",
+        [centerId],
+      ),
+      db.query(
+        "SELECT COALESCE(MAX(server_seq), 0) as max_seq FROM server_sync_operations WHERE center_id = $1",
+        [centerId],
+      ),
+    ]);
+
+    return res.json({
+      centerId,
+      students: studentsRes.rows,
+      cards: cardsRes.rows,
+      groups: groupsRes.rows,
+      teachers: teachersRes.rows,
+      subjects: subjectsRes.rows,
+      sessions: sessionsRes.rows,
+      enrollments: enrollmentsRes.rows,
+      latestServerSeq: parseInt(maxSeqRes.rows[0]?.max_seq || 0, 10),
+      timestamp: new Date().toISOString(),
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
  * Push offline operations to server
  */
 router.post("/push", authMiddleware, deviceGuard, async (req, res, next) => {
