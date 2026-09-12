@@ -1,7 +1,7 @@
 services:
   - type: web
     name: fixion-backend
-    env: node
+    runtime: node
     plan: free
     rootDir: backend
     buildCommand: npm install --omit=dev
