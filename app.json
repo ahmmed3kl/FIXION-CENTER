@@ -15,7 +15,7 @@
     "android": {
       "package": "com.fixion.center",
       "adaptiveIcon": {
-        "backgroundColor": "#1E293B",
+        "backgroundColor": "#000000",
         "foregroundImage": "./assets/images/android-icon-foreground.png"
       },
       "supportsRTL": true

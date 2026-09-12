@@ -1,5 +1,6 @@
 import { useState } from "react";
 import {
+  Image,
   KeyboardAvoidingView,
   Platform,
   SafeAreaView,
@@ -49,9 +50,11 @@ export default function LoginScreen() {
         >
           {/* Logo & Header */}
           <View style={styles.header}>
-            <View style={styles.logoBadge}>
-              <Text style={styles.logoText}>FIXION</Text>
-            </View>
+            <Image
+              source={require("../../../assets/images/icon.png")}
+              style={styles.logoImage}
+              resizeMode="contain"
+            />
             <Text style={styles.title}>{Strings.loginTitle}</Text>
             <Text style={styles.subtitle}>{Strings.loginSubtitle}</Text>
           </View>
@@ -113,18 +116,11 @@ const styles = StyleSheet.create({
     alignItems: "center",
     marginBottom: Spacing.xxl,
   },
-  logoBadge: {
-    backgroundColor: Colors.primary,
-    paddingHorizontal: Spacing.xl,
-    paddingVertical: Spacing.sm,
-    borderRadius: BorderRadius.md,
+  logoImage: {
+    width: 96,
+    height: 96,
+    borderRadius: 22,
     marginBottom: Spacing.md,
-  },
-  logoText: {
-    fontSize: 22,
-    fontWeight: "800",
-    color: Colors.white,
-    letterSpacing: 2,
   },
   title: {
     ...Typography.h1,
