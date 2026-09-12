@@ -1,3 +1,4 @@
+import { Platform } from "react-native";
 import { env } from "../../config/env";
 import { DeviceService } from "../device";
 import {
@@ -43,6 +44,32 @@ export interface ISyncApiAdapter {
  * GET  /sync/bootstrap?centerId=...
  */
 export class HttpSyncApiAdapter implements ISyncApiAdapter {
+  private async ensureDeviceRegistered(
+    centerId: string,
+    deviceId: string,
+  ): Promise<void> {
+    try {
+      const client = ApiClient.getInstance();
+      await client.post(
+        "/devices/register",
+        {
+          deviceId,
+          deviceName: `${Platform.OS.toUpperCase()}-Device-${deviceId.slice(-4)}`,
+          platform: Platform.OS,
+          appVersion: env.appVersion,
+        },
+        {
+          headers: {
+            "X-Center-Id": centerId,
+            "X-Device-Id": deviceId,
+          },
+        },
+      );
+    } catch (e) {
+      console.warn("Auto-register device notice:", e);
+    }
+  }
+
   async pushOperations(
     centerId: string,
     operations: SyncOperationPayload[],
@@ -57,17 +84,42 @@ export class HttpSyncApiAdapter implements ISyncApiAdapter {
       operations,
     };
 
-    const response = await client.post<PushSyncResponse>(
-      "/sync/push",
-      requestBody,
-      {
-        headers: {
-          "X-Center-Id": centerId,
-          "X-Device-Id": deviceId,
+    try {
+      const response = await client.post<PushSyncResponse>(
+        "/sync/push",
+        requestBody,
+        {
+          headers: {
+            "X-Center-Id": centerId,
+            "X-Device-Id": deviceId,
+          },
         },
-      },
-    );
-    return response.data;
+      );
+      return response.data;
+    } catch (err: any) {
+      const isDeviceErr =
+        err?.code === "FORBIDDEN" ||
+        err?.statusCode === 403 ||
+        err?.message?.includes("Device") ||
+        err?.message?.includes("device") ||
+        err?.userMessage?.includes("الجهاز");
+
+      if (isDeviceErr) {
+        await this.ensureDeviceRegistered(centerId, deviceId);
+        const retryResponse = await client.post<PushSyncResponse>(
+          "/sync/push",
+          requestBody,
+          {
+            headers: {
+              "X-Center-Id": centerId,
+              "X-Device-Id": deviceId,
+            },
+          },
+        );
+        return retryResponse.data;
+      }
+      throw err;
+    }
   }
 
   async pullChanges(
@@ -78,32 +130,101 @@ export class HttpSyncApiAdapter implements ISyncApiAdapter {
     const client = ApiClient.getInstance();
     const deviceId = await DeviceService.getDeviceId();
 
-    const response = await client.get<PullSyncResponse>("/sync/pull", {
-      params: {
-        centerId,
-        cursor,
-        limit,
-      },
-      headers: {
-        "X-Center-Id": centerId,
-        "X-Device-Id": deviceId,
-      },
-    });
-    return response.data;
+    const fetchPull = () =>
+      client.get<PullSyncResponse>("/sync/pull", {
+        params: {
+          centerId,
+          cursor,
+          limit,
+        },
+        headers: {
+          "X-Center-Id": centerId,
+          "X-Device-Id": deviceId,
+        },
+      });
+
+    try {
+      const response = await fetchPull();
+      return response.data;
+    } catch (err: any) {
+      const isDeviceErr =
+        err?.code === "FORBIDDEN" ||
+        err?.statusCode === 403 ||
+        err?.message?.includes("Device") ||
+        err?.message?.includes("device") ||
+        err?.userMessage?.includes("الجهاز");
+
+      if (isDeviceErr) {
+        await this.ensureDeviceRegistered(centerId, deviceId);
+        const retryResponse = await fetchPull();
+        return retryResponse.data;
+      }
+      throw err;
+    }
   }
 
   async bootstrapCenter(centerId: string): Promise<BootstrapResponse> {
     const client = ApiClient.getInstance();
     const deviceId = await DeviceService.getDeviceId();
 
-    const response = await client.get<BootstrapResponse>("/sync/bootstrap", {
-      params: { centerId },
-      headers: {
-        "X-Center-Id": centerId,
-        "X-Device-Id": deviceId,
-      },
-    });
-    return response.data;
+    const fetchBootstrap = () =>
+      client.get<BootstrapResponse>("/sync/bootstrap", {
+        params: { centerId },
+        headers: {
+          "X-Center-Id": centerId,
+          "X-Device-Id": deviceId,
+        },
+      });
+
+    try {
+      const response = await fetchBootstrap();
+      return response.data;
+    } catch (err: any) {
+      // If endpoint not found on server (404), return empty snapshot gracefully
+      if (err?.statusCode === 404 || err?.code === "NOT_FOUND") {
+        return {
+          centerId,
+          students: [],
+          cards: [],
+          groups: [],
+          teachers: [],
+          subjects: [],
+          sessions: [],
+          enrollments: [],
+          latestServerSeq: 0,
+          timestamp: new Date().toISOString(),
+        };
+      }
+
+      const isDeviceErr =
+        err?.code === "FORBIDDEN" ||
+        err?.statusCode === 403 ||
+        err?.message?.includes("Device") ||
+        err?.message?.includes("device") ||
+        err?.userMessage?.includes("الجهاز");
+
+      if (isDeviceErr) {
+        await this.ensureDeviceRegistered(centerId, deviceId);
+        try {
+          const retryResponse = await fetchBootstrap();
+          return retryResponse.data;
+        } catch {
+          return {
+            centerId,
+            students: [],
+            cards: [],
+            groups: [],
+            teachers: [],
+            subjects: [],
+            sessions: [],
+            enrollments: [],
+            latestServerSeq: 0,
+            timestamp: new Date().toISOString(),
+          };
+        }
+      }
+      throw err;
+    }
   }
 }
 

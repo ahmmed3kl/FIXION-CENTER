@@ -85,9 +85,8 @@ export class AuthRepository {
         const resolvedPermissions: User["permissions"] =
           Array.isArray(rawPermissions) && rawPermissions.length > 0
             ? rawPermissions
-            : RolePermissions[
-                data.user.role as keyof typeof RolePermissions
-              ] || RolePermissions.admin;
+            : RolePermissions[data.user.role as keyof typeof RolePermissions] ||
+              RolePermissions.admin;
 
         const user: User = {
           id: data.user.id,
@@ -207,6 +206,34 @@ export class AuthRepository {
               RolePermissions.admin;
 
         const user: User = { ...parsed, permissions: normalizedPermissions };
+
+        // Proactively ensure device is registered on the live backend during restore
+        if (!env.enableMockData && token && user.centerId) {
+          DeviceService.getDeviceId().then(async (deviceId) => {
+            try {
+              const client = ApiClient.getInstance();
+              await client.post(
+                "/devices/register",
+                {
+                  deviceId,
+                  deviceName: `${Platform.OS.toUpperCase()}-Device-${deviceId.slice(-4)}`,
+                  platform: Platform.OS,
+                  appVersion: env.appVersion,
+                },
+                {
+                  headers: {
+                    Authorization: `Bearer ${token}`,
+                    "X-Center-Id": user.centerId,
+                    "X-Device-Id": deviceId,
+                  },
+                },
+              );
+            } catch (regErr) {
+              console.warn("Device registration on restoreSession notice:", regErr);
+            }
+          }).catch(() => {});
+        }
+
         return { user, token };
       } catch {
         return null;

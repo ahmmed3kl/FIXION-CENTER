@@ -158,27 +158,47 @@ export class DeviceRepository {
 export class DeviceService {
   private static cachedDeviceId: string | null = null;
 
-  static async getDeviceId(): Promise<string> {
+  private static getOrInitPermanentDeviceId(): string {
     if (this.cachedDeviceId) {
       return this.cachedDeviceId;
     }
 
-    let deviceId = await SecureStorageService.getItem(DEVICE_ID_KEY);
-    if (!deviceId) {
-      deviceId = `dev-${generateUUID()}`;
-      await SecureStorageService.setItem(DEVICE_ID_KEY, deviceId);
-    }
+    try {
+      const db = DatabaseService.getDb();
+      db.execSync(
+        `CREATE TABLE IF NOT EXISTS app_metadata (key TEXT PRIMARY KEY, value TEXT);`,
+      );
+      const row = db.getFirstSync<{ value: string }>(
+        `SELECT value FROM app_metadata WHERE key = ?`,
+        [DEVICE_ID_KEY],
+      );
+      if (row?.value) {
+        this.cachedDeviceId = row.value;
+        return this.cachedDeviceId;
+      }
 
-    this.cachedDeviceId = deviceId;
-    return deviceId;
+      const newId = `dev-${generateUUID()}`;
+      db.runSync(
+        `INSERT OR REPLACE INTO app_metadata (key, value) VALUES (?, ?);`,
+        [DEVICE_ID_KEY, newId],
+      );
+      this.cachedDeviceId = newId;
+      SecureStorageService.setItem(DEVICE_ID_KEY, newId).catch(() => {});
+      return this.cachedDeviceId;
+    } catch {
+      if (!this.cachedDeviceId) {
+        this.cachedDeviceId = `dev-${generateUUID()}`;
+      }
+      return this.cachedDeviceId;
+    }
+  }
+
+  static async getDeviceId(): Promise<string> {
+    return this.getOrInitPermanentDeviceId();
   }
 
   static getDeviceIdSync(): string {
-    if (this.cachedDeviceId) {
-      return this.cachedDeviceId;
-    }
-    this.cachedDeviceId = `dev-${generateUUID()}`;
-    return this.cachedDeviceId;
+    return this.getOrInitPermanentDeviceId();
   }
 
   static setCachedDeviceId(id: string): void {

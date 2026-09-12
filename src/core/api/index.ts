@@ -98,10 +98,20 @@ export class ApiClient {
           }
 
           const status = error.response.status;
-          const serverMessage =
-            error.response.data?.message ||
-            error.response.data?.error ||
-            "خطأ غير متوقع في استجابة الخادم";
+          const serverData = error.response.data;
+          const serverErr = serverData?.error;
+
+          let serverMessage = "خطأ غير متوقع في استجابة الخادم";
+          let serverUserMessage: string | undefined;
+
+          if (serverErr && typeof serverErr === "object") {
+            serverMessage = serverErr.message || JSON.stringify(serverErr);
+            serverUserMessage = serverErr.userMessage;
+          } else if (typeof serverErr === "string") {
+            serverMessage = serverErr;
+          } else if (serverData?.message) {
+            serverMessage = typeof serverData.message === "object" ? JSON.stringify(serverData.message) : String(serverData.message);
+          }
 
           if (status === 401) {
             if (ApiClient.onUnauthorizedCallback) {
@@ -112,7 +122,7 @@ export class ApiClient {
             return Promise.reject(
               new UnauthorizedError(
                 serverMessage,
-                "انتهت صلاحية الجلسة أو تم تسجيل الخروج. يرجى إعادة تسجيل الدخول.",
+                serverUserMessage || "انتهت صلاحية الجلسة أو تم تسجيل الخروج. يرجى إعادة تسجيل الدخول.",
               ),
             );
           }
@@ -121,7 +131,7 @@ export class ApiClient {
             return Promise.reject(
               new ForbiddenError(
                 serverMessage,
-                "ليس لديك الصلاحية الكافية لإتمام هذا الإجراء.",
+                serverUserMessage || "ليس لديك الصلاحية الكافية لإتمام هذا الإجراء.",
               ),
             );
           }
@@ -130,7 +140,7 @@ export class ApiClient {
             return Promise.reject(
               new NotFoundError(
                 serverMessage,
-                "العنصر المطلوب غير موجود على الخادم.",
+                serverUserMessage || "العنصر المطلوب غير موجود على الخادم.",
               ),
             );
           }
@@ -139,7 +149,7 @@ export class ApiClient {
             return Promise.reject(
               new ConflictError(
                 serverMessage,
-                "يوجد تضارب في البيانات المسجلة على الخادم.",
+                serverUserMessage || "يوجد تضارب في البيانات المسجلة على الخادم.",
               ),
             );
           }
@@ -148,7 +158,7 @@ export class ApiClient {
             return Promise.reject(
               new ValidationError(
                 serverMessage,
-                serverMessage || "البيانات المدخلة غير صحيحة.",
+                serverUserMessage || serverMessage || "البيانات المدخلة غير صحيحة.",
               ),
             );
           }
@@ -158,13 +168,17 @@ export class ApiClient {
               new AppError(
                 serverMessage,
                 `HTTP_${status}`,
-                "حدث خطأ في الخادم أثناء معالجة الطلب. يرجى المحاولة لاحقاً.",
+                serverUserMessage || "حدث خطأ في الخادم أثناء معالجة الطلب. يرجى المحاولة لاحقاً.",
               ),
             );
           }
 
           return Promise.reject(
-            new AppError(serverMessage, `HTTP_${status}`, serverMessage),
+            new AppError(
+              serverMessage,
+              `HTTP_${status}`,
+              serverUserMessage || serverMessage,
+            ),
           );
         },
       );
