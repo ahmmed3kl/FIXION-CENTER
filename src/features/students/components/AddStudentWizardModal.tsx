@@ -44,6 +44,12 @@ const DAYS_OF_WEEK = [
   "السبت",
 ];
 
+const GRADE_STAGES = [
+  { id: "primary", label: "ابتدائي", grades: ["الأول الابتدائي", "الثاني الابتدائي", "الثالث الابتدائي", "الرابع الابتدائي", "الخامس الابتدائي", "السادس الابتدائي"] },
+  { id: "preparatory", label: "إعدادي", grades: ["الأول الإعدادي", "الثاني الإعدادي", "الثالث الإعدادي"] },
+  { id: "secondary", label: "ثانوي", grades: ["الأول الثانوي", "الثاني الثانوي", "الثالث الثانوي"] },
+] as const;
+
 interface AddStudentWizardModalProps {
   visible: boolean;
   onClose: () => void;
@@ -73,7 +79,8 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({
   const [parentPhone, setParentPhone] = useState("");
   const [phoneDuplicateWarning, setPhoneDuplicateWarning] = useState(false);
   const [parentPhoneDuplicateWarning, setParentPhoneDuplicateWarning] = useState(false);
-  const [grade, setGrade] = useState("الصف الثالث الثانوي");
+  const [grade, setGrade] = useState("");
+  const [gradeStage, setGradeStage] = useState<(typeof GRADE_STAGES)[number]["id"] | null>(null);
   const [notes, setNotes] = useState("");
   const [step2Errors, setStep2Errors] = useState<{
     fullName?: string;
@@ -97,6 +104,7 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({
   const [selectionPhase, setSelectionPhase] = useState<"teachers" | "groups">("teachers");
   const [selectedTeacherIds, setSelectedTeacherIds] = useState<string[]>([]);
   const [currentGroupTeacherIndex, setCurrentGroupTeacherIndex] = useState(0);
+  const [openTeacherPicker, setOpenTeacherPicker] = useState<number | null>(null);
 
   // Step 4 & 5: Submission & creation
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -163,7 +171,8 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({
     setParentPhone("");
     setPhoneDuplicateWarning(false);
     setParentPhoneDuplicateWarning(false);
-    setGrade("الصف الثالث الثانوي");
+    setGrade("");
+    setGradeStage(null);
     setNotes("");
     setStep2Errors({});
     setSelectedGroupIds([]);
@@ -275,6 +284,10 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({
     }
     if (!isEgyptianPhone(parentPhone)) {
       errors.parentPhone = "رقم هاتف ولي الأمر مطلوب.";
+    }
+    if (!grade.trim()) {
+      Alert.alert("تنبيه", "اختر المرحلة والصف الدراسي للطالب.");
+      return;
     }
 
     if (Object.keys(errors).length > 0) {
@@ -807,13 +820,23 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({
                   </View>
                 ) : null}
 
-                <AppInput
-                  label="المرحلة الدراسية"
-                  placeholder="الصف الثالث الثانوي"
-                  value={grade}
-                  onChangeText={setGrade}
-                  containerStyle={styles.formField}
-                />
+                <View style={styles.formField}>
+                  <Text style={styles.gradeLabel}>المرحلة الدراسية</Text>
+                  <View style={styles.gradeStageRow}>
+                    {GRADE_STAGES.map((stage) => (
+                      <TouchableOpacity key={stage.id} style={[styles.gradeStage, gradeStage === stage.id && styles.gradeStageActive]} onPress={() => { setGradeStage(stage.id); setGrade(""); }}>
+                        <Text style={[styles.gradeStageText, gradeStage === stage.id && styles.gradeStageTextActive]}>{stage.label}</Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                  {gradeStage ? <View style={styles.gradeOptions}>
+                    {GRADE_STAGES.find((stage) => stage.id === gradeStage)?.grades.map((option) => (
+                      <TouchableOpacity key={option} style={[styles.gradeOption, grade === option && styles.gradeOptionActive]} onPress={() => setGrade(option)}>
+                        <Text style={[styles.gradeOptionText, grade === option && styles.gradeOptionTextActive]}>{grade === option ? "✓ " : ""}{option}</Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View> : <Text style={styles.gradeHint}>اختر المرحلة أولاً ثم الصف الدراسي.</Text>}
+                </View>
 
                 <AppInput
                   label="ملاحظات إضافية (اختياري)"
@@ -1751,4 +1774,16 @@ const styles = StyleSheet.create({
   phoneWarningText: { fontSize: 13, fontWeight: "700", color: Colors.warningText },
   phoneWarningHint: { fontSize: 12, color: Colors.warningText, marginTop: 2 },
   phoneWarningActions: { flexDirection: "row", gap: Spacing.xs, marginTop: Spacing.sm },
+  gradeLabel: { color: Colors.slate700, fontSize: 14, fontWeight: "700", marginBottom: Spacing.xs, textAlign: "right" },
+  gradeStageRow: { flexDirection: "row", gap: Spacing.xs },
+  gradeStage: { flex: 1, borderWidth: 1, borderColor: Colors.border, borderRadius: BorderRadius.sm, paddingVertical: Spacing.sm, alignItems: "center", backgroundColor: Colors.white },
+  gradeStageActive: { backgroundColor: Colors.primary, borderColor: Colors.primary },
+  gradeStageText: { color: Colors.slate700, fontWeight: "700" },
+  gradeStageTextActive: { color: Colors.white },
+  gradeOptions: { flexDirection: "row", flexWrap: "wrap", gap: Spacing.xs, marginTop: Spacing.xs },
+  gradeOption: { borderWidth: 1, borderColor: Colors.border, borderRadius: BorderRadius.sm, paddingHorizontal: Spacing.sm, paddingVertical: 7, backgroundColor: Colors.white },
+  gradeOptionActive: { backgroundColor: Colors.primaryLight, borderColor: Colors.primary },
+  gradeOptionText: { color: Colors.slate700, fontSize: 13 },
+  gradeOptionTextActive: { color: Colors.primaryDark, fontWeight: "700" },
+  gradeHint: { color: Colors.slate500, fontSize: 12, marginTop: Spacing.xs, textAlign: "right" },
 });

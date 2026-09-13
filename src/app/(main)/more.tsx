@@ -4,6 +4,7 @@ import { SafeAreaView, ScrollView, StyleSheet, Text, TouchableOpacity, View } fr
 import { Colors, Spacing, Typography } from "../../core/theme";
 
 const items = [
+  { label: "تبديل السنتر", route: "/(main)/center-switch", icon: "business-outline" as const },
   { label: "الإدارة الأكاديمية", route: "/(main)/academic", icon: "school-outline" as const },
   { label: "الباقات", route: "/(main)/packages", icon: "pricetags-outline" as const },
   { label: "الإغلاق اليومي", route: "/(main)/closing", icon: "lock-closed-outline" as const },

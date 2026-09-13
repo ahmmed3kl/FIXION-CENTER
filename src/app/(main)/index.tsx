@@ -90,7 +90,7 @@ export default function DashboardScreen() {
             <Text style={styles.userName}>{currentUser?.fullName}</Text>
             {availableCenters.length > 1 ? (
               <TouchableOpacity
-                onPress={() => router.push("/(auth)/select-center")}
+                onPress={() => router.push("/(main)/center-switch")}
                 style={styles.switchCenterBadge}
               >
                 <Text style={styles.switchCenterText}>تبديل المركز</Text>
