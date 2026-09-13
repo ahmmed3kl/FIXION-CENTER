@@ -113,9 +113,9 @@ export default function AcademicScreen() {
 
   const loadData = () => {
     try {
-      setTeachers(TeacherRepository.getAll(true));
-      setSubjects(SubjectRepository.getAll(true));
-      setGroups(GroupRepository.getAll(true));
+      setTeachers(TeacherRepository.getAll());
+      setSubjects(SubjectRepository.getAll());
+      setGroups(GroupRepository.getAll());
       setTodaySessions(SessionGenerationService.getSessionsForDate(todayStr));
     } catch (e: any) {
       console.error("Academic loadData error:", e);

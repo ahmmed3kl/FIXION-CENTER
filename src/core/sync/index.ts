@@ -1128,6 +1128,9 @@ export class SyncEngine {
               t.updated_at || new Date().toISOString(),
             ],
           );
+          if (t.cascadeGroups === true && (t.status || "") === "inactive") {
+            db.runSync("UPDATE groups SET status = 'inactive', updated_at = ? WHERE center_id = ? AND teacher_id = ?", [t.updated_at || t.updatedAt || new Date().toISOString(), centerId, teacherId]);
+          }
         } else if (
           entityType === "subject" ||
           entityType === "subject_created" ||

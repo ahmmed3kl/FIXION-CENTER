@@ -286,7 +286,7 @@ export class TeacherRepository {
     SyncRepository.enqueueOperation({ operationId, centerId, userId: user.id, deviceId, operationType: "UPDATE", entityType: "teacher", entityId: teacherId, payload: { status: "active", updatedAt: now } });
   }
 
-  /** Hard delete is allowed only when no historical/relational record depends on the teacher. */
+  /** Hide a teacher and all of their groups while preserving every historical record. */
   static deleteTeacher(teacherId: string): void {
     const { centerId, user } = this.getActiveContext();
     if (!PermissionService.hasPermission(user.permissions, "teachers.deactivate")) throw new ForbiddenError("ليس لديك صلاحية حذف المدرس.");
@@ -294,12 +294,17 @@ export class TeacherRepository {
     if (!existing) throw new NotFoundError("المدرس غير موجود.");
     const db = DatabaseService.getDb();
     const refs = db.getFirstSync<{ count: number }>("SELECT COUNT(*) as count FROM groups WHERE center_id=? AND teacher_id=?", [centerId, teacherId]);
-    if ((refs?.count || 0) > 0) throw new ValidationError("لا يمكن حذف مدرس مرتبط بمجموعات؛ عطّله للحفاظ على السجل.");
-    db.runSync("DELETE FROM teacher_subjects WHERE center_id=? AND teacher_id=?", [centerId, teacherId]);
-    db.runSync("DELETE FROM teachers WHERE center_id=? AND id=?", [centerId, teacherId]);
+    const now = new Date().toISOString();
+    if ((refs?.count || 0) > 0) {
+      // Do not cascade-delete groups, enrollments, sessions, attendance, or finance.
+      // Marking the groups inactive removes them from operational lists while
+      // preserving their relationships for historical reports.
+      db.runSync("UPDATE groups SET status='inactive', updated_at=? WHERE center_id=? AND teacher_id=?", [now, centerId, teacherId]);
+    }
+    db.runSync("UPDATE teachers SET status='inactive', updated_at=? WHERE center_id=? AND id=?", [now, centerId, teacherId]);
     const operationId = `op-teach-delete-${Date.now()}-${teacherId}`;
     const deviceId = DeviceService.getDeviceIdSync();
     AuditService.recordEvent({ operationId, centerId, userId: user.id, deviceId, entityType: "teacher", entityId: teacherId, action: "teacher.delete", payload: { name: existing.name } });
-    SyncRepository.enqueueOperation({ operationId, centerId, userId: user.id, deviceId, operationType: "DELETE", entityType: "teacher", entityId: teacherId, payload: { id: teacherId } });
+    SyncRepository.enqueueOperation({ operationId, centerId, userId: user.id, deviceId, operationType: "UPDATE", entityType: "teacher", entityId: teacherId, payload: { id: teacherId, status: "inactive", cascadeGroups: true, updatedAt: now } });
   }
 }

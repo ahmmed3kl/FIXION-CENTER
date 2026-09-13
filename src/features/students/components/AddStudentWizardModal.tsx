@@ -93,6 +93,7 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({
   const [enrollmentMode, setEnrollmentMode] = useState<"groups" | "package">("groups");
   const [selectedPackageId, setSelectedPackageId] = useState("");
   const [selectedPackageOptionIds, setSelectedPackageOptionIds] = useState<string[]>([]);
+  const [packageGroupByOption, setPackageGroupByOption] = useState<Record<string, string>>({});
 
   // Step 4 & 5: Submission & creation
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -164,6 +165,7 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({
     setEnrollmentMode("groups");
     setSelectedPackageId("");
     setSelectedPackageOptionIds([]);
+    setPackageGroupByOption({});
     setIsSubmitting(false);
   };
 
@@ -284,6 +286,17 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({
     );
   };
 
+  const groupsForPackageOption = (option: PackageSubject) => availableGroups.filter((group) => group.teacherId === option.defaultTeacherId && group.subjectId === option.subjectId && group.status === "active");
+  const selectPackageGroup = (optionId: string, groupId: string) => setPackageGroupByOption((current) => ({ ...current, [optionId]: groupId }));
+  const validatePackageGroups = () => {
+    if (enrollmentMode !== "package") return true;
+    const options = packageOptions[selectedPackageId] || [];
+    const selected = options.filter((option) => selectedPackageOptionIds.includes(option.id));
+    const missing = selected.find((option) => groupsForPackageOption(option).length > 0 && !packageGroupByOption[option.id]);
+    if (missing) { Alert.alert("تنبيه", `اختر مجموعة للمدرس ${missing.defaultTeacherName || "المحدد"}.`); return false; }
+    return true;
+  };
+
   const handleConfirmAddStudent = () => {
     setIsSubmitting(true);
     try {
@@ -295,7 +308,7 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({
         parentPhone: parentPhone.trim(),
         grade: grade.trim(),
         notes: notes.trim() || undefined,
-        groupIds: enrollmentMode === "groups" ? selectedGroupIds : [],
+        groupIds: enrollmentMode === "groups" ? selectedGroupIds : selectedPackageOptionIds.map((optionId) => packageGroupByOption[optionId]).filter(Boolean),
       });
       if (enrollmentMode === "package" && selectedPackageId) {
         PackageSubscriptionRepository.subscribeStudent({
@@ -814,9 +827,18 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({
                 </View>
                 {enrollmentMode === "package" && <View>
                   <Text style={styles.stepSubtitle}>اختر باقة ثم اختيارات المدرسين/المواد.</Text>
-                  {availablePackages.map((pkg) => <TouchableOpacity key={pkg.id} onPress={() => { setSelectedPackageId(pkg.id); setSelectedPackageOptionIds([]); }}><AppCard style={[styles.groupSelectCard, selectedPackageId === pkg.id && styles.groupSelectCardActive]}><Text style={styles.groupCardName}>{pkg.name}</Text><Text>{formatCurrency(pkg.price)} / شهر • حتى {pkg.maxSelections} اختيارات</Text></AppCard></TouchableOpacity>)}
+                  {availablePackages.map((pkg) => <TouchableOpacity key={pkg.id} onPress={() => { setSelectedPackageId(pkg.id); setSelectedPackageOptionIds([]); setPackageGroupByOption({}); }}><AppCard style={[styles.groupSelectCard, selectedPackageId === pkg.id && styles.groupSelectCardActive]}><Text style={styles.groupCardName}>{pkg.name}</Text><Text>{formatCurrency(pkg.price)} / شهر • حتى {pkg.maxSelections} اختيارات</Text></AppCard></TouchableOpacity>)}
                   {!!selectedPackageId && (packageOptions[selectedPackageId] || []).map((option) => { const selected = selectedPackageOptionIds.includes(option.id); const pkg = availablePackages.find((p) => p.id === selectedPackageId)!; return <TouchableOpacity key={option.id} onPress={() => { if (!selected && selectedPackageOptionIds.length >= pkg.maxSelections) { Alert.alert("تنبيه", `يمكنك اختيار ${pkg.maxSelections} فقط.`); return; } setSelectedPackageOptionIds((old) => selected ? old.filter((id) => id !== option.id) : [...old, option.id]); }}><AppCard style={[styles.groupSelectCard, selected && styles.groupSelectCardActive]}><Text style={styles.groupCardName}>{selected ? "✓ " : "□ "}{option.subjectName} - {option.defaultTeacherName}</Text></AppCard></TouchableOpacity>; })}
                 </View>}
+                {enrollmentMode === "package" && selectedPackageOptionIds.map((optionId) => {
+                  const option = (packageOptions[selectedPackageId] || []).find((item) => item.id === optionId);
+                  if (!option) return null;
+                  const matchingGroups = groupsForPackageOption(option);
+                  return <View key={`package-groups-${option.id}`} style={styles.packageGroupBox}>
+                    <Text style={styles.packageGroupTitle}>{option.defaultTeacherName} - {option.subjectName}</Text>
+                    {matchingGroups.length === 0 ? <Text style={styles.packageGroupHint}>لا توجد مجموعات لهذا المدرس حاليًا؛ يمكنك المتابعة وسيتم تحديدها لاحقًا.</Text> : matchingGroups.map((group) => <TouchableOpacity key={group.id} onPress={() => selectPackageGroup(option.id, group.id)}><AppCard style={[styles.groupSelectCard, packageGroupByOption[option.id] === group.id && styles.groupSelectCardActive]}><Text style={styles.groupCardName}>{packageGroupByOption[option.id] === group.id ? "✓ " : "□ "}{group.name}</Text><Text style={styles.groupCardTeacher}>{groupSchedules[group.id]?.length ? groupSchedules[group.id].map((s) => `${DAYS_OF_WEEK[s.dayOfWeek]} ${s.startTime}-${s.endTime}`).join(" • ") : "بدون موعد محدد بعد"}</Text></AppCard></TouchableOpacity>)}
+                  </View>;
+                })}
                 {enrollmentMode === "groups" && <Text style={styles.stepSubtitle}>
                   اختر المجموعات التي سينضم إليها الطالب (يمكنك اختيار أكثر من
                   مجموعة):
@@ -921,7 +943,7 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({
                   />
                   <AppButton
                     title={`التالي: المراجعة (${enrollmentMode === "package" ? selectedPackageOptionIds.length : selectedGroupIds.length})`}
-                    onPress={() => setStep(4)}
+                    onPress={() => { if (enrollmentMode === "package" && (!selectedPackageId || selectedPackageOptionIds.length === 0)) { Alert.alert("تنبيه", "اختر باقة ومدرسًا واحدًا على الأقل."); return; } if (validatePackageGroups()) setStep(4); }}
                     style={{ flex: 2 }}
                   />
                 </View>
@@ -1221,6 +1243,9 @@ const styles = StyleSheet.create({
   modeButton: { flex: 1, padding: 12, borderRadius: BorderRadius.md, backgroundColor: Colors.slate100, alignItems: "center" },
   modeButtonActive: { backgroundColor: Colors.primary },
   modeText: { color: Colors.slate800, fontWeight: "700" },
+  packageGroupBox: { marginTop: Spacing.sm },
+  packageGroupTitle: { fontSize: 14, fontWeight: "700", color: Colors.slate800, marginBottom: Spacing.xs },
+  packageGroupHint: { fontSize: 12, color: Colors.slate500, backgroundColor: Colors.slate50, padding: Spacing.sm, borderRadius: BorderRadius.sm },
   stepSubtitle: {
     fontSize: 14,
     color: Colors.slate600,

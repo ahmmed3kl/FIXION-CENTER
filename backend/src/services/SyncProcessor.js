@@ -693,6 +693,12 @@ class SyncProcessor {
             endedAt,
           ],
         );
+        if (t.cascadeGroups === true && (t.status || "") === "inactive") {
+          await client.query(
+            "UPDATE groups SET status = 'archived', updated_at = NOW() WHERE center_id = $1 AND teacher_id = $2",
+            [centerId, teacherId],
+          );
+        }
         break;
       }
 
