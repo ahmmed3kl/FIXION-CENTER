@@ -383,6 +383,8 @@ export class SyncEngine {
   private static currentState: SyncEngineState = "online";
   /** One in-flight sync pipeline per center; callers queue behind it. */
   private static readonly syncLocks = new Map<string, Promise<void>>();
+  /** SQLite is a single native connection; serialize pipelines across centers too. */
+  private static databaseSyncLock: Promise<void> | null = null;
 
   static setAdapter(adapter: ISyncApiAdapter): void {
     this.adapter = adapter;
@@ -1354,9 +1356,20 @@ export class SyncEngine {
     const queueTail = previous ? previous.catch(() => {}).then(() => current) : current;
     this.syncLocks.set(centerId, queueTail);
     if (previous) await previous.catch(() => {});
+    const databasePrevious = this.databaseSyncLock;
+    let databaseRelease!: () => void;
+    const databaseCurrent = new Promise<void>((resolve) => {
+      databaseRelease = resolve;
+    });
+    this.databaseSyncLock = databaseCurrent;
+    if (databasePrevious) await databasePrevious.catch(() => {});
     try {
       return await this.runSyncCenterNow(centerId, options);
     } finally {
+      databaseRelease();
+      if (this.databaseSyncLock === databaseCurrent) {
+        this.databaseSyncLock = null;
+      }
       release();
       if (this.syncLocks.get(centerId) === queueTail) {
         this.syncLocks.delete(centerId);
