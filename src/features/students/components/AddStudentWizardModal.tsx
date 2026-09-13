@@ -286,7 +286,11 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({
     );
   };
 
-  const groupsForPackageOption = (option: PackageSubject) => availableGroups.filter((group) => group.teacherId === option.defaultTeacherId && group.subjectId === option.subjectId && group.status === "active");
+  // A teacher may teach multiple subjects and have multiple weekly groups.
+  // The student chooses the concrete group for the selected teacher; do not
+  // hide a valid group merely because the package option's subject snapshot
+  // differs from the group's current subject.
+  const groupsForPackageOption = (option: PackageSubject) => availableGroups.filter((group) => String(group.teacherId) === String(option.defaultTeacherId));
   const selectPackageGroup = (optionId: string, groupId: string) => setPackageGroupByOption((current) => ({ ...current, [optionId]: groupId }));
   const validatePackageGroups = () => {
     if (enrollmentMode !== "package") return true;
