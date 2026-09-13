@@ -17,8 +17,18 @@ export interface BootstrapResponse {
   teachers: any[];
   subjects: any[];
   teacherSubjects?: any[];
+  schedules?: any[];
   sessions: any[];
   enrollments: any[];
+  packages?: any[];
+  packageSubjects?: any[];
+  packageSubscriptions?: any[];
+  packageTeacherOverrides?: any[];
+  debtCycles?: any[];
+  notificationEvents?: any[];
+  notificationDeliveries?: any[];
+  sessionClosings?: any[];
+  dailyClosings?: any[];
   latestServerSeq: number;
   timestamp: string;
 }

@@ -49,6 +49,8 @@ export interface PullSyncRequest {
 
 export interface ServerChangeRecord {
   sequenceNumber: number;
+  /** The same immutable operation id used by the originating audit/outbox row. */
+  operationId?: string;
   entityType: string;
   entityId: string;
   action: "create" | "update" | "delete";

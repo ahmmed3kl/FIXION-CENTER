@@ -743,6 +743,33 @@ export const MIGRATIONS: Migration[] = [
       `);
     },
   },
+  {
+    version: 7,
+    name: "sync_retry_and_conflict_review",
+    up: (db: SqlDatabase) => {
+      // Retry scheduling survives process restarts and keeps a failed
+      // operation from being retried on every render/background tick.
+      try {
+        db.execSync("ALTER TABLE sync_operations ADD COLUMN next_retry_at TEXT;");
+      } catch {}
+      db.execSync(`
+        CREATE TABLE IF NOT EXISTS sync_conflicts (
+          id TEXT PRIMARY KEY,
+          operation_id TEXT NOT NULL UNIQUE,
+          center_id TEXT NOT NULL,
+          entity_type TEXT NOT NULL,
+          entity_id TEXT NOT NULL,
+          reason TEXT NOT NULL,
+          local_payload TEXT,
+          server_payload TEXT,
+          created_at TEXT NOT NULL,
+          resolved_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_sync_conflicts_center
+          ON sync_conflicts(center_id, resolved_at, created_at);
+      `);
+    },
+  },
 ];
 
 // In-Memory SQLite Mock for Jest / Test environments
@@ -770,6 +797,7 @@ class InMemorySqliteMock implements SqlDatabase {
     this.tables.set("debt_adjustments", []);
     this.tables.set("payments", []);
     this.tables.set("sync_operations", []);
+    this.tables.set("sync_conflicts", []);
     this.tables.set("audit_logs", []);
     this.tables.set("packages", []);
     this.tables.set("package_subjects", []);
@@ -826,6 +854,17 @@ class InMemorySqliteMock implements SqlDatabase {
         });
 
         const list = this.tables.get(tableName) || [];
+        // Basic SQLite-compatible upsert behavior for the in-memory test DB.
+        // Most sync writes use ON CONFLICT(id) DO UPDATE; merge those rows
+        // instead of incorrectly raising a duplicate-key error.
+        if (trimmed.toUpperCase().includes("ON CONFLICT") && row.id != null) {
+          const existingIndex = list.findIndex((r) => r.id === row.id);
+          if (existingIndex >= 0) {
+            list[existingIndex] = { ...list[existingIndex], ...row };
+            this.tables.set(tableName, list);
+            return { lastInsertRowId: existingIndex + 1, changes: 1 };
+          }
+        }
         // Check UNIQUE constraints
         if (tableName === "students") {
           if (row.card_code) {
@@ -1132,6 +1171,11 @@ class InMemorySqliteMock implements SqlDatabase {
             if (isRetryInc) row.retry_count = (row.retry_count || 0) + 1;
             if (params.length >= 2 && trimmed.includes("last_error = ?")) {
               row.last_error = params[0];
+            }
+            if (trimmed.includes("next_retry_at = NULL")) {
+              row.next_retry_at = null;
+            } else if (trimmed.includes("next_retry_at = ?")) {
+              row.next_retry_at = params[1];
             }
             if (params.length >= 2 && trimmed.includes("synced_at = ?")) {
               row.synced_at = params[0];
@@ -2548,15 +2592,16 @@ class InMemorySqliteMock implements SqlDatabase {
         syncedAt: r.synced_at,
         retryCount: r.retry_count,
         lastError: r.last_error,
+        nextRetryAt: r.next_retry_at || null,
       }));
 
       if (params.length >= 1 && trimmed.includes("WHERE operation_id = ?")) {
         return mapped.filter((r) => r.operationId === params[0]) as T[];
       }
       if (params.length >= 1 && trimmed.includes("status = 'pending'")) {
-        return mapped.filter(
-          (r) => r.centerId === params[0] && r.status === "pending",
-        ) as T[];
+        const now = params[1] ? new Date(params[1]).getTime() : Date.now();
+        return mapped.filter((r) => r.centerId === params[0] &&
+          (r.status === "pending" || (r.status === "failed" && Number(r.retryCount || 0) < 10 && (!r.nextRetryAt || new Date(r.nextRetryAt).getTime() <= now)))) as T[];
       }
       if (params.length >= 1 && trimmed.includes("center_id = ?")) {
         return mapped.filter((r) => r.centerId === params[0]) as T[];
@@ -3154,6 +3199,22 @@ export class DatabaseService {
 
   static setMockDb(mock: SqlDatabase) {
     this.db = mock;
+  }
+
+  /** Runs a synchronous SQLite transaction for snapshot/bootstrap writes. */
+  static runInTransaction<T>(callback: (db: SqlDatabase) => T): T {
+    const db = this.getDb();
+    db.execSync("BEGIN IMMEDIATE;");
+    try {
+      const result = callback(db);
+      db.execSync("COMMIT;");
+      return result;
+    } catch (error) {
+      try {
+        db.execSync("ROLLBACK;");
+      } catch {}
+      throw error;
+    }
   }
 
   static init(): void {

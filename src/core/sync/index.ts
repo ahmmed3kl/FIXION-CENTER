@@ -76,6 +76,10 @@ export function getOperationPriority(entityType: string): number {
   return 6;
 }
 
+function retryDelayMs(retryCount: number): number {
+  return Math.min(1000 * Math.pow(2, Math.max(0, retryCount)), 60000);
+}
+
 export class SyncRepository {
   static getByOperationId(operationId: string): SyncOperation | null {
     const db = DatabaseService.getDb();
@@ -184,8 +188,12 @@ export class SyncRepository {
               payload, status, created_at as createdAt, synced_at as syncedAt, retry_count as retryCount,
               last_error as lastError
        FROM sync_operations
-       WHERE center_id = ? AND (status = 'pending' OR (status = 'failed' AND retry_count < 10))`,
-      [centerId],
+       WHERE center_id = ? AND (
+         status = 'pending' OR
+         (status = 'failed' AND retry_count < 10 AND
+          (next_retry_at IS NULL OR next_retry_at <= ?))
+       )`,
+      [centerId, new Date().toISOString()],
     );
 
     // Sort by priority ASC, then createdAt ASC
@@ -238,25 +246,99 @@ export class SyncRepository {
     const db = DatabaseService.getDb();
     const syncedAt = new Date().toISOString();
     db.runSync(
-      `UPDATE sync_operations SET status = 'synced', synced_at = ? WHERE operation_id = ?`,
+      `UPDATE sync_operations SET status = 'synced', synced_at = ?, next_retry_at = NULL WHERE operation_id = ?`,
       [syncedAt, operationId],
     );
   }
 
   static markAsFailed(operationId: string, errorReason: string): void {
     const db = DatabaseService.getDb();
+    const current = db.getFirstSync<{ retryCount: number }>(
+      `SELECT retry_count as retryCount FROM sync_operations WHERE operation_id = ?`,
+      [operationId],
+    );
+    const retryCount = Number(current?.retryCount || 0);
+    const nextRetryAt = new Date(Date.now() + retryDelayMs(retryCount)).toISOString();
     db.runSync(
-      `UPDATE sync_operations SET status = 'failed', retry_count = retry_count + 1, last_error = ? WHERE operation_id = ?`,
-      [errorReason, operationId],
+      `UPDATE sync_operations
+       SET status = 'failed', retry_count = retry_count + 1, last_error = ?, next_retry_at = ?
+       WHERE operation_id = ?`,
+      [errorReason, nextRetryAt, operationId],
     );
   }
 
-  static markAsConflict(operationId: string, errorReason: string): void {
+  static markAsConflict(
+    operationId: string,
+    errorReason: string,
+    details?: { serverState?: any; resolution?: string },
+  ): void {
     const db = DatabaseService.getDb();
     db.runSync(
-      `UPDATE sync_operations SET status = 'conflict', last_error = ? WHERE operation_id = ?`,
+      `UPDATE sync_operations SET status = 'conflict', last_error = ?, next_retry_at = NULL WHERE operation_id = ?`,
       [errorReason, operationId],
     );
+    const operation = db.getFirstSync<any>(
+      `SELECT center_id as centerId, entity_type as entityType, entity_id as entityId, payload
+       FROM sync_operations WHERE operation_id = ?`,
+      [operationId],
+    );
+    if (!operation) return;
+    db.runSync(
+      `INSERT INTO sync_conflicts
+         (id, operation_id, center_id, entity_type, entity_id, reason, local_payload, server_payload, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(operation_id) DO UPDATE SET
+         reason = excluded.reason,
+         server_payload = excluded.server_payload,
+         created_at = excluded.created_at`,
+      [
+        `conflict-${generateUUID()}`,
+        operationId,
+        operation.centerId,
+        operation.entityType,
+        operation.entityId,
+        errorReason,
+        operation.payload || null,
+        details?.serverState === undefined ? null : JSON.stringify(details.serverState),
+        new Date().toISOString(),
+      ],
+    );
+  }
+
+  static getConflicts(centerId: string): any[] {
+    return DatabaseService.getDb().getAllSync<any>(
+      `SELECT id, operation_id as operationId, center_id as centerId,
+              entity_type as entityType, entity_id as entityId, reason,
+              local_payload as localPayload, server_payload as serverPayload,
+              created_at as createdAt, resolved_at as resolvedAt
+       FROM sync_conflicts WHERE center_id = ? AND resolved_at IS NULL
+       ORDER BY created_at DESC`,
+      [centerId],
+    );
+  }
+
+  static resolveConflict(operationId: string): void {
+    DatabaseService.getDb().runSync(
+      `UPDATE sync_conflicts SET resolved_at = ? WHERE operation_id = ?`,
+      [new Date().toISOString(), operationId],
+    );
+  }
+
+  /**
+   * A process can be terminated after marking an operation as syncing but
+   * before the server response is persisted. Such rows must be retryable on
+   * the next launch; otherwise one crash permanently strands the mutation.
+   */
+  static recoverInterruptedOperations(centerId: string): number {
+    const db = DatabaseService.getDb();
+    const result = db.runSync(
+      `UPDATE sync_operations
+       SET status = 'pending', next_retry_at = NULL,
+           last_error = COALESCE(last_error, 'sync interrupted')
+       WHERE center_id = ? AND status = 'syncing'`,
+      [centerId],
+    );
+    return result.changes ?? 0;
   }
 
   /**
@@ -326,13 +408,14 @@ export class SyncEngine {
   static async bootstrapCenter(centerId: string): Promise<void> {
     try {
       const data = await this.adapter.bootstrapCenter(centerId);
-      const db = DatabaseService.getDb();
+      DatabaseService.runInTransaction((db) => {
 
       // Upsert Teachers
       if (Array.isArray(data.teachers)) {
         for (const t of data.teachers) {
           db.runSync(
-            `INSERT OR REPLACE INTO teachers (id, center_id, name, phone, status, notes, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            `INSERT INTO teachers (id, center_id, name, phone, status, notes, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET name=excluded.name, phone=excluded.phone, status=excluded.status, notes=excluded.notes, updated_at=excluded.updated_at`,
             [
               t.id,
               t.center_id || centerId,
@@ -351,7 +434,8 @@ export class SyncEngine {
       if (Array.isArray(data.subjects)) {
         for (const s of data.subjects) {
           db.runSync(
-            `INSERT OR REPLACE INTO subjects (id, center_id, name, code, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            `INSERT INTO subjects (id, center_id, name, code, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET name=excluded.name, code=excluded.code, status=excluded.status, updated_at=excluded.updated_at`,
             [
               s.id,
               s.center_id || centerId,
@@ -369,7 +453,8 @@ export class SyncEngine {
       if (Array.isArray(data.teacherSubjects)) {
         for (const ts of data.teacherSubjects) {
           db.runSync(
-            `INSERT OR REPLACE INTO teacher_subjects (id, center_id, teacher_id, subject_id, created_at) VALUES (?, ?, ?, ?, ?)`,
+            `INSERT INTO teacher_subjects (id, center_id, teacher_id, subject_id, created_at) VALUES (?, ?, ?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET teacher_id=excluded.teacher_id, subject_id=excluded.subject_id`,
             [
               ts.id || `ts-${centerId}-${ts.teacher_id}-${ts.subject_id}`,
               ts.center_id || centerId,
@@ -398,7 +483,8 @@ export class SyncEngine {
             g.late_after_minutes || g.lateAfterMinutes || 15,
           );
           db.runSync(
-            `INSERT OR REPLACE INTO groups (id, center_id, name, teacher_id, subject_id, grade, default_fee, session_price, monthly_price, session_duration_minutes, late_after_minutes, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            `INSERT INTO groups (id, center_id, name, teacher_id, subject_id, grade, default_fee, session_price, monthly_price, session_duration_minutes, late_after_minutes, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET name=excluded.name, teacher_id=excluded.teacher_id, subject_id=excluded.subject_id, grade=excluded.grade, default_fee=excluded.default_fee, session_price=excluded.session_price, monthly_price=excluded.monthly_price, session_duration_minutes=excluded.session_duration_minutes, late_after_minutes=excluded.late_after_minutes, status=excluded.status, updated_at=excluded.updated_at`,
             [
               g.id,
               g.center_id || centerId,
@@ -411,7 +497,7 @@ export class SyncEngine {
               monthlyPrice,
               duration,
               lateAfter,
-              g.status || "active",
+              g.status === "archived" ? "inactive" : (g.status || "active"),
               g.created_at || new Date().toISOString(),
               g.updated_at || new Date().toISOString(),
             ],
@@ -446,8 +532,9 @@ export class SyncEngine {
             "";
           const cardCode = std.card_code || std.cardCode || studentCode;
           db.runSync(
-            `INSERT OR REPLACE INTO students (id, center_id, student_code, full_name, card_code, phone, parent_phone, grade, status, student_type, notes, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            `INSERT INTO students (id, center_id, student_code, full_name, card_code, phone, parent_phone, grade, status, student_type, notes, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET student_code=excluded.student_code, card_code=excluded.card_code, full_name=excluded.full_name, phone=excluded.phone, parent_phone=excluded.parent_phone, grade=excluded.grade, status=excluded.status, student_type=excluded.student_type, notes=excluded.notes, updated_at=excluded.updated_at`,
             [
               std.id,
               std.center_id || centerId,
@@ -471,16 +558,49 @@ export class SyncEngine {
       if (Array.isArray(data.cards)) {
         for (const card of data.cards) {
           db.runSync(
-            `INSERT OR REPLACE INTO student_cards (id, center_id, student_id, card_code, status, issued_at, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            `INSERT INTO student_cards (id, center_id, student_id, card_code, status, issued_at, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET student_id=excluded.student_id, card_code=excluded.card_code, status=excluded.status, issued_at=excluded.issued_at`,
             [
               card.id,
               card.center_id || centerId,
               card.student_id || card.studentId,
               card.card_code || card.cardCode,
-              card.status || "active",
+              card.status === "active" ? "active" : "inactive",
               card.issued_at || new Date().toISOString(),
               card.created_at || new Date().toISOString(),
+            ],
+          );
+        }
+      }
+
+      // Upsert Sessions
+      // Schedules are independent records and must be bootstrapped as well;
+      // otherwise a fresh device cannot render or generate the same timetable.
+      if (Array.isArray(data.schedules)) {
+        for (const schedule of data.schedules) {
+          db.runSync(
+            `INSERT INTO group_schedules
+               (id, group_id, day_of_week, start_time, end_time, center_id, status, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET
+               group_id = excluded.group_id,
+               day_of_week = excluded.day_of_week,
+               start_time = excluded.start_time,
+               end_time = excluded.end_time,
+               center_id = excluded.center_id,
+               status = excluded.status,
+               updated_at = excluded.updated_at`,
+            [
+              schedule.id,
+              schedule.group_id || schedule.groupId,
+              Number(schedule.day_of_week ?? schedule.dayOfWeek),
+              schedule.start_time || schedule.startTime,
+              schedule.end_time || schedule.endTime,
+              schedule.center_id || schedule.centerId || centerId,
+              schedule.status || "active",
+              schedule.created_at || schedule.createdAt || new Date().toISOString(),
+              schedule.updated_at || schedule.updatedAt || new Date().toISOString(),
             ],
           );
         }
@@ -490,8 +610,21 @@ export class SyncEngine {
       if (Array.isArray(data.sessions)) {
         for (const sess of data.sessions) {
           db.runSync(
-            `INSERT OR REPLACE INTO sessions (id, center_id, group_id, session_date, start_time, end_time, status)
-             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            `INSERT INTO sessions
+               (id, center_id, group_id, session_date, start_time, end_time, status, schedule_id, subject_id, teacher_id, session_price, late_after_minutes, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET
+               group_id = excluded.group_id,
+               session_date = excluded.session_date,
+               start_time = excluded.start_time,
+               end_time = excluded.end_time,
+               status = excluded.status,
+               schedule_id = excluded.schedule_id,
+               subject_id = excluded.subject_id,
+               teacher_id = excluded.teacher_id,
+               session_price = excluded.session_price,
+               late_after_minutes = excluded.late_after_minutes,
+               updated_at = excluded.updated_at`,
             [
               sess.id,
               sess.center_id || centerId,
@@ -500,6 +633,13 @@ export class SyncEngine {
               sess.start_time || sess.startTime,
               sess.end_time || sess.endTime,
               sess.status || "open",
+              sess.schedule_id || sess.scheduleId || null,
+              sess.subject_id || sess.subjectId || null,
+              sess.teacher_id || sess.teacherId || null,
+              Number(sess.session_price ?? sess.sessionPrice ?? 0),
+              Number(sess.late_after_minutes ?? sess.lateAfterMinutes ?? 15),
+              sess.created_at || sess.createdAt || new Date().toISOString(),
+              sess.updated_at || sess.updatedAt || new Date().toISOString(),
             ],
           );
         }
@@ -509,8 +649,17 @@ export class SyncEngine {
       if (Array.isArray(data.enrollments)) {
         for (const enr of data.enrollments) {
           db.runSync(
-            `INSERT OR REPLACE INTO student_group_enrollments (id, center_id, student_id, group_id, start_date, status, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            `INSERT INTO student_group_enrollments
+               (id, center_id, student_id, group_id, start_date, end_date, status, special_monthly_price, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET
+               student_id = excluded.student_id,
+               group_id = excluded.group_id,
+               start_date = excluded.start_date,
+               end_date = excluded.end_date,
+               status = excluded.status,
+               special_monthly_price = excluded.special_monthly_price,
+               updated_at = excluded.updated_at`,
             [
               enr.id,
               enr.center_id || centerId,
@@ -519,16 +668,93 @@ export class SyncEngine {
               enr.start_date ||
                 enr.joined_at ||
                 new Date().toISOString().slice(0, 10),
-              enr.status || "active",
+              enr.end_date || enr.ended_at || null,
+              enr.status === "withdrawn" ? "ended" : (enr.status || "active"),
+              enr.special_monthly_price ?? enr.specialMonthlyPrice ?? enr.price_override ?? enr.priceOverride ?? null,
               enr.created_at || new Date().toISOString(),
+              enr.updated_at || new Date().toISOString(),
             ],
           );
+        }
+      }
+
+      if (Array.isArray(data.packages)) {
+        for (const p of data.packages) {
+          db.runSync(`INSERT INTO packages (id, center_id, name, price, description, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET name=excluded.name, price=excluded.price, description=excluded.description, status=excluded.status, updated_at=excluded.updated_at`,
+            [p.id, p.center_id || centerId, p.name || "", Number(p.price ?? p.total_price ?? p.totalPrice ?? 0), p.description || null, p.status || "active", p.created_at || new Date().toISOString(), p.updated_at || new Date().toISOString()]);
+        }
+      }
+      if (Array.isArray(data.packageSubjects)) {
+        for (const p of data.packageSubjects) {
+          db.runSync(`INSERT INTO package_subjects (id, center_id, package_id, subject_id, default_teacher_id, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET package_id=excluded.package_id, subject_id=excluded.subject_id, default_teacher_id=excluded.default_teacher_id`,
+            [p.id, p.center_id || centerId, p.package_id || p.packageId, p.subject_id || p.subjectId, p.default_teacher_id || p.defaultTeacherId || "", p.created_at || new Date().toISOString()]);
+        }
+      }
+      if (Array.isArray(data.packageSubscriptions)) {
+        for (const s of data.packageSubscriptions) {
+          db.runSync(`INSERT INTO student_package_subscriptions (id, center_id, student_id, package_id, start_date, end_date, cancellation_date, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET student_id=excluded.student_id, package_id=excluded.package_id, start_date=excluded.start_date, end_date=excluded.end_date, cancellation_date=excluded.cancellation_date, status=excluded.status, updated_at=excluded.updated_at`,
+            [s.id, s.center_id || centerId, s.student_id || s.studentId, s.package_id || s.packageId, s.start_date || s.startDate || new Date().toISOString().slice(0,10), s.end_date || s.endDate || null, s.cancellation_date || s.cancellationDate || null, s.status || "active", s.created_at || new Date().toISOString(), s.updated_at || new Date().toISOString()]);
+        }
+      }
+      if (Array.isArray(data.packageTeacherOverrides)) {
+        for (const o of data.packageTeacherOverrides) {
+          db.runSync(`INSERT INTO package_subject_teacher_overrides (id, center_id, subscription_id, subject_id, teacher_id, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET teacher_id=excluded.teacher_id`,
+            [o.id, o.center_id || centerId, o.subscription_id || o.subscriptionId, o.subject_id || o.subjectId, o.teacher_id || o.teacherId, o.created_at || new Date().toISOString()]);
+        }
+      }
+      if (Array.isArray(data.debtCycles)) {
+        for (const c of data.debtCycles) {
+          db.runSync(`INSERT INTO debt_cycles (id, center_id, student_id, enrollment_id, group_id, cycle_number, start_date, end_date, cycle_price, status, created_at, updated_at, package_subscription_id, cycle_type)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET student_id=excluded.student_id, enrollment_id=excluded.enrollment_id, start_date=excluded.start_date, end_date=excluded.end_date, cycle_price=excluded.cycle_price, status=excluded.status, updated_at=excluded.updated_at, package_subscription_id=excluded.package_subscription_id, cycle_type=excluded.cycle_type`,
+            [c.id, c.center_id || centerId, c.student_id || c.studentId, c.enrollment_id || c.enrollmentId || "", c.group_id || c.groupId || "", Number(c.cycle_number || c.cycleNumber || 1), c.start_date || c.period_start || new Date().toISOString().slice(0,10), c.end_date || c.period_end || new Date().toISOString().slice(0,10), Number(c.cycle_price ?? c.amount_due ?? c.amountDue ?? 0), c.status === "pending" ? "open" : (c.status || "open"), c.created_at || new Date().toISOString(), c.updated_at || new Date().toISOString(), c.package_subscription_id || c.packageSubscriptionId || null, c.cycle_type || c.cycleType || "monthly"]);
+        }
+      }
+      if (Array.isArray(data.notificationEvents)) {
+        for (const e of data.notificationEvents) {
+          db.runSync(`INSERT INTO notification_events (id, operation_id, center_id, student_id, session_id, attendance_id, event_type, template_id, created_by, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET event_type=excluded.event_type, template_id=excluded.template_id`,
+            [e.id, e.operation_id || `bootstrap-${e.id}`, e.center_id || centerId, e.student_id || e.studentId, e.session_id || e.sessionId || "", e.attendance_id || e.attendanceId || null, e.event_type || e.eventType || "", e.template_id || e.templateId || null, e.created_by || e.createdBy || "system", e.created_at || new Date().toISOString()]);
+        }
+      }
+      if (Array.isArray(data.notificationDeliveries)) {
+        for (const d of data.notificationDeliveries) {
+          db.runSync(`INSERT INTO notification_deliveries (id, center_id, notification_event_id, channel, status, recipient, rendered_message, sent_at, failure_reason, retry_count, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET channel=excluded.channel, status=excluded.status, sent_at=excluded.sent_at, failure_reason=excluded.failure_reason, retry_count=excluded.retry_count, updated_at=excluded.updated_at`,
+            [d.id, d.center_id || centerId, d.notification_event_id || d.notificationEventId, d.provider || d.channel || "push", d.status || "pending", d.recipient || "", d.rendered_message || d.renderedMessage || "", d.sent_at || d.sentAt || null, d.failure_reason || d.failureReason || (d.response_payload ? JSON.stringify(d.response_payload) : null), Number(d.retry_count || 0), d.created_at || new Date().toISOString(), d.updated_at || new Date().toISOString()]);
+        }
+      }
+      if (Array.isArray(data.sessionClosings)) {
+        for (const c of data.sessionClosings) {
+          db.runSync(`INSERT INTO session_closing_records (id, operation_id, center_id, session_id, action, reason, performed_by, performed_at, previous_status, new_status, total_attendance, total_session_payments, created_at)
+            VALUES (?, ?, ?, ?, 'close', ?, ?, ?, 'open', 'closed', ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET new_status='closed', total_attendance=excluded.total_attendance, total_session_payments=excluded.total_session_payments`,
+            [c.id, `bootstrap-${c.id}`, c.center_id || centerId, c.session_id || c.sessionId, c.discrepancy_notes || null, c.closed_by || c.closedBy || "system", c.closed_at || new Date().toISOString(), Number(c.total_present || 0), Number(c.total_collected || 0), c.closed_at || new Date().toISOString()]);
+        }
+      }
+      if (Array.isArray(data.dailyClosings)) {
+        for (const c of data.dailyClosings) {
+          db.runSync(`INSERT INTO daily_closing_summaries (id, operation_id, center_id, business_date, status, closed_by, closed_at, total_cash, payment_count, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET status=excluded.status, closed_by=excluded.closed_by, closed_at=excluded.closed_at, total_cash=excluded.total_cash, payment_count=excluded.payment_count, updated_at=excluded.updated_at`,
+            [c.id, `bootstrap-${c.id}`, c.center_id || centerId, c.business_date || c.businessDate, c.status || "closed", c.closed_by || c.closedBy || null, c.closed_at || c.closedAt || null, Number(c.cash_in_drawer ?? c.total_revenue ?? 0), Number(c.payment_count || 0), c.closed_at || new Date().toISOString(), new Date().toISOString()]);
         }
       }
 
       if (data.latestServerSeq > 0) {
         SyncRepository.setServerCursor(centerId, String(data.latestServerSeq));
       }
+      });
     } catch (bootstrapErr) {
       console.warn("Bootstrap center error:", bootstrapErr);
     }
@@ -547,44 +773,275 @@ export class SyncEngine {
         if (entityType === "student" || entityType === "student_created") {
           const s = data.student || data;
           const studentId = s.id || change.entityId;
+          const existingStudent = db.getFirstSync<any>(
+            `SELECT student_code, card_code, full_name, phone, parent_phone, grade, status, student_type, notes, created_at, updated_at
+             FROM students WHERE center_id = ? AND id = ?`,
+            [centerId, studentId],
+          );
           const studentCode =
-            s.student_code || s.studentCode || s.card_code || s.cardCode || "";
-          const cardCode = s.card_code || s.cardCode || studentCode;
+            s.student_code || s.studentCode || s.card_code || s.cardCode || existingStudent?.student_code || existingStudent?.card_code || "";
+          const cardCode = s.card_code || s.cardCode || existingStudent?.card_code || studentCode;
+          const cardWasProvided = Boolean(data.card || !existingStudent);
 
           db.runSync(
-            `INSERT OR REPLACE INTO students (id, center_id, student_code, full_name, card_code, phone, parent_phone, grade, status, student_type, notes, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            `INSERT INTO students (id, center_id, student_code, full_name, card_code, phone, parent_phone, grade, status, student_type, notes, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET student_code=excluded.student_code, card_code=excluded.card_code, full_name=excluded.full_name, phone=excluded.phone, parent_phone=excluded.parent_phone, grade=excluded.grade, status=excluded.status, student_type=excluded.student_type, notes=excluded.notes, updated_at=excluded.updated_at`,
             [
               studentId,
               centerId,
               studentCode,
-              s.full_name || s.fullName || "",
+              s.full_name || s.fullName || existingStudent?.full_name || "",
               cardCode,
-              s.phone || "",
-              s.parent_phone || s.parentPhone || "",
-              s.grade || "",
-              s.status || "active",
-              s.student_type || s.studentType || "registered",
-              s.notes || null,
-              s.created_at || new Date().toISOString(),
-              s.updated_at || new Date().toISOString(),
+              s.phone || existingStudent?.phone || "",
+              s.parent_phone || s.parentPhone || existingStudent?.parent_phone || "",
+              s.grade || existingStudent?.grade || "",
+              s.status || existingStudent?.status || "active",
+              s.student_type || s.studentType || existingStudent?.student_type || "registered",
+              s.notes !== undefined ? s.notes : (existingStudent?.notes || null),
+              s.created_at || existingStudent?.created_at || new Date().toISOString(),
+              s.updated_at || s.updatedAt || existingStudent?.updated_at || new Date().toISOString(),
             ],
           );
 
-          if (cardCode) {
+          if (cardCode && cardWasProvided) {
             db.runSync(
-              `INSERT OR REPLACE INTO student_cards (id, center_id, student_id, card_code, status, issued_at, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)`,
+              `INSERT INTO student_cards (id, center_id, student_id, card_code, status, issued_at, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(id) DO UPDATE SET student_id=excluded.student_id, card_code=excluded.card_code, status=excluded.status, issued_at=excluded.issued_at`,
               [
                 `card-${studentId}`,
                 centerId,
                 studentId,
                 cardCode,
-                s.status || "active",
+                s.status || existingStudent?.status || "active",
                 new Date().toISOString(),
                 new Date().toISOString(),
               ],
             );
+          }
+        } else if (entityType === "student_card") {
+          const card = data.card || data;
+          const cardId = card.id || change.entityId;
+          const studentId = card.student_id || card.studentId;
+          const cardCode = String(card.card_code || card.cardCode || "").trim();
+          const action = String(change.action || "").toUpperCase();
+          const isDeactivation = action === "DELETE" || card.status === "deactivated" || card.status === "lost" || card.status === "inactive";
+          if (!cardId || !studentId || (!cardCode && !isDeactivation)) {
+            throw new Error("Invalid student card change from server");
+          }
+          if (
+            isDeactivation
+          ) {
+            db.runSync(
+              `UPDATE student_cards SET status = ?, deactivated_at = ?
+               WHERE id = ? AND center_id = ?`,
+              [
+                "inactive",
+                new Date().toISOString(),
+                cardId,
+                centerId,
+              ],
+            );
+          } else {
+            db.runSync(
+              `UPDATE student_cards SET status = 'deactivated', deactivated_at = ?
+               WHERE center_id = ? AND student_id = ? AND status = 'active' AND id <> ?`,
+              [new Date().toISOString(), centerId, studentId, cardId],
+            );
+            const existingByCode = db.getFirstSync<any>(
+              `SELECT id, student_id as studentId FROM student_cards
+               WHERE center_id = ? AND card_code = ?`,
+              [centerId, cardCode],
+            );
+            if (existingByCode && existingByCode.studentId !== studentId) {
+              throw new Error("Card code is owned by another student");
+            }
+            if (existingByCode && existingByCode.id !== cardId) {
+              db.runSync(
+                `UPDATE student_cards SET status = 'active', deactivated_at = NULL, issued_at = ?, created_at = COALESCE(created_at, ?)
+                 WHERE id = ? AND center_id = ?`,
+                [
+                  card.issued_at || card.issuedAt || new Date().toISOString(),
+                  card.created_at || card.createdAt || new Date().toISOString(),
+                  existingByCode.id,
+                  centerId,
+                ],
+              );
+            } else {
+            db.runSync(
+              `INSERT INTO student_cards
+                 (id, center_id, student_id, card_code, status, issued_at, deactivated_at, created_at)
+               VALUES (?, ?, ?, ?, 'active', ?, NULL, ?)
+               ON CONFLICT(id) DO UPDATE SET
+                 center_id = excluded.center_id,
+                 student_id = excluded.student_id,
+                 card_code = excluded.card_code,
+                 status = 'active',
+                 issued_at = excluded.issued_at,
+                 deactivated_at = NULL`,
+              [
+                cardId,
+                centerId,
+                studentId,
+                cardCode,
+                card.issued_at || card.issuedAt || new Date().toISOString(),
+                card.created_at || card.createdAt || new Date().toISOString(),
+              ],
+            );
+            }
+          }
+        } else if (entityType === "enrollment" || entityType === "student_group_enrollment") {
+          const enrollment = data.enrollment || data;
+          const enrollmentId = enrollment.id || change.entityId;
+          db.runSync(
+            `INSERT INTO student_group_enrollments
+               (id, center_id, student_id, group_id, start_date, end_date, status, special_monthly_price, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET
+               student_id = excluded.student_id,
+               group_id = excluded.group_id,
+               start_date = excluded.start_date,
+               end_date = excluded.end_date,
+               status = excluded.status,
+               special_monthly_price = excluded.special_monthly_price,
+               updated_at = excluded.updated_at`,
+            [
+              enrollmentId,
+              centerId,
+              enrollment.student_id || enrollment.studentId,
+              enrollment.group_id || enrollment.groupId,
+              enrollment.start_date || enrollment.startDate || enrollment.joined_at || enrollment.joinedAt || new Date().toISOString().slice(0, 10),
+              enrollment.end_date || enrollment.endDate || enrollment.ended_at || enrollment.endedAt || null,
+              enrollment.status === "withdrawn" ? "ended" : (enrollment.status || "active"),
+              enrollment.special_monthly_price ?? enrollment.specialMonthlyPrice ?? enrollment.price_override ?? enrollment.priceOverride ?? null,
+              enrollment.created_at || enrollment.createdAt || new Date().toISOString(),
+              enrollment.updated_at || enrollment.updatedAt || new Date().toISOString(),
+            ],
+          );
+        } else if (entityType === "teacher_subject" || entityType === "teacher_subject_assigned") {
+          const link = data.teacherSubject || data;
+          const teacherId = link.teacher_id || link.teacherId;
+          const subjectId = link.subject_id || link.subjectId;
+          if (!teacherId || !subjectId) throw new Error("Invalid teacher-subject change from server");
+          if (String(change.action || "").toUpperCase() === "DELETE" || link.status === "inactive") {
+            db.runSync(
+              `DELETE FROM teacher_subjects WHERE center_id = ? AND teacher_id = ? AND subject_id = ?`,
+              [centerId, teacherId, subjectId],
+            );
+          } else {
+            db.runSync(
+              `INSERT OR IGNORE INTO teacher_subjects (id, center_id, teacher_id, subject_id, created_at)
+               VALUES (?, ?, ?, ?, ?)`,
+              [
+                link.id || `ts-${centerId}-${teacherId}-${subjectId}`,
+                centerId,
+                teacherId,
+                subjectId,
+                link.created_at || link.createdAt || new Date().toISOString(),
+              ],
+            );
+          }
+        } else if (entityType === "group_schedule") {
+          const schedule = data.schedule || data;
+          const scheduleId = schedule.id || change.entityId;
+          if (String(change.action || "").toUpperCase() === "DELETE" || schedule.status === "inactive") {
+            db.runSync(
+              `UPDATE group_schedules SET status = 'inactive', updated_at = ? WHERE id = ? AND center_id = ?`,
+              [new Date().toISOString(), scheduleId, centerId],
+            );
+          } else {
+            db.runSync(
+              `INSERT INTO group_schedules (id, group_id, day_of_week, start_time, end_time, center_id, status, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(id) DO UPDATE SET
+                 group_id = excluded.group_id,
+                 day_of_week = excluded.day_of_week,
+                 start_time = excluded.start_time,
+                 end_time = excluded.end_time,
+                 center_id = excluded.center_id,
+                 status = excluded.status,
+                 updated_at = excluded.updated_at`,
+              [
+                scheduleId,
+                schedule.group_id || schedule.groupId,
+                Number(schedule.day_of_week ?? schedule.dayOfWeek),
+                schedule.start_time || schedule.startTime,
+                schedule.end_time || schedule.endTime,
+                centerId,
+                schedule.status || "active",
+                schedule.created_at || schedule.createdAt || new Date().toISOString(),
+                schedule.updated_at || schedule.updatedAt || new Date().toISOString(),
+              ],
+            );
+          }
+        } else if (entityType === "session" || entityType === "session_created") {
+          const session = data.session || data;
+          const sessionId = session.id || session.sessionId || change.entityId;
+          const existingSession = db.getFirstSync<any>(`SELECT group_id, session_date, start_time, end_time, schedule_id, subject_id, teacher_id, session_price, late_after_minutes, created_at FROM sessions WHERE center_id = ? AND id = ?`, [centerId, sessionId]);
+          const sessionAction = String(session.action || change.action || "").toLowerCase();
+          const requestedSessionStatus = sessionAction === "close" ? "closed" : sessionAction === "reopen" ? "open" : (session.status || "open");
+          db.runSync(
+            `INSERT INTO sessions
+               (id, center_id, group_id, session_date, start_time, end_time, status, schedule_id, subject_id, teacher_id, session_price, late_after_minutes, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET
+               group_id = excluded.group_id,
+               session_date = excluded.session_date,
+               start_time = excluded.start_time,
+               end_time = excluded.end_time,
+               status = excluded.status,
+               schedule_id = excluded.schedule_id,
+               subject_id = excluded.subject_id,
+               teacher_id = excluded.teacher_id,
+               session_price = excluded.session_price,
+               late_after_minutes = excluded.late_after_minutes,
+               updated_at = excluded.updated_at`,
+            [
+              sessionId,
+              centerId,
+              session.group_id || session.groupId || existingSession?.group_id || "",
+              session.session_date || session.sessionDate || existingSession?.session_date || new Date().toISOString().slice(0,10),
+              session.start_time || session.startTime || existingSession?.start_time || "00:00",
+              session.end_time || session.endTime || existingSession?.end_time || "00:00",
+              requestedSessionStatus,
+              session.schedule_id || session.scheduleId || existingSession?.schedule_id || null,
+              session.subject_id || session.subjectId || existingSession?.subject_id || null,
+              session.teacher_id || session.teacherId || existingSession?.teacher_id || null,
+              Number(session.session_price ?? session.sessionPrice ?? existingSession?.session_price ?? 0),
+              Number(session.late_after_minutes ?? session.lateAfterMinutes ?? existingSession?.late_after_minutes ?? 15),
+              session.created_at || session.createdAt || existingSession?.created_at || new Date().toISOString(),
+              session.updated_at || session.updatedAt || new Date().toISOString(),
+            ],
+          );
+          if (Array.isArray(session.expectedStudentIds)) {
+            for (const studentId of session.expectedStudentIds) {
+              db.runSync(
+                `INSERT OR IGNORE INTO session_expected_students
+                   (id, center_id, session_id, student_id, created_at)
+                 VALUES (?, ?, ?, ?, ?)`,
+                [
+                  `exp-${sessionId}-${studentId}`,
+                  centerId,
+                  sessionId,
+                  studentId,
+                  session.created_at || session.createdAt || new Date().toISOString(),
+                ],
+              );
+            }
+          }
+          if (sessionAction === "close" || sessionAction === "reopen") {
+            if (sessionAction === "reopen") {
+              db.runSync(`INSERT INTO session_closing_records (id, operation_id, center_id, session_id, action, reason, performed_by, performed_at, previous_status, new_status, total_attendance, total_session_payments, created_at)
+                VALUES (?, ?, ?, ?, 'reopen', ?, ?, ?, 'closed', 'open', 0, 0, ?)
+                ON CONFLICT(operation_id) DO NOTHING`,
+                [session.closingRecordId || `reopen-${sessionId}-${change.operationId || Date.now()}`, change.operationId || `srv-reopen-${sessionId}`, centerId, sessionId, session.reason || null, session.performedBy || "system", session.performedAt || new Date().toISOString(), new Date().toISOString()]);
+            } else {
+              db.runSync(`INSERT INTO session_closing_records (id, operation_id, center_id, session_id, action, reason, performed_by, performed_at, previous_status, new_status, total_attendance, total_session_payments, created_at)
+                VALUES (?, ?, ?, ?, 'close', ?, ?, ?, 'open', 'closed', ?, ?, ?)
+                ON CONFLICT(operation_id) DO NOTHING`,
+                [session.closingRecordId || `close-${sessionId}`, change.operationId || `srv-close-${sessionId}`, centerId, sessionId, session.reason || null, session.performedBy || "system", session.performedAt || new Date().toISOString(), Number(session.totalAttendance || 0), Number(session.totalSessionPayments || 0), new Date().toISOString()]);
+            }
           }
         } else if (
           entityType === "teacher" ||
@@ -594,7 +1051,8 @@ export class SyncEngine {
           const t = data.teacher || data;
           const teacherId = t.id || change.entityId;
           db.runSync(
-            `INSERT OR REPLACE INTO teachers (id, center_id, name, phone, status, notes, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            `INSERT INTO teachers (id, center_id, name, phone, status, notes, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET name=excluded.name, phone=excluded.phone, status=excluded.status, notes=excluded.notes, updated_at=excluded.updated_at`,
             [
               teacherId,
               centerId,
@@ -614,7 +1072,8 @@ export class SyncEngine {
           const s = data.subject || data;
           const subjectId = s.id || change.entityId;
           db.runSync(
-            `INSERT OR REPLACE INTO subjects (id, center_id, name, code, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            `INSERT INTO subjects (id, center_id, name, code, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET name=excluded.name, code=excluded.code, status=excluded.status, updated_at=excluded.updated_at`,
             [
               subjectId,
               centerId,
@@ -640,7 +1099,8 @@ export class SyncEngine {
             g.monthly_price || g.monthlyPrice || defaultFee * 4,
           );
           db.runSync(
-            `INSERT OR REPLACE INTO groups (id, center_id, name, teacher_id, subject_id, grade, default_fee, session_price, monthly_price, session_duration_minutes, late_after_minutes, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            `INSERT INTO groups (id, center_id, name, teacher_id, subject_id, grade, default_fee, session_price, monthly_price, session_duration_minutes, late_after_minutes, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET name=excluded.name, teacher_id=excluded.teacher_id, subject_id=excluded.subject_id, grade=excluded.grade, default_fee=excluded.default_fee, session_price=excluded.session_price, monthly_price=excluded.monthly_price, session_duration_minutes=excluded.session_duration_minutes, late_after_minutes=excluded.late_after_minutes, status=excluded.status, updated_at=excluded.updated_at`,
             [
               groupId,
               centerId,
@@ -653,7 +1113,7 @@ export class SyncEngine {
               monthlyPrice,
               Number(g.session_duration_minutes || 120),
               Number(g.late_after_minutes || 15),
-              g.status || "active",
+              g.status === "archived" ? "inactive" : (g.status || "active"),
               g.created_at || new Date().toISOString(),
               g.updated_at || new Date().toISOString(),
             ],
@@ -679,8 +1139,9 @@ export class SyncEngine {
           const att = data;
           const attId = att.id || change.entityId;
           db.runSync(
-            `INSERT OR REPLACE INTO attendance (id, center_id, student_id, session_id, check_in_time, status, is_late, attendance_type, original_absence_id, operation_id)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            `INSERT INTO attendance (id, center_id, student_id, session_id, check_in_time, status, is_late, attendance_type, original_absence_id, operation_id)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET status=excluded.status, check_in_time=excluded.check_in_time, is_late=excluded.is_late, attendance_type=excluded.attendance_type, original_absence_id=excluded.original_absence_id`,
             [
               attId,
               centerId,
@@ -691,18 +1152,19 @@ export class SyncEngine {
               att.is_late || att.isLate ? 1 : 0,
               att.attendance_type || att.attendanceType || "present",
               att.original_absence_id || att.originalAbsenceId || null,
-              `srv-op-${change.sequenceNumber || Date.now()}`,
+              change.operationId || `srv-op-${change.sequenceNumber || Date.now()}`,
             ],
           );
         } else if (entityType === "payment") {
           const pay = data;
           const payId = pay.id || change.entityId;
           db.runSync(
-            `INSERT OR REPLACE INTO payments (id, operation_id, center_id, student_id, amount, payment_type, created_at, user_id)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            `INSERT INTO payments (id, operation_id, center_id, student_id, amount, payment_type, created_at, user_id)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET amount=excluded.amount, payment_type=excluded.payment_type`,
             [
               payId,
-              pay.operation_id || `srv-pay-${payId}`,
+              change.operationId || pay.operation_id || pay.operationId || `srv-pay-${payId}`,
               centerId,
               pay.student_id || pay.studentId,
               parseFloat(pay.amount || 0),
@@ -711,9 +1173,88 @@ export class SyncEngine {
               pay.user_id || "system",
             ],
           );
+        } else if (entityType === "payment_reversal") {
+          const rev = data.reversal || data;
+          const paymentId = rev.payment_id || rev.paymentId;
+          db.runSync(`UPDATE payments SET is_reversed = 1, updated_at = ? WHERE id = ? AND center_id = ?`, [new Date().toISOString(), paymentId, centerId]);
+          db.runSync(`INSERT INTO payment_reversals (id, operation_id, center_id, payment_id, student_id, reversed_amount, reason, reversed_by, reversed_at, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(operation_id) DO NOTHING`,
+            [rev.id || change.entityId, change.operationId || `srv-reversal-${rev.id || change.entityId}`, centerId, paymentId, rev.student_id || rev.studentId || "", Number(rev.reversed_amount ?? rev.reversedAmount ?? 0), rev.reason || "", rev.reversed_by || rev.reversedBy || "system", rev.reversed_at || rev.reversedAt || new Date().toISOString(), rev.created_at || new Date().toISOString()]);
+        } else if (entityType === "debt_adjustment") {
+          const a = data.adjustment || data;
+          db.runSync(`INSERT INTO debt_adjustments (id, operation_id, center_id, student_id, enrollment_id, debt_cycle_id, amount_before, adjustment_amount, amount_after, reason, created_by, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(operation_id) DO NOTHING`,
+            [a.id || change.entityId, change.operationId || `srv-adjustment-${a.id || change.entityId}`, centerId, a.student_id || a.studentId || "", a.enrollment_id || a.enrollmentId || null, a.debt_cycle_id || a.debtCycleId || "", Number(a.amount_before ?? a.amountBefore ?? 0), Number(a.adjustment_amount ?? a.adjustmentAmount ?? a.amount ?? 0), Number(a.amount_after ?? a.amountAfter ?? 0), a.reason || "", a.created_by || a.createdBy || "system", a.created_at || new Date().toISOString()]);
+        } else if (entityType === "package") {
+          const p = data.package || data;
+          db.runSync(`INSERT INTO packages (id, center_id, name, price, description, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET name=excluded.name, price=excluded.price, description=excluded.description, status=excluded.status, updated_at=excluded.updated_at`,
+            [p.id || change.entityId, centerId, p.name || "", Number(p.price ?? p.total_price ?? p.totalPrice ?? 0), p.description || null, p.status || "active", p.created_at || new Date().toISOString(), p.updated_at || new Date().toISOString()]);
+        } else if (entityType === "package_subject") {
+          const p = data.packageSubject || data;
+          const packageAction = String(change.action || "").toUpperCase();
+          const remove = packageAction === "DELETE" || packageAction.includes("REMOVE") || p.status === "inactive";
+          if (remove) db.runSync(`DELETE FROM package_subjects WHERE center_id=? AND package_id=? AND subject_id=?`, [centerId, p.package_id || p.packageId, p.subject_id || p.subjectId]);
+          else db.runSync(`INSERT INTO package_subjects (id, center_id, package_id, subject_id, default_teacher_id, created_at) VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET package_id=excluded.package_id, subject_id=excluded.subject_id, default_teacher_id=excluded.default_teacher_id`,
+            [p.id || change.entityId, centerId, p.package_id || p.packageId, p.subject_id || p.subjectId, p.default_teacher_id || p.defaultTeacherId || p.teacher_id || p.teacherId || "", p.created_at || new Date().toISOString()]);
+        } else if (entityType === "package_subscription") {
+          const s = data.subscription || data;
+          db.runSync(`INSERT INTO student_package_subscriptions (id, center_id, student_id, package_id, start_date, end_date, cancellation_date, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET student_id=excluded.student_id, package_id=excluded.package_id, start_date=excluded.start_date, end_date=excluded.end_date, cancellation_date=excluded.cancellation_date, status=excluded.status, updated_at=excluded.updated_at`,
+            [s.id || change.entityId, centerId, s.student_id || s.studentId, s.package_id || s.packageId, s.start_date || s.startDate || new Date().toISOString().slice(0,10), s.end_date || s.endDate || null, s.cancellation_date || s.cancellationDate || null, s.status || "active", s.created_at || new Date().toISOString(), s.updated_at || new Date().toISOString()]);
+        } else if (entityType === "package_teacher_override") {
+          const o = data.override || data;
+          const overrideAction = String(change.action || "").toUpperCase();
+          const remove = overrideAction === "DELETE" || overrideAction.includes("REMOVE") || o.status === "inactive";
+          if (remove) db.runSync(`DELETE FROM package_subject_teacher_overrides WHERE center_id=? AND subscription_id=? AND subject_id=?`, [centerId, o.subscription_id || o.subscriptionId, o.subject_id || o.subjectId]);
+          else db.runSync(`INSERT INTO package_subject_teacher_overrides (id, center_id, subscription_id, subject_id, teacher_id, created_at) VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET teacher_id=excluded.teacher_id`,
+            [o.id || change.entityId, centerId, o.subscription_id || o.subscriptionId, o.subject_id || o.subjectId, o.teacher_id || o.teacherId, o.created_at || new Date().toISOString()]);
+        } else if (entityType === "debt_cycle") {
+          const c = data.debtCycle || data;
+          db.runSync(`INSERT INTO debt_cycles (id, center_id, student_id, enrollment_id, group_id, cycle_number, start_date, end_date, cycle_price, status, created_at, updated_at, package_subscription_id, cycle_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET student_id=excluded.student_id, enrollment_id=excluded.enrollment_id, start_date=excluded.start_date, end_date=excluded.end_date, cycle_price=excluded.cycle_price, status=excluded.status, updated_at=excluded.updated_at, package_subscription_id=excluded.package_subscription_id, cycle_type=excluded.cycle_type`,
+            [c.id || change.entityId, centerId, c.student_id || c.studentId, c.enrollment_id || c.enrollmentId || "", c.group_id || c.groupId || "", Number(c.cycle_number || c.cycleNumber || 1), c.start_date || c.period_start || new Date().toISOString().slice(0,10), c.end_date || c.period_end || new Date().toISOString().slice(0,10), Number(c.cycle_price ?? c.cyclePrice ?? c.amount_due ?? c.amountDue ?? 0), c.status === "pending" ? "open" : (c.status || "open"), c.created_at || new Date().toISOString(), c.updated_at || new Date().toISOString(), c.package_subscription_id || c.packageSubscriptionId || null, c.cycle_type || c.cycleType || "monthly"]);
+        } else if (entityType === "advance_coverage") {
+          const c = data.coverage || data;
+          db.runSync(`INSERT INTO advance_coverages (id, operation_id, center_id, student_id, advance_session_id, target_future_session_id, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET target_future_session_id=excluded.target_future_session_id`,
+            [c.id || change.entityId, change.operationId || `srv-coverage-${c.id || change.entityId}`, centerId, c.student_id || c.studentId, c.advance_session_id || c.advanceSessionId, c.target_future_session_id || c.targetFutureSessionId, c.created_by || c.createdBy || "system", c.created_at || new Date().toISOString()]);
+        } else if (entityType === "notification_event") {
+          const e = data.event || data;
+          db.runSync(`INSERT INTO notification_events (id, operation_id, center_id, student_id, session_id, attendance_id, event_type, template_id, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET event_type=excluded.event_type, template_id=excluded.template_id`,
+            [e.id || e.eventId || change.entityId, change.operationId || e.operation_id || `srv-notif-${e.id || change.entityId}`, centerId, e.student_id || e.studentId, e.session_id || e.sessionId || "", e.attendance_id || e.attendanceId || null, e.event_type || e.eventType || "", e.template_id || e.templateId || null, e.created_by || e.createdBy || "system", e.created_at || new Date().toISOString()]);
+        } else if (entityType === "notification_delivery") {
+          const d = data.delivery || data;
+          db.runSync(`INSERT INTO notification_deliveries (id, center_id, notification_event_id, channel, status, recipient, rendered_message, sent_at, failure_reason, retry_count, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET channel=excluded.channel, status=excluded.status, sent_at=excluded.sent_at, failure_reason=excluded.failure_reason, retry_count=excluded.retry_count, updated_at=excluded.updated_at`,
+            [d.id || change.entityId, centerId, d.notification_event_id || d.notificationEventId, d.provider || d.channel || "push", d.status || "pending", d.recipient || "", d.rendered_message || d.renderedMessage || "", d.sent_at || d.sentAt || null, d.failure_reason || d.failureReason || null, Number(d.retry_count || 0), d.created_at || new Date().toISOString(), d.updated_at || new Date().toISOString()]);
+        } else if (entityType === "session_closing") {
+          const c = data.closing || data;
+          const sessionId = c.session_id || c.sessionId || change.entityId;
+          const reopen = String(c.action || change.action || "").toLowerCase() === "reopen";
+          db.runSync(`UPDATE sessions SET status=?, updated_at=? WHERE id=? AND center_id=?`, [reopen ? "open" : "closed", new Date().toISOString(), sessionId, centerId]);
+          if (reopen) db.runSync(`DELETE FROM session_closing_records WHERE center_id=? AND session_id=?`, [centerId, sessionId]);
+          else db.runSync(`INSERT INTO session_closing_records (id, operation_id, center_id, session_id, action, reason, performed_by, performed_at, previous_status, new_status, total_attendance, total_session_payments, created_at) VALUES (?, ?, ?, ?, 'close', ?, ?, ?, 'open', 'closed', ?, ?, ?)
+            ON CONFLICT(operation_id) DO NOTHING`, [c.id || `close-${sessionId}`, change.operationId || `srv-close-${sessionId}`, centerId, sessionId, c.reason || null, c.performed_by || c.performedBy || "system", c.performed_at || c.performedAt || new Date().toISOString(), Number(c.total_attendance ?? c.totalAttendance ?? 0), Number(c.total_session_payments ?? c.totalSessionPayments ?? 0), new Date().toISOString()]);
+        } else if (entityType === "daily_closing") {
+          const c = data.closing || data;
+          const dailyAction = String(c.action || change.action || "").toLowerCase();
+          const reopen = dailyAction === "reopen" || dailyAction.includes("reopen") || Boolean(c.reopenedBy || c.reopened_by || c.reason);
+          db.runSync(`INSERT INTO daily_closing_summaries (id, operation_id, center_id, business_date, status, closed_by, closed_at, reopened_by, reopened_at, reopen_reason, total_cash, payment_count, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET status=excluded.status, closed_by=excluded.closed_by, closed_at=excluded.closed_at, reopened_by=excluded.reopened_by, reopened_at=excluded.reopened_at, reopen_reason=excluded.reopen_reason, total_cash=excluded.total_cash, payment_count=excluded.payment_count, updated_at=excluded.updated_at`, [c.id || change.entityId, change.operationId || `srv-daily-${c.id || change.entityId}`, centerId, c.business_date || c.businessDate, reopen ? "open" : "closed", c.closed_by || c.closedBy || null, reopen ? null : (c.closed_at || c.closedAt || new Date().toISOString()), reopen ? (c.reopened_by || c.reopenedBy || "system") : null, reopen ? new Date().toISOString() : null, c.reason || null, Number(c.total_cash ?? c.totalCash ?? c.cash_in_drawer ?? 0), Number(c.payment_count || 0), new Date().toISOString(), new Date().toISOString()]);
+        } else {
+          // Never advance the cursor past a record we cannot apply locally.
+          // The next sync retries it after the app/backend has been upgraded.
+          throw new Error(`Unsupported server sync entity type: ${entityType}`);
         }
       } catch (applyErr) {
         console.warn("Failed to apply change:", change, applyErr);
+        throw applyErr;
       }
     }
   }
@@ -770,6 +1311,9 @@ export class SyncEngine {
     const batchSize = options?.batchSize || 50;
     const pullLimit = options?.pullLimit || 50;
 
+    // Recover mutations left in `syncing` by a crashed or force-closed app.
+    SyncRepository.recoverInterruptedOperations(centerId);
+
     let syncedCount = 0;
     let errors = 0;
     let conflicts = 0;
@@ -804,21 +1348,23 @@ export class SyncEngine {
 
       // 4. Pull Changes from Server with Monotonic Cursor
       try {
-        const pullResponse = await this.adapter.pullChanges(
-          centerId,
-          currentCursor,
-          pullLimit,
-        );
-
-        if (pullResponse.changes && pullResponse.changes.length > 0) {
-          this.applyServerChanges(centerId, pullResponse.changes);
-        }
-
-        if (
-          pullResponse.nextCursor &&
-          pullResponse.nextCursor !== currentCursor
-        ) {
-          SyncRepository.setServerCursor(centerId, pullResponse.nextCursor);
+        let hasMore = true;
+        let batches = 0;
+        while (hasMore && batches < 100) {
+          const pullResponse = await this.adapter.pullChanges(centerId, currentCursor, pullLimit);
+          if (pullResponse.changes && pullResponse.changes.length > 0) {
+            this.applyServerChanges(centerId, pullResponse.changes);
+          }
+          const nextCursor = pullResponse.nextCursor || currentCursor;
+          if (nextCursor === currentCursor && (pullResponse.hasMore || (pullResponse.changes?.length || 0) > 0)) {
+            throw new Error("Server returned pull changes without cursor progress");
+          }
+          if (nextCursor !== currentCursor) {
+            SyncRepository.setServerCursor(centerId, nextCursor);
+            currentCursor = nextCursor;
+          }
+          hasMore = Boolean(pullResponse.hasMore);
+          batches += 1;
         }
       } catch (pullErr: any) {
         // Pull failure is non-fatal — log it and continue to push phase.
@@ -875,6 +1421,7 @@ export class SyncEngine {
             SyncRepository.markAsConflict(
               conflict.operationId,
               `تضارب مع الخادم: ${conflict.reason} (${conflict.resolution})`,
+              { serverState: conflict.serverState, resolution: conflict.resolution },
             );
             conflicts++;
           }

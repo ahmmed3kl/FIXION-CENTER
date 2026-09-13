@@ -19,39 +19,53 @@ router.get(
     try {
       const centerId = req.centerId;
 
-      const [
-        studentsRes,
-        cardsRes,
-        groupsRes,
-        teachersRes,
-        subjectsRes,
-        teacherSubjectsRes,
-        sessionsRes,
-        enrollmentsRes,
-        maxSeqRes,
-      ] = await Promise.all([
-        db.query("SELECT * FROM students WHERE center_id = $1", [centerId]),
-        db.query("SELECT * FROM student_cards WHERE center_id = $1", [
-          centerId,
-        ]),
-        db.query("SELECT * FROM groups WHERE center_id = $1", [centerId]),
-        db.query("SELECT * FROM teachers WHERE center_id = $1", [centerId]),
-        db.query("SELECT * FROM subjects WHERE center_id = $1", [centerId]),
-        db.query("SELECT * FROM teacher_subjects WHERE center_id = $1", [
-          centerId,
-        ]),
-        db.query("SELECT * FROM sessions WHERE center_id = $1", [centerId]),
-        db.query(
-          "SELECT * FROM student_group_enrollments WHERE center_id = $1",
-          [centerId],
-        ),
-        db.query(
-          "SELECT COALESCE(MAX(server_seq), 0) as max_seq FROM server_sync_operations WHERE center_id = $1",
-          [centerId],
-        ),
-      ]);
+      const snapshot = await db.withTransaction(async (client) => {
+        // A repeatable-read snapshot makes the rows and max server sequence
+        // describe one exact point in the stream.
+        await client.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ");
+        const [
+          studentsRes,
+          cardsRes,
+          groupsRes,
+          teachersRes,
+          subjectsRes,
+          teacherSubjectsRes,
+          schedulesRes,
+          sessionsRes,
+          enrollmentsRes,
+          packagesRes,
+          packageSubjectsRes,
+          packageSubscriptionsRes,
+          overridesRes,
+          debtCyclesRes,
+          notificationEventsRes,
+          notificationDeliveriesRes,
+          sessionClosingsRes,
+          dailyClosingsRes,
+          maxSeqRes,
+        ] = await Promise.all([
+          client.query("SELECT * FROM students WHERE center_id = $1", [centerId]),
+          client.query("SELECT * FROM student_cards WHERE center_id = $1", [centerId]),
+          client.query("SELECT * FROM groups WHERE center_id = $1", [centerId]),
+          client.query("SELECT * FROM teachers WHERE center_id = $1", [centerId]),
+          client.query("SELECT * FROM subjects WHERE center_id = $1", [centerId]),
+          client.query("SELECT * FROM teacher_subjects WHERE center_id = $1", [centerId]),
+          client.query("SELECT * FROM group_schedules WHERE center_id = $1", [centerId]),
+          client.query("SELECT * FROM sessions WHERE center_id = $1", [centerId]),
+          client.query("SELECT * FROM student_group_enrollments WHERE center_id = $1", [centerId]),
+          client.query("SELECT * FROM packages WHERE center_id = $1", [centerId]),
+          client.query("SELECT * FROM package_subjects WHERE center_id = $1", [centerId]),
+          client.query("SELECT * FROM student_package_subscriptions WHERE center_id = $1", [centerId]),
+          client.query("SELECT * FROM package_subject_teacher_overrides WHERE center_id = $1", [centerId]),
+          client.query("SELECT * FROM debt_cycles WHERE center_id = $1", [centerId]),
+          client.query("SELECT * FROM notification_events WHERE center_id = $1", [centerId]),
+          client.query("SELECT * FROM notification_deliveries WHERE center_id = $1", [centerId]),
+          client.query("SELECT * FROM session_closing_records WHERE center_id = $1", [centerId]),
+          client.query("SELECT * FROM daily_closing_summaries WHERE center_id = $1", [centerId]),
+          client.query("SELECT COALESCE(MAX(server_seq), 0) as max_seq FROM server_sync_operations WHERE center_id = $1", [centerId]),
+        ]);
 
-      return res.json({
+        return {
         centerId,
         students: studentsRes.rows,
         cards: cardsRes.rows,
@@ -59,11 +73,24 @@ router.get(
         teachers: teachersRes.rows,
         subjects: subjectsRes.rows,
         teacherSubjects: teacherSubjectsRes.rows,
+        schedules: schedulesRes.rows,
         sessions: sessionsRes.rows,
         enrollments: enrollmentsRes.rows,
+        packages: packagesRes.rows,
+        packageSubjects: packageSubjectsRes.rows,
+        packageSubscriptions: packageSubscriptionsRes.rows,
+        packageTeacherOverrides: overridesRes.rows,
+        debtCycles: debtCyclesRes.rows,
+        notificationEvents: notificationEventsRes.rows,
+        notificationDeliveries: notificationDeliveriesRes.rows,
+        sessionClosings: sessionClosingsRes.rows,
+        dailyClosings: dailyClosingsRes.rows,
         latestServerSeq: parseInt(maxSeqRes.rows[0]?.max_seq || 0, 10),
         timestamp: new Date().toISOString(),
+        };
       });
+
+      return res.json(snapshot);
     } catch (err) {
       next(err);
     }
@@ -110,7 +137,7 @@ router.get("/pull", authMiddleware, deviceGuard, async (req, res, next) => {
 
     // Query global server sync stream for the center
     const rowsRes = await db.query(
-      `SELECT server_seq, entity_type, entity_id, operation_type, payload, applied_at
+      `SELECT server_seq, operation_id, entity_type, entity_id, operation_type, payload, applied_at
        FROM server_sync_operations
        WHERE center_id = $1 AND server_seq > $2
        ORDER BY server_seq ASC
@@ -129,9 +156,10 @@ router.get("/pull", authMiddleware, deviceGuard, async (req, res, next) => {
     // Format changes as ServerChangeRecord
     const changes = returnedRows.map((row) => ({
       sequenceNumber: parseInt(row.server_seq, 10),
+      operationId: row.operation_id,
       entityType: row.entity_type,
       entityId: row.entity_id,
-      action: row.operation_type,
+      action: String(row.operation_type || "update").toLowerCase(),
       data:
         typeof row.payload === "string" ? JSON.parse(row.payload) : row.payload,
       serverTimestamp: row.applied_at,
