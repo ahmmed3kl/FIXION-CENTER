@@ -3,7 +3,9 @@ import { ApiClient } from "../../core/api";
 import { AuditService } from "../../core/audit";
 import { DeviceRepository, DeviceService } from "../../core/device";
 import { ForbiddenError } from "../../core/errors";
-import { RolePermissions, resolveUserPermissions } from "../../core/permissions";
+import {
+    resolveUserPermissions
+} from "../../core/permissions";
 import { SecureStorageService } from "../../core/storage";
 import { SyncEngine } from "../../core/sync";
 import { Center, User } from "../../shared/types";

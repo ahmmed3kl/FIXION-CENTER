@@ -13,7 +13,10 @@ import {
     View,
 } from "react-native";
 import { Strings } from "../../core/localization";
-import { PermissionService, RolePermissions, resolveUserPermissions } from "../../core/permissions";
+import {
+    PermissionService,
+    resolveUserPermissions
+} from "../../core/permissions";
 import { SyncEngine } from "../../core/sync";
 import { Colors, Spacing, Typography } from "../../core/theme";
 import { useAuthStore } from "../../features/auth/useAuthStore";
@@ -814,6 +817,7 @@ export default function AcademicScreen() {
                   value={groupSessionPrice}
                   onChangeText={setGroupSessionPrice}
                   keyboardType="numeric"
+                  inputKind="decimal"
                   containerStyle={{ flex: 1 }}
                 />
                 <AppInput
@@ -821,6 +825,7 @@ export default function AcademicScreen() {
                   value={groupMonthlyPrice}
                   onChangeText={setGroupMonthlyPrice}
                   keyboardType="numeric"
+                  inputKind="decimal"
                   containerStyle={{ flex: 1 }}
                 />
               </View>
@@ -833,6 +838,7 @@ export default function AcademicScreen() {
                   value={groupDuration}
                   onChangeText={setGroupDuration}
                   keyboardType="numeric"
+                  inputKind="integer"
                   containerStyle={{ flex: 1 }}
                 />
                 <AppInput
@@ -840,6 +846,7 @@ export default function AcademicScreen() {
                   value={groupLateThreshold}
                   onChangeText={setGroupLateThreshold}
                   keyboardType="numeric"
+                  inputKind="integer"
                   containerStyle={{ flex: 1 }}
                 />
               </View>

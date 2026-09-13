@@ -8,9 +8,13 @@ import {
     UnauthorizedError,
     ValidationError,
 } from "../../core/errors";
-import { PermissionService, RolePermissions, resolveUserPermissions } from "../../core/permissions";
+import {
+    PermissionService,
+    resolveUserPermissions
+} from "../../core/permissions";
 import { SyncRepository } from "../../core/sync";
-import { GroupSchedule, Permission } from "../../shared/types";
+import { GroupSchedule } from "../../shared/types";
+import { isValidTime, ValidationMessages } from "../../shared/utils/validation";
 import { useAuthStore } from "../auth/useAuthStore";
 import { GroupRepository } from "./GroupRepository";
 
@@ -74,6 +78,9 @@ export class GroupScheduleRepository {
 
     if (!dto.startTime || !dto.endTime) {
       throw new ValidationError("وقت البدء ووقت الانتهاء مطلوبان.");
+    }
+    if (!isValidTime(dto.startTime) || !isValidTime(dto.endTime)) {
+      throw new ValidationError(ValidationMessages.time);
     }
 
     // Validation: End time must be strictly after Start time

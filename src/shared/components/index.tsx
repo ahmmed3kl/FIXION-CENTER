@@ -20,6 +20,7 @@ import {
     Typography,
 } from "../../core/theme";
 import { ConnectivityState } from "../types";
+import { InputKind, sanitizeInput } from "../utils/validation";
 
 // ==========================================
 // 1. AppButton
@@ -123,6 +124,7 @@ interface AppInputProps extends TextInputProps {
   label?: string;
   error?: string;
   containerStyle?: StyleProp<ViewStyle>;
+  inputKind?: InputKind;
 }
 
 export const AppInput: React.FC<AppInputProps> = ({
@@ -130,8 +132,17 @@ export const AppInput: React.FC<AppInputProps> = ({
   error,
   containerStyle,
   style,
+  inputKind,
+  onChangeText,
+  maxLength,
   ...props
 }) => {
+  const resolvedInputKind =
+    inputKind ?? (props.keyboardType === "phone-pad" ? "phone" : undefined);
+  const resolvedMaxLength =
+    resolvedInputKind === "phone"
+      ? Math.min(maxLength ?? 11, 11)
+      : maxLength;
   return (
     <View style={[styles.inputContainer, containerStyle]}>
       {label ? <Text style={styles.inputLabel}>{label}</Text> : null}
@@ -139,6 +150,10 @@ export const AppInput: React.FC<AppInputProps> = ({
         style={[styles.textInput, error ? styles.inputError : null, style]}
         placeholderTextColor={Colors.slate400}
         textAlign="right"
+        maxLength={resolvedMaxLength}
+        onChangeText={(value) =>
+          onChangeText?.(sanitizeInput(value, resolvedInputKind))
+        }
         {...props}
       />
       {error ? <Text style={styles.errorText}>{error}</Text> : null}

@@ -41,6 +41,10 @@ CREATE TABLE IF NOT EXISTS users (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- Phone numbers are shared contact details, not identities. Keep login lookup
+-- indexed by the database if desired, but never enforce uniqueness on it.
+ALTER TABLE users DROP CONSTRAINT IF EXISTS users_phone_key;
+
 -- Multi-Center Access for Users
 CREATE TABLE IF NOT EXISTS user_centers (
     id VARCHAR(64) PRIMARY KEY,

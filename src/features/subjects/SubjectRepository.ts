@@ -8,9 +8,13 @@ import {
     UnauthorizedError,
     ValidationError,
 } from "../../core/errors";
-import { PermissionService, RolePermissions, resolveUserPermissions } from "../../core/permissions";
+import {
+    PermissionService,
+    resolveUserPermissions
+} from "../../core/permissions";
 import { SyncEngine, SyncRepository } from "../../core/sync";
-import { Permission, Subject } from "../../shared/types";
+import { Subject } from "../../shared/types";
+import { isValidName, ValidationMessages } from "../../shared/utils/validation";
 import { useAuthStore } from "../auth/useAuthStore";
 
 export interface CreateSubjectDTO {
@@ -96,6 +100,7 @@ export class SubjectRepository {
     if (!dto.code || !dto.code.trim()) {
       throw new ValidationError("كود المادة مطلوب.");
     }
+    if (!isValidName(dto.name)) throw new ValidationError(ValidationMessages.name);
 
     const trimmedCode = dto.code.trim().toUpperCase();
     const existing = this.findByCode(trimmedCode);
@@ -179,6 +184,7 @@ export class SubjectRepository {
     const code =
       dto.code !== undefined ? dto.code.trim().toUpperCase() : existing.code;
     const status = dto.status || existing.status;
+    if (!isValidName(name)) throw new ValidationError(ValidationMessages.name);
 
     if (code !== existing.code) {
       const codeTaken = this.findByCode(code);

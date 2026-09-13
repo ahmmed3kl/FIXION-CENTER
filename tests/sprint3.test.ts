@@ -32,7 +32,7 @@ describe("Sprint 3 - FIXION Financial Core & Cash Payments", () => {
     beforeAll(() => {
       // Create student for cycle tests
       studentA = StudentRepository.createStudent({
-        studentCode: "FIN-STD-001",
+        studentCode: "300001",
         fullName: "محمد أحمد المالي",
         phone: "01011112222",
         parentPhone: "01033334444",
@@ -115,7 +115,7 @@ describe("Sprint 3 - FIXION Financial Core & Cash Payments", () => {
     it("strict enrollment end date bounding: NEVER generates cycles starting after enrollment.endDate", async () => {
       // Create student with finite enrollment
       const studentB = StudentRepository.createStudent({
-        studentCode: "FIN-STD-002",
+        studentCode: "300002",
         fullName: "سارة محمود علي",
         phone: "01022223333",
         parentPhone: "01044445555",
@@ -150,7 +150,7 @@ describe("Sprint 3 - FIXION Financial Core & Cash Payments", () => {
 
     it("ended or inactive enrollment generates NO new cycles", async () => {
       const studentC = StudentRepository.createStudent({
-        studentCode: "FIN-STD-003",
+        studentCode: "300003",
         fullName: "كريم يحيى فؤاد",
         phone: "01033331111",
         parentPhone: "01055552222",
@@ -191,7 +191,7 @@ describe("Sprint 3 - FIXION Financial Core & Cash Payments", () => {
 
     beforeAll(async () => {
       studentIso = StudentRepository.createStudent({
-        studentCode: "FIN-STD-ISO",
+        studentCode: "300004",
         fullName: "ياسر كمال فهمي",
         phone: "01066667777",
         parentPhone: "01088889999",
@@ -282,7 +282,7 @@ describe("Sprint 3 - FIXION Financial Core & Cash Payments", () => {
 
     beforeAll(async () => {
       studentPay = StudentRepository.createStudent({
-        studentCode: "FIN-STD-PAY",
+        studentCode: "300005",
         fullName: "نورهان هشام مصطفى",
         phone: "01011223344",
         parentPhone: "01055667788",
@@ -375,7 +375,7 @@ describe("Sprint 3 - FIXION Financial Core & Cash Payments", () => {
 
     beforeAll(async () => {
       studentRev = StudentRepository.createStudent({
-        studentCode: "FIN-STD-REV",
+        studentCode: "300006",
         fullName: "طارق سليم إبراهيم",
         phone: "01077889900",
         parentPhone: "01099001122",
@@ -475,7 +475,7 @@ describe("Sprint 3 - FIXION Financial Core & Cash Payments", () => {
 
     beforeAll(async () => {
       studentAdj = StudentRepository.createStudent({
-        studentCode: "FIN-STD-ADJ",
+        studentCode: "300007",
         fullName: "جميلة عادل توفيق",
         phone: "01033445566",
         parentPhone: "01077889911",
@@ -577,7 +577,7 @@ describe("Sprint 3 - FIXION Financial Core & Cash Payments", () => {
     beforeAll(async () => {
       // Create student and payment under admin
       studentSec = StudentRepository.createStudent({
-        studentCode: "FIN-STD-SEC",
+        studentCode: "300008",
         fullName: "عمر شريف سامي",
         phone: "01099887766",
         parentPhone: "01044332211",
@@ -669,7 +669,7 @@ describe("Sprint 3 - FIXION Financial Core & Cash Payments", () => {
       await useAuthStore.getState().selectCenter("center-1");
 
       center1Student = StudentRepository.createStudent({
-        studentCode: "FIN-STD-C1",
+        studentCode: "300009",
         fullName: "طالب مركز النور",
         phone: "01011110000",
         parentPhone: "01022220000",
@@ -752,7 +752,7 @@ describe("Sprint 3 - FIXION Financial Core & Cash Payments", () => {
   describe("8. Offline Sync Queue & Audit Logging", () => {
     it("enqueues all financial operations (payment, adjustment, reversal) with unique operation_id and logs audit", async () => {
       const studentSync = StudentRepository.createStudent({
-        studentCode: "FIN-STD-SYNC",
+        studentCode: "300010",
         fullName: "أيمن رفعت الشريف",
         phone: "01033441122",
         parentPhone: "01055663344",

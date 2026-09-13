@@ -4,7 +4,10 @@ import { ApiClient } from "../../core/api";
 import { DatabaseService } from "../../core/database";
 import { DeviceService } from "../../core/device";
 import { UnauthorizedError } from "../../core/errors";
-import { RolePermissions, resolveUserPermissions } from "../../core/permissions";
+import {
+    RolePermissions,
+    resolveUserPermissions,
+} from "../../core/permissions";
 import { SecureStorageService } from "../../core/storage";
 import { Center, User } from "../../shared/types";
 

@@ -22,6 +22,7 @@ import { FinancialCalculationService } from "../../features/payments/FinancialCa
 import { PaymentRepository } from "../../features/payments/PaymentRepository";
 import { StudentCardRepository } from "../../features/students/StudentCardRepository";
 import { StudentRepository } from "../../features/students/StudentRepository";
+import { smartSearch } from "../../shared/utils/smartSearch";
 import { AddStudentWizardModal } from "../../features/students/components/AddStudentWizardModal";
 import {
     AppButton,
@@ -325,14 +326,13 @@ export default function StudentsScreen() {
     );
   };
 
-  const filteredStudents = students.filter(
-    (s) =>
-      s.fullName.includes(searchQuery) ||
-      s.studentCode.includes(searchQuery) ||
-      (s.cardCode && s.cardCode.includes(searchQuery)) ||
-      s.phone.includes(searchQuery) ||
-      s.parentPhone.includes(searchQuery),
-  );
+  const filteredStudents = smartSearch(students, searchQuery, [
+    { get: (s) => s.fullName, weight: 1.2 },
+    { get: (s) => s.studentCode, weight: 1.1 },
+    { get: (s) => s.cardCode, weight: 1.1 },
+    { get: (s) => s.phone },
+    { get: (s) => s.parentPhone },
+  ]);
 
   const canCreate = PermissionService.hasPermission(
     permissions,

@@ -8,12 +8,14 @@ import {
     UnauthorizedError,
     ValidationError,
 } from "../../core/errors";
-import { PermissionService, RolePermissions, resolveUserPermissions } from "../../core/permissions";
+import {
+    PermissionService,
+    resolveUserPermissions
+} from "../../core/permissions";
 import { SyncRepository } from "../../core/sync";
 import {
     PackageTeacherOverride,
-    Permission,
-    StudentPackageSubscription,
+    StudentPackageSubscription
 } from "../../shared/types";
 import { useAuthStore } from "../auth/useAuthStore";
 import { DebtCycleRepository } from "../payments/DebtCycleRepository";

@@ -187,10 +187,10 @@ describe("FIXION Architecture & UX Correction Pass", () => {
     });
 
     it("Test 13: Rejects duplicate student code assignment within the same center", () => {
-      const code = "STD-CODE-999";
+      const code = "210999";
       StudentRepository.createStudent({
         studentCode: code,
-        cardCode: "CARD-CODE-999",
+        cardCode: "200999",
         fullName: "طالب كود مكرر",
         phone: "01055556666",
         parentPhone: "01155556666",
@@ -199,7 +199,7 @@ describe("FIXION Architecture & UX Correction Pass", () => {
       expect(() => {
         StudentRepository.createStudent({
           studentCode: code,
-          cardCode: "CARD-CODE-DIFF",
+          cardCode: "200998",
           fullName: "طالب آخر بنفس الكود",
           phone: "01077778888",
           parentPhone: "01177778888",

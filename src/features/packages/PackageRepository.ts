@@ -8,9 +8,12 @@ import {
     UnauthorizedError,
     ValidationError,
 } from "../../core/errors";
-import { PermissionService, RolePermissions, resolveUserPermissions } from "../../core/permissions";
+import {
+    PermissionService,
+    resolveUserPermissions
+} from "../../core/permissions";
 import { SyncRepository } from "../../core/sync";
-import { Package, PackageSubject, Permission } from "../../shared/types";
+import { Package, PackageSubject } from "../../shared/types";
 import { useAuthStore } from "../auth/useAuthStore";
 import { SubjectRepository } from "../subjects/SubjectRepository";
 import { TeacherRepository } from "../teachers/TeacherRepository";

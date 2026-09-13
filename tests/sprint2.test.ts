@@ -41,7 +41,7 @@ describe("Sprint 2 - FIXION Academic Core", () => {
 
     it("creates student with external student_code successfully", () => {
       const student = StudentRepository.createStudent({
-        studentCode: "EXT-STD-100",
+        studentCode: "210100",
         fullName: "زياد عمرو حسن",
         phone: "01099991111",
         parentPhone: "01199991111",
@@ -51,7 +51,7 @@ describe("Sprint 2 - FIXION Academic Core", () => {
       });
 
       expect(student).not.toBeNull();
-      expect(student.studentCode).toBe("EXT-STD-100");
+      expect(student.studentCode).toBe("210100");
       expect(student.fullName).toBe("زياد عمرو حسن");
       expect(student.centerId).toBe("center-1");
       expect(student.status).toBe("active");
@@ -60,7 +60,7 @@ describe("Sprint 2 - FIXION Academic Core", () => {
     it("enforces unique external student_code per center", () => {
       expect(() => {
         StudentRepository.createStudent({
-          studentCode: "EXT-STD-100", // duplicate in center-1
+          studentCode: "210100", // duplicate in center-1
           fullName: "طالب مكرر الكود",
           phone: "01088882222",
           parentPhone: "01188882222",
@@ -100,7 +100,7 @@ describe("Sprint 2 - FIXION Academic Core", () => {
     });
 
     it("replaces student card: deactivates previous card and issues new active card", () => {
-      const student = StudentRepository.findByStudentCode("EXT-STD-100");
+      const student = StudentRepository.findByStudentCode("210100");
       expect(student).not.toBeNull();
 
       // Issue initial card 00901
@@ -126,7 +126,7 @@ describe("Sprint 2 - FIXION Academic Core", () => {
     });
 
     it("deactivates card properly", () => {
-      const student = StudentRepository.findByStudentCode("EXT-STD-100");
+      const student = StudentRepository.findByStudentCode("210100");
       const activeCard = StudentCardRepository.getActiveCardByStudentId(
         student!.id,
       );
@@ -355,7 +355,7 @@ describe("Sprint 2 - FIXION Academic Core", () => {
 
   describe("8. Student Group Enrollments", () => {
     it("enrolls student in group with valid date and optional special price", () => {
-      const student = StudentRepository.findByStudentCode("EXT-STD-100");
+      const student = StudentRepository.findByStudentCode("210100");
       const group = GroupRepository.getAll().find((g) =>
         g.name.includes("كيمياء 3 ثانوي"),
       );
@@ -375,7 +375,7 @@ describe("Sprint 2 - FIXION Academic Core", () => {
     });
 
     it("prevents duplicate active enrollment for the same student in the same group", () => {
-      const student = StudentRepository.findByStudentCode("EXT-STD-100");
+      const student = StudentRepository.findByStudentCode("210100");
       const group = GroupRepository.getAll().find((g) =>
         g.name.includes("كيمياء 3 ثانوي"),
       );
@@ -390,7 +390,7 @@ describe("Sprint 2 - FIXION Academic Core", () => {
     });
 
     it("ends enrollment properly with end_date", () => {
-      const student = StudentRepository.findByStudentCode("EXT-STD-100");
+      const student = StudentRepository.findByStudentCode("210100");
       const enrollments = EnrollmentRepository.getActiveEnrollmentsForStudent(
         student!.id,
       );
@@ -447,7 +447,7 @@ describe("Sprint 2 - FIXION Academic Core", () => {
 
       // Enroll a new student today in the same group after session generation
       const newStudent = StudentRepository.createStudent({
-        studentCode: "LATE-ENR-001",
+        studentCode: "210101",
         fullName: "طالب مسجل متأخر",
         phone: "01077776666",
         parentPhone: "01177776666",
@@ -482,8 +482,8 @@ describe("Sprint 2 - FIXION Academic Core", () => {
 
     it("ScannerService strictly derives eligibility from immutable expected students snapshot, excluding late enrollees", () => {
       const today = new Date().toISOString().split("T")[0];
-      // Student LATE-ENR-001 was enrolled in test 9.3 AFTER session was generated
-      const lateStudent = StudentRepository.findByStudentCode("LATE-ENR-001");
+      // Student 210101 was enrolled in test 9.3 AFTER session was generated
+      const lateStudent = StudentRepository.findByStudentCode("210101");
       expect(lateStudent).not.toBeNull();
 
       const eligibleSessions = ScannerService.getEligibleSessionsForStudent(

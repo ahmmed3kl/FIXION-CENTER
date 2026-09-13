@@ -7,9 +7,12 @@ import {
     UnauthorizedError,
     ValidationError,
 } from "../../core/errors";
-import { PermissionService, RolePermissions, resolveUserPermissions } from "../../core/permissions";
+import {
+    PermissionService,
+    resolveUserPermissions
+} from "../../core/permissions";
 import { SyncEngine, SyncRepository } from "../../core/sync";
-import { Group, Permission } from "../../shared/types";
+import { Group } from "../../shared/types";
 import { useAuthStore } from "../auth/useAuthStore";
 import { SubjectRepository } from "../subjects/SubjectRepository";
 import { TeacherRepository } from "../teachers/TeacherRepository";

@@ -196,7 +196,7 @@ describe("Sprint 4 - FIXION Packages, Makeups & Unified Attendance/Financial Int
 
     beforeAll(async () => {
       student = StudentRepository.createStudent({
-        studentCode: "PKG-STD-001",
+        studentCode: "400001",
         fullName: "كريم حسام الدين",
         phone: "01099998888",
         parentPhone: "01199998888",
@@ -271,7 +271,7 @@ describe("Sprint 4 - FIXION Packages, Makeups & Unified Attendance/Financial Int
 
     beforeAll(async () => {
       student = StudentRepository.createStudent({
-        studentCode: "PKG-STD-002",
+        studentCode: "400002",
         fullName: "ياسين عادل",
         phone: "01077776666",
         parentPhone: "01177776666",
@@ -378,7 +378,7 @@ describe("Sprint 4 - FIXION Packages, Makeups & Unified Attendance/Financial Int
       });
 
       studentUnpaid = StudentRepository.createStudent({
-        studentCode: "PKG-UNPAID-001",
+        studentCode: "400003",
         fullName: "ماجد توفيق",
         phone: "01066665555",
         parentPhone: "01166665555",
@@ -402,7 +402,7 @@ describe("Sprint 4 - FIXION Packages, Makeups & Unified Attendance/Financial Int
       });
 
       studentPaid = StudentRepository.createStudent({
-        studentCode: "PKG-PAID-001",
+        studentCode: "400004",
         fullName: "طارق سليم",
         phone: "01055554444",
         parentPhone: "01155554444",
@@ -484,7 +484,7 @@ describe("Sprint 4 - FIXION Packages, Makeups & Unified Attendance/Financial Int
 
     beforeAll(() => {
       student = StudentRepository.createStudent({
-        studentCode: "ADV-STD-001",
+        studentCode: "400005",
         fullName: "رامي وجدي",
         phone: "01044443333",
         parentPhone: "01144443333",
@@ -630,7 +630,7 @@ describe("Sprint 4 - FIXION Packages, Makeups & Unified Attendance/Financial Int
 
     beforeAll(() => {
       student = StudentRepository.createStudent({
-        studentCode: "MKP-STD-001",
+        studentCode: "400006",
         fullName: "حسام خيري",
         phone: "01033332222",
         parentPhone: "01133332222",
@@ -709,7 +709,7 @@ describe("Sprint 4 - FIXION Packages, Makeups & Unified Attendance/Financial Int
 
     beforeAll(() => {
       externalStudent = StudentRepository.createStudent({
-        studentCode: "EXT-STD-001",
+        studentCode: "400007",
         fullName: "أيمن سامي (طالب خارجي)",
         phone: "01022221111",
         parentPhone: "01122221111",
@@ -766,7 +766,7 @@ describe("Sprint 4 - FIXION Packages, Makeups & Unified Attendance/Financial Int
 
     beforeAll(async () => {
       studentDual = StudentRepository.createStudent({
-        studentCode: "DUAL-STD-001",
+        studentCode: "400008",
         fullName: "شريف منير (مشترك مجموعة + باقة)",
         phone: "01012341234",
         parentPhone: "01112341234",
@@ -904,7 +904,7 @@ describe("Sprint 4 - FIXION Packages, Makeups & Unified Attendance/Financial Int
       await useAuthStore.getState().selectCenter("center-1");
 
       regStudent = StudentRepository.createStudent({
-        studentCode: "REG-FIN-001",
+        studentCode: "400009",
         fullName: "طارق سليم (اختبارات الفصل المالي)",
         phone: "01099998888",
         parentPhone: "01199998888",
@@ -1016,7 +1016,7 @@ describe("Sprint 4 - FIXION Packages, Makeups & Unified Attendance/Financial Int
 
     it("c) external makeup payment: records paymentType 'session' and paymentMethod 'cash', zero subscription debt", async () => {
       const extStudent = StudentRepository.createStudent({
-        studentCode: "EXT-REG-002",
+        studentCode: "400010",
         fullName: "نادر فتحي (طالب خارجي تجريبي)",
         phone: "01033334444",
         parentPhone: "01133334444",
@@ -1058,7 +1058,7 @@ describe("Sprint 4 - FIXION Packages, Makeups & Unified Attendance/Financial Int
 
     it("d) session payment exceeding monthly price: NEVER reduces monthly subscription debt", async () => {
       const bigSessionStudent = StudentRepository.createStudent({
-        studentCode: "BIG-SESS-001",
+        studentCode: "400011",
         fullName: "رامي خليل (مدفوعات حصص كبيرة)",
         phone: "01077776666",
         parentPhone: "01177776666",

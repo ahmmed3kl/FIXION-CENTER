@@ -2,9 +2,9 @@ import { ConnectivityService } from "../src/core/connectivity";
 import { DatabaseService } from "../src/core/database";
 import { DeviceService } from "../src/core/device";
 import {
-  PermissionService,
-  RolePermissions,
-  resolveUserPermissions,
+    PermissionService,
+    RolePermissions,
+    resolveUserPermissions,
 } from "../src/core/permissions";
 import { SyncEngine, SyncRepository } from "../src/core/sync";
 import { useAuthStore } from "../src/features/auth/useAuthStore";
@@ -127,10 +127,7 @@ describe("Security & Data Integrity Audit Suite", () => {
       };
 
       expect(
-        PermissionService.hasPermission(
-          mapPermissions as any,
-          "students.view",
-        ),
+        PermissionService.hasPermission(mapPermissions as any, "students.view"),
       ).toBe(true);
       expect(
         PermissionService.hasPermission(
@@ -145,10 +142,7 @@ describe("Security & Data Integrity Audit Suite", () => {
         ),
       ).toBe(false);
       expect(
-        PermissionService.hasPermission(
-          mapPermissions as any,
-          "groups.create",
-        ),
+        PermissionService.hasPermission(mapPermissions as any, "groups.create"),
       ).toBe(false);
     });
   });

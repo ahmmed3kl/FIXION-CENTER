@@ -11,9 +11,11 @@ import {
 import { PermissionService } from "../../core/permissions";
 import { SyncEngine, SyncRepository } from "../../core/sync";
 import { Student } from "../../shared/types";
+import { isEgyptianPhone, isNumericCode, isValidName, normalizeDigits, ValidationMessages } from "../../shared/utils/validation";
 import { useAuthStore } from "../auth/useAuthStore";
 import { EnrollmentRepository } from "../enrollments/EnrollmentRepository";
 import { StudentCardRepository } from "./StudentCardRepository";
+import { smartSearch } from "../../shared/utils/smartSearch";
 
 export interface CreateStudentDTO {
   studentCode?: string;
@@ -118,6 +120,36 @@ export class StudentRepository {
     return this.findByIdInternal(studentId);
   }
 
+  /**
+   * A duplicate phone is informational only. The lookup is deliberately
+   * scoped to the active center and never participates in create/update.
+   */
+  static isPhoneUsedInActiveCenter(
+    phone: string,
+    excludeStudentId?: string,
+  ): boolean {
+    const { centerId } = this.getActiveContext();
+    const normalizedPhone = normalizeDigits(phone).replace(/\s/g, "");
+    if (!normalizedPhone) return false;
+    const db = DatabaseService.getDb();
+    const students = db.getAllSync<{ id: string; phone: string; parentPhone: string }>(
+      `SELECT id, phone, parent_phone as parentPhone FROM students WHERE center_id = ?`,
+      [centerId],
+    );
+    if (students.some((student) =>
+      student.id !== excludeStudentId &&
+      [student.phone, student.parentPhone].some((value) => normalizeDigits(value || "").replace(/\s/g, "") === normalizedPhone),
+    )) return true;
+
+    const teachers = db.getAllSync<{ phone: string }>(
+      `SELECT phone FROM teachers WHERE center_id = ?`,
+      [centerId],
+    );
+    return teachers.some((teacher) =>
+      normalizeDigits(teacher.phone || "").replace(/\s/g, "") === normalizedPhone,
+    );
+  }
+
   static getAll(includeInactive = false): Student[] {
     const { centerId, user } = this.getActiveContext();
     if (!PermissionService.hasPermission(user.permissions, "students.view")) {
@@ -162,6 +194,16 @@ export class StudentRepository {
     // Preserves leading zeros exactly (e.g. "00126")
     const trimmedCode = rawCode;
     const cardCode = (dto.cardCode || dto.studentCode || "").trim();
+
+    if (!isNumericCode(trimmedCode) || !isNumericCode(cardCode)) {
+      throw new ValidationError(ValidationMessages.code);
+    }
+    if (!isValidName(dto.fullName || "")) {
+      throw new ValidationError(ValidationMessages.name);
+    }
+    if (!isEgyptianPhone(normalizeDigits(dto.phone || "")) || !isEgyptianPhone(normalizeDigits(dto.parentPhone || ""))) {
+      throw new ValidationError(ValidationMessages.phone);
+    }
 
     if (!dto.fullName || !dto.fullName.trim()) {
       throw new ValidationError("اسم الطالب مطلوب.");
@@ -522,15 +564,12 @@ export class StudentRepository {
 
   static search(query: string): Student[] {
     const all = this.getAll(false);
-    if (!query || !query.trim()) return all;
-    const q = query.trim().toLowerCase();
-    return all.filter(
-      (s) =>
-        s.fullName.toLowerCase().includes(q) ||
-        s.studentCode.toLowerCase().includes(q) ||
-        (s.cardCode && s.cardCode.toLowerCase().includes(q)) ||
-        s.phone.includes(q) ||
-        s.parentPhone.includes(q),
-    );
+    return smartSearch(all, query, [
+      { get: (s) => s.fullName, weight: 1.2 },
+      { get: (s) => s.studentCode, weight: 1.1 },
+      { get: (s) => s.cardCode, weight: 1.1 },
+      { get: (s) => s.phone },
+      { get: (s) => s.parentPhone },
+    ]);
   }
 }

@@ -25,6 +25,7 @@ import {
 } from "../../../shared/components";
 import { Group, GroupSchedule } from "../../../shared/types";
 import { formatDisplayIdentifier } from "../../../shared/utils/formatters";
+import { isEgyptianPhone, isNumericCode, isValidName, ValidationMessages } from "../../../shared/utils/validation";
 import { GroupRepository } from "../../groups/GroupRepository";
 import { GroupScheduleRepository } from "../../groups/GroupScheduleRepository";
 import { TeacherRepository } from "../../teachers/TeacherRepository";
@@ -68,6 +69,8 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({
   const [fullName, setFullName] = useState("");
   const [phone, setPhone] = useState("");
   const [parentPhone, setParentPhone] = useState("");
+  const [phoneDuplicateWarning, setPhoneDuplicateWarning] = useState(false);
+  const [parentPhoneDuplicateWarning, setParentPhoneDuplicateWarning] = useState(false);
   const [grade, setGrade] = useState("الصف الثالث الثانوي");
   const [notes, setNotes] = useState("");
   const [step2Errors, setStep2Errors] = useState<{
@@ -138,6 +141,8 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({
     setFullName("");
     setPhone("");
     setParentPhone("");
+    setPhoneDuplicateWarning(false);
+    setParentPhoneDuplicateWarning(false);
     setGrade("الصف الثالث الثانوي");
     setNotes("");
     setStep2Errors({});
@@ -179,6 +184,10 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({
     const raw = code.trim();
     if (!raw) {
       setScanError("يرجى إدخال أو مسح كود الكارت.");
+      return false;
+    }
+    if (!isNumericCode(raw)) {
+      setScanError(ValidationMessages.code);
       return false;
     }
 
@@ -231,13 +240,13 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({
       parentPhone?: string;
     } = {};
 
-    if (!fullName.trim()) {
+    if (!isValidName(fullName)) {
       errors.fullName = "اسم الطالب مطلوب.";
     }
-    if (!phone.trim()) {
+    if (!isEgyptianPhone(phone)) {
       errors.phone = "رقم هاتف الطالب مطلوب.";
     }
-    if (!parentPhone.trim()) {
+    if (!isEgyptianPhone(parentPhone)) {
       errors.parentPhone = "رقم هاتف ولي الأمر مطلوب.";
     }
 
@@ -616,6 +625,7 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({
                               setScanError(null);
                             }}
                             keyboardType="default"
+                            inputKind="cardCode"
                             autoCapitalize="none"
                             containerStyle={{ marginBottom: Spacing.sm }}
                           />
@@ -667,6 +677,7 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({
                       setStep2Errors((e) => ({ ...e, fullName: undefined }));
                   }}
                   error={step2Errors.fullName}
+                  onBlur={() => setStep2Errors((e) => ({ ...e, fullName: isValidName(fullName) ? undefined : ValidationMessages.name }))}
                   containerStyle={styles.formField}
                 />
 
@@ -676,13 +687,30 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({
                   value={phone}
                   onChangeText={(val) => {
                     setPhone(val);
+                    setPhoneDuplicateWarning(false);
                     if (step2Errors.phone)
                       setStep2Errors((e) => ({ ...e, phone: undefined }));
                   }}
                   keyboardType="phone-pad"
+                  inputKind="phone"
                   error={step2Errors.phone}
+                  onBlur={() => {
+                    const valid = isEgyptianPhone(phone);
+                    setStep2Errors((e) => ({ ...e, phone: valid ? undefined : ValidationMessages.phone }));
+                    setPhoneDuplicateWarning(valid && StudentRepository.isPhoneUsedInActiveCenter(phone));
+                  }}
                   containerStyle={styles.formField}
                 />
+                {phoneDuplicateWarning ? (
+                  <View style={styles.phoneWarning}>
+                    <Text style={styles.phoneWarningText}>⚠️ الرقم ده مستخدم قبل كده</Text>
+                    <Text style={styles.phoneWarningHint}>ممكن تستخدم نفس الرقم عادي لو ده مقصود</Text>
+                    <View style={styles.phoneWarningActions}>
+                      <AppButton title="تعديل الرقم" size="sm" variant="outline" onPress={() => setPhoneDuplicateWarning(false)} />
+                      <AppButton title="استخدام الرقم على أي حال" size="sm" variant="secondary" onPress={() => setPhoneDuplicateWarning(false)} />
+                    </View>
+                  </View>
+                ) : null}
 
                 <AppInput
                   label="رقم هاتف ولي الأمر *"
@@ -690,13 +718,30 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({
                   value={parentPhone}
                   onChangeText={(val) => {
                     setParentPhone(val);
+                    setParentPhoneDuplicateWarning(false);
                     if (step2Errors.parentPhone)
                       setStep2Errors((e) => ({ ...e, parentPhone: undefined }));
                   }}
                   keyboardType="phone-pad"
+                  inputKind="phone"
                   error={step2Errors.parentPhone}
+                  onBlur={() => {
+                    const valid = isEgyptianPhone(parentPhone);
+                    setStep2Errors((e) => ({ ...e, parentPhone: valid ? undefined : ValidationMessages.phone }));
+                    setParentPhoneDuplicateWarning(valid && StudentRepository.isPhoneUsedInActiveCenter(parentPhone));
+                  }}
                   containerStyle={styles.formField}
                 />
+                {parentPhoneDuplicateWarning ? (
+                  <View style={styles.phoneWarning}>
+                    <Text style={styles.phoneWarningText}>⚠️ الرقم ده مستخدم قبل كده</Text>
+                    <Text style={styles.phoneWarningHint}>ممكن تستخدم نفس الرقم عادي لو ده مقصود</Text>
+                    <View style={styles.phoneWarningActions}>
+                      <AppButton title="تعديل الرقم" size="sm" variant="outline" onPress={() => setParentPhoneDuplicateWarning(false)} />
+                      <AppButton title="استخدام الرقم على أي حال" size="sm" variant="secondary" onPress={() => setParentPhoneDuplicateWarning(false)} />
+                    </View>
+                  </View>
+                ) : null}
 
                 <AppInput
                   label="المرحلة الدراسية"
@@ -1584,4 +1629,16 @@ const styles = StyleSheet.create({
     fontWeight: "700",
     color: Colors.slate800,
   },
+  phoneWarning: {
+    backgroundColor: Colors.warningLight,
+    borderColor: Colors.warning,
+    borderWidth: 1,
+    borderRadius: BorderRadius.md,
+    padding: Spacing.sm,
+    marginTop: -Spacing.sm,
+    marginBottom: Spacing.md,
+  },
+  phoneWarningText: { fontSize: 13, fontWeight: "700", color: Colors.warningText },
+  phoneWarningHint: { fontSize: 12, color: Colors.warningText, marginTop: 2 },
+  phoneWarningActions: { flexDirection: "row", gap: Spacing.xs, marginTop: Spacing.sm },
 });

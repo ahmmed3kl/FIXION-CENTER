@@ -7,13 +7,15 @@ import {
     NotFoundError,
     UnauthorizedError,
 } from "../../core/errors";
-import { PermissionService, RolePermissions, resolveUserPermissions } from "../../core/permissions";
+import {
+    PermissionService,
+    resolveUserPermissions
+} from "../../core/permissions";
 import { SyncEngine, SyncRepository } from "../../core/sync";
 import {
-    Permission,
     Subject,
     Teacher,
-    TeacherSubject,
+    TeacherSubject
 } from "../../shared/types";
 import { useAuthStore } from "../auth/useAuthStore";
 import { SubjectRepository } from "../subjects/SubjectRepository";

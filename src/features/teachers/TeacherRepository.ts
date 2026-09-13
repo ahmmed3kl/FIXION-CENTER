@@ -7,9 +7,13 @@ import {
     UnauthorizedError,
     ValidationError,
 } from "../../core/errors";
-import { PermissionService, RolePermissions, resolveUserPermissions } from "../../core/permissions";
+import {
+    PermissionService,
+    resolveUserPermissions
+} from "../../core/permissions";
 import { SyncEngine, SyncRepository } from "../../core/sync";
-import { Permission, Teacher } from "../../shared/types";
+import { Teacher } from "../../shared/types";
+import { isEgyptianPhone, isValidName, normalizeDigits, ValidationMessages } from "../../shared/utils/validation";
 import { useAuthStore } from "../auth/useAuthStore";
 
 export interface CreateTeacherDTO {
@@ -79,6 +83,9 @@ export class TeacherRepository {
 
     if (!dto.name || !dto.name.trim()) {
       throw new ValidationError("اسم المعلم مطلوب.");
+    }
+    if (!isValidName(dto.name) || (dto.phone && !isEgyptianPhone(normalizeDigits(dto.phone)))) {
+      throw new ValidationError(!isValidName(dto.name) ? ValidationMessages.name : ValidationMessages.phone);
     }
 
     const db = DatabaseService.getDb();
@@ -161,6 +168,9 @@ export class TeacherRepository {
     const notes =
       dto.notes !== undefined ? dto.notes.trim() : (existing.notes ?? null);
     const status = dto.status || existing.status;
+    if (!isValidName(name) || (phone && !isEgyptianPhone(normalizeDigits(phone)))) {
+      throw new ValidationError(!isValidName(name) ? ValidationMessages.name : ValidationMessages.phone);
+    }
 
     db.runSync(
       `UPDATE teachers
