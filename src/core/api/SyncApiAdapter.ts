@@ -19,11 +19,18 @@ export interface BootstrapResponse {
   teacherSubjects?: any[];
   schedules?: any[];
   sessions: any[];
+  expectedStudents?: any[];
   enrollments: any[];
+  attendance?: any[];
+  payments?: any[];
+  paymentReversals?: any[];
+  debtAdjustments?: any[];
   packages?: any[];
   packageSubjects?: any[];
   packageSubscriptions?: any[];
   packageTeacherOverrides?: any[];
+  advanceCoverages?: any[];
+  notificationTemplates?: any[];
   debtCycles?: any[];
   notificationEvents?: any[];
   notificationDeliveries?: any[];
@@ -187,7 +194,18 @@ export class HttpSyncApiAdapter implements ISyncApiAdapter {
           teachers: [],
           subjects: [],
           sessions: [],
+          expectedStudents: [],
           enrollments: [],
+          attendance: [],
+          payments: [],
+          paymentReversals: [],
+          debtAdjustments: [],
+          advanceCoverages: [],
+          notificationTemplates: [],
+          notificationEvents: [],
+          notificationDeliveries: [],
+          sessionClosings: [],
+          dailyClosings: [],
           latestServerSeq: 0,
           timestamp: new Date().toISOString(),
         };
@@ -214,7 +232,18 @@ export class HttpSyncApiAdapter implements ISyncApiAdapter {
             teachers: [],
             subjects: [],
             sessions: [],
+            expectedStudents: [],
             enrollments: [],
+            attendance: [],
+            payments: [],
+            paymentReversals: [],
+            debtAdjustments: [],
+            advanceCoverages: [],
+            notificationTemplates: [],
+            notificationEvents: [],
+            notificationDeliveries: [],
+            sessionClosings: [],
+            dailyClosings: [],
             latestServerSeq: 0,
             timestamp: new Date().toISOString(),
           };

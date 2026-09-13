@@ -381,6 +381,8 @@ export class SyncEngine {
     ? new MockSyncApiAdapter()
     : new HttpSyncApiAdapter();
   private static currentState: SyncEngineState = "online";
+  /** One in-flight sync pipeline per center; callers queue behind it. */
+  private static readonly syncLocks = new Map<string, Promise<void>>();
 
   static setAdapter(adapter: ISyncApiAdapter): void {
     this.adapter = adapter;
@@ -644,6 +646,14 @@ export class SyncEngine {
           );
         }
       }
+      if (Array.isArray(data.expectedStudents)) {
+        for (const expected of data.expectedStudents) {
+          db.runSync(`INSERT INTO session_expected_students (id, center_id, session_id, student_id, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET session_id=excluded.session_id, student_id=excluded.student_id`,
+            [expected.id, expected.center_id || centerId, expected.session_id || expected.sessionId, expected.student_id || expected.studentId, expected.created_at || new Date().toISOString()]);
+        }
+      }
 
       // Upsert Enrollments
       if (Array.isArray(data.enrollments)) {
@@ -675,6 +685,58 @@ export class SyncEngine {
               enr.updated_at || new Date().toISOString(),
             ],
           );
+        }
+      }
+
+      if (Array.isArray(data.attendance)) {
+        for (const a of data.attendance) {
+          db.runSync(`INSERT INTO attendance (id, center_id, student_id, session_id, check_in_time, status, is_late, attendance_type, original_absence_id, operation_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET status=excluded.status, check_in_time=excluded.check_in_time, is_late=excluded.is_late, attendance_type=excluded.attendance_type, original_absence_id=excluded.original_absence_id`,
+            [a.id, a.center_id || centerId, a.student_id || a.studentId, a.session_id || a.sessionId, a.check_in_time || a.checkInTime || a.created_at || new Date().toISOString(), a.status || "present", a.is_late ? 1 : 0, a.attendance_type || a.attendanceType || "present", a.original_absence_id || a.originalAbsenceId || null, a.operation_id || a.operationId || `bootstrap-attendance-${a.id}`]);
+        }
+      }
+      if (Array.isArray(data.payments)) {
+        for (const p of data.payments) {
+          db.runSync(`INSERT INTO payments (id, operation_id, center_id, student_id, amount, payment_type, payment_method, debt_cycle_id, session_id, subscription_id, created_at, user_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET amount=excluded.amount, payment_type=excluded.payment_type, payment_method=excluded.payment_method, debt_cycle_id=excluded.debt_cycle_id, session_id=excluded.session_id, subscription_id=excluded.subscription_id, updated_at=excluded.created_at`,
+            [p.id, p.operation_id || p.operationId || `bootstrap-payment-${p.id}`, p.center_id || centerId, p.student_id || p.studentId, Number(p.amount || 0), p.payment_type || p.paymentType || "session", p.payment_method || p.paymentMethod || "cash", p.debt_cycle_id || p.debtCycleId || null, p.session_id || p.sessionId || null, p.subscription_id || p.subscriptionId || null, p.created_at || new Date().toISOString(), p.user_id || p.userId || "system"]);
+        }
+      }
+      if (Array.isArray(data.paymentReversals)) {
+        const paymentById = new Map((data.payments || []).map((p: any) => [p.id, p]));
+        for (const r of data.paymentReversals) {
+          const paymentId = r.payment_id || r.paymentId;
+          const payment = paymentById.get(paymentId) as any;
+          db.runSync(`INSERT INTO payment_reversals (id, operation_id, center_id, payment_id, student_id, reversed_amount, reason, reversed_by, reversed_at, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(operation_id) DO NOTHING`,
+            [r.id, r.operation_id || r.operationId || `bootstrap-reversal-${r.id}`, r.center_id || centerId, paymentId, r.student_id || r.studentId || payment?.student_id || "", Number(r.reversed_amount || r.reversedAmount || 0), r.reason || "", r.reversed_by || r.reversedBy || r.user_id || "system", r.reversed_at || r.reversedAt || r.created_at || new Date().toISOString(), r.created_at || new Date().toISOString()]);
+        }
+      }
+      if (Array.isArray(data.debtAdjustments)) {
+        for (const a of data.debtAdjustments) {
+          db.runSync(`INSERT INTO debt_adjustments (id, operation_id, center_id, student_id, enrollment_id, debt_cycle_id, amount_before, adjustment_amount, amount_after, reason, created_by, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(operation_id) DO NOTHING`,
+            [a.id, a.operation_id || a.operationId || `bootstrap-adjustment-${a.id}`, a.center_id || centerId, a.student_id || a.studentId || "", a.enrollment_id || a.enrollmentId || null, a.debt_cycle_id || a.debtCycleId, Number(a.amount_before || a.amountBefore || 0), Number(a.adjustment_amount || a.adjustmentAmount || a.amount || 0), Number(a.amount_after || a.amountAfter || a.amount || 0), a.reason || "", a.created_by || a.createdBy || a.user_id || "system", a.created_at || new Date().toISOString()]);
+        }
+      }
+      if (Array.isArray(data.advanceCoverages)) {
+        for (const c of data.advanceCoverages) {
+          db.runSync(`INSERT INTO advance_coverages (id, operation_id, center_id, student_id, advance_session_id, target_future_session_id, created_by, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET target_future_session_id=excluded.target_future_session_id`,
+            [c.id, c.operation_id || c.operationId || `bootstrap-coverage-${c.id}`, c.center_id || centerId, c.student_id || c.studentId, c.advance_session_id || c.advanceSessionId, c.target_future_session_id || c.targetFutureSessionId, c.created_by || c.createdBy || "system", c.created_at || new Date().toISOString()]);
+        }
+      }
+      if (Array.isArray(data.notificationTemplates)) {
+        for (const t of data.notificationTemplates) {
+          db.runSync(`INSERT INTO notification_templates (id, center_id, event_type, channel, template_body, is_default, created_by, updated_by, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET template_body=excluded.template_body, updated_by=excluded.updated_by, updated_at=excluded.updated_at`,
+            [t.id, t.center_id || centerId, t.event_type || t.eventType, t.channel, t.template_body || t.templateBody || "", t.is_default ? 1 : 0, t.created_by || t.createdBy || "system", t.updated_by || t.updatedBy || null, t.created_at || new Date().toISOString(), t.updated_at || t.updatedAt || new Date().toISOString()]);
         }
       }
 
@@ -764,9 +826,11 @@ export class SyncEngine {
    * Applies server stream changes incrementally to local SQLite.
    */
   static applyServerChanges(centerId: string, changes: any[]): void {
-    const db = DatabaseService.getDb();
-    for (const change of changes) {
-      try {
+    // Apply the complete pull batch atomically. The caller advances the
+    // server cursor only after this transaction commits successfully.
+    DatabaseService.runInTransaction((db) => {
+      for (const change of changes) {
+        try {
         const entityType = change.entityType;
         const data = change.data || {};
 
@@ -1252,11 +1316,12 @@ export class SyncEngine {
           // The next sync retries it after the app/backend has been upgraded.
           throw new Error(`Unsupported server sync entity type: ${entityType}`);
         }
-      } catch (applyErr) {
-        console.warn("Failed to apply change:", change, applyErr);
-        throw applyErr;
+        } catch (applyErr) {
+          console.warn("Failed to apply change:", change, applyErr);
+          throw applyErr;
+        }
       }
-    }
+    });
   }
 
   /**
@@ -1269,6 +1334,34 @@ export class SyncEngine {
    * 6. Handles conflicts and retries gracefully.
    */
   static async syncCenterNow(
+    centerId: string,
+    options?: { batchSize?: number; pullLimit?: number },
+  ): Promise<{
+    syncedCount: number;
+    errors: number;
+    conflicts: number;
+    state: SyncEngineState;
+    arabicMessage: string;
+  }> {
+    const previous = this.syncLocks.get(centerId);
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const queueTail = previous ? previous.catch(() => {}).then(() => current) : current;
+    this.syncLocks.set(centerId, queueTail);
+    if (previous) await previous.catch(() => {});
+    try {
+      return await this.runSyncCenterNow(centerId, options);
+    } finally {
+      release();
+      if (this.syncLocks.get(centerId) === queueTail) {
+        this.syncLocks.delete(centerId);
+      }
+    }
+  }
+
+  private static async runSyncCenterNow(
     centerId: string,
     options?: { batchSize?: number; pullLimit?: number },
   ): Promise<{

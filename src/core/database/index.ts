@@ -776,6 +776,7 @@ export const MIGRATIONS: Migration[] = [
 class InMemorySqliteMock implements SqlDatabase {
   private tables = new Map<string, any[]>();
   private userVersion = 0;
+  private transactionSnapshot: Map<string, any[]> | null = null;
 
   constructor() {
     this.tables.set("schema_migrations", []);
@@ -817,6 +818,29 @@ class InMemorySqliteMock implements SqlDatabase {
 
   execSync(sql: string): void {
     const trimmed = sql.trim();
+    const command = trimmed.replace(/;\s*$/, "").toUpperCase();
+    if (command === "BEGIN IMMEDIATE" || command === "BEGIN") {
+      if (!this.transactionSnapshot) {
+        this.transactionSnapshot = new Map(
+          Array.from(this.tables.entries()).map(([name, rows]) => [
+            name,
+            rows.map((row) => ({ ...row })),
+          ]),
+        );
+      }
+      return;
+    }
+    if (command === "COMMIT") {
+      this.transactionSnapshot = null;
+      return;
+    }
+    if (command === "ROLLBACK") {
+      if (this.transactionSnapshot) {
+        this.tables = this.transactionSnapshot;
+        this.transactionSnapshot = null;
+      }
+      return;
+    }
     if (trimmed.includes("PRAGMA user_version =")) {
       const match = trimmed.match(/PRAGMA\s+user_version\s*=\s*(\d+)/i);
       if (match) {

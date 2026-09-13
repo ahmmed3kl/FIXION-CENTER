@@ -352,6 +352,21 @@ CREATE TABLE IF NOT EXISTS advance_coverages (
 -- 8. NOTIFICATIONS & CLOSINGS (Sprint 5)
 -- ------------------------------------------------------------------------------
 
+-- Notification Templates (center-scoped, editable message definitions)
+CREATE TABLE IF NOT EXISTS notification_templates (
+    id VARCHAR(64) PRIMARY KEY,
+    center_id VARCHAR(64) NOT NULL REFERENCES centers(id) ON DELETE CASCADE,
+    event_type VARCHAR(64) NOT NULL,
+    channel VARCHAR(32) NOT NULL CHECK (channel IN ('whatsapp', 'sms', 'push')),
+    template_body TEXT NOT NULL,
+    is_default BOOLEAN NOT NULL DEFAULT FALSE,
+    created_by VARCHAR(64) NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+    updated_by VARCHAR(64) REFERENCES users(id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ,
+    CONSTRAINT uq_notification_template UNIQUE (center_id, event_type, channel, is_default)
+);
+
 -- Notification Events (Decoupled from core attendance speed)
 CREATE TABLE IF NOT EXISTS notification_events (
     id VARCHAR(64) PRIMARY KEY,
