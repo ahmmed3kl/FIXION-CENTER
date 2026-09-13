@@ -61,6 +61,7 @@ export default function MainLayout() {
       <Tabs.Screen
         name="academic"
         options={{
+          href: null,
           title: Strings.tabAcademic,
           tabBarIcon: ({ color, size }) => (
             <Ionicons name="school-outline" size={size} color={color} />
@@ -70,6 +71,7 @@ export default function MainLayout() {
       <Tabs.Screen
         name="closing"
         options={{
+          href: null,
           title: "الإغلاق",
           tabBarIcon: ({ color, size }) => (
             <Ionicons name="lock-closed-outline" size={size} color={color} />
@@ -79,6 +81,7 @@ export default function MainLayout() {
       <Tabs.Screen
         name="notifications"
         options={{
+          href: null,
           title: "الإشعارات",
           tabBarIcon: ({ color, size }) => (
             <Ionicons name="notifications-outline" size={size} color={color} />
@@ -88,6 +91,7 @@ export default function MainLayout() {
       <Tabs.Screen
         name="reports"
         options={{
+          href: null,
           title: "التقارير",
           tabBarIcon: ({ color, size }) => (
             <Ionicons name="bar-chart-outline" size={size} color={color} />
@@ -95,6 +99,13 @@ export default function MainLayout() {
         }}
       />
       <Tabs.Screen name="packages" options={{ href: null }} />
+      <Tabs.Screen
+        name="more"
+        options={{
+          title: "المزيد",
+          tabBarIcon: ({ color, size }) => <Ionicons name="menu-outline" size={size} color={color} />,
+        }}
+      />
     </Tabs>
   );
 }
