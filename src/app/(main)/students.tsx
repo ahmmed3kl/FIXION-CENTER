@@ -135,6 +135,10 @@ export default function StudentsScreen() {
     loadData();
     // The screen stays mounted while the user switches centers. Reload all
     // center-scoped lists so the previous center can never remain visible.
+    setSelectedStudent(null);
+    setStudentCards([]);
+    setStudentEnrollments([]);
+    setFinancialStatus(null);
   }, [activeCenterId]);
 
   const openStudentDetails = (student: Student) => {
