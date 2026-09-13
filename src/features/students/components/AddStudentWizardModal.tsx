@@ -107,7 +107,9 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({
 
   const loadContextData = () => {
     try {
-      const groups = GroupRepository.getAll();
+      // Load inactive/archived groups too: a student may need to be attached
+      // to a group that was created before its schedule was activated.
+      const groups = GroupRepository.getAll(true);
       setAvailableGroups(groups);
       try {
         const pkgs = PackageRepository.getPackages();
@@ -834,7 +836,14 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({
                   {availablePackages.map((pkg) => <TouchableOpacity key={pkg.id} onPress={() => { setSelectedPackageId(pkg.id); setSelectedPackageOptionIds([]); setPackageGroupByOption({}); }}><AppCard style={[styles.groupSelectCard, selectedPackageId === pkg.id && styles.groupSelectCardActive]}><Text style={styles.groupCardName}>{pkg.name}</Text><Text>{formatCurrency(pkg.price)} / شهر • حتى {pkg.maxSelections} اختيارات</Text></AppCard></TouchableOpacity>)}
                   {!!selectedPackageId && (packageOptions[selectedPackageId] || []).map((option) => { const selected = selectedPackageOptionIds.includes(option.id); const pkg = availablePackages.find((p) => p.id === selectedPackageId)!; return <TouchableOpacity key={option.id} onPress={() => { if (!selected && selectedPackageOptionIds.length >= pkg.maxSelections) { Alert.alert("تنبيه", `يمكنك اختيار ${pkg.maxSelections} فقط.`); return; } setSelectedPackageOptionIds((old) => selected ? old.filter((id) => id !== option.id) : [...old, option.id]); }}><AppCard style={[styles.groupSelectCard, selected && styles.groupSelectCardActive]}><Text style={styles.groupCardName}>{selected ? "✓ " : "□ "}{option.subjectName} - {option.defaultTeacherName}</Text></AppCard></TouchableOpacity>; })}
                 </View>}
-                {enrollmentMode === "package" && selectedPackageOptionIds.map((optionId) => {
+                {enrollmentMode === "package" && selectedPackageId && (packageOptions[selectedPackageId] || []).map((option) => {
+                  const matchingGroups = groupsForPackageOption(option);
+                  return <View key={`available-package-groups-${option.id}`} style={styles.packageGroupBox}>
+                    <Text style={styles.packageGroupTitle}>{option.defaultTeacherName} - اختر المجموعة</Text>
+                    {matchingGroups.length === 0 ? <Text style={styles.packageGroupHint}>لا توجد مجموعة لهذا المدرس حاليًا؛ يمكنك المتابعة بدون مجموعة.</Text> : matchingGroups.map((group) => <TouchableOpacity key={group.id} onPress={() => { if (!selectedPackageOptionIds.includes(option.id)) setSelectedPackageOptionIds((old) => [...old, option.id]); selectPackageGroup(option.id, group.id); }}><AppCard style={[styles.groupSelectCard, packageGroupByOption[option.id] === group.id && styles.groupSelectCardActive]}><Text style={styles.groupCardName}>{packageGroupByOption[option.id] === group.id ? "✓ " : "□ "}{group.name}</Text><Text style={styles.groupCardTeacher}>{group.status === "active" ? "نشطة" : "مؤرشفة"}</Text></AppCard></TouchableOpacity>)}
+                  </View>;
+                })}
+                {false && enrollmentMode === "package" && selectedPackageOptionIds.map((optionId) => {
                   const option = (packageOptions[selectedPackageId] || []).find((item) => item.id === optionId);
                   if (!option) return null;
                   const matchingGroups = groupsForPackageOption(option);
