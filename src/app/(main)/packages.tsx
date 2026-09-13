@@ -6,9 +6,9 @@ import { TeacherRepository } from "../../features/teachers/TeacherRepository";
 import { TeacherSubjectRepository } from "../../features/teachers/TeacherSubjectRepository";
 import { Package, Subject, Teacher } from "../../shared/types";
 import { PermissionService, resolveUserPermissions } from "../../core/permissions";
-import { useAuthStore } from "../../features/auth/useAuthStore";
 import { Colors, Spacing, Typography } from "../../core/theme";
 import { AppButton, AppCard, AppInput, EmptyState, StatusBadge } from "../../shared/components";
+import { useAuthStore } from "../../features/auth/useAuthStore";
 
 type OptionDraft = { teacherId: string; subjectId: string };
 
@@ -30,7 +30,8 @@ export default function PackagesScreen() {
   const canUpdate = PermissionService.hasPermission(permissions, "packages.update");
   const subjectsForTeacher = (teacherId: string): Subject[] => { try { return TeacherSubjectRepository.getSubjectsForTeacher(teacherId); } catch { return []; } };
   const load = () => { try { setPackages(PackageRepository.getPackages(true)); setTeachers(TeacherRepository.getAll()); } catch (e: any) { Alert.alert("خطأ", e?.message || "تعذر تحميل الباقات"); } };
-  useEffect(() => { load(); }, []);
+  const activeCenterId = useAuthStore((s) => s.activeCenterId);
+  useEffect(() => { load(); }, [activeCenterId]);
   const reset = () => { setEditing(null); setName(""); setPrice(""); setMaxSelections("1"); setDescription(""); setOptions([]); };
   const beginEdit = (pkg: Package) => { setEditing(pkg); setName(pkg.name); setPrice(String(pkg.price)); setMaxSelections(String(pkg.maxSelections || 1)); setDescription(pkg.description || ""); setOptions(PackageRepository.getPackageSubjects(pkg.id).map((s) => ({ subjectId: s.subjectId, teacherId: s.defaultTeacherId }))); };
   const addOption = () => { const t = teachers[0]; const taught = t ? subjectsForTeacher(t.id) : []; setOptions((old) => [...old, { teacherId: t?.id || "", subjectId: taught[0]?.id || "" }]); };

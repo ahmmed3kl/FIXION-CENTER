@@ -137,6 +137,12 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       activeCenterId: centerId,
       activeCenter: center,
     });
+
+    // Switching context must hydrate the selected center before its screens
+    // read repositories. Offline/local data remains available if sync fails.
+    SyncEngine.syncCenterNow(centerId).catch((err) => {
+      console.warn("Center switch sync notice:", err);
+    });
   },
 
   logout: async () => {

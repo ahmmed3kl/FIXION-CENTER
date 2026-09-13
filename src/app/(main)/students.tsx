@@ -48,6 +48,7 @@ import { formatDisplayIdentifier } from "../../shared/utils/formatters";
 
 export default function StudentsScreen() {
   const currentUser = useAuthStore((s) => s.currentUser);
+  const activeCenterId = useAuthStore((s) => s.activeCenterId);
   const permissions = Array.isArray(currentUser?.permissions)
     ? currentUser.permissions
     : [];
@@ -132,7 +133,9 @@ export default function StudentsScreen() {
 
   useEffect(() => {
     loadData();
-  }, []);
+    // The screen stays mounted while the user switches centers. Reload all
+    // center-scoped lists so the previous center can never remain visible.
+  }, [activeCenterId]);
 
   const openStudentDetails = (student: Student) => {
     setSelectedStudent(student);
