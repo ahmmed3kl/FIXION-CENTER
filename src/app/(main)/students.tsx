@@ -14,6 +14,7 @@ import {
 import { formatCurrency, Strings } from "../../core/localization";
 import { PermissionService } from "../../core/permissions";
 import { Colors, Spacing, Typography } from "../../core/theme";
+import { useServiceVisibility } from "../../core/services/ServiceVisibilityContext";
 import { useAuthStore } from "../../features/auth/useAuthStore";
 import { EnrollmentRepository } from "../../features/enrollments/EnrollmentRepository";
 import { PackageRepository } from "../../features/packages/PackageRepository";
@@ -47,6 +48,8 @@ import {
 import { formatDisplayIdentifier } from "../../shared/utils/formatters";
 
 export default function StudentsScreen() {
+  const services = useServiceVisibility();
+  const paymentsEnabled = services.isEnabled("payments");
   const currentUser = useAuthStore((s) => s.currentUser);
   const activeCenterId = useAuthStore((s) => s.activeCenterId);
   const permissions = Array.isArray(currentUser?.permissions)
@@ -150,7 +153,7 @@ export default function StudentsScreen() {
         student.id,
       );
       setStudentEnrollments(enrollments);
-      if (PermissionService.hasPermission(permissions, "payments.view")) {
+      if (paymentsEnabled && PermissionService.hasPermission(permissions, "payments.view")) {
         const fin = FinancialCalculationService.getStudentFinancialStatus(
           student.id,
         );
@@ -381,19 +384,19 @@ export default function StudentsScreen() {
     permissions,
     "students.deactivate",
   );
-  const canViewPayments = PermissionService.hasPermission(
+  const canViewPayments = paymentsEnabled && PermissionService.hasPermission(
     permissions,
     "payments.view",
   );
-  const canCreatePayment = PermissionService.hasPermission(
+  const canCreatePayment = paymentsEnabled && PermissionService.hasPermission(
     permissions,
     "payments.create",
   );
-  const canReversePayment = PermissionService.hasPermission(
+  const canReversePayment = paymentsEnabled && PermissionService.hasPermission(
     permissions,
     "payments.reverse",
   );
-  const canAdjustDebt = PermissionService.hasPermission(
+  const canAdjustDebt = paymentsEnabled && PermissionService.hasPermission(
     permissions,
     "payments.adjust",
   );

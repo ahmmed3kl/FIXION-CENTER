@@ -9,20 +9,17 @@ const config = {
     process.env.NEON_SQL_ENDPOINT ||
     "https://ep-spring-queen-a50g0aeo-pooler.us-east-2.aws.neon.tech/sql",
   jwtSecret: process.env.JWT_SECRET || "fallback_secret_for_local_tests_only",
-  corsOrigin: process.env.CORS_ORIGIN || "*",
+  corsOrigin: process.env.CORS_ORIGIN || (process.env.APP_ENV === "production" ? "" : "*"),
 };
 
 if (!config.databaseUrl) {
   console.warn("WARNING: DATABASE_URL is not set in environment!");
 }
 
-if (
-  config.appEnv === "production" &&
-  config.jwtSecret === "fallback_secret_for_local_tests_only"
-) {
-  console.warn(
-    "SECURITY WARNING: Running in production with default JWT_SECRET! Please set JWT_SECRET in environment variables.",
-  );
+if (config.appEnv === "production") {
+  if (!config.databaseUrl) throw new Error("DATABASE_URL must be configured in production.");
+  if (config.jwtSecret === "fallback_secret_for_local_tests_only") throw new Error("JWT_SECRET must be configured in production.");
+  if (!config.corsOrigin) throw new Error("CORS_ORIGIN must be configured in production.");
 }
 
 module.exports = config;
