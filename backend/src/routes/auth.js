@@ -93,6 +93,18 @@ router.post("/login", async (req, res, next) => {
       );
     }
 
+    const centerMemberships = await db.query(
+      `SELECT uc.center_id, c.name, c.code
+       FROM user_centers uc
+       JOIN centers c ON c.id = uc.center_id
+       WHERE uc.user_id = $1 AND c.status = 'active'
+       ORDER BY uc.is_primary DESC, c.name ASC`,
+      [user.id],
+    );
+    const centerIds = centerMemberships.rows.length > 0
+      ? centerMemberships.rows.map((row) => row.center_id)
+      : [user.center_id];
+
     // Minimal JWT claims as specified in approved design:
     // sub, centerId, role, iat, exp
     const expiresIn = "7d";
@@ -111,7 +123,6 @@ router.post("/login", async (req, res, next) => {
         ? JSON.parse(user.permissions)
         : user.permissions || {};
 
-    // Single authoritative center returned - NO centerIds[] array exposed
     return res.json({
       token,
       user: {
@@ -122,6 +133,7 @@ router.post("/login", async (req, res, next) => {
         role: user.role,
         centerId: user.center_id,
         centerName: user.center_name,
+        centerIds,
         permissions,
       },
       expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),

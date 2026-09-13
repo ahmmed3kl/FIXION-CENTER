@@ -76,6 +76,7 @@ export class AuthRepository {
             role: any;
             centerId: string;
             centerName?: string;
+            centerIds?: string[];
             permissions?: any;
           };
         }>("/auth/login", {
@@ -94,10 +95,9 @@ export class AuthRepository {
             u.phone === data.user.phone,
         );
         const resolvedCenterIds =
-          demoMatch?.centerIds ||
-          (data.user.role === "admin"
-            ? ["center-1", "center-2"]
-            : [data.user.centerId]);
+          data.user.centerIds?.length
+            ? data.user.centerIds
+            : demoMatch?.centerIds || [data.user.centerId];
 
         const user: User = {
           id: data.user.id,

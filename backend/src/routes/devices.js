@@ -28,17 +28,9 @@ router.post("/register", authMiddleware, async (req, res, next) => {
       [deviceId],
     );
 
-    if (
-      existing.rows.length > 0 &&
-      existing.rows[0].center_id !== req.centerId
-    ) {
-      throw new AppError(
-        "TENANT_MISMATCH",
-        "This physical device is already bound to another center.",
-        "هذا الجهاز مسجل بالفعل في مركز تعليمي آخر.",
-        403,
-      );
-    }
+    // authMiddleware already verifies that the user belongs to req.centerId.
+    // Rebinding the device here allows one tablet to serve multiple authorized
+    // centers while preserving tenant isolation for every request.
 
     // Upsert device under the authenticated center
     const upsertRes = await db.query(

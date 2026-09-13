@@ -52,13 +52,18 @@ async function deviceGuard(req, res, next) {
 
     const device = deviceRes.rows[0];
 
+    // A single authorized device can be used for multiple centers. The user
+    // membership was validated by authMiddleware; move the device's active
+    // tenant binding to the selected center instead of rejecting the switch.
     if (device.center_id !== req.centerId) {
-      throw new AppError(
-        "TENANT_MISMATCH",
-        `Device '${deviceId}' is registered to center '${device.center_id}', not '${req.centerId}'.`,
-        "هذا الجهاز مسجل في مركز تعليمي آخر.",
-        403,
+      await db.query(
+        `UPDATE devices SET center_id = $1, user_id = $2, status = 'active',
+                last_seen_at = NOW(), updated_at = NOW() WHERE id = $3`,
+        [req.centerId, req.user ? req.user.id : null, deviceId],
       );
+      device.center_id = req.centerId;
+      device.user_id = req.user ? req.user.id : device.user_id;
+      device.status = "active";
     }
 
     if (device.status !== "active") {

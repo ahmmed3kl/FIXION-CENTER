@@ -58,21 +58,32 @@ async function authMiddleware(req, res, next) {
       );
     }
 
-    // Authoritatively derive tenant context from authenticated user
-    req.user = user;
-    req.centerId = user.center_id;
-
-    // Tenant Isolation Consistency Check:
-    // If client provided X-Center-Id header, it MUST match the authenticated user's center_id.
+    // A user may be assigned to more than one center through user_centers.
+    // The requested header is accepted only when that membership exists.
+    const memberships = await db.query(
+      `SELECT uc.center_id, c.status as center_status
+       FROM user_centers uc
+       JOIN centers c ON c.id = uc.center_id
+       WHERE uc.user_id = $1`,
+      [user.id],
+    );
+    const allowedCenters = memberships.rows.length > 0
+      ? memberships.rows.filter((row) => row.center_status === "active").map((row) => row.center_id)
+      : [user.center_id];
     const clientHeaderCenterId = req.headers["x-center-id"];
-    if (clientHeaderCenterId && clientHeaderCenterId !== req.centerId) {
+    const requestedCenterId = clientHeaderCenterId || decoded.centerId || user.center_id;
+    if (!allowedCenters.includes(requestedCenterId)) {
       throw new AppError(
         "TENANT_MISMATCH",
-        `Access denied. Client header specifies center '${clientHeaderCenterId}', but authenticated session belongs to '${req.centerId}'.`,
+        `Access denied. User is not assigned to center '${requestedCenterId}'.`,
         "غير مصرح لك بالوصول لبيانات مركز تعليمي آخر.",
         403,
       );
     }
+
+    // Authoritatively derive the selected tenant context after membership validation.
+    req.user = { ...user, center_id: requestedCenterId, centerIds: allowedCenters };
+    req.centerId = requestedCenterId;
 
     next();
   } catch (err) {
