@@ -50,9 +50,9 @@ export class PackageRepository {
     }
     const db = DatabaseService.getDb();
     const query = includeInactive
-      ? `SELECT id, center_id as centerId, name, price, description, status, created_at as createdAt, updated_at as updatedAt
+      ? `SELECT id, center_id as centerId, name, price, max_selections as maxSelections, description, status, created_at as createdAt, updated_at as updatedAt
          FROM packages WHERE center_id = ? ORDER BY name ASC`
-      : `SELECT id, center_id as centerId, name, price, description, status, created_at as createdAt, updated_at as updatedAt
+      : `SELECT id, center_id as centerId, name, price, max_selections as maxSelections, description, status, created_at as createdAt, updated_at as updatedAt
          FROM packages WHERE center_id = ? AND status = 'active' ORDER BY name ASC`;
 
     return db.getAllSync<Package>(query, [centerId]);
@@ -68,7 +68,7 @@ export class PackageRepository {
     }
     const db = DatabaseService.getDb();
     return db.getFirstSync<Package>(
-      `SELECT id, center_id as centerId, name, price, description, status, created_at as createdAt, updated_at as updatedAt
+      `SELECT id, center_id as centerId, name, price, max_selections as maxSelections, description, status, created_at as createdAt, updated_at as updatedAt
        FROM packages WHERE center_id = ? AND id = ?`,
       [centerId, id],
     );
@@ -101,6 +101,7 @@ export class PackageRepository {
   static async createPackage(data: {
     name: string;
     price: number;
+    maxSelections?: number;
     description?: string;
   }): Promise<Package> {
     const { centerId, user } = this.getActiveContext();
@@ -114,6 +115,10 @@ export class PackageRepository {
     if (data.price === undefined || data.price === null || data.price < 0) {
       throw new ValidationError("سعر الباقة يجب أن يكون صفراً أو أكثر.");
     }
+    const maxSelections = data.maxSelections ?? 1;
+    if (!Number.isInteger(maxSelections) || maxSelections < 1) {
+      throw new ValidationError("الحد الأقصى للاختيارات يجب أن يكون رقمًا صحيحًا أكبر من صفر.");
+    }
 
     const db = DatabaseService.getDb();
     const id = `pkg-${generateUUID()}`;
@@ -122,13 +127,14 @@ export class PackageRepository {
     const operationId = `op-pkg-create-${generateUUID()}`;
 
     db.runSync(
-      `INSERT INTO packages (id, center_id, name, price, description, status, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO packages (id, center_id, name, price, max_selections, description, status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         id,
         centerId,
         data.name.trim(),
         data.price,
+        maxSelections,
         data.description?.trim() || null,
         "active",
         now,
@@ -141,6 +147,7 @@ export class PackageRepository {
       centerId,
       name: data.name.trim(),
       price: data.price,
+      maxSelections,
       description: data.description?.trim() || null,
       status: "active",
       createdAt: now,
@@ -181,6 +188,7 @@ export class PackageRepository {
     data: {
       name?: string;
       price?: number;
+      maxSelections?: number;
       description?: string;
       status?: "active" | "inactive";
     },
@@ -198,10 +206,14 @@ export class PackageRepository {
     if (data.price !== undefined && data.price < 0) {
       throw new ValidationError("سعر الباقة يجب أن يكون صفراً أو أكثر.");
     }
+    if (data.maxSelections !== undefined && (!Number.isInteger(data.maxSelections) || data.maxSelections < 1)) {
+      throw new ValidationError("الحد الأقصى للاختيارات يجب أن يكون رقمًا صحيحًا أكبر من صفر.");
+    }
 
     const updatedName =
       data.name !== undefined ? data.name.trim() : existing.name;
     const updatedPrice = data.price !== undefined ? data.price : existing.price;
+    const updatedMaxSelections = data.maxSelections !== undefined ? data.maxSelections : existing.maxSelections;
     const updatedDesc =
       data.description !== undefined
         ? data.description.trim()
@@ -213,11 +225,12 @@ export class PackageRepository {
     const db = DatabaseService.getDb();
     db.runSync(
       `UPDATE packages
-       SET name = ?, price = ?, description = ?, status = ?, updated_at = ?
+       SET name = ?, price = ?, max_selections = ?, description = ?, status = ?, updated_at = ?
        WHERE center_id = ? AND id = ?`,
       [
         updatedName,
         updatedPrice,
+        updatedMaxSelections,
         updatedDesc,
         updatedStatus,
         now,
@@ -230,6 +243,7 @@ export class PackageRepository {
       ...existing,
       name: updatedName,
       price: updatedPrice,
+      maxSelections: updatedMaxSelections,
       description: updatedDesc,
       status: updatedStatus,
       updatedAt: now,

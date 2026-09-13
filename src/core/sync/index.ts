@@ -742,10 +742,10 @@ export class SyncEngine {
 
       if (Array.isArray(data.packages)) {
         for (const p of data.packages) {
-          db.runSync(`INSERT INTO packages (id, center_id, name, price, description, status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET name=excluded.name, price=excluded.price, description=excluded.description, status=excluded.status, updated_at=excluded.updated_at`,
-            [p.id, p.center_id || centerId, p.name || "", Number(p.price ?? p.total_price ?? p.totalPrice ?? 0), p.description || null, p.status || "active", p.created_at || new Date().toISOString(), p.updated_at || new Date().toISOString()]);
+          db.runSync(`INSERT INTO packages (id, center_id, name, price, max_selections, description, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET name=excluded.name, price=excluded.price, max_selections=excluded.max_selections, description=excluded.description, status=excluded.status, updated_at=excluded.updated_at`,
+            [p.id, p.center_id || centerId, p.name || "", Number(p.price ?? p.total_price ?? p.totalPrice ?? 0), Number(p.max_selections ?? p.maxSelections ?? 1), p.description || null, p.status || "active", p.created_at || new Date().toISOString(), p.updated_at || new Date().toISOString()]);
         }
       }
       if (Array.isArray(data.packageSubjects)) {
@@ -1253,9 +1253,9 @@ export class SyncEngine {
             [a.id || change.entityId, change.operationId || `srv-adjustment-${a.id || change.entityId}`, centerId, a.student_id || a.studentId || "", a.enrollment_id || a.enrollmentId || null, a.debt_cycle_id || a.debtCycleId || "", Number(a.amount_before ?? a.amountBefore ?? 0), Number(a.adjustment_amount ?? a.adjustmentAmount ?? a.amount ?? 0), Number(a.amount_after ?? a.amountAfter ?? 0), a.reason || "", a.created_by || a.createdBy || "system", a.created_at || new Date().toISOString()]);
         } else if (entityType === "package") {
           const p = data.package || data;
-          db.runSync(`INSERT INTO packages (id, center_id, name, price, description, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET name=excluded.name, price=excluded.price, description=excluded.description, status=excluded.status, updated_at=excluded.updated_at`,
-            [p.id || change.entityId, centerId, p.name || "", Number(p.price ?? p.total_price ?? p.totalPrice ?? 0), p.description || null, p.status || "active", p.created_at || new Date().toISOString(), p.updated_at || new Date().toISOString()]);
+          db.runSync(`INSERT INTO packages (id, center_id, name, price, max_selections, description, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET name=excluded.name, price=excluded.price, max_selections=excluded.max_selections, description=excluded.description, status=excluded.status, updated_at=excluded.updated_at`,
+            [p.id || change.entityId, centerId, p.name || "", Number(p.price ?? p.total_price ?? p.totalPrice ?? 0), Number(p.max_selections ?? p.maxSelections ?? 1), p.description || null, p.status || "active", p.created_at || new Date().toISOString(), p.updated_at || new Date().toISOString()]);
         } else if (entityType === "package_subject") {
           const p = data.packageSubject || data;
           const packageAction = String(change.action || "").toUpperCase();

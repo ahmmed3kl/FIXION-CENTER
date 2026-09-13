@@ -221,4 +221,16 @@ export class GroupScheduleRepository {
       payload: { status: "inactive", updatedAt: now },
     });
   }
+
+  static reactivateSchedule(scheduleId: string): void {
+    const { centerId, user } = this.getActiveContext();
+    if (!PermissionService.hasPermission(user.permissions, "groups.update")) throw new ForbiddenError("ليس لديك صلاحية إعادة تفعيل الموعد.");
+    const db = DatabaseService.getDb();
+    const existing = db.getFirstSync<GroupSchedule>("SELECT id, group_id as groupId FROM group_schedules WHERE center_id=? AND id=?", [centerId, scheduleId]);
+    if (!existing) throw new NotFoundError("الموعد غير موجود.");
+    const now = new Date().toISOString(); db.runSync("UPDATE group_schedules SET status='active', updated_at=? WHERE center_id=? AND id=?", [now, centerId, scheduleId]);
+    const operationId = `op-sched-reactivate-${Date.now()}-${scheduleId}`; const deviceId = DeviceService.getDeviceIdSync();
+    AuditService.recordEvent({ operationId, centerId, userId: user.id, deviceId, entityType: "group_schedule", entityId: scheduleId, action: "group_schedule.reactivate", payload: { groupId: existing.groupId } });
+    SyncRepository.enqueueOperation({ operationId, centerId, userId: user.id, deviceId, operationType: "UPDATE", entityType: "group_schedule", entityId: scheduleId, payload: { status: "active", updatedAt: now } });
+  }
 }

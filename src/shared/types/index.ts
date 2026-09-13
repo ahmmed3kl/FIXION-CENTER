@@ -244,6 +244,8 @@ export interface Package {
   centerId: string;
   name: string;
   price: number;
+  /** Maximum number of package options a student may select. */
+  maxSelections: number;
   monthlyPrice?: number;
   description?: string | null;
   status: "active" | "inactive";

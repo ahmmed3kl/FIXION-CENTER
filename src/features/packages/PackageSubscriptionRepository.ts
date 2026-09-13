@@ -112,6 +112,7 @@ export class PackageSubscriptionRepository {
     packageId: string;
     startDate: string;
     endDate?: string;
+    selectedOptionIds?: string[];
   }): Promise<StudentPackageSubscription> {
     const { centerId, user } = this.getActiveContext();
     if (
@@ -128,6 +129,15 @@ export class PackageSubscriptionRepository {
     const pkg = PackageRepository.getPackageById(params.packageId);
     if (!pkg || pkg.status !== "active") {
       throw new NotFoundError("الباقة غير موجودة أو غير نشطة.");
+    }
+    const packageOptions = PackageRepository.getPackageSubjects(params.packageId);
+    const selectedOptionIds = params.selectedOptionIds ?? packageOptions.map((o) => o.id);
+    const hasExplicitSelection = params.selectedOptionIds !== undefined;
+    if (hasExplicitSelection && packageOptions.length > 0 && (selectedOptionIds.length < 1 || selectedOptionIds.length > (pkg.maxSelections || 1))) {
+      throw new ValidationError(`يجب اختيار من 1 إلى ${pkg.maxSelections || 1} من اختيارات الباقة.`);
+    }
+    if (selectedOptionIds.some((id) => !packageOptions.some((o) => o.id === id))) {
+      throw new ValidationError("يوجد اختيار غير تابع لهذه الباقة.");
     }
 
     const db = DatabaseService.getDb();
@@ -157,6 +167,17 @@ export class PackageSubscriptionRepository {
         now,
       ],
     );
+    // Keep the student's selected package options in the existing audited
+    // override table. The default teacher is stored deliberately so the
+    // selection remains available offline and survives a mid-month switch.
+    for (const optionId of selectedOptionIds) {
+      const option = packageOptions.find((o) => o.id === optionId)!;
+      db.runSync(
+        `INSERT OR IGNORE INTO package_subject_teacher_overrides (id, center_id, subscription_id, subject_id, teacher_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [`sel-${generateUUID()}`, centerId, id, option.subjectId, option.defaultTeacherId, now],
+      );
+    }
 
     const subscription: StudentPackageSubscription = {
       id,
@@ -204,6 +225,7 @@ export class PackageSubscriptionRepository {
         studentId: params.studentId,
         packageId: params.packageId,
         startDate: params.startDate,
+        selectedOptionIds,
       },
     });
 

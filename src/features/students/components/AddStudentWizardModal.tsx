@@ -23,7 +23,7 @@ import {
     AppCard,
     AppInput
 } from "../../../shared/components";
-import { Group, GroupSchedule } from "../../../shared/types";
+import { Group, GroupSchedule, Package, PackageSubject } from "../../../shared/types";
 import { formatDisplayIdentifier } from "../../../shared/utils/formatters";
 import { isEgyptianPhone, isNumericCode, isValidName, ValidationMessages } from "../../../shared/utils/validation";
 import { GroupRepository } from "../../groups/GroupRepository";
@@ -31,6 +31,8 @@ import { GroupScheduleRepository } from "../../groups/GroupScheduleRepository";
 import { TeacherRepository } from "../../teachers/TeacherRepository";
 import { StudentCardRepository } from "../StudentCardRepository";
 import { StudentRepository } from "../StudentRepository";
+import { PackageRepository } from "../../packages/PackageRepository";
+import { PackageSubscriptionRepository } from "../../packages/PackageSubscriptionRepository";
 
 const DAYS_OF_WEEK = [
   "الأحد",
@@ -86,6 +88,11 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({
   >({});
   const [teachersMap, setTeachersMap] = useState<Record<string, string>>({});
   const [selectedGroupIds, setSelectedGroupIds] = useState<string[]>([]);
+  const [availablePackages, setAvailablePackages] = useState<Package[]>([]);
+  const [packageOptions, setPackageOptions] = useState<Record<string, PackageSubject[]>>({});
+  const [enrollmentMode, setEnrollmentMode] = useState<"groups" | "package">("groups");
+  const [selectedPackageId, setSelectedPackageId] = useState("");
+  const [selectedPackageOptionIds, setSelectedPackageOptionIds] = useState<string[]>([]);
 
   // Step 4 & 5: Submission & creation
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -101,6 +108,13 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({
     try {
       const groups = GroupRepository.getAll();
       setAvailableGroups(groups);
+      try {
+        const pkgs = PackageRepository.getPackages();
+        setAvailablePackages(pkgs);
+        const opts: Record<string, PackageSubject[]> = {};
+        pkgs.forEach((p) => { opts[p.id] = PackageRepository.getPackageSubjects(p.id); });
+        setPackageOptions(opts);
+      } catch (err) { console.warn("Could not load packages:", err); }
 
       // Load active schedules
       try {
@@ -147,6 +161,9 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({
     setNotes("");
     setStep2Errors({});
     setSelectedGroupIds([]);
+    setEnrollmentMode("groups");
+    setSelectedPackageId("");
+    setSelectedPackageOptionIds([]);
     setIsSubmitting(false);
   };
 
@@ -270,7 +287,7 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({
   const handleConfirmAddStudent = () => {
     setIsSubmitting(true);
     try {
-      StudentRepository.createStudent({
+      const created = StudentRepository.createStudent({
         studentCode: scannedCardCode,
         cardCode: scannedCardCode,
         fullName: fullName.trim(),
@@ -278,8 +295,16 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({
         parentPhone: parentPhone.trim(),
         grade: grade.trim(),
         notes: notes.trim() || undefined,
-        groupIds: selectedGroupIds,
+        groupIds: enrollmentMode === "groups" ? selectedGroupIds : [],
       });
+      if (enrollmentMode === "package" && selectedPackageId) {
+        PackageSubscriptionRepository.subscribeStudent({
+          studentId: created.id,
+          packageId: selectedPackageId,
+          startDate: new Date().toISOString().split("T")[0],
+          selectedOptionIds: selectedPackageOptionIds,
+        });
+      }
 
       setIsSubmitting(false);
       setStep(5);
@@ -291,6 +316,7 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({
   };
 
   const calculateTotalMonthly = () => {
+    if (enrollmentMode === "package") return availablePackages.find((p) => p.id === selectedPackageId)?.price || 0;
     return selectedGroupIds.reduce((sum, gId) => {
       const grp = availableGroups.find((g) => g.id === gId);
       return sum + (grp?.monthlyPrice || 0);
@@ -782,12 +808,21 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({
             {/* ============================================================ */}
             {step === 3 && (
               <View style={styles.stepContent}>
-                <Text style={styles.stepSubtitle}>
+                <View style={styles.modeSwitch}>
+                  <TouchableOpacity style={[styles.modeButton, enrollmentMode === "groups" && styles.modeButtonActive]} onPress={() => setEnrollmentMode("groups")}><Text style={styles.modeText}>مجموعات عادية</Text></TouchableOpacity>
+                  <TouchableOpacity style={[styles.modeButton, enrollmentMode === "package" && styles.modeButtonActive]} onPress={() => setEnrollmentMode("package")}><Text style={styles.modeText}>باقة</Text></TouchableOpacity>
+                </View>
+                {enrollmentMode === "package" && <View>
+                  <Text style={styles.stepSubtitle}>اختر باقة ثم اختيارات المدرسين/المواد.</Text>
+                  {availablePackages.map((pkg) => <TouchableOpacity key={pkg.id} onPress={() => { setSelectedPackageId(pkg.id); setSelectedPackageOptionIds([]); }}><AppCard style={[styles.groupSelectCard, selectedPackageId === pkg.id && styles.groupSelectCardActive]}><Text style={styles.groupCardName}>{pkg.name}</Text><Text>{formatCurrency(pkg.price)} / شهر • حتى {pkg.maxSelections} اختيارات</Text></AppCard></TouchableOpacity>)}
+                  {!!selectedPackageId && (packageOptions[selectedPackageId] || []).map((option) => { const selected = selectedPackageOptionIds.includes(option.id); const pkg = availablePackages.find((p) => p.id === selectedPackageId)!; return <TouchableOpacity key={option.id} onPress={() => { if (!selected && selectedPackageOptionIds.length >= pkg.maxSelections) { Alert.alert("تنبيه", `يمكنك اختيار ${pkg.maxSelections} فقط.`); return; } setSelectedPackageOptionIds((old) => selected ? old.filter((id) => id !== option.id) : [...old, option.id]); }}><AppCard style={[styles.groupSelectCard, selected && styles.groupSelectCardActive]}><Text style={styles.groupCardName}>{selected ? "✓ " : "□ "}{option.subjectName} - {option.defaultTeacherName}</Text></AppCard></TouchableOpacity>; })}
+                </View>}
+                {enrollmentMode === "groups" && <Text style={styles.stepSubtitle}>
                   اختر المجموعات التي سينضم إليها الطالب (يمكنك اختيار أكثر من
                   مجموعة):
-                </Text>
+                </Text>}
 
-                {availableGroups.length === 0 ? (
+                {enrollmentMode === "groups" && (availableGroups.length === 0 ? (
                   <AppCard style={styles.emptyGroupsCard}>
                     <Ionicons
                       name="people-outline"
@@ -875,7 +910,7 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({
                       );
                     })}
                   </View>
-                )}
+                ))}
 
                 <View style={styles.stepNavRow}>
                   <AppButton
@@ -885,7 +920,7 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({
                     style={{ flex: 1, marginLeft: Spacing.sm }}
                   />
                   <AppButton
-                    title={`التالي: المراجعة (${selectedGroupIds.length})`}
+                    title={`التالي: المراجعة (${enrollmentMode === "package" ? selectedPackageOptionIds.length : selectedGroupIds.length})`}
                     onPress={() => setStep(4)}
                     style={{ flex: 2 }}
                   />
@@ -1182,6 +1217,10 @@ const styles = StyleSheet.create({
   stepContent: {
     width: "100%",
   },
+  modeSwitch: { flexDirection: "row", gap: 8, marginBottom: Spacing.md },
+  modeButton: { flex: 1, padding: 12, borderRadius: BorderRadius.md, backgroundColor: Colors.slate100, alignItems: "center" },
+  modeButtonActive: { backgroundColor: Colors.primary },
+  modeText: { color: Colors.slate800, fontWeight: "700" },
   stepSubtitle: {
     fontSize: 14,
     color: Colors.slate600,

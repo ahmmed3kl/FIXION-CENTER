@@ -286,4 +286,30 @@ export class SubjectRepository {
       payload: { status: "inactive", updatedAt: now },
     });
   }
+
+  static reactivateSubject(subjectId: string): void {
+    const { centerId, user } = this.getActiveContext();
+    if (!PermissionService.hasPermission(user.permissions, "subjects.update")) throw new ForbiddenError("ليس لديك صلاحية إعادة تفعيل المادة.");
+    const existing = this.findById(subjectId);
+    if (!existing) throw new NotFoundError("المادة غير موجودة.");
+    const now = new Date().toISOString();
+    DatabaseService.getDb().runSync("UPDATE subjects SET status='active', updated_at=? WHERE center_id=? AND id=?", [now, centerId, subjectId]);
+    const operationId = `op-subj-reactivate-${Date.now()}-${subjectId}`; const deviceId = DeviceService.getDeviceIdSync();
+    AuditService.recordEvent({ operationId, centerId, userId: user.id, deviceId, entityType: "subject", entityId: subjectId, action: "subject.reactivate", payload: {} });
+    SyncRepository.enqueueOperation({ operationId, centerId, userId: user.id, deviceId, operationType: "UPDATE", entityType: "subject", entityId: subjectId, payload: { status: "active", updatedAt: now } });
+  }
+
+  static deleteSubject(subjectId: string): void {
+    const { centerId, user } = this.getActiveContext();
+    if (!PermissionService.hasPermission(user.permissions, "subjects.deactivate")) throw new ForbiddenError("ليس لديك صلاحية حذف المادة.");
+    const existing = this.findById(subjectId); if (!existing) throw new NotFoundError("المادة غير موجودة.");
+    const db = DatabaseService.getDb();
+    const refs = db.getFirstSync<{ count: number }>("SELECT COUNT(*) as count FROM groups WHERE center_id=? AND subject_id=?", [centerId, subjectId]);
+    if ((refs?.count || 0) > 0) throw new ValidationError("لا يمكن حذف مادة مرتبطة بمجموعات؛ عطّلها للحفاظ على السجل.");
+    db.runSync("DELETE FROM teacher_subjects WHERE center_id=? AND subject_id=?", [centerId, subjectId]);
+    db.runSync("DELETE FROM subjects WHERE center_id=? AND id=?", [centerId, subjectId]);
+    const operationId = `op-subj-delete-${Date.now()}-${subjectId}`; const deviceId = DeviceService.getDeviceIdSync();
+    AuditService.recordEvent({ operationId, centerId, userId: user.id, deviceId, entityType: "subject", entityId: subjectId, action: "subject.delete", payload: { name: existing.name } });
+    SyncRepository.enqueueOperation({ operationId, centerId, userId: user.id, deviceId, operationType: "DELETE", entityType: "subject", entityId: subjectId, payload: { id: subjectId } });
+  }
 }

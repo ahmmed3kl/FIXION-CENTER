@@ -16,6 +16,8 @@ import { PermissionService } from "../../core/permissions";
 import { Colors, Spacing, Typography } from "../../core/theme";
 import { useAuthStore } from "../../features/auth/useAuthStore";
 import { EnrollmentRepository } from "../../features/enrollments/EnrollmentRepository";
+import { PackageRepository } from "../../features/packages/PackageRepository";
+import { PackageSubscriptionRepository } from "../../features/packages/PackageSubscriptionRepository";
 import { GroupRepository } from "../../features/groups/GroupRepository";
 import { DebtAdjustmentRepository } from "../../features/payments/DebtAdjustmentRepository";
 import { FinancialCalculationService } from "../../features/payments/FinancialCalculationService";
@@ -39,6 +41,8 @@ import {
     Student,
     StudentCard,
     StudentGroupEnrollment,
+    Package,
+    PackageSubject,
 } from "../../shared/types";
 import { formatDisplayIdentifier } from "../../shared/utils/formatters";
 
@@ -66,6 +70,11 @@ export default function StudentsScreen() {
   const [isPaymentModalOpen, setIsPaymentModalOpen] = useState(false);
   const [isAdjModalOpen, setIsAdjModalOpen] = useState(false);
   const [isRevModalOpen, setIsRevModalOpen] = useState(false);
+  const [isPackageModalOpen, setIsPackageModalOpen] = useState(false);
+  const [availablePackages, setAvailablePackages] = useState<Package[]>([]);
+  const [packageOptions, setPackageOptions] = useState<PackageSubject[]>([]);
+  const [packageId, setPackageId] = useState("");
+  const [packageOptionIds, setPackageOptionIds] = useState<string[]>([]);
 
   // Financial Form States
   const [paymentAmount, setPaymentAmount] = useState("");
@@ -101,9 +110,24 @@ export default function StudentsScreen() {
       setStudents(all);
       const groups = GroupRepository.getAll();
       setAvailableGroups(groups);
+      try { setAvailablePackages(PackageRepository.getPackages()); } catch {}
     } catch (e: any) {
       console.error(e);
     }
+  };
+
+  const openPackageModal = () => {
+    if (!selectedStudent) return;
+    const first = availablePackages[0];
+    setPackageId(first?.id || "");
+    setPackageOptions(first ? PackageRepository.getPackageSubjects(first.id) : []);
+    setPackageOptionIds([]);
+    setIsPackageModalOpen(true);
+  };
+  const handlePackageChange = (id: string) => { setPackageId(id); setPackageOptions(PackageRepository.getPackageSubjects(id)); setPackageOptionIds([]); };
+  const handleSubscribePackage = async () => {
+    if (!selectedStudent || !packageId || packageOptionIds.length === 0) return Alert.alert("تنبيه", "اختر الباقة واختيارًا واحدًا على الأقل.");
+    try { await PackageSubscriptionRepository.subscribeStudent({ studentId: selectedStudent.id, packageId, startDate: new Date().toISOString().split("T")[0], selectedOptionIds: packageOptionIds }); Alert.alert("تم بنجاح", "تم تحويل الطالب إلى الباقة من تاريخ اليوم مع الحفاظ على السجل السابق."); setIsPackageModalOpen(false); } catch (e: any) { Alert.alert("خطأ", e?.message || "تعذر تسجيل الباقة."); }
   };
 
   useEffect(() => {
@@ -575,6 +599,12 @@ export default function StudentsScreen() {
                         </Text>
                       </TouchableOpacity>
                     )}
+                    {PermissionService.hasPermission(permissions, "packages.subscribe") && availablePackages.length > 0 && (
+                      <TouchableOpacity style={styles.smallActionBtn} onPress={openPackageModal}>
+                        <Ionicons name="pricetags-outline" size={14} color={Colors.white} />
+                        <Text style={styles.smallActionBtnText}>تحويل إلى باقة</Text>
+                      </TouchableOpacity>
+                    )}
                   </View>
 
                   {studentEnrollments.length === 0 ? (
@@ -864,6 +894,18 @@ export default function StudentsScreen() {
           </View>
         </Modal>
       )}
+
+      <Modal visible={isPackageModalOpen} animationType="slide" transparent>
+        <View style={styles.modalOverlay}><View style={styles.smallModalCard}>
+          <Text style={styles.modalTitle}>تحويل الطالب إلى باقة</Text>
+          <Text style={styles.fieldNote}>يبدأ الاشتراك من اليوم، ولا يتم حذف التسجيلات أو الدورات السابقة.</Text>
+          <ScrollView style={{ maxHeight: 360 }}>
+            {availablePackages.map((pkg) => <TouchableOpacity key={pkg.id} onPress={() => handlePackageChange(pkg.id)} style={[styles.enrollChoice, packageId === pkg.id && styles.enrollChoiceActive]}><Text>{pkg.name} • {pkg.price} ج.م • حد {pkg.maxSelections}</Text></TouchableOpacity>)}
+            {packageOptions.map((option) => { const selected = packageOptionIds.includes(option.id); const max = availablePackages.find((p) => p.id === packageId)?.maxSelections || 1; return <TouchableOpacity key={option.id} onPress={() => { if (!selected && packageOptionIds.length >= max) return Alert.alert("تنبيه", `يمكنك اختيار ${max} فقط.`); setPackageOptionIds((old) => selected ? old.filter((id) => id !== option.id) : [...old, option.id]); }} style={[styles.enrollChoice, selected && styles.enrollChoiceActive]}><Text>{selected ? "✓ " : "□ "}{option.subjectName} - {option.defaultTeacherName}</Text></TouchableOpacity>; })}
+          </ScrollView>
+          <View style={{ flexDirection: "row", gap: 8, marginTop: Spacing.md }}><AppButton title="تأكيد التحويل" onPress={handleSubscribePackage} style={{ flex: 1 }} /><AppButton title="إلغاء" variant="outline" onPress={() => setIsPackageModalOpen(false)} style={{ flex: 1 }} /></View>
+        </View></View>
+      </Modal>
 
       {/* 3. Issue/Replace Card Modal */}
       <Modal visible={isCardModalOpen} animationType="slide" transparent>
@@ -1233,6 +1275,8 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     padding: Spacing.lg,
   },
+  enrollChoice: { padding: 12, borderWidth: 1, borderColor: Colors.border, borderRadius: 8, marginBottom: 8, backgroundColor: Colors.white },
+  enrollChoiceActive: { borderColor: Colors.primary, backgroundColor: Colors.primaryLight + "20" },
   modalHeader: {
     flexDirection: "row",
     justifyContent: "space-between",

@@ -272,4 +272,34 @@ export class TeacherRepository {
       payload: { status: "inactive", updatedAt: now },
     });
   }
+
+  static reactivateTeacher(teacherId: string): void {
+    const { centerId, user } = this.getActiveContext();
+    if (!PermissionService.hasPermission(user.permissions, "teachers.update")) throw new ForbiddenError("ليس لديك صلاحية إعادة تفعيل المدرس.");
+    const existing = this.findById(teacherId);
+    if (!existing) throw new NotFoundError("المدرس غير موجود.");
+    const now = new Date().toISOString();
+    DatabaseService.getDb().runSync("UPDATE teachers SET status='active', updated_at=? WHERE center_id=? AND id=?", [now, centerId, teacherId]);
+    const operationId = `op-teach-reactivate-${Date.now()}-${teacherId}`;
+    const deviceId = DeviceService.getDeviceIdSync();
+    AuditService.recordEvent({ operationId, centerId, userId: user.id, deviceId, entityType: "teacher", entityId: teacherId, action: "teacher.reactivate", payload: {} });
+    SyncRepository.enqueueOperation({ operationId, centerId, userId: user.id, deviceId, operationType: "UPDATE", entityType: "teacher", entityId: teacherId, payload: { status: "active", updatedAt: now } });
+  }
+
+  /** Hard delete is allowed only when no historical/relational record depends on the teacher. */
+  static deleteTeacher(teacherId: string): void {
+    const { centerId, user } = this.getActiveContext();
+    if (!PermissionService.hasPermission(user.permissions, "teachers.deactivate")) throw new ForbiddenError("ليس لديك صلاحية حذف المدرس.");
+    const existing = this.findById(teacherId);
+    if (!existing) throw new NotFoundError("المدرس غير موجود.");
+    const db = DatabaseService.getDb();
+    const refs = db.getFirstSync<{ count: number }>("SELECT COUNT(*) as count FROM groups WHERE center_id=? AND teacher_id=?", [centerId, teacherId]);
+    if ((refs?.count || 0) > 0) throw new ValidationError("لا يمكن حذف مدرس مرتبط بمجموعات؛ عطّله للحفاظ على السجل.");
+    db.runSync("DELETE FROM teacher_subjects WHERE center_id=? AND teacher_id=?", [centerId, teacherId]);
+    db.runSync("DELETE FROM teachers WHERE center_id=? AND id=?", [centerId, teacherId]);
+    const operationId = `op-teach-delete-${Date.now()}-${teacherId}`;
+    const deviceId = DeviceService.getDeviceIdSync();
+    AuditService.recordEvent({ operationId, centerId, userId: user.id, deviceId, entityType: "teacher", entityId: teacherId, action: "teacher.delete", payload: { name: existing.name } });
+    SyncRepository.enqueueOperation({ operationId, centerId, userId: user.id, deviceId, operationType: "DELETE", entityType: "teacher", entityId: teacherId, payload: { id: teacherId } });
+  }
 }

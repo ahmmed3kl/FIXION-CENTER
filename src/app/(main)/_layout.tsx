@@ -94,6 +94,7 @@ export default function MainLayout() {
           ),
         }}
       />
+      <Tabs.Screen name="packages" options={{ href: null }} />
     </Tabs>
   );
 }

@@ -765,15 +765,15 @@ class SyncProcessor {
       case "package": {
         const pkg = payload.package || payload;
         const packageId = pkg.id || pkg.packageId || context.entityId;
-        const existing = await client.query("SELECT name, grade, total_price, billing_cycle, status FROM packages WHERE center_id = $1 AND id = $2", [centerId, packageId]);
+        const existing = await client.query("SELECT name, grade, total_price, max_selections, billing_cycle, status FROM packages WHERE center_id = $1 AND id = $2", [centerId, packageId]);
         const prev = existing.rows[0] || {};
         await client.query(
-          `INSERT INTO packages (id, center_id, name, grade, total_price, billing_cycle, status, created_at, updated_at)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,NOW(),NOW())
+          `INSERT INTO packages (id, center_id, name, grade, total_price, max_selections, billing_cycle, status, created_at, updated_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW(),NOW())
            ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name, grade=EXCLUDED.grade,
-             total_price=EXCLUDED.total_price, billing_cycle=EXCLUDED.billing_cycle,
+             total_price=EXCLUDED.total_price, max_selections=EXCLUDED.max_selections, billing_cycle=EXCLUDED.billing_cycle,
              status=EXCLUDED.status, updated_at=NOW()` ,
-          [packageId, centerId, pkg.name ?? prev.name, pkg.grade ?? prev.grade ?? "all", Number(pkg.total_price ?? pkg.totalPrice ?? pkg.price ?? prev.total_price ?? 0), pkg.billing_cycle ?? pkg.billingCycle ?? prev.billing_cycle ?? "monthly", pkg.status ?? prev.status ?? "active"],
+          [packageId, centerId, pkg.name ?? prev.name, pkg.grade ?? prev.grade ?? "all", Number(pkg.total_price ?? pkg.totalPrice ?? pkg.price ?? prev.total_price ?? 0), Number(pkg.max_selections ?? pkg.maxSelections ?? prev.max_selections ?? 1), pkg.billing_cycle ?? pkg.billingCycle ?? prev.billing_cycle ?? "monthly", pkg.status ?? prev.status ?? "active"],
         );
         break;
       }

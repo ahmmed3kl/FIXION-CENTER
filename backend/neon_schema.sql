@@ -299,11 +299,17 @@ CREATE TABLE IF NOT EXISTS packages (
     name VARCHAR(255) NOT NULL,
     grade VARCHAR(64) NOT NULL,
     total_price NUMERIC(12, 2) NOT NULL CHECK (total_price >= 0),
+    max_selections INTEGER NOT NULL DEFAULT 1 CHECK (max_selections > 0),
     billing_cycle VARCHAR(32) NOT NULL DEFAULT 'monthly' CHECK (billing_cycle IN ('monthly', 'term', 'annual')),
     status VARCHAR(32) NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+ALTER TABLE packages ADD COLUMN IF NOT EXISTS max_selections INTEGER NOT NULL DEFAULT 1;
+DO $$ BEGIN
+  ALTER TABLE packages ADD CONSTRAINT packages_max_selections_positive CHECK (max_selections > 0);
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
 
 -- Package Subjects
 CREATE TABLE IF NOT EXISTS package_subjects (

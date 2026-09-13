@@ -412,4 +412,28 @@ export class GroupRepository {
       payload: { status: "inactive", updatedAt: now },
     });
   }
+
+  static reactivateGroup(groupId: string): void {
+    const { centerId, user } = this.getActiveContext();
+    if (!PermissionService.hasPermission(user.permissions, "groups.update")) throw new ForbiddenError("ليس لديك صلاحية إعادة تفعيل المجموعة.");
+    const existing = this.findById(groupId); if (!existing) throw new NotFoundError("المجموعة غير موجودة.");
+    const now = new Date().toISOString(); DatabaseService.getDb().runSync("UPDATE groups SET status='active', updated_at=? WHERE center_id=? AND id=?", [now, centerId, groupId]);
+    const operationId = `op-grp-reactivate-${Date.now()}-${groupId}`; const deviceId = DeviceService.getDeviceIdSync();
+    AuditService.recordEvent({ operationId, centerId, userId: user.id, deviceId, entityType: "group", entityId: groupId, action: "group.reactivate", payload: {} });
+    SyncRepository.enqueueOperation({ operationId, centerId, userId: user.id, deviceId, operationType: "UPDATE", entityType: "group", entityId: groupId, payload: { status: "active", updatedAt: now } });
+  }
+
+  static deleteGroup(groupId: string): void {
+    const { centerId, user } = this.getActiveContext();
+    if (!PermissionService.hasPermission(user.permissions, "groups.deactivate")) throw new ForbiddenError("ليس لديك صلاحية حذف المجموعة.");
+    const existing = this.findById(groupId); if (!existing) throw new NotFoundError("المجموعة غير موجودة.");
+    const db = DatabaseService.getDb();
+    const refs = db.getFirstSync<{ count: number }>("SELECT COUNT(*) as count FROM student_group_enrollments WHERE center_id=? AND group_id=?", [centerId, groupId]);
+    if ((refs?.count || 0) > 0) throw new ValidationError("لا يمكن حذف مجموعة لها تسجيلات؛ عطّلها للحفاظ على السجل.");
+    db.runSync("DELETE FROM group_schedules WHERE center_id=? AND group_id=?", [centerId, groupId]);
+    db.runSync("DELETE FROM groups WHERE center_id=? AND id=?", [centerId, groupId]);
+    const operationId = `op-grp-delete-${Date.now()}-${groupId}`; const deviceId = DeviceService.getDeviceIdSync();
+    AuditService.recordEvent({ operationId, centerId, userId: user.id, deviceId, entityType: "group", entityId: groupId, action: "group.delete", payload: { name: existing.name } });
+    SyncRepository.enqueueOperation({ operationId, centerId, userId: user.id, deviceId, operationType: "DELETE", entityType: "group", entityId: groupId, payload: { id: groupId } });
+  }
 }

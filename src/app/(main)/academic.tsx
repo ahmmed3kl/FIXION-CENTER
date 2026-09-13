@@ -1,4 +1,5 @@
 import { Ionicons } from "@expo/vector-icons";
+import { useRouter } from "expo-router";
 import { useEffect, useState } from "react";
 import {
     Alert,
@@ -54,6 +55,7 @@ const DAYS_OF_WEEK = [
 ];
 
 export default function AcademicScreen() {
+  const router = useRouter();
   const currentUser = useAuthStore((s) => s.currentUser);
   const activeCenterId = useAuthStore((s) => s.activeCenterId);
   const permissions = resolveUserPermissions(currentUser);
@@ -70,8 +72,12 @@ export default function AcademicScreen() {
   // Selection & Modals
   const [isAddTeacherOpen, setIsAddTeacherOpen] = useState(false);
   const [isAddSubjectOpen, setIsAddSubjectOpen] = useState(false);
+  const [editingTeacher, setEditingTeacher] = useState<Teacher | null>(null);
+  const [editingSubject, setEditingSubject] = useState<Subject | null>(null);
+  const [teacherSubjectIds, setTeacherSubjectIds] = useState<string[]>([]);
   const [isAddGroupOpen, setIsAddGroupOpen] = useState(false);
   const [selectedGroup, setSelectedGroup] = useState<Group | null>(null);
+  const [editingGroup, setEditingGroup] = useState<Group | null>(null);
   const [groupSchedules, setGroupSchedules] = useState<GroupSchedule[]>([]);
   const [isAddScheduleOpen, setIsAddScheduleOpen] = useState(false);
 
@@ -107,9 +113,9 @@ export default function AcademicScreen() {
 
   const loadData = () => {
     try {
-      setTeachers(TeacherRepository.getAll());
-      setSubjects(SubjectRepository.getAll());
-      setGroups(GroupRepository.getAll());
+      setTeachers(TeacherRepository.getAll(true));
+      setSubjects(SubjectRepository.getAll(true));
+      setGroups(GroupRepository.getAll(true));
       setTodaySessions(SessionGenerationService.getSessionsForDate(todayStr));
     } catch (e: any) {
       console.error("Academic loadData error:", e);
@@ -148,13 +154,17 @@ export default function AcademicScreen() {
       return;
     }
     try {
-      TeacherRepository.createTeacher({
-        name: teacherName.trim(),
-        phone: teacherPhone.trim() || undefined,
-        notes: teacherNotes.trim() || undefined,
-      });
+      const teacher = editingTeacher
+        ? TeacherRepository.updateTeacher(editingTeacher.id, { name: teacherName.trim(), phone: teacherPhone.trim() || undefined, notes: teacherNotes.trim() || undefined })
+        : TeacherRepository.createTeacher({ name: teacherName.trim(), phone: teacherPhone.trim() || undefined, notes: teacherNotes.trim() || undefined });
+      for (const subject of SubjectRepository.getAll(true)) {
+        const assigned = TeacherSubjectRepository.isTeacherAssignedToSubject(teacher.id, subject.id);
+        if (teacherSubjectIds.includes(subject.id) && !assigned) TeacherSubjectRepository.assignTeacherToSubject(teacher.id, subject.id);
+        if (!teacherSubjectIds.includes(subject.id) && assigned) TeacherSubjectRepository.removeTeacherFromSubject(teacher.id, subject.id);
+      }
       Alert.alert("تم بنجاح", "تم إضافة المعلم بنجاح.");
       setIsAddTeacherOpen(false);
+      setEditingTeacher(null); setTeacherSubjectIds([]);
       setTeacherName("");
       setTeacherPhone("");
       setTeacherNotes("");
@@ -171,12 +181,11 @@ export default function AcademicScreen() {
       return;
     }
     try {
-      SubjectRepository.createSubject({
-        name: subjectName.trim(),
-        code: subjectCode.trim(),
-      });
+      if (editingSubject) SubjectRepository.updateSubject(editingSubject.id, { name: subjectName.trim(), code: subjectCode.trim() });
+      else SubjectRepository.createSubject({ name: subjectName.trim(), code: subjectCode.trim() });
       Alert.alert("تم بنجاح", "تم إضافة المادة الدراسية بنجاح.");
       setIsAddSubjectOpen(false);
+      setEditingSubject(null);
       setSubjectName("");
       setSubjectCode("");
       loadData();
@@ -184,6 +193,16 @@ export default function AcademicScreen() {
       Alert.alert("خطأ", e?.message || "فشل إضافة المادة");
     }
   };
+
+  const openTeacherEditor = (teacher: Teacher) => { setEditingTeacher(teacher); setTeacherName(teacher.name); setTeacherPhone(teacher.phone || ""); setTeacherNotes(teacher.notes || ""); try { setTeacherSubjectIds(TeacherSubjectRepository.getSubjectsForTeacher(teacher.id).map((s) => s.id)); } catch { setTeacherSubjectIds([]); } setIsAddTeacherOpen(true); };
+  const openSubjectEditor = (subject: Subject) => { setEditingSubject(subject); setSubjectName(subject.name); setSubjectCode(subject.code); setIsAddSubjectOpen(true); };
+  const toggleGroupStatus = (group: Group) => { try { group.status === "active" ? GroupRepository.deactivateGroup(group.id) : GroupRepository.reactivateGroup(group.id); loadData(); Alert.alert("تم بنجاح", "تم تحديث حالة المجموعة."); } catch (e: any) { Alert.alert("خطأ", e?.message || "تعذر تحديث حالة المجموعة."); } };
+  const openGroupEditor = (group: Group) => { setEditingGroup(group); setGroupName(group.name); setGroupTeacherId(group.teacherId); setGroupSubjectId(group.subjectId); setGroupGrade(group.grade); setGroupSessionPrice(String(group.sessionPrice)); setGroupMonthlyPrice(String(group.monthlyPrice)); setGroupDuration(String(group.sessionDurationMinutes)); setGroupLateThreshold(String(group.lateAfterMinutes)); setIsAddGroupOpen(true); };
+  const deleteGroup = (group: Group) => { Alert.alert("تأكيد الحذف", "سيتم الحذف فقط إذا لم توجد تسجيلات.", [{ text: "إلغاء", style: "cancel" }, { text: "حذف", style: "destructive", onPress: () => { try { GroupRepository.deleteGroup(group.id); loadData(); Alert.alert("تم بنجاح", "تم حذف المجموعة."); } catch (e: any) { Alert.alert("لا يمكن الحذف", e?.message || "استخدم التعطيل للحفاظ على السجل."); } } }]); };
+  const deleteTeacher = (teacher: Teacher) => { Alert.alert("تأكيد الحذف", "سيتم الحذف فقط إذا لم توجد سجلات مرتبطة.", [{ text: "إلغاء", style: "cancel" }, { text: "حذف", style: "destructive", onPress: () => { try { TeacherRepository.deleteTeacher(teacher.id); loadData(); Alert.alert("تم بنجاح", "تم حذف المدرس."); } catch (e: any) { Alert.alert("لا يمكن الحذف", e?.message || "استخدم التعطيل للحفاظ على السجل."); } } }]); };
+  const deleteSubject = (subject: Subject) => { Alert.alert("تأكيد الحذف", "سيتم الحذف فقط إذا لم توجد سجلات مرتبطة.", [{ text: "إلغاء", style: "cancel" }, { text: "حذف", style: "destructive", onPress: () => { try { SubjectRepository.deleteSubject(subject.id); loadData(); Alert.alert("تم بنجاح", "تم حذف المادة."); } catch (e: any) { Alert.alert("لا يمكن الحذف", e?.message || "استخدم التعطيل للحفاظ على السجل."); } } }]); };
+  const toggleTeacherStatus = (teacher: Teacher) => { try { teacher.status === "active" ? TeacherRepository.deactivateTeacher(teacher.id) : TeacherRepository.reactivateTeacher(teacher.id); loadData(); Alert.alert("تم بنجاح", "تم تحديث حالة المدرس."); } catch (e: any) { Alert.alert("خطأ", e?.message || "تعذر تحديث حالة المدرس."); } };
+  const toggleSubjectStatus = (subject: Subject) => { try { subject.status === "active" ? SubjectRepository.deactivateSubject(subject.id) : SubjectRepository.reactivateSubject(subject.id); loadData(); Alert.alert("تم بنجاح", "تم تحديث حالة المادة."); } catch (e: any) { Alert.alert("خطأ", e?.message || "تعذر تحديث حالة المادة."); } };
 
   // 3. Groups Actions
   const handleCreateGroup = () => {
@@ -206,7 +225,9 @@ export default function AcademicScreen() {
         );
       }
 
-      GroupRepository.createGroup({
+      if (editingGroup) GroupRepository.updateGroup(editingGroup.id, {
+        name: groupName.trim(), teacherId: groupTeacherId, subjectId: groupSubjectId, grade: groupGrade.trim(), sessionPrice: parseFloat(groupSessionPrice) || 0, monthlyPrice: parseFloat(groupMonthlyPrice) || 0, sessionDurationMinutes: parseInt(groupDuration, 10) || 120, lateAfterMinutes: parseInt(groupLateThreshold, 10) || 15,
+      }); else GroupRepository.createGroup({
         name: groupName.trim(),
         teacherId: groupTeacherId,
         subjectId: groupSubjectId,
@@ -219,6 +240,7 @@ export default function AcademicScreen() {
 
       Alert.alert("تم بنجاح", "تم إنشاء المجموعة بنجاح.");
       setIsAddGroupOpen(false);
+      setEditingGroup(null);
       setGroupName("");
       loadData();
     } catch (e: any) {
@@ -299,14 +321,20 @@ export default function AcademicScreen() {
     permissions,
     "teachers.create",
   );
+  const canUpdateTeacher = PermissionService.hasPermission(permissions, "teachers.update");
+  const canDeactivateTeacher = PermissionService.hasPermission(permissions, "teachers.deactivate");
   const canCreateSubject = PermissionService.hasPermission(
     permissions,
     "subjects.create",
   );
+  const canUpdateSubject = PermissionService.hasPermission(permissions, "subjects.update");
+  const canDeactivateSubject = PermissionService.hasPermission(permissions, "subjects.deactivate");
   const canCreateGroup = PermissionService.hasPermission(
     permissions,
     "groups.create",
   );
+  const canUpdateGroup = PermissionService.hasPermission(permissions, "groups.update");
+  const canDeactivateGroup = PermissionService.hasPermission(permissions, "groups.deactivate");
   const canGenSessions = PermissionService.hasPermission(
     permissions,
     "sessions.generate",
@@ -316,6 +344,12 @@ export default function AcademicScreen() {
     <SafeAreaView style={styles.safeArea}>
       <View style={styles.header}>
         <Text style={styles.headerTitle}>{Strings.tabAcademic}</Text>
+        {PermissionService.hasPermission(permissions, "packages.view") && (
+          <TouchableOpacity style={styles.headerPackagesButton} onPress={() => router.push("/(main)/packages") }>
+            <Ionicons name="pricetags-outline" size={18} color={Colors.white} />
+            <Text style={styles.headerPackagesText}>الباقات</Text>
+          </TouchableOpacity>
+        )}
       </View>
 
       {/* Segmented Control Bar */}
@@ -434,6 +468,11 @@ export default function AcademicScreen() {
                     text={item.status === "active" ? "نشط" : "معطل"}
                     type={item.status === "active" ? "success" : "neutral"}
                   />
+                  {(canUpdateTeacher || canDeactivateTeacher) && <View style={styles.itemActions}>
+                    {canUpdateTeacher && <TouchableOpacity onPress={() => openTeacherEditor(item)}><Ionicons name="create-outline" size={20} color={Colors.primary} /></TouchableOpacity>}
+                    {canDeactivateTeacher && <TouchableOpacity onPress={() => toggleTeacherStatus(item)}><Ionicons name={item.status === "active" ? "pause-circle-outline" : "play-circle-outline"} size={20} color={item.status === "active" ? Colors.danger : Colors.success} /></TouchableOpacity>}
+                    {canDeactivateTeacher && <TouchableOpacity onPress={() => deleteTeacher(item)}><Ionicons name="trash-outline" size={20} color={Colors.danger} /></TouchableOpacity>}
+                  </View>}
                 </AppCard>
               )}
             />
@@ -480,6 +519,11 @@ export default function AcademicScreen() {
                     text={item.status === "active" ? "نشطة" : "معطلة"}
                     type={item.status === "active" ? "success" : "neutral"}
                   />
+                  {(canUpdateSubject || canDeactivateSubject) && <View style={styles.itemActions}>
+                    {canUpdateSubject && <TouchableOpacity onPress={() => openSubjectEditor(item)}><Ionicons name="create-outline" size={20} color={Colors.primary} /></TouchableOpacity>}
+                    {canDeactivateSubject && <TouchableOpacity onPress={() => toggleSubjectStatus(item)}><Ionicons name={item.status === "active" ? "pause-circle-outline" : "play-circle-outline"} size={20} color={item.status === "active" ? Colors.danger : Colors.success} /></TouchableOpacity>}
+                    {canDeactivateSubject && <TouchableOpacity onPress={() => deleteSubject(item)}><Ionicons name="trash-outline" size={20} color={Colors.danger} /></TouchableOpacity>}
+                  </View>}
                 </AppCard>
               )}
             />
@@ -546,6 +590,11 @@ export default function AcademicScreen() {
                       size={20}
                       color={Colors.slate400}
                     />
+                    {(canUpdateGroup || canDeactivateGroup) && <View style={styles.itemActions}>
+                      {canUpdateGroup && <TouchableOpacity onPress={(e) => { e.stopPropagation(); openGroupEditor(item); }}><Ionicons name="create-outline" size={20} color={Colors.primary} /></TouchableOpacity>}
+                      {canDeactivateGroup && <TouchableOpacity onPress={(e) => { e.stopPropagation(); toggleGroupStatus(item); }}><Ionicons name={item.status === "active" ? "pause-circle-outline" : "play-circle-outline"} size={20} color={item.status === "active" ? Colors.danger : Colors.success} /></TouchableOpacity>}
+                      {canDeactivateGroup && <TouchableOpacity onPress={(e) => { e.stopPropagation(); deleteGroup(item); }}><Ionicons name="trash-outline" size={20} color={Colors.danger} /></TouchableOpacity>}
+                    </View>}
                   </AppCard>
                 </TouchableOpacity>
               )}
@@ -663,7 +712,7 @@ export default function AcademicScreen() {
       <Modal visible={isAddTeacherOpen} animationType="slide" transparent>
         <View style={styles.modalOverlay}>
           <View style={styles.modalCard}>
-            <Text style={styles.modalTitle}>إضافة معلم جديد</Text>
+            <Text style={styles.modalTitle}>{editingTeacher ? "تعديل بيانات المدرس" : "إضافة معلم جديد"}</Text>
             <AppInput
               label="اسم المعلم *"
               placeholder="مثال: أ/ حسام البدري"
@@ -686,11 +735,15 @@ export default function AcademicScreen() {
               onChangeText={setTeacherNotes}
               containerStyle={styles.formField}
             />
+            <Text style={styles.inputLabel}>المواد التي يدرسها</Text>
+            <ScrollView horizontal style={{ marginBottom: Spacing.sm }}>
+              {subjects.filter((s) => s.status === "active").map((subject) => <TouchableOpacity key={subject.id} style={[styles.chip, teacherSubjectIds.includes(subject.id) && styles.chipActive]} onPress={() => setTeacherSubjectIds((ids) => ids.includes(subject.id) ? ids.filter((id) => id !== subject.id) : [...ids, subject.id])}><Text style={[styles.chipText, teacherSubjectIds.includes(subject.id) && styles.chipTextActive]}>{subject.name}</Text></TouchableOpacity>)}
+            </ScrollView>
             <View
               style={{ flexDirection: "row", gap: 8, marginTop: Spacing.md }}
             >
               <AppButton
-                title="حفظ"
+                title={editingTeacher ? "حفظ التعديل" : "حفظ"}
                 onPress={handleCreateTeacher}
                 style={{ flex: 1 }}
               />
@@ -709,7 +762,7 @@ export default function AcademicScreen() {
       <Modal visible={isAddSubjectOpen} animationType="slide" transparent>
         <View style={styles.modalOverlay}>
           <View style={styles.modalCard}>
-            <Text style={styles.modalTitle}>إضافة مادة دراسية</Text>
+            <Text style={styles.modalTitle}>{editingSubject ? "تعديل المادة" : "إضافة مادة دراسية"}</Text>
             <AppInput
               label="اسم المادة *"
               placeholder="مثال: كيمياء"
@@ -728,7 +781,7 @@ export default function AcademicScreen() {
               style={{ flexDirection: "row", gap: 8, marginTop: Spacing.md }}
             >
               <AppButton
-                title="حفظ"
+                title={editingSubject ? "حفظ التعديل" : "حفظ"}
                 onPress={handleCreateSubject}
                 style={{ flex: 1 }}
               />
@@ -748,7 +801,7 @@ export default function AcademicScreen() {
         <View style={styles.modalOverlay}>
           <View style={styles.modalCard}>
             <ScrollView style={{ maxHeight: 520 }}>
-              <Text style={styles.modalTitle}>إنشاء مجموعة دراسية جديدة</Text>
+              <Text style={styles.modalTitle}>{editingGroup ? "تعديل المجموعة" : "إنشاء مجموعة دراسية جديدة"}</Text>
 
               <AppInput
                 label="اسم المجموعة *"
@@ -856,7 +909,7 @@ export default function AcademicScreen() {
               style={{ flexDirection: "row", gap: 8, marginTop: Spacing.md }}
             >
               <AppButton
-                title="إنشاء المجموعة"
+                title={editingGroup ? "حفظ التعديل" : "إنشاء المجموعة"}
                 onPress={handleCreateGroup}
                 style={{ flex: 1 }}
               />
@@ -999,6 +1052,9 @@ const styles = StyleSheet.create({
     backgroundColor: Colors.background,
   },
   header: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
     paddingHorizontal: Spacing.lg,
     paddingVertical: Spacing.md,
     backgroundColor: Colors.white,
@@ -1010,6 +1066,16 @@ const styles = StyleSheet.create({
     color: Colors.slate900,
     fontWeight: "700",
   },
+  headerPackagesButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    backgroundColor: Colors.primary,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 10,
+  },
+  headerPackagesText: { color: Colors.white, fontWeight: "700" },
   tabBar: {
     flexDirection: "row",
     backgroundColor: Colors.white,
@@ -1072,6 +1138,7 @@ const styles = StyleSheet.create({
     padding: Spacing.md,
     marginBottom: Spacing.sm,
   },
+  itemActions: { flexDirection: "row", alignItems: "center", gap: 10, marginLeft: 8 },
   itemName: {
     fontSize: 14,
     fontWeight: "700",

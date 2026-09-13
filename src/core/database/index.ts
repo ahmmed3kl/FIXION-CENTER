@@ -770,6 +770,16 @@ export const MIGRATIONS: Migration[] = [
       `);
     },
   },
+  {
+    version: 8,
+    name: "package_selection_limits",
+    up: (db: SqlDatabase) => {
+      try {
+        db.execSync("ALTER TABLE packages ADD COLUMN max_selections INTEGER NOT NULL DEFAULT 1;");
+      } catch {}
+      db.execSync("CREATE INDEX IF NOT EXISTS idx_packages_selection_limit ON packages(center_id, max_selections);");
+    },
+  },
 ];
 
 // In-Memory SQLite Mock for Jest / Test environments
