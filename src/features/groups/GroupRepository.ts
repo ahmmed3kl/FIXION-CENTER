@@ -77,6 +77,23 @@ export class GroupRepository {
     return includeInactive ? rows : rows.filter((r) => r.status === "active");
   }
 
+  /** Returns active groups that have at least one schedule on the requested JS weekday. */
+  static getGroupsForDay(dayOfWeek: number): Group[] {
+    if (!Number.isInteger(dayOfWeek) || dayOfWeek < 0 || dayOfWeek > 6) {
+      throw new ValidationError("يوم الأسبوع يجب أن يكون بين 0 و6.");
+    }
+    const groups = this.getAll();
+    const { centerId } = this.getActiveContext();
+    const db = DatabaseService.getDb();
+    const rows = db.getAllSync<{ groupId: string }>(
+      `SELECT DISTINCT group_id as groupId FROM group_schedules
+       WHERE center_id = ? AND day_of_week = ? AND status = 'active'`,
+      [centerId, dayOfWeek],
+    );
+    const ids = new Set(rows.map((row) => row.groupId));
+    return groups.filter((group) => ids.has(group.id));
+  }
+
   static findById(groupId: string): Group | null {
     const { centerId, user } = this.getActiveContext();
     if (!PermissionService.hasPermission(user.permissions, "groups.view")) {

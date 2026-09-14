@@ -67,6 +67,8 @@ export default function AcademicScreen() {
   const [teachers, setTeachers] = useState<Teacher[]>([]);
   const [subjects, setSubjects] = useState<Subject[]>([]);
   const [groups, setGroups] = useState<Group[]>([]);
+  const [showTodayGroups, setShowTodayGroups] = useState(false);
+  const [todayGroupIds, setTodayGroupIds] = useState<string[]>([]);
   const [todaySessions, setTodaySessions] = useState<Session[]>([]);
 
   // Selection & Modals
@@ -97,6 +99,9 @@ export default function AcademicScreen() {
   const [groupMonthlyPrice, setGroupMonthlyPrice] = useState("400");
   const [groupDuration, setGroupDuration] = useState("120");
   const [groupLateThreshold, setGroupLateThreshold] = useState("15");
+  const [groupNameCustomized, setGroupNameCustomized] = useState(false);
+  const [selectedScheduleDays, setSelectedScheduleDays] = useState<number[]>([]);
+  const [scheduleTimes, setScheduleTimes] = useState<Record<number, { start: string; end: string }>>({});
 
   const [schedDay, setSchedDay] = useState(0);
   const [schedStart, setSchedStart] = useState("14:00");
@@ -111,11 +116,25 @@ export default function AcademicScreen() {
   const [genToDate, setGenToDate] = useState(nextWeekStr);
   const [generatedSessions, setGeneratedSessions] = useState<Session[]>([]);
 
+  const generatedGroupName = () => {
+    const teacher = teachers.find((item) => item.id === groupTeacherId)?.name;
+    const subject = subjects.find((item) => item.id === groupSubjectId)?.name;
+    return [groupGrade.trim(), subject, teacher].filter(Boolean).join(" - ");
+  };
+
+  useEffect(() => {
+    if (!groupNameCustomized) {
+      const name = generatedGroupName();
+      if (name) setGroupName(name);
+    }
+  }, [groupGrade, groupTeacherId, groupSubjectId, teachers, subjects, groupNameCustomized]);
+
   const loadData = () => {
     try {
       setTeachers(TeacherRepository.getAll());
       setSubjects(SubjectRepository.getAll());
-      setGroups(GroupRepository.getAll());
+      setGroups(GroupRepository.getAll(true));
+      setTodayGroupIds(GroupRepository.getGroupsForDay(new Date().getDay()).map((group) => group.id));
       setTodaySessions(SessionGenerationService.getSessionsForDate(todayStr));
     } catch (e: any) {
       console.error("Academic loadData error:", e);
@@ -197,7 +216,28 @@ export default function AcademicScreen() {
   const openTeacherEditor = (teacher: Teacher) => { setEditingTeacher(teacher); setTeacherName(teacher.name); setTeacherPhone(teacher.phone || ""); setTeacherNotes(teacher.notes || ""); try { setTeacherSubjectIds(TeacherSubjectRepository.getSubjectsForTeacher(teacher.id).map((s) => s.id)); } catch { setTeacherSubjectIds([]); } setIsAddTeacherOpen(true); };
   const openSubjectEditor = (subject: Subject) => { setEditingSubject(subject); setSubjectName(subject.name); setSubjectCode(subject.code); setIsAddSubjectOpen(true); };
   const toggleGroupStatus = (group: Group) => { try { group.status === "active" ? GroupRepository.deactivateGroup(group.id) : GroupRepository.reactivateGroup(group.id); loadData(); Alert.alert("تم بنجاح", "تم تحديث حالة المجموعة."); } catch (e: any) { Alert.alert("خطأ", e?.message || "تعذر تحديث حالة المجموعة."); } };
-  const openGroupEditor = (group: Group) => { setEditingGroup(group); setGroupName(group.name); setGroupTeacherId(group.teacherId); setGroupSubjectId(group.subjectId); setGroupGrade(group.grade); setGroupSessionPrice(String(group.sessionPrice)); setGroupMonthlyPrice(String(group.monthlyPrice)); setGroupDuration(String(group.sessionDurationMinutes)); setGroupLateThreshold(String(group.lateAfterMinutes)); setIsAddGroupOpen(true); };
+  const openGroupEditor = (group: Group) => {
+    setEditingGroup(group);
+    setGroupName(group.name);
+    setGroupTeacherId(group.teacherId);
+    setGroupSubjectId(group.subjectId);
+    setGroupGrade(group.grade);
+    setGroupSessionPrice(String(group.sessionPrice));
+    setGroupMonthlyPrice(String(group.monthlyPrice));
+    setGroupDuration(String(group.sessionDurationMinutes));
+    setGroupLateThreshold(String(group.lateAfterMinutes));
+    const generated = [group.grade, group.subjectName, group.teacherName].filter(Boolean).join(" - ");
+    setGroupNameCustomized(group.name !== generated);
+    try {
+      const schedules = GroupScheduleRepository.getSchedulesForGroup(group.id);
+      setSelectedScheduleDays(schedules.map((schedule) => schedule.dayOfWeek));
+      setScheduleTimes(Object.fromEntries(schedules.map((schedule) => [schedule.dayOfWeek, { start: schedule.startTime, end: schedule.endTime }])));
+    } catch {
+      setSelectedScheduleDays([]);
+      setScheduleTimes({});
+    }
+    setIsAddGroupOpen(true);
+  };
   const deleteGroup = (group: Group) => { Alert.alert("تأكيد الحذف", "سيتم الحذف فقط إذا لم توجد تسجيلات.", [{ text: "إلغاء", style: "cancel" }, { text: "حذف", style: "destructive", onPress: () => { try { GroupRepository.deleteGroup(group.id); loadData(); Alert.alert("تم بنجاح", "تم حذف المجموعة."); } catch (e: any) { Alert.alert("لا يمكن الحذف", e?.message || "استخدم التعطيل للحفاظ على السجل."); } } }]); };
   const deleteTeacher = (teacher: Teacher) => { Alert.alert("تأكيد الحذف", "سيتم الحذف فقط إذا لم توجد سجلات مرتبطة.", [{ text: "إلغاء", style: "cancel" }, { text: "حذف", style: "destructive", onPress: () => { try { TeacherRepository.deleteTeacher(teacher.id); loadData(); Alert.alert("تم بنجاح", "تم حذف المدرس."); } catch (e: any) { Alert.alert("لا يمكن الحذف", e?.message || "استخدم التعطيل للحفاظ على السجل."); } } }]); };
   const deleteSubject = (subject: Subject) => { Alert.alert("تأكيد الحذف", "سيتم الحذف فقط إذا لم توجد سجلات مرتبطة.", [{ text: "إلغاء", style: "cancel" }, { text: "حذف", style: "destructive", onPress: () => { try { SubjectRepository.deleteSubject(subject.id); loadData(); Alert.alert("تم بنجاح", "تم حذف المادة."); } catch (e: any) { Alert.alert("لا يمكن الحذف", e?.message || "استخدم التعطيل للحفاظ على السجل."); } } }]); };
@@ -206,7 +246,15 @@ export default function AcademicScreen() {
 
   // 3. Groups Actions
   const handleCreateGroup = () => {
-    if (!groupName.trim() || !groupTeacherId || !groupSubjectId) {
+    if (selectedScheduleDays.length === 0) {
+      Alert.alert("تنبيه", "يرجى اختيار يوم واحد للمجموعة على الأقل.");
+      return;
+    }
+    if (selectedScheduleDays.some((day) => !scheduleTimes[day]?.start || !scheduleTimes[day]?.end || scheduleTimes[day].end <= scheduleTimes[day].start)) {
+      Alert.alert("تنبيه", "يجب تحديد وقت صحيح لكل يوم مختار.");
+      return;
+    }
+    if (!groupName.trim() || !groupTeacherId || !groupSubjectId || !groupGrade.trim()) {
       Alert.alert("تنبيه", "يرجى استكمال جميع بيانات المجموعة المطلوبة.");
       return;
     }
@@ -225,9 +273,10 @@ export default function AcademicScreen() {
         );
       }
 
-      if (editingGroup) GroupRepository.updateGroup(editingGroup.id, {
+      let savedGroup: Group;
+      if (editingGroup) savedGroup = GroupRepository.updateGroup(editingGroup.id, {
         name: groupName.trim(), teacherId: groupTeacherId, subjectId: groupSubjectId, grade: groupGrade.trim(), sessionPrice: parseFloat(groupSessionPrice) || 0, monthlyPrice: parseFloat(groupMonthlyPrice) || 0, sessionDurationMinutes: parseInt(groupDuration, 10) || 120, lateAfterMinutes: parseInt(groupLateThreshold, 10) || 15,
-      }); else GroupRepository.createGroup({
+      }); else savedGroup = GroupRepository.createGroup({
         name: groupName.trim(),
         teacherId: groupTeacherId,
         subjectId: groupSubjectId,
@@ -238,10 +287,22 @@ export default function AcademicScreen() {
         lateAfterMinutes: parseInt(groupLateThreshold, 10) || 15,
       });
 
-      Alert.alert("تم بنجاح", "تم إنشاء المجموعة بنجاح.");
+      if (editingGroup) {
+        for (const schedule of GroupScheduleRepository.getSchedulesForGroup(editingGroup.id)) {
+          GroupScheduleRepository.deactivateSchedule(schedule.id);
+        }
+      }
+      for (const day of selectedScheduleDays) {
+        const time = scheduleTimes[day];
+        GroupScheduleRepository.createSchedule({ groupId: savedGroup.id, dayOfWeek: day, startTime: time.start, endTime: time.end });
+      }
+      Alert.alert("تم بنجاح", editingGroup ? "تم تحديث المجموعة بنجاح." : "تم إنشاء المجموعة بنجاح.");
       setIsAddGroupOpen(false);
       setEditingGroup(null);
       setGroupName("");
+      setGroupNameCustomized(false);
+      setSelectedScheduleDays([]);
+      setScheduleTimes({});
       loadData();
     } catch (e: any) {
       Alert.alert("خطأ", e?.message || "فشل إنشاء المجموعة");
@@ -540,7 +601,14 @@ export default function AcademicScreen() {
               {canCreateGroup && (
                 <TouchableOpacity
                   style={styles.addButton}
-                  onPress={() => setIsAddGroupOpen(true)}
+                  onPress={() => {
+                    setEditingGroup(null);
+                    setGroupName("");
+                    setGroupNameCustomized(false);
+                    setSelectedScheduleDays([]);
+                    setScheduleTimes({});
+                    setIsAddGroupOpen(true);
+                  }}
                 >
                   <Ionicons name="add" size={18} color={Colors.white} />
                   <Text style={styles.addButtonText}>مجموعة جديدة</Text>
@@ -548,8 +616,17 @@ export default function AcademicScreen() {
               )}
             </View>
 
+            <View style={styles.groupFilterRow}>
+              <TouchableOpacity style={[styles.filterChip, !showTodayGroups && styles.filterChipActive]} onPress={() => setShowTodayGroups(false)}>
+                <Text style={[styles.filterChipText, !showTodayGroups && styles.filterChipTextActive]}>كل المجموعات</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[styles.filterChip, showTodayGroups && styles.filterChipActive]} onPress={() => setShowTodayGroups(true)}>
+                <Text style={[styles.filterChipText, showTodayGroups && styles.filterChipTextActive]}>مجموعات اليوم</Text>
+              </TouchableOpacity>
+            </View>
+
             <FlatList
-              data={groups}
+              data={showTodayGroups ? groups.filter((group) => todayGroupIds.includes(group.id)) : groups}
               keyExtractor={(item) => item.id}
               refreshControl={
                 <RefreshControl
@@ -807,7 +884,7 @@ export default function AcademicScreen() {
                 label="اسم المجموعة *"
                 placeholder="مثال: فيزياء - 3 ثانوي (مجموعة أ)"
                 value={groupName}
-                onChangeText={setGroupName}
+                onChangeText={(value) => { setGroupNameCustomized(true); setGroupName(value); }}
                 containerStyle={styles.formField}
               />
 
@@ -863,6 +940,42 @@ export default function AcademicScreen() {
                 onChangeText={setGroupGrade}
                 containerStyle={styles.formField}
               />
+
+              <Text style={styles.inputLabel}>أيام وجدول المجموعة *</Text>
+              <View style={styles.weekDaysGrid}>
+                {DAYS_OF_WEEK.map((day, index) => {
+                  const selected = selectedScheduleDays.includes(index);
+                  return (
+                    <TouchableOpacity
+                      key={day}
+                      style={[styles.weekDayChip, selected && styles.weekDayChipActive]}
+                      onPress={() => {
+                        setSelectedScheduleDays((current) => selected ? current.filter((item) => item !== index) : [...current, index]);
+                        if (!scheduleTimes[index]) setScheduleTimes((current) => ({ ...current, [index]: { start: "17:00", end: "19:00" } }));
+                      }}
+                    >
+                      <Text style={[styles.weekDayText, selected && styles.weekDayTextActive]}>{day}</Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+              {selectedScheduleDays.slice().sort((a, b) => a - b).map((day) => (
+                <View key={day} style={styles.dayTimeRow}>
+                  <Text style={styles.dayTimeLabel}>{DAYS_OF_WEEK[day]}</Text>
+                  <AppInput
+                    label="البداية"
+                    value={scheduleTimes[day]?.start || ""}
+                    onChangeText={(value) => setScheduleTimes((current) => ({ ...current, [day]: { ...(current[day] || { end: "19:00" }), start: value } }))}
+                    containerStyle={styles.dayTimeInput}
+                  />
+                  <AppInput
+                    label="النهاية"
+                    value={scheduleTimes[day]?.end || ""}
+                    onChangeText={(value) => setScheduleTimes((current) => ({ ...current, [day]: { ...(current[day] || { start: "17:00" }), end: value } }))}
+                    containerStyle={styles.dayTimeInput}
+                  />
+                </View>
+              ))}
 
               <View style={{ flexDirection: "row", gap: 8 }}>
                 <AppInput
@@ -1301,6 +1414,75 @@ const styles = StyleSheet.create({
   chipTextActive: {
     color: Colors.white,
     fontWeight: "700",
+  },
+  weekDaysGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+    marginBottom: Spacing.sm,
+  },
+  groupFilterRow: {
+    flexDirection: "row",
+    gap: 8,
+    marginBottom: Spacing.sm,
+  },
+  filterChip: {
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: Colors.slate200,
+    backgroundColor: Colors.white,
+  },
+  filterChipActive: {
+    backgroundColor: Colors.primary,
+    borderColor: Colors.primary,
+  },
+  filterChipText: {
+    fontSize: 12,
+    color: Colors.slate600,
+  },
+  filterChipTextActive: {
+    color: Colors.white,
+    fontWeight: "700",
+  },
+  weekDayChip: {
+    width: "30%",
+    alignItems: "center",
+    paddingVertical: 8,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: Colors.slate200,
+    backgroundColor: Colors.slate50,
+  },
+  weekDayChipActive: {
+    backgroundColor: Colors.primary,
+    borderColor: Colors.primary,
+  },
+  weekDayText: {
+    fontSize: 12,
+    color: Colors.slate700,
+  },
+  weekDayTextActive: {
+    color: Colors.white,
+    fontWeight: "700",
+  },
+  dayTimeRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    marginBottom: Spacing.sm,
+  },
+  dayTimeLabel: {
+    width: 58,
+    fontSize: 11,
+    fontWeight: "700",
+    color: Colors.slate700,
+    textAlign: "right",
+  },
+  dayTimeInput: {
+    flex: 1,
+    marginBottom: 0,
   },
   smallActionBtn: {
     flexDirection: "row",

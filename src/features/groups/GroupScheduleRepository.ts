@@ -66,7 +66,8 @@ export class GroupScheduleRepository {
 
   static createSchedule(dto: CreateGroupScheduleDTO): GroupSchedule {
     const { centerId, user } = this.getActiveContext();
-    if (!PermissionService.hasPermission(user.permissions, "groups.update")) {
+    const canCreateSchedule = PermissionService.hasPermission(user.permissions, "groups.create") || PermissionService.hasPermission(user.permissions, "groups.update");
+    if (!canCreateSchedule) {
       throw new ForbiddenError("ليس لديك صلاحية تعديل جدول مواعيد المجموعة.");
     }
 
