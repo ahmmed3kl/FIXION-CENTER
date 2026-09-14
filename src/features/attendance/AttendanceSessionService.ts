@@ -98,7 +98,25 @@ export class AttendanceSessionService {
 
   static isExpected(sessionId: string, studentId: string): boolean {
     const db = DatabaseService.getDb();
-    return !!db.getFirstSync("SELECT 1 FROM session_expected_students WHERE session_id = ? AND student_id = ?", [sessionId, studentId]);
+    if (db.getFirstSync("SELECT 1 FROM session_expected_students WHERE session_id = ? AND student_id = ?", [sessionId, studentId])) return true;
+
+    // A student can be enrolled after a scheduled session was generated. For
+    // an open session, honor the current active enrollment and extend the
+    // local expected snapshot before recording attendance.
+    const session = db.getFirstSync<{ id: string; centerId: string; groupId: string; sessionDate: string; status: string }>(
+      "SELECT id, center_id as centerId, group_id as groupId, session_date as sessionDate, status FROM sessions WHERE id = ?",
+      [sessionId],
+    );
+    if (!session || (session.status !== "open" && session.status !== "scheduled")) return false;
+    const enrolled = EnrollmentRepository.getActiveEnrollmentsForGroup(session.groupId, session.sessionDate)
+      .some((enrollment) => enrollment.studentId === studentId);
+    if (!enrolled) return false;
+    const now = new Date().toISOString();
+    db.runSync(
+      "INSERT OR IGNORE INTO session_expected_students (id, center_id, session_id, student_id, created_at) VALUES (?, ?, ?, ?, ?)",
+      [`exp-${sessionId}-${studentId}`, session.centerId, sessionId, studentId, now],
+    );
+    return true;
   }
 
   static getSummary(sessionId: string): AttendanceSummary {
