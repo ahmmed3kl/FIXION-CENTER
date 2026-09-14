@@ -187,6 +187,7 @@ function ScannerContent() {
       setSearchError(getUserErrorMessage(err));
     } finally {
       setIsProcessing(false);
+      isScanningBlockedRef.current = false;
     }
   };
 
@@ -328,13 +329,18 @@ function ScannerContent() {
             {isCameraActive ? (
               <View style={styles.cameraContainer}>
                 {permission?.granted ? (
+                  <View style={styles.cameraFrameWrap}>
                   <CameraView
                     style={styles.camera}
+                    autofocus="on"
+                    zoom={0.2}
                     barcodeScannerSettings={{
                       barcodeTypes: ["qr", "code128", "ean13", "upc_a"],
                     }}
                     onBarcodeScanned={handleBarcodeScanned}
                   />
+                  <View pointerEvents="none" style={styles.scanGuide}><View style={styles.scanGuideCorner} /><Text style={styles.scanGuideText}>قرّب الكارت داخل الإطار</Text></View>
+                  </View>
                 ) : (
                   <View style={styles.permissionBox}>
                     <Text style={styles.permissionText}>
@@ -359,7 +365,7 @@ function ScannerContent() {
               <View style={styles.cameraPlaceholder}>
                 <TouchableOpacity
                   activeOpacity={0.8}
-                  onPress={() => setIsCameraActive(true)}
+                  onPress={() => { isScanningBlockedRef.current = false; setIsCameraActive(true); }}
                   style={styles.cameraLaunchButton}
                 >
                   <Ionicons
@@ -732,11 +738,46 @@ const styles = StyleSheet.create({
   cameraContainer: {
     alignItems: "center",
   },
-  camera: {
+  cameraFrameWrap: {
     width: "100%",
     height: 240,
     borderRadius: BorderRadius.md,
     overflow: "hidden",
+    position: "relative",
+    backgroundColor: Colors.slate900,
+  },
+  camera: {
+    width: "100%",
+    height: 240,
+  },
+  scanGuide: {
+    position: "absolute",
+    left: "10%",
+    right: "10%",
+    top: "28%",
+    height: "44%",
+    borderWidth: 2,
+    borderColor: Colors.white,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "flex-end",
+    paddingBottom: 8,
+  },
+  scanGuideCorner: {
+    ...StyleSheet.absoluteFill,
+    borderWidth: 3,
+    borderColor: Colors.primary,
+    borderRadius: 12,
+    opacity: 0.85,
+  },
+  scanGuideText: {
+    color: Colors.white,
+    fontSize: 12,
+    fontWeight: "700",
+    backgroundColor: "rgba(0,0,0,0.55)",
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
   },
   permissionBox: {
     height: 180,
