@@ -606,7 +606,7 @@ export default function AcademicScreen() {
         {activeTab === "sessions" && (
           <ScrollView style={{ flex: 1 }}>
             {/* Session Generation Box */}
-            <AppCard style={styles.generatorCard}>
+            {false && <AppCard style={styles.generatorCard}>
               <View style={styles.generatorHeader}>
                 <Ionicons
                   name="calendar-outline"
@@ -650,7 +650,7 @@ export default function AcademicScreen() {
                   style={{ marginTop: Spacing.xs }}
                 />
               )}
-            </AppCard>
+            </AppCard>}
 
             {/* Today's Sessions List */}
             <View style={{ marginTop: Spacing.lg }}>

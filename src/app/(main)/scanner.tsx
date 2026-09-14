@@ -1,6 +1,6 @@
 import { Ionicons } from "@expo/vector-icons";
 import { CameraView, useCameraPermissions } from "expo-camera";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
     Alert,
     Modal,
@@ -26,6 +26,7 @@ import {
 } from "../../core/theme";
 import { useServiceVisibility } from "../../core/services/ServiceVisibilityContext";
 import { AttendanceRepository } from "../../features/attendance/AttendanceRepository";
+import { AttendanceSessionService, AttendanceSummary } from "../../features/attendance/AttendanceSessionService";
 import { PaymentRepository } from "../../features/payments/PaymentRepository";
 import { ScannerService } from "../../features/scanner/ScannerService";
 import { StudentRepository } from "../../features/students/StudentRepository";
@@ -70,6 +71,10 @@ function ScannerContent() {
   const [financialStatus, setFinancialStatus] =
     useState<StudentFinancialStatus | null>(null);
   const [searchError, setSearchError] = useState<string | null>(null);
+  const [todaySessions, setTodaySessions] = useState<Session[]>([]);
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [attendanceStarted, setAttendanceStarted] = useState(false);
+  const [attendanceSummary, setAttendanceSummary] = useState<AttendanceSummary | null>(null);
 
   // Quick Payment Modal
   const [showPaymentModal, setShowPaymentModal] = useState(false);
@@ -77,6 +82,19 @@ function ScannerContent() {
   const [isRecordingPayment, setIsRecordingPayment] = useState(false);
 
   const isScanningBlockedRef = useRef(false);
+
+  useEffect(() => {
+    try { setTodaySessions(AttendanceSessionService.getTodaySessions()); } catch (error) { setSearchError(getUserErrorMessage(error)); }
+  }, []);
+
+  const startAttendance = () => {
+    if (!activeSessionId) return;
+    try {
+      AttendanceSessionService.activate(activeSessionId);
+      setAttendanceStarted(true);
+      setAttendanceSummary(AttendanceSessionService.getSummary(activeSessionId));
+    } catch (error) { setSearchError(getUserErrorMessage(error)); }
+  };
 
   // Reset student search
   const handleReset = () => {
@@ -91,6 +109,7 @@ function ScannerContent() {
   };
 
   const lookupCard = (rawCode: string) => {
+    if (!attendanceStarted || !activeSessionId) { setSearchError("اختر المجموعة وابدأ جلسة الحضور أولاً."); return; }
     const normalized = ScannerService.normalizeCardCode(rawCode);
     if (!normalized) {
       setSearchError("يرجى إدخال كود الكارت");
@@ -112,10 +131,15 @@ function ScannerContent() {
 
       setStudent(foundStudent);
 
+      if (!AttendanceSessionService.isExpected(activeSessionId, foundStudent.id)) {
+        setStudent(null);
+        setSearchError("الطالب غير متوقع في مجموعة الحضور الحالية.");
+        setIsProcessing(false);
+        return;
+      }
+
       // Load eligible sessions
-      const sessions = ScannerService.getEligibleSessionsForStudent(
-        foundStudent.id,
-      );
+      const sessions = ScannerService.getEligibleSessionsForStudent(foundStudent.id).filter((session) => session.id === activeSessionId);
       setEligibleSessions(sessions);
 
       if (sessions.length === 1) {
@@ -184,6 +208,7 @@ function ScannerContent() {
 
       setAttendanceResult(result);
       setIsAlreadyAttended(true);
+      setAttendanceSummary(AttendanceSessionService.getSummary(session.id));
     } catch (err: any) {
       Alert.alert(Strings.errorTitle, getUserErrorMessage(err));
     } finally {
@@ -237,8 +262,35 @@ function ScannerContent() {
         contentContainerStyle={styles.scrollContent}
         keyboardShouldPersistTaps="handled"
       >
+        {!attendanceStarted ? (
+          <View style={styles.startAttendancePanel}>
+            <Text style={styles.startTitle}>اختيار المجموعة للحضور</Text>
+            <Text style={styles.startSubtitle}>اختر مجموعة اليوم ثم ابدأ الجلسة لتفعيل المسح.</Text>
+            {todaySessions.length === 0 ? (
+              <Text style={styles.emptySessionText}>لا توجد جلسات مجدولة اليوم.</Text>
+            ) : todaySessions.map((session) => (
+              <TouchableOpacity key={session.id} onPress={() => setActiveSessionId(session.id)}>
+                <AppCard style={[styles.sessionCard, activeSessionId === session.id ? styles.sessionCardSelected : null]}>
+                  <Text style={styles.sessionSubject}>{session.groupName || session.subjectName || "مجموعة"}</Text>
+                  <Text style={styles.sessionTime}>{formatTimeArabic(session.startTime)} - {formatTimeArabic(session.endTime)}</Text>
+                  {activeSessionId === session.id ? <Ionicons name="checkmark-circle" size={20} color={Colors.primary} /> : null}
+                </AppCard>
+              </TouchableOpacity>
+            ))}
+            <AppButton title="بدء جلسة الحضور" onPress={startAttendance} disabled={!activeSessionId} size="lg" />
+            {searchError ? <Text style={styles.errorAlertText}>{searchError}</Text> : null}
+          </View>
+        ) : null}
+        {attendanceStarted && attendanceSummary ? (
+          <View style={styles.attendanceCounterBar}>
+            <Text style={styles.counterTitle}>حضور الجلسة</Text>
+            <Text style={styles.counterItem}>الكل: {attendanceSummary.total}</Text>
+            <Text style={[styles.counterItem, { color: Colors.successText }]}>حاضر: {attendanceSummary.present}</Text>
+            <Text style={[styles.counterItem, { color: Colors.dangerText }]}>غائب: {attendanceSummary.absent}</Text>
+          </View>
+        ) : null}
         {/* CAMERA OR MANUAL SCANNER CARD */}
-        {!student ? (
+        {attendanceStarted && !student ? (
           <AppCard style={styles.scannerCard}>
             {isCameraActive ? (
               <View style={styles.cameraContainer}>
@@ -598,6 +650,12 @@ function ScannerContent() {
 }
 
 const styles = StyleSheet.create({
+  startAttendancePanel: { backgroundColor: Colors.white, borderRadius: BorderRadius.xl, padding: Spacing.lg, marginBottom: Spacing.lg, ...Shadows.card },
+  startTitle: { ...Typography.h2, color: Colors.slate900, marginBottom: 4 },
+  startSubtitle: { ...Typography.caption, color: Colors.slate500, textAlign: "right", marginBottom: Spacing.md },
+  attendanceCounterBar: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", backgroundColor: Colors.white, borderRadius: BorderRadius.lg, padding: Spacing.md, marginBottom: Spacing.md, ...Shadows.card },
+  counterTitle: { fontSize: 13, fontWeight: "800", color: Colors.slate800 },
+  counterItem: { fontSize: 12, fontWeight: "700", color: Colors.primaryDark },
   safeArea: {
     flex: 1,
     backgroundColor: Colors.background,
