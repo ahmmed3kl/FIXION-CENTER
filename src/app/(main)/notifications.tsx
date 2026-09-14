@@ -39,8 +39,8 @@ export default function NotificationsScreen() {
   const [editingTemplate, setEditingTemplate] = useState<NotificationTemplate | null>(null);
   const [templateBodyInput, setTemplateBodyInput] = useState("");
 
-  if (!services.loaded) return <View style={styles.centered}><Text style={styles.loadingText}>جار تحميل حالة الخدمات...</Text></View>;
-  if (!services.isEnabled("notifications")) return <View style={styles.centered}><Text style={styles.loadingText}>خدمة الإشعارات غير مفعلة لهذا المركز.</Text></View>;
+  if (!services.loaded && !services.error) return <View style={styles.centered}><Text style={styles.loadingText}>جار تحميل حالة الخدمات...</Text></View>;
+  if (services.loaded && !services.isEnabled("notifications")) return <View style={styles.centered}><Text style={styles.loadingText}>خدمة الإشعارات غير مفعلة لهذا المركز.</Text></View>;
 
   const loadData = () => {
     if (!activeCenterId) return;
