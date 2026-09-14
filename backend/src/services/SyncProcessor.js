@@ -747,27 +747,38 @@ class SyncProcessor {
       case "group_schedule": {
         const sched = payload;
         const schedId = sched.id || context.entityId || `sched-${Date.now()}`;
-        if (String(context.operationType || "").toUpperCase() === "DELETE" || sched.status === "inactive") {
+        const operation = String(context.operationType || "").toUpperCase();
+        if (["DELETE", "REMOVE"].includes(operation) || sched.status === "inactive") {
           await client.query(
             `DELETE FROM group_schedules WHERE id = $1 AND center_id = $2`,
             [schedId, centerId],
           );
           break;
         }
+        const existing = await client.query(
+          `SELECT group_id, day_of_week, start_time, end_time FROM group_schedules WHERE id = $1 AND center_id = $2`,
+          [schedId, centerId],
+        );
+        // Status-only updates (activate/deactivate) must not overwrite the
+        // schedule with null day/time values from a compact offline payload.
+        if (existing.rows[0] && (!sched.groupId && !sched.group_id && sched.status === "active")) {
+          break;
+        }
         await client.query(
           `INSERT INTO group_schedules (id, center_id, group_id, day_of_week, start_time, end_time, created_at)
            VALUES ($1, $2, $3, $4, $5, $6, NOW())
            ON CONFLICT (id) DO UPDATE SET
+             group_id = EXCLUDED.group_id,
              day_of_week = EXCLUDED.day_of_week,
              start_time = EXCLUDED.start_time,
              end_time = EXCLUDED.end_time;`,
           [
             schedId,
             centerId,
-            sched.group_id || sched.groupId,
-            parseInt(sched.day_of_week || sched.dayOfWeek, 10),
-            sched.start_time || sched.startTime,
-            sched.end_time || sched.endTime,
+            sched.group_id || sched.groupId || existing.rows[0]?.group_id,
+            parseInt(sched.day_of_week ?? sched.dayOfWeek ?? existing.rows[0]?.day_of_week, 10),
+            sched.start_time || sched.startTime || existing.rows[0]?.start_time,
+            sched.end_time || sched.endTime || existing.rows[0]?.end_time,
           ],
         );
         break;
