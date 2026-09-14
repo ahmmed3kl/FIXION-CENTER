@@ -3,11 +3,13 @@ import { DeviceService } from "../../core/device";
 import { ConflictError, ForbiddenError } from "../../core/errors";
 import { PermissionService } from "../../core/permissions";
 import { SyncRepository } from "../../core/sync";
-import { Session } from "../../shared/types";
+import { Group, Session } from "../../shared/types";
 import { useAuthStore } from "../auth/useAuthStore";
 import { EnrollmentRepository } from "../enrollments/EnrollmentRepository";
 import { GroupRepository } from "../groups/GroupRepository";
 import { SessionRepository } from "../sessions/SessionRepository";
+import { GroupScheduleRepository } from "../groups/GroupScheduleRepository";
+import { AuditService } from "../../core/audit";
 
 export interface AttendanceSummary {
   total: number;
@@ -17,6 +19,32 @@ export interface AttendanceSummary {
 
 /** Single source of truth for the normal attendance session flow. */
 export class AttendanceSessionService {
+  static getTodayGroups(date = AttendanceSessionService.localDate()): Group[] {
+    return GroupRepository.getGroupsForDay(new Date(`${date}T12:00:00`).getDay());
+  }
+
+  static ensureSessionForGroup(groupId: string, date = AttendanceSessionService.localDate()): Session {
+    const { activeCenterId, currentUser } = useAuthStore.getState();
+    if (!activeCenterId || !currentUser) throw new ForbiddenError("يجب تسجيل الدخول أولاً.");
+    const db = DatabaseService.getDb();
+    const existing = SessionRepository.getSessionsForDate(date).find((session) => session.groupId === groupId);
+    if (existing) return existing;
+    const group = GroupRepository.findById(groupId);
+    if (!group) throw new ConflictError("المجموعة غير موجودة.");
+    const schedule = GroupScheduleRepository.getSchedulesForGroup(groupId).find((item) => item.dayOfWeek === new Date(`${date}T12:00:00`).getDay());
+    if (!schedule) throw new ConflictError("لا يوجد موعد للمجموعة اليوم.");
+    const now = new Date().toISOString();
+    const sessionId = `sess-att-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+    db.runSync(`INSERT INTO sessions (id, center_id, group_id, schedule_id, subject_id, teacher_id, session_price, late_after_minutes, session_date, start_time, end_time, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)`, [sessionId, activeCenterId, group.id, schedule.id, group.subjectId, group.teacherId, group.sessionPrice, group.lateAfterMinutes, date, schedule.startTime, schedule.endTime, now]);
+    const enrollments = EnrollmentRepository.getActiveEnrollmentsForGroup(group.id, date);
+    for (const enrollment of enrollments) db.runSync("INSERT OR IGNORE INTO session_expected_students (id, center_id, session_id, student_id, created_at) VALUES (?, ?, ?, ?, ?)", [`exp-${sessionId}-${enrollment.studentId}`, activeCenterId, sessionId, enrollment.studentId, now]);
+    const deviceId = DeviceService.getDeviceIdSync();
+    const operationId = `op-session-att-${sessionId}`;
+    AuditService.recordEvent({ operationId, centerId: activeCenterId, userId: currentUser.id, deviceId, entityType: "session", entityId: sessionId, action: "session.attendance_start", payload: { groupId: group.id, scheduleId: schedule.id, sessionDate: date } });
+    SyncRepository.enqueueOperation({ operationId, centerId: activeCenterId, userId: currentUser.id, deviceId, operationType: "CREATE", entityType: "session", entityId: sessionId, payload: { groupId: group.id, scheduleId: schedule.id, subjectId: group.subjectId, teacherId: group.teacherId, sessionPrice: group.sessionPrice, lateAfterMinutes: group.lateAfterMinutes, sessionDate: date, startTime: schedule.startTime, endTime: schedule.endTime, expectedStudentIds: enrollments.map((item) => item.studentId), status: "open", createdAt: now } });
+    return { id: sessionId, centerId: activeCenterId, groupId: group.id, scheduleId: schedule.id, subjectId: group.subjectId, teacherId: group.teacherId, sessionPrice: group.sessionPrice, lateAfterMinutes: group.lateAfterMinutes, sessionDate: date, startTime: schedule.startTime, endTime: schedule.endTime, status: "open", createdAt: now, groupName: group.name, teacherName: group.teacherName, subjectName: group.subjectName };
+  }
+
   static getTodaySessions(date = AttendanceSessionService.localDate()): Session[] {
     const sessions = SessionRepository.getSessionsForDate(date).filter((session) => session.status === "open" || session.status === "scheduled");
     const scheduledGroupIds = new Set(GroupRepository.getGroupsForDay(new Date(`${date}T12:00:00`).getDay()).map((group) => group.id));

@@ -38,6 +38,7 @@ import {
 } from "../../shared/components";
 import {
     Attendance,
+    Group,
     Session,
     Student,
     StudentFinancialStatus,
@@ -71,7 +72,7 @@ function ScannerContent() {
   const [financialStatus, setFinancialStatus] =
     useState<StudentFinancialStatus | null>(null);
   const [searchError, setSearchError] = useState<string | null>(null);
-  const [todaySessions, setTodaySessions] = useState<Session[]>([]);
+  const [todayGroups, setTodayGroups] = useState<Group[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [attendanceStarted, setAttendanceStarted] = useState(false);
   const [attendanceSummary, setAttendanceSummary] = useState<AttendanceSummary | null>(null);
@@ -84,15 +85,18 @@ function ScannerContent() {
   const isScanningBlockedRef = useRef(false);
 
   useEffect(() => {
-    try { setTodaySessions(AttendanceSessionService.getTodaySessions()); } catch (error) { setSearchError(getUserErrorMessage(error)); }
+    try { setTodayGroups(AttendanceSessionService.getTodayGroups()); } catch (error) { setSearchError(getUserErrorMessage(error)); }
   }, []);
 
   const startAttendance = () => {
-    if (!activeSessionId) return;
+    const selectedGroup = todayGroups.find((group) => group.id === activeSessionId);
+    if (!selectedGroup) return;
     try {
-      AttendanceSessionService.activate(activeSessionId);
+      const session = AttendanceSessionService.ensureSessionForGroup(selectedGroup.id);
+      setActiveSessionId(session.id);
+      AttendanceSessionService.activate(session.id);
       setAttendanceStarted(true);
-      setAttendanceSummary(AttendanceSessionService.getSummary(activeSessionId));
+      setAttendanceSummary(AttendanceSessionService.getSummary(session.id));
     } catch (error) { setSearchError(getUserErrorMessage(error)); }
   };
 
@@ -266,14 +270,14 @@ function ScannerContent() {
           <View style={styles.startAttendancePanel}>
             <Text style={styles.startTitle}>اختيار المجموعة للحضور</Text>
             <Text style={styles.startSubtitle}>اختر مجموعة اليوم ثم ابدأ الجلسة لتفعيل المسح.</Text>
-            {todaySessions.length === 0 ? (
+            {todayGroups.length === 0 ? (
               <Text style={styles.emptySessionText}>لا توجد جلسات مجدولة اليوم.</Text>
-            ) : todaySessions.map((session) => (
-              <TouchableOpacity key={session.id} onPress={() => setActiveSessionId(session.id)}>
-                <AppCard style={[styles.sessionCard, activeSessionId === session.id ? styles.sessionCardSelected : null]}>
-                  <Text style={styles.sessionSubject}>{session.groupName || session.subjectName || "مجموعة"}</Text>
-                  <Text style={styles.sessionTime}>{formatTimeArabic(session.startTime)} - {formatTimeArabic(session.endTime)}</Text>
-                  {activeSessionId === session.id ? <Ionicons name="checkmark-circle" size={20} color={Colors.primary} /> : null}
+            ) : todayGroups.map((group) => (
+              <TouchableOpacity key={group.id} onPress={() => setActiveSessionId(group.id)}>
+                <AppCard style={[styles.sessionCard, activeSessionId === group.id ? styles.sessionCardSelected : null]}>
+                  <Text style={styles.sessionSubject}>{group.name}</Text>
+                  <Text style={styles.sessionTime}>مجموعة اليوم • {group.subjectName || ""}</Text>
+                  {activeSessionId === group.id ? <Ionicons name="checkmark-circle" size={20} color={Colors.primary} /> : null}
                 </AppCard>
               </TouchableOpacity>
             ))}
