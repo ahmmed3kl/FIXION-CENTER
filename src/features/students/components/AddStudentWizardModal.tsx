@@ -821,7 +821,7 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({
                 <View style={styles.formField}>
                   <Text style={styles.gradeLabel}>المرحلة الدراسية</Text>
                   <View style={styles.gradeStageRow}>
-                    {gradeStages.map((stage) => (
+                    {gradeStages.filter((stage) => stage.grades.length > 0).map((stage) => (
                       <TouchableOpacity key={stage.id} style={[styles.gradeStage, gradeStage === stage.id && styles.gradeStageActive]} onPress={() => { setGradeStage(stage.id); setGrade(""); }}>
                         <Text style={[styles.gradeStageText, gradeStage === stage.id && styles.gradeStageTextActive]}>{stage.label}</Text>
                       </TouchableOpacity>

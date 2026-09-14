@@ -20,7 +20,17 @@ export class CenterAcademicStageRepository {
     if (!row?.stagesJson) return DEFAULT_ACADEMIC_STAGES.map((stage) => ({ ...stage, grades: [...stage.grades] }));
     try {
       const parsed = JSON.parse(row.stagesJson);
-      return Array.isArray(parsed) ? parsed : DEFAULT_ACADEMIC_STAGES.map((stage) => ({ ...stage, grades: [...stage.grades] }));
+      if (!Array.isArray(parsed)) {
+        return DEFAULT_ACADEMIC_STAGES.map((stage) => ({ ...stage, grades: [...stage.grades] }));
+      }
+      // Keep disabled stages in the configuration so they can be re-enabled later.
+      return DEFAULT_ACADEMIC_STAGES.map((defaultStage) => {
+        const saved = parsed.find((stage: any) => stage?.id === defaultStage.id);
+        return {
+          ...defaultStage,
+          grades: Array.isArray(saved?.grades) ? saved.grades : [],
+        };
+      });
     } catch {
       return DEFAULT_ACADEMIC_STAGES.map((stage) => ({ ...stage, grades: [...stage.grades] }));
     }
@@ -29,7 +39,13 @@ export class CenterAcademicStageRepository {
   static saveStages(stages: AcademicStage[]): void {
     const centerId = useAuthStore.getState().activeCenterId;
     if (!centerId) throw new Error("يجب تحديد السنتر أولاً.");
-    const cleaned = stages.filter((stage) => stage && stage.id && stage.label && stage.grades.length);
+    const cleaned = DEFAULT_ACADEMIC_STAGES.map((defaultStage) => {
+      const selected = stages.find((stage) => stage.id === defaultStage.id);
+      return {
+        ...defaultStage,
+        grades: selected?.grades ? [...selected.grades] : [],
+      };
+    });
     DatabaseService.getDb().runSync(
       `INSERT INTO center_academic_stages (center_id, stages_json, updated_at) VALUES (?, ?, ?)
        ON CONFLICT(center_id) DO UPDATE SET stages_json = excluded.stages_json, updated_at = excluded.updated_at`,
