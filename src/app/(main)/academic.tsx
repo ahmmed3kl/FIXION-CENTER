@@ -102,6 +102,8 @@ export default function AcademicScreen() {
   const [groupNameCustomized, setGroupNameCustomized] = useState(false);
   const [selectedScheduleDays, setSelectedScheduleDays] = useState<number[]>([]);
   const [scheduleTimes, setScheduleTimes] = useState<Record<number, { start: string; end: string }>>({});
+  const [timePicker, setTimePicker] = useState<{ day: number; field: "start" | "end" } | null>(null);
+  const [timeDraftHour, setTimeDraftHour] = useState(17);
 
   const [schedDay, setSchedDay] = useState(0);
   const [schedStart, setSchedStart] = useState("14:00");
@@ -119,7 +121,32 @@ export default function AcademicScreen() {
   const generatedGroupName = () => {
     const teacher = teachers.find((item) => item.id === groupTeacherId)?.name;
     const subject = subjects.find((item) => item.id === groupSubjectId)?.name;
-    return [groupGrade.trim(), subject, teacher].filter(Boolean).join(" - ");
+    const schedule = selectedScheduleDays.slice().sort((a, b) => a - b).map((day) => {
+      const time = scheduleTimes[day];
+      return time?.start && time?.end ? `${DAYS_OF_WEEK[day]} ${formatTimeForName(time.start)}-${formatTimeForName(time.end)}` : null;
+    }).filter(Boolean).join("، ");
+    return [groupGrade.trim(), subject, teacher, schedule].filter(Boolean).join(" • ");
+  };
+
+  const formatTimeForName = (value: string) => {
+    const [hour, minute] = value.split(":").map(Number);
+    if (!Number.isFinite(hour) || !Number.isFinite(minute)) return value;
+    const suffix = hour >= 12 ? "م" : "ص";
+    const displayHour = hour % 12 || 12;
+    return `${String(displayHour).padStart(2, "0")}:${String(minute).padStart(2, "0")} ${suffix}`;
+  };
+
+  const selectTime = (hour: number, minute: number) => {
+    if (!timePicker) return;
+    const value = `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+    setScheduleTimes((current) => ({ ...current, [timePicker.day]: { ...(current[timePicker.day] || { start: "17:00", end: "19:00" }), [timePicker.field]: value } }));
+    setTimePicker(null);
+  };
+
+  const openTimePicker = (day: number, field: "start" | "end") => {
+    const value = scheduleTimes[day]?.[field] || (field === "start" ? "17:00" : "19:00");
+    setTimeDraftHour(Number(value.split(":")[0]) || 17);
+    setTimePicker({ day, field });
   };
 
   useEffect(() => {
@@ -127,7 +154,7 @@ export default function AcademicScreen() {
       const name = generatedGroupName();
       if (name) setGroupName(name);
     }
-  }, [groupGrade, groupTeacherId, groupSubjectId, teachers, subjects, groupNameCustomized]);
+  }, [groupGrade, groupTeacherId, groupSubjectId, teachers, subjects, groupNameCustomized, selectedScheduleDays, scheduleTimes]);
 
   const loadData = () => {
     try {
@@ -962,18 +989,13 @@ export default function AcademicScreen() {
               {selectedScheduleDays.slice().sort((a, b) => a - b).map((day) => (
                 <View key={day} style={styles.dayTimeRow}>
                   <Text style={styles.dayTimeLabel}>{DAYS_OF_WEEK[day]}</Text>
-                  <AppInput
-                    label="البداية"
-                    value={scheduleTimes[day]?.start || ""}
-                    onChangeText={(value) => setScheduleTimes((current) => ({ ...current, [day]: { ...(current[day] || { end: "19:00" }), start: value } }))}
-                    containerStyle={styles.dayTimeInput}
-                  />
-                  <AppInput
-                    label="النهاية"
-                    value={scheduleTimes[day]?.end || ""}
-                    onChangeText={(value) => setScheduleTimes((current) => ({ ...current, [day]: { ...(current[day] || { start: "17:00" }), end: value } }))}
-                    containerStyle={styles.dayTimeInput}
-                  />
+                  {(["start", "end"] as const).map((field) => (
+                    <TouchableOpacity key={field} style={styles.timePickerButton} onPress={() => openTimePicker(day, field)}>
+                      <Text style={styles.timePickerLabel}>{field === "start" ? "من" : "إلى"}</Text>
+                      <Text style={styles.timePickerValue}>{formatTimeForName(scheduleTimes[day]?.[field] || (field === "start" ? "17:00" : "19:00"))}</Text>
+                      <Ionicons name="time-outline" size={16} color={Colors.primary} />
+                    </TouchableOpacity>
+                  ))}
                 </View>
               ))}
 
@@ -1033,6 +1055,36 @@ export default function AcademicScreen() {
                 style={{ flex: 1 }}
               />
             </View>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal visible={!!timePicker} animationType="fade" transparent onRequestClose={() => setTimePicker(null)}>
+        <View style={styles.modalOverlay}>
+          <View style={styles.timePickerCard}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>اختيار الوقت</Text>
+              <TouchableOpacity onPress={() => setTimePicker(null)}><Ionicons name="close" size={24} color={Colors.slate500} /></TouchableOpacity>
+            </View>
+            <Text style={styles.modalSubtitle}>اختر الساعة والدقيقة من القوائم</Text>
+            <View style={styles.timeColumns}>
+              <ScrollView style={styles.timeColumn} contentContainerStyle={styles.timeColumnContent}>
+                {Array.from({ length: 24 }, (_, hour) => (
+                  <TouchableOpacity key={hour} style={[styles.timeOption, timeDraftHour === hour && styles.timeOptionActive]} onPress={() => setTimeDraftHour(hour)}>
+                    <Text style={styles.timeOptionText}>{String(hour).padStart(2, "0")}</Text>
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+              <Text style={styles.timeSeparator}>:</Text>
+              <ScrollView style={styles.timeColumn} contentContainerStyle={styles.timeColumnContent}>
+                {[0, 15, 30, 45].map((minute) => (
+                  <TouchableOpacity key={minute} style={styles.timeOption} onPress={() => selectTime(timeDraftHour, minute)}>
+                    <Text style={styles.timeOptionText}>{String(minute).padStart(2, "0")}</Text>
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+            </View>
+            <AppButton title="إغلاق" variant="outline" onPress={() => setTimePicker(null)} />
           </View>
         </View>
       </Modal>
@@ -1480,6 +1532,26 @@ const styles = StyleSheet.create({
     color: Colors.slate700,
     textAlign: "right",
   },
+  timePickerButton: {
+    flex: 1,
+    minHeight: 48,
+    borderWidth: 1,
+    borderColor: Colors.slate200,
+    borderRadius: 10,
+    paddingHorizontal: 8,
+    justifyContent: "center",
+    backgroundColor: Colors.white,
+  },
+  timePickerLabel: { fontSize: 10, color: Colors.slate500 },
+  timePickerValue: { fontSize: 14, fontWeight: "700", color: Colors.slate800, marginTop: 2 },
+  timePickerCard: { width: "90%", maxHeight: "75%", backgroundColor: Colors.white, borderRadius: 18, padding: Spacing.lg },
+  timeColumns: { flexDirection: "row", alignItems: "center", justifyContent: "center", marginVertical: Spacing.md },
+  timeColumn: { height: 220, width: 100 },
+  timeColumnContent: { alignItems: "center", paddingVertical: 4 },
+  timeOption: { width: 76, paddingVertical: 10, alignItems: "center", borderRadius: 10, marginBottom: 4 },
+  timeOptionActive: { backgroundColor: Colors.primaryLight },
+  timeOptionText: { fontSize: 18, fontWeight: "700", color: Colors.slate800 },
+  timeSeparator: { fontSize: 26, fontWeight: "800", color: Colors.primary, marginHorizontal: 4 },
   dayTimeInput: {
     flex: 1,
     marginBottom: 0,
