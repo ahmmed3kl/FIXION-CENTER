@@ -104,6 +104,7 @@ export default function AcademicScreen() {
   const [scheduleTimes, setScheduleTimes] = useState<Record<number, { start: string; end: string }>>({});
   const [timePicker, setTimePicker] = useState<{ day: number; field: "start" | "end" } | null>(null);
   const [timeDraftHour, setTimeDraftHour] = useState(17);
+  const [timeDraftMinute, setTimeDraftMinute] = useState(0);
 
   const [schedDay, setSchedDay] = useState(0);
   const [schedStart, setSchedStart] = useState("14:00");
@@ -146,6 +147,7 @@ export default function AcademicScreen() {
   const openTimePicker = (day: number, field: "start" | "end") => {
     const value = scheduleTimes[day]?.[field] || (field === "start" ? "17:00" : "19:00");
     setTimeDraftHour(Number(value.split(":")[0]) || 17);
+    setTimeDraftMinute(Number(value.split(":")[1]) || 0);
     setTimePicker({ day, field });
   };
 
@@ -1078,13 +1080,14 @@ export default function AcademicScreen() {
               <Text style={styles.timeSeparator}>:</Text>
               <ScrollView style={styles.timeColumn} contentContainerStyle={styles.timeColumnContent}>
                 {[0, 15, 30, 45].map((minute) => (
-                  <TouchableOpacity key={minute} style={styles.timeOption} onPress={() => selectTime(timeDraftHour, minute)}>
+                  <TouchableOpacity key={minute} style={[styles.timeOption, timeDraftMinute === minute && styles.timeOptionActive]} onPress={() => setTimeDraftMinute(minute)}>
                     <Text style={styles.timeOptionText}>{String(minute).padStart(2, "0")}</Text>
                   </TouchableOpacity>
                 ))}
               </ScrollView>
             </View>
-            <AppButton title="إغلاق" variant="outline" onPress={() => setTimePicker(null)} />
+            <AppButton title="تأكيد الوقت" onPress={() => selectTime(timeDraftHour, timeDraftMinute)} />
+            <AppButton title="إلغاء" variant="outline" onPress={() => setTimePicker(null)} style={{ marginTop: Spacing.sm }} />
           </View>
         </View>
       </Modal>
