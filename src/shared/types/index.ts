@@ -436,6 +436,19 @@ export interface DetailedStudentFinancialStatus extends StudentFinancialStatus {
   sessionPayments: PaymentEvent[];
   monthlyPayments: PaymentEvent[];
   reversals: PaymentReversal[];
+  sessionDebt?: SessionDebtBreakdown;
+}
+
+export interface SessionDebtBreakdown {
+  periodStart: string;
+  periodEnd: string;
+  expectedSessions: number;
+  futureUnpaidSessions: number;
+  futurePaidSessions: number;
+  attendedPaidSessions: number;
+  attendedUnpaidSessions: number;
+  currentDebt: number;
+  sessionPriceTotal: number;
 }
 
 export type SyncOperationStatus =

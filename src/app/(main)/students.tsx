@@ -729,6 +729,22 @@ export default function StudentsScreen() {
                       </View>
                     </View>
 
+                    {financialStatus.sessionDebt && (
+                      <View style={styles.sessionDebtCard}>
+                        <Text style={styles.sessionDebtTitle}>تفصيل حصص الشهر</Text>
+                        <Text style={styles.sessionDebtPeriod}>
+                          {financialStatus.sessionDebt.periodStart} - {financialStatus.sessionDebt.periodEnd}
+                        </Text>
+                        <View style={styles.sessionDebtGrid}>
+                          <Text style={styles.sessionDebtItem}>متبقية غير مدفوعة: {financialStatus.sessionDebt.futureUnpaidSessions}</Text>
+                          <Text style={styles.sessionDebtItem}>متبقية مدفوعة: {financialStatus.sessionDebt.futurePaidSessions}</Text>
+                          <Text style={styles.sessionDebtItem}>حضر ودفع: {financialStatus.sessionDebt.attendedPaidSessions}</Text>
+                          <Text style={styles.sessionDebtItem}>حضر ولم يدفع: {financialStatus.sessionDebt.attendedUnpaidSessions}</Text>
+                        </View>
+                        <Text style={styles.sessionDebtAmount}>المديونية الحالية: {formatCurrency(financialStatus.sessionDebt.currentDebt)}</Text>
+                      </View>
+                    )}
+
                     {/* Session Payments Note/Total if any */}
                     {financialStatus.sessionTotalPaid > 0 && (
                       <View style={styles.sessionPaymentsBanner}>
@@ -1479,6 +1495,41 @@ const styles = StyleSheet.create({
     fontSize: 10,
     color: Colors.slate600,
     marginTop: 2,
+  },
+  sessionDebtCard: {
+    backgroundColor: Colors.white,
+    padding: Spacing.sm,
+    borderRadius: 10,
+    marginVertical: Spacing.xs,
+    borderWidth: 1,
+    borderColor: Colors.border,
+  },
+  sessionDebtTitle: {
+    fontSize: 13,
+    fontWeight: "800",
+    color: Colors.slate900,
+  },
+  sessionDebtPeriod: {
+    fontSize: 10,
+    color: Colors.slate500,
+    marginTop: 2,
+  },
+  sessionDebtGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 6,
+    marginTop: 8,
+  },
+  sessionDebtItem: {
+    width: "48%",
+    fontSize: 11,
+    color: Colors.slate700,
+  },
+  sessionDebtAmount: {
+    fontSize: 12,
+    fontWeight: "800",
+    color: Colors.danger,
+    marginTop: 8,
   },
   sectionSubtitle: {
     fontSize: 12,

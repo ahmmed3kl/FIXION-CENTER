@@ -48,6 +48,25 @@ export function getCycleEndDate(nextCycleStartDate: string): string {
 }
 
 export class DebtCycleRepository {
+  private static getFirstScheduledDate(groupId: string, startDate: string): string {
+    const { activeCenterId } = useAuthStore.getState();
+    const db = DatabaseService.getDb();
+    const schedules = db.getAllSync<{ dayOfWeek: number }>(
+      `SELECT day_of_week as dayOfWeek FROM group_schedules
+       WHERE center_id = ? AND group_id = ? AND status = 'active'`,
+      [activeCenterId, groupId],
+    );
+    if (!schedules.length) return startDate;
+    const start = new Date(`${startDate}T12:00:00`);
+    for (let offset = 0; offset < 7; offset += 1) {
+      const candidate = new Date(start);
+      candidate.setDate(start.getDate() + offset);
+      if (schedules.some((schedule) => schedule.dayOfWeek === candidate.getDay())) {
+        return candidate.toISOString().slice(0, 10);
+      }
+    }
+    return startDate;
+  }
   private static getActiveContext() {
     const { activeCenterId, currentUser } = useAuthStore.getState();
     if (!activeCenterId || !currentUser) {
@@ -216,7 +235,9 @@ export class DebtCycleRepository {
     let nextCycleNum: number;
 
     if (existingCycles.length === 0) {
-      nextStart = enrollment.startDate;
+      // A new enrollment starts financially on the first actual scheduled
+      // class on/after the enrollment date, never before the student can attend.
+      nextStart = this.getFirstScheduledDate(enrollment.groupId, enrollment.startDate);
       nextCycleNum = 1;
     } else {
       const lastCycle = existingCycles[existingCycles.length - 1];

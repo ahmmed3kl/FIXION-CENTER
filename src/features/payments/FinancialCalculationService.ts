@@ -12,6 +12,7 @@ import {
 import { useAuthStore } from "../auth/useAuthStore";
 import { DebtAdjustmentRepository } from "./DebtAdjustmentRepository";
 import { DebtCycleRepository } from "./DebtCycleRepository";
+import { SessionDebtService } from "./SessionDebtService";
 
 export class FinancialCalculationService {
   private static getActiveContext() {
@@ -254,6 +255,7 @@ export class FinancialCalculationService {
       0,
     );
     const sessionPaymentsTotal = sessionTotalPaid;
+    const sessionDebt = SessionDebtService.getCurrentMonthBreakdown(studentId, targetDate);
 
     const monthlyAdjustments = adjustments.reduce(
       (sum, a) => sum + (Number(a.adjustmentAmount) || 0),
@@ -287,6 +289,7 @@ export class FinancialCalculationService {
       sessionPayments: activeSessionPayments,
       monthlyPayments: activeMonthlyPayments,
       reversals,
+      sessionDebt,
     };
   }
 }

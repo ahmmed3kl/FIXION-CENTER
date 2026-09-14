@@ -14,6 +14,7 @@ import { StudentGroupEnrollment } from "../../shared/types";
 import { useAuthStore } from "../auth/useAuthStore";
 import { GroupRepository } from "../groups/GroupRepository";
 import { StudentRepository } from "../students/StudentRepository";
+import { DebtCycleRepository } from "../payments/DebtCycleRepository";
 
 export interface EnrollStudentDTO {
   studentId: string;
@@ -190,6 +191,17 @@ export class EnrollmentRepository {
         createdAt: now,
       },
     });
+
+    // Create the first financial cycle immediately when the caller also has
+    // financial access. The calculation layer remains lazy for roles that can
+    // enroll students but are not allowed to view financial data.
+    try {
+      if (PermissionService.hasPermission(user.permissions, "payments.view") || PermissionService.hasPermission(user.permissions, "payments.create")) {
+        DebtCycleRepository.generateCyclesForEnrollment(enrollmentId);
+      }
+    } catch {
+      // Financial generation is retried when the student's financial status is opened.
+    }
 
     return {
       id: enrollmentId,
