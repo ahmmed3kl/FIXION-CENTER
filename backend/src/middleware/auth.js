@@ -67,9 +67,15 @@ async function authMiddleware(req, res, next) {
        WHERE uc.user_id = $1`,
       [user.id],
     );
-    const allowedCenters = memberships.rows.length > 0
+    let allowedCenters = memberships.rows.length > 0
       ? memberships.rows.filter((row) => row.center_status === "active").map((row) => row.center_id)
       : [user.center_id];
+    // The system owner/admin manages every active center. Other roles remain
+    // restricted to their explicit user_centers memberships.
+    if (user.role === "admin" || user.role === "owner") {
+      const allCenters = await db.query("SELECT id FROM centers WHERE status = 'active' ORDER BY name ASC");
+      allowedCenters = allCenters.rows.map((row) => row.id);
+    }
     const clientHeaderCenterId = req.headers["x-center-id"];
     const requestedCenterId = clientHeaderCenterId || decoded.centerId || user.center_id;
     if (!allowedCenters.includes(requestedCenterId)) {

@@ -101,12 +101,17 @@ router.post("/login", async (req, res, next) => {
        ORDER BY uc.is_primary DESC, c.name ASC`,
       [user.id],
     );
-    const centerIds = centerMemberships.rows.length > 0
+    let centerIds = centerMemberships.rows.length > 0
       ? centerMemberships.rows.map((row) => row.center_id)
       : [user.center_id];
-    const centers = centerMemberships.rows.length > 0
+    let centers = centerMemberships.rows.length > 0
       ? centerMemberships.rows.map((row) => ({ id: row.center_id, name: row.name, code: row.code }))
       : [{ id: user.center_id, name: user.center_name, code: user.center_code }];
+    if (user.role === "admin" || user.role === "owner") {
+      const allCenters = await db.query("SELECT id, name, code FROM centers WHERE status = 'active' ORDER BY name ASC");
+      centers = allCenters.rows;
+      centerIds = centers.map((center) => center.id);
+    }
 
     // Minimal JWT claims as specified in approved design:
     // sub, centerId, role, iat, exp
