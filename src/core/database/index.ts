@@ -3302,6 +3302,11 @@ export class DatabaseService {
         created_at TEXT NOT NULL,
         CONSTRAINT uq_teacher_subject UNIQUE (center_id, teacher_id, subject_id)
       );`,
+      `CREATE TABLE IF NOT EXISTS center_academic_stages (
+        center_id TEXT PRIMARY KEY,
+        stages_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );`,
       // 4. Groups
       "ALTER TABLE groups ADD COLUMN session_price REAL NOT NULL DEFAULT 0;",
       "ALTER TABLE groups ADD COLUMN monthly_price REAL NOT NULL DEFAULT 0;",

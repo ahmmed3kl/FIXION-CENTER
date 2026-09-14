@@ -28,6 +28,7 @@ import { SessionGenerationService } from "../../features/sessions/SessionGenerat
 import { SubjectRepository } from "../../features/subjects/SubjectRepository";
 import { TeacherRepository } from "../../features/teachers/TeacherRepository";
 import { TeacherSubjectRepository } from "../../features/teachers/TeacherSubjectRepository";
+import { AcademicStage, CenterAcademicStageRepository, DEFAULT_ACADEMIC_STAGES } from "../../features/academic/CenterAcademicStageRepository";
 import {
     AppButton,
     AppCard,
@@ -43,7 +44,7 @@ import {
     Teacher,
 } from "../../shared/types";
 
-type AcademicTab = "teachers" | "subjects" | "groups" | "sessions";
+type AcademicTab = "teachers" | "subjects" | "groups" | "stages";
 
 const DAYS_OF_WEEK = [
   "الأحد",
@@ -71,6 +72,7 @@ export default function AcademicScreen() {
   const [showTodayGroups, setShowTodayGroups] = useState(false);
   const [todayGroupIds, setTodayGroupIds] = useState<string[]>([]);
   const [todaySessions, setTodaySessions] = useState<Session[]>([]);
+  const [academicStages, setAcademicStages] = useState<AcademicStage[]>(() => DEFAULT_ACADEMIC_STAGES.map((stage) => ({ ...stage, grades: [...stage.grades] })));
 
   // Selection & Modals
   const [isAddTeacherOpen, setIsAddTeacherOpen] = useState(false);
@@ -170,6 +172,7 @@ export default function AcademicScreen() {
       setGroups(GroupRepository.getAll(true));
       setTodayGroupIds(GroupRepository.getGroupsForDay(new Date().getDay()).map((group) => group.id));
       setTodaySessions(SessionGenerationService.getSessionsForDate(todayStr));
+      setAcademicStages(CenterAcademicStageRepository.getStages());
     } catch (e: any) {
       console.error("Academic loadData error:", e);
     }
@@ -497,21 +500,8 @@ export default function AcademicScreen() {
             المجموعات
           </Text>
         </TouchableOpacity>
-        <TouchableOpacity
-          style={[
-            styles.tabButton,
-            activeTab === "sessions" && styles.tabButtonActive,
-          ]}
-          onPress={() => setActiveTab("sessions")}
-        >
-          <Text
-            style={[
-              styles.tabButtonText,
-              activeTab === "sessions" && styles.tabButtonTextActive,
-            ]}
-          >
-            الحصص
-          </Text>
+        <TouchableOpacity style={[styles.tabButton, activeTab === "stages" && styles.tabButtonActive]} onPress={() => setActiveTab("stages")}>
+          <Text style={[styles.tabButtonText, activeTab === "stages" && styles.tabButtonTextActive]}>المراحل</Text>
         </TouchableOpacity>
       </View>
 
@@ -713,8 +703,23 @@ export default function AcademicScreen() {
           </View>
         )}
 
-        {/* TAB 4: SESSIONS & GENERATION */}
-        {activeTab === "sessions" && (
+        {/* TAB 4: CENTER ACADEMIC STAGES */}
+        {activeTab === "stages" && (
+          <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: Spacing.xl }}>
+            <AppCard style={styles.generatorCard}>
+              <Text style={styles.sectionHeaderTitle}>المراحل الدراسية التي يقدمها السنتر</Text>
+              <Text style={styles.generatorDesc}>اختر المراحل المتاحة عند تسجيل الطلاب. الصفوف التابعة لكل مرحلة جاهزة تلقائيًا.</Text>
+              {academicStages.map((stage) => <TouchableOpacity key={stage.id} style={[styles.stageSelectCard, stage.grades.length > 0 && styles.stageSelectCardActive]} onPress={() => setAcademicStages((current) => current.map((item) => item.id === stage.id ? { ...item, grades: item.grades.length > 0 ? [] : [...(DEFAULT_ACADEMIC_STAGES.find((defaultStage) => defaultStage.id === stage.id)?.grades || [])] } : item))}>
+                <Text style={styles.stageCardName}>{stage.grades.length > 0 ? "✓ " : "□ "}{stage.label}</Text>
+                <Text style={styles.stageCardGrades}>{stage.grades.length > 0 ? stage.grades.join(" • ") : "غير مفعلة"}</Text>
+              </TouchableOpacity>)}
+              <AppButton title="حفظ مراحل السنتر" onPress={() => { try { CenterAcademicStageRepository.saveStages(academicStages); Alert.alert("تم بنجاح", "تم حفظ المراحل الدراسية للسنتر."); } catch (error: any) { Alert.alert("خطأ", error?.message || "تعذر حفظ المراحل."); } }} />
+            </AppCard>
+          </ScrollView>
+        )}
+
+        {/* TAB 4: SESSIONS & GENERATION (disabled; attendance starts sessions automatically) */}
+        {false && (
           <ScrollView style={{ flex: 1 }}>
             {/* Session Generation Box */}
             {false && <AppCard style={styles.generatorCard}>
@@ -1383,6 +1388,29 @@ const styles = StyleSheet.create({
     color: Colors.slate600,
     lineHeight: 18,
     marginBottom: Spacing.sm,
+  },
+  stageSelectCard: {
+    borderWidth: 1,
+    borderColor: Colors.border,
+    borderRadius: 12,
+    padding: Spacing.md,
+    marginBottom: Spacing.sm,
+    backgroundColor: Colors.slate50,
+  },
+  stageSelectCardActive: {
+    borderColor: Colors.primary,
+    backgroundColor: Colors.primaryLight + "18",
+  },
+  stageCardName: {
+    fontSize: 15,
+    fontWeight: "700",
+    color: Colors.slate900,
+  },
+  stageCardGrades: {
+    fontSize: 11,
+    color: Colors.slate600,
+    marginTop: 4,
+    lineHeight: 18,
   },
   sectionHeaderTitle: {
     fontSize: 14,

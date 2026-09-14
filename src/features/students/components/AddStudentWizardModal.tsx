@@ -33,6 +33,7 @@ import { StudentCardRepository } from "../StudentCardRepository";
 import { StudentRepository } from "../StudentRepository";
 import { PackageRepository } from "../../packages/PackageRepository";
 import { PackageSubscriptionRepository } from "../../packages/PackageSubscriptionRepository";
+import { AcademicStage, CenterAcademicStageRepository, DEFAULT_ACADEMIC_STAGES } from "../../academic/CenterAcademicStageRepository";
 
 const DAYS_OF_WEEK = [
   "الأحد",
@@ -43,12 +44,6 @@ const DAYS_OF_WEEK = [
   "الجمعة",
   "السبت",
 ];
-
-const GRADE_STAGES = [
-  { id: "primary", label: "ابتدائي", grades: ["الأول الابتدائي", "الثاني الابتدائي", "الثالث الابتدائي", "الرابع الابتدائي", "الخامس الابتدائي", "السادس الابتدائي"] },
-  { id: "preparatory", label: "إعدادي", grades: ["الأول الإعدادي", "الثاني الإعدادي", "الثالث الإعدادي"] },
-  { id: "secondary", label: "ثانوي", grades: ["الأول الثانوي", "الثاني الثانوي", "الثالث الثانوي"] },
-] as const;
 
 interface AddStudentWizardModalProps {
   visible: boolean;
@@ -80,7 +75,8 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({
   const [phoneDuplicateWarning, setPhoneDuplicateWarning] = useState(false);
   const [parentPhoneDuplicateWarning, setParentPhoneDuplicateWarning] = useState(false);
   const [grade, setGrade] = useState("");
-  const [gradeStage, setGradeStage] = useState<(typeof GRADE_STAGES)[number]["id"] | null>(null);
+  const [gradeStages, setGradeStages] = useState<AcademicStage[]>(() => DEFAULT_ACADEMIC_STAGES.map((stage) => ({ ...stage, grades: [...stage.grades] })));
+  const [gradeStage, setGradeStage] = useState<string | null>(null);
   const [notes, setNotes] = useState("");
   const [step2Errors, setStep2Errors] = useState<{
     fullName?: string;
@@ -118,6 +114,7 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({
 
   const loadContextData = () => {
     try {
+      setGradeStages(CenterAcademicStageRepository.getStages());
       // Load inactive/archived groups too: a student may need to be attached
       // to a group that was created before its schedule was activated.
       const groups = GroupRepository.getAll(true);
@@ -311,7 +308,8 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({
   // The student chooses the concrete group for the selected teacher; do not
   // hide a valid group merely because the package option's subject snapshot
   // differs from the group's current subject.
-  const groupsForPackageOption = (option: PackageSubject) => availableGroups.filter((group) => String(group.teacherId) === String(option.defaultTeacherId));
+  const groupMatchesGrade = (group: Group) => !grade.trim() || String(group.grade || "").trim() === grade.trim();
+  const groupsForPackageOption = (option: PackageSubject) => availableGroups.filter((group) => String(group.teacherId) === String(option.defaultTeacherId) && groupMatchesGrade(group));
   const selectPackageGroup = (optionId: string, groupId: string) => setPackageGroupByOption((current) => ({ ...current, [optionId]: groupId }));
   const validatePackageGroups = () => {
     if (enrollmentMode !== "package") return true;
@@ -328,7 +326,7 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({
       if (option && groupsForPackageOption(option).length > 0 && !packageGroupByOption[option.id]) { Alert.alert("تنبيه", `اختر مجموعة للمدرس ${option.defaultTeacherName || "المحدد"}.`); return false; }
     } else {
       const teacherId = selectedTeacherIds[currentGroupTeacherIndex];
-      const teacherGroups = availableGroups.filter((group) => group.teacherId === teacherId);
+      const teacherGroups = availableGroups.filter((group) => group.teacherId === teacherId && groupMatchesGrade(group));
       if (teacherGroups.length > 0 && !selectedGroupIds.some((id) => teacherGroups.some((group) => group.id === id))) { Alert.alert("تنبيه", "اختر مجموعة لهذا المدرس قبل المتابعة."); return false; }
     }
     return true;
@@ -823,14 +821,14 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({
                 <View style={styles.formField}>
                   <Text style={styles.gradeLabel}>المرحلة الدراسية</Text>
                   <View style={styles.gradeStageRow}>
-                    {GRADE_STAGES.map((stage) => (
+                    {gradeStages.map((stage) => (
                       <TouchableOpacity key={stage.id} style={[styles.gradeStage, gradeStage === stage.id && styles.gradeStageActive]} onPress={() => { setGradeStage(stage.id); setGrade(""); }}>
                         <Text style={[styles.gradeStageText, gradeStage === stage.id && styles.gradeStageTextActive]}>{stage.label}</Text>
                       </TouchableOpacity>
                     ))}
                   </View>
                   {gradeStage ? <View style={styles.gradeOptions}>
-                    {GRADE_STAGES.find((stage) => stage.id === gradeStage)?.grades.map((option) => (
+                    {gradeStages.find((stage) => stage.id === gradeStage)?.grades.map((option) => (
                       <TouchableOpacity key={option} style={[styles.gradeOption, grade === option && styles.gradeOptionActive]} onPress={() => setGrade(option)}>
                         <Text style={[styles.gradeOptionText, grade === option && styles.gradeOptionTextActive]}>{grade === option ? "✓ " : ""}{option}</Text>
                       </TouchableOpacity>
@@ -929,7 +927,7 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({
                   </AppCard>
                 ) : (
                   <View style={{ marginBottom: Spacing.md }}>
-                    {availableGroups.filter((grp) => grp.teacherId === selectedTeacherIds[currentGroupTeacherIndex]).map((grp) => {
+                    {availableGroups.filter((grp) => grp.teacherId === selectedTeacherIds[currentGroupTeacherIndex] && groupMatchesGrade(grp)).map((grp) => {
                       const isSelected = selectedGroupIds.includes(grp.id);
                       const teacherName =
                         teachersMap[grp.teacherId] || "غير محدد";
