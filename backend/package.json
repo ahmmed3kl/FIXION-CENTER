@@ -5,7 +5,8 @@
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
-    "test": "node tests/backend_integration.test.js"
+    "test": "node tests/backend_integration.test.js",
+    "platform:bootstrap-admin": "node scripts/bootstrap-platform-admin.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

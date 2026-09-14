@@ -7,6 +7,16 @@ const healthRouter = require("./routes/health");
 const authRouter = require("./routes/auth");
 const devicesRouter = require("./routes/devices");
 const syncRouter = require("./routes/sync");
+const servicesRouter = require("./routes/services");
+const platformRouter = require("./routes/platform");
+const platformCentersRouter = require("./routes/platformCenters");
+const platformUsersRouter = require("./routes/platformUsers");
+const platformServicesRouter = require("./routes/platformServices");
+const platformCardRangesRouter = require("./routes/platformCardRanges");
+const platformDevicesRouter = require("./routes/platformDevices");
+const platformSyncRouter = require("./routes/platformSync");
+const platformAuditRouter = require("./routes/platformAudit");
+const platformSyncQuery = require("./services/platformSyncQuery");
 
 const app = express();
 
@@ -15,6 +25,7 @@ app.set("trust proxy", 1);
 
 // Security and utility middlewares
 app.use(cors({ origin: config.corsOrigin }));
+app.use((req, res, next) => { res.setHeader("X-Content-Type-Options", "nosniff"); res.setHeader("X-Frame-Options", "DENY"); res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin"); next(); });
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 
@@ -33,6 +44,17 @@ app.use("/v1/health", healthRouter);
 app.use("/v1/auth", authRouter);
 app.use("/v1/devices", devicesRouter);
 app.use("/v1/sync", syncRouter);
+app.use("/v1/services", servicesRouter);
+app.use("/v1/platform", platformRouter);
+app.use("/v1/platform/centers", platformCentersRouter);
+app.use("/v1/platform/centers/:centerId/users", platformUsersRouter);
+app.use("/v1/platform/centers/:centerId/services", platformServicesRouter);
+app.use("/v1/platform/centers/:centerId/card-ranges", platformCardRangesRouter);
+app.use("/v1/platform/centers/:centerId/devices", platformDevicesRouter);
+app.use("/v1/platform/centers/:centerId/sync", platformSyncRouter);
+app.use("/v1/platform/audit-logs", platformAuditRouter.router);
+app.get("/v1/platform/sync/summary", require("./middleware/platformAuth").platformAuthMiddleware, async (req,res,next)=>{ try { res.json({ summary: await platformSyncQuery.summary(req.query) }); } catch(e) { next(e); } });
+app.get("/v1/platform/sync", require("./middleware/platformAuth").platformAuthMiddleware, async (req,res,next)=>{ try { res.json(await platformSyncQuery.listOperations(req.query)); } catch(e) { next(e); } });
 
 // 404 handler
 app.use((req, res) => {

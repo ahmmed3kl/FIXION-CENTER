@@ -45,6 +45,20 @@ CREATE TABLE IF NOT EXISTS users (
 -- indexed by the database if desired, but never enforce uniqueness on it.
 ALTER TABLE users DROP CONSTRAINT IF EXISTS users_phone_key;
 
+-- Platform administrators are a separate security scope from center users.
+-- No center_id is stored because platform access is not tenant-scoped.
+CREATE TABLE IF NOT EXISTS platform_admins (
+    id VARCHAR(64) PRIMARY KEY,
+    full_name VARCHAR(255) NOT NULL,
+    email VARCHAR(255) NOT NULL UNIQUE,
+    password_hash VARCHAR(255) NOT NULL,
+    status VARCHAR(32) NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'suspended', 'inactive')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_platform_admins_email_lower ON platform_admins(LOWER(email));
+
 -- Multi-Center Access for Users
 CREATE TABLE IF NOT EXISTS user_centers (
     id VARCHAR(64) PRIMARY KEY,
@@ -451,6 +465,13 @@ CREATE TABLE IF NOT EXISTS audit_logs (
     timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     payload JSONB
 );
+ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS actor_type VARCHAR(32);
+ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS actor_id VARCHAR(64);
+ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS before_state JSONB;
+ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS after_state JSONB;
+ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS metadata JSONB;
+CREATE INDEX IF NOT EXISTS idx_audit_actor_time ON audit_logs(actor_type, actor_id, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_action_time ON audit_logs(action, timestamp DESC);
 
 -- Ingested Sync Operations (Monotonic server ledger for offline-first clients)
 CREATE TABLE IF NOT EXISTS server_sync_operations (
@@ -484,6 +505,35 @@ CREATE TABLE IF NOT EXISTS sync_checkpoints (
 -- ------------------------------------------------------------------------------
 
 CREATE INDEX IF NOT EXISTS idx_users_center ON users(center_id, role);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_active_admin_per_center ON users(center_id) WHERE role = 'admin' AND status = 'active';
+
+-- Optional per-center service overrides. Missing rows preserve legacy behavior (enabled).
+CREATE TABLE IF NOT EXISTS center_services (
+    id VARCHAR(64) PRIMARY KEY,
+    center_id VARCHAR(64) NOT NULL REFERENCES centers(id) ON DELETE CASCADE,
+    service_key VARCHAR(64) NOT NULL,
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT uq_center_service UNIQUE (center_id, service_key)
+);
+
+-- Centrally controlled fixed-length decimal card ownership ranges.
+CREATE TABLE IF NOT EXISTS card_ranges (
+    id VARCHAR(64) PRIMARY KEY,
+    center_id VARCHAR(64) NOT NULL REFERENCES centers(id) ON DELETE CASCADE,
+    start_code VARCHAR(64) NOT NULL,
+    end_code VARCHAR(64) NOT NULL,
+    status VARCHAR(32) NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT uq_card_range_identity UNIQUE (center_id, start_code, end_code),
+    CONSTRAINT chk_card_range_digits CHECK (start_code ~ '^[0-9]+$' AND end_code ~ '^[0-9]+$'),
+    CONSTRAINT chk_card_range_same_length CHECK (length(start_code) = length(end_code)),
+    CONSTRAINT chk_card_range_order CHECK (start_code <= end_code)
+);
+CREATE INDEX IF NOT EXISTS idx_card_ranges_codes ON card_ranges(start_code, end_code, status);
+CREATE INDEX IF NOT EXISTS idx_center_services_center ON center_services(center_id, service_key);
 CREATE INDEX IF NOT EXISTS idx_devices_center ON devices(center_id, status);
 CREATE INDEX IF NOT EXISTS idx_students_center_code ON students(center_id, student_code);
 CREATE INDEX IF NOT EXISTS idx_students_center_name ON students(center_id, full_name);
