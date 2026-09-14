@@ -308,7 +308,11 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({
   // The student chooses the concrete group for the selected teacher; do not
   // hide a valid group merely because the package option's subject snapshot
   // differs from the group's current subject.
-  const groupMatchesGrade = (group: Group) => !grade.trim() || String(group.grade || "").trim() === grade.trim();
+  // Group creation historically allowed entering "الصف ..." while the
+  // student wizard stores the same grade without that prefix. Compare the
+  // canonical grade text so only groups for this student's grade appear.
+  const normalizeGrade = (value: string) => value.trim().replace(/^الصف\s*/u, "");
+  const groupMatchesGrade = (group: Group) => !grade.trim() || normalizeGrade(String(group.grade || "")) === normalizeGrade(grade);
   const groupsForPackageOption = (option: PackageSubject) => availableGroups.filter((group) => String(group.teacherId) === String(option.defaultTeacherId) && groupMatchesGrade(group));
   const selectPackageGroup = (optionId: string, groupId: string) => setPackageGroupByOption((current) => ({ ...current, [optionId]: groupId }));
   const validatePackageGroups = () => {
