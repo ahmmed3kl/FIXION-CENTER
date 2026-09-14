@@ -112,6 +112,13 @@ function ScannerContent() {
     isScanningBlockedRef.current = false;
   };
 
+  const handleBackToGroups = () => {
+    setAttendanceStarted(false);
+    setActiveSessionId(null);
+    setAttendanceSummary(null);
+    handleReset();
+  };
+
   const lookupCard = (rawCode: string) => {
     if (!attendanceStarted || !activeSessionId) { setSearchError("اختر المجموعة وابدأ جلسة الحضور أولاً."); return; }
     const normalized = ScannerService.normalizeCardCode(rawCode);
@@ -254,7 +261,12 @@ function ScannerContent() {
       {/* Top Header */}
       <View style={styles.headerBar}>
         <Text style={styles.headerTitle}>{Strings.scanCardTitle}</Text>
-        {student ? (
+        {attendanceStarted ? (
+          <TouchableOpacity onPress={handleBackToGroups} style={styles.resetButton}>
+            <Ionicons name="arrow-forward" size={20} color={Colors.primary} />
+            <Text style={styles.resetButtonText}>الرجوع للمجموعات</Text>
+          </TouchableOpacity>
+        ) : student ? (
           <TouchableOpacity onPress={handleReset} style={styles.resetButton}>
             <Ionicons name="refresh" size={20} color={Colors.primary} />
             <Text style={styles.resetButtonText}>مسح جديد</Text>
