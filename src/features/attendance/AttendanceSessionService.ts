@@ -6,6 +6,7 @@ import { SyncRepository } from "../../core/sync";
 import { Session } from "../../shared/types";
 import { useAuthStore } from "../auth/useAuthStore";
 import { EnrollmentRepository } from "../enrollments/EnrollmentRepository";
+import { GroupRepository } from "../groups/GroupRepository";
 import { SessionRepository } from "../sessions/SessionRepository";
 
 export interface AttendanceSummary {
@@ -16,8 +17,17 @@ export interface AttendanceSummary {
 
 /** Single source of truth for the normal attendance session flow. */
 export class AttendanceSessionService {
-  static getTodaySessions(date = new Date().toISOString().slice(0, 10)): Session[] {
-    return SessionRepository.getSessionsForDate(date).filter((session) => session.status === "open" || session.status === "scheduled");
+  static getTodaySessions(date = AttendanceSessionService.localDate()): Session[] {
+    const sessions = SessionRepository.getSessionsForDate(date).filter((session) => session.status === "open" || session.status === "scheduled");
+    const scheduledGroupIds = new Set(GroupRepository.getGroupsForDay(new Date(`${date}T12:00:00`).getDay()).map((group) => group.id));
+    return sessions.filter((session) => scheduledGroupIds.has(session.groupId));
+  }
+
+  private static localDate(date = new Date()): string {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, "0");
+    const day = String(date.getDate()).padStart(2, "0");
+    return `${year}-${month}-${day}`;
   }
 
   static activate(sessionId: string): Session {

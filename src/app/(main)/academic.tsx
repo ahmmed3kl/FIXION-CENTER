@@ -123,11 +123,7 @@ export default function AcademicScreen() {
   const generatedGroupName = () => {
     const teacher = teachers.find((item) => item.id === groupTeacherId)?.name;
     const subject = subjects.find((item) => item.id === groupSubjectId)?.name;
-    const schedule = selectedScheduleDays.slice().sort((a, b) => a - b).map((day) => {
-      const time = scheduleTimes[day];
-      return time?.start && time?.end ? `${DAYS_OF_WEEK[day]} ${formatTimeForName(time.start)}-${formatTimeForName(time.end)}` : null;
-    }).filter(Boolean).join("، ");
-    return [groupGrade.trim(), subject, teacher, schedule].filter(Boolean).join(" • ");
+    return [groupGrade.trim(), subject, teacher].filter(Boolean).join(" - ");
   };
 
   const formatTimeForName = (value: string) => {
