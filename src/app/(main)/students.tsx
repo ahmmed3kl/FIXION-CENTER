@@ -1,4 +1,5 @@
 import { Ionicons } from "@expo/vector-icons";
+import { useLocalSearchParams } from "expo-router";
 import { useEffect, useState } from "react";
 import {
     Alert,
@@ -48,6 +49,7 @@ import {
 import { formatDisplayIdentifier } from "../../shared/utils/formatters";
 
 export default function StudentsScreen() {
+  const { studentId } = useLocalSearchParams<{ studentId?: string }>();
   const services = useServiceVisibility();
   const paymentsEnabled = services.isEnabled("payments");
   const currentUser = useAuthStore((s) => s.currentUser);
@@ -142,7 +144,11 @@ export default function StudentsScreen() {
     setStudentCards([]);
     setStudentEnrollments([]);
     setFinancialStatus(null);
-  }, [activeCenterId]);
+    if (studentId) {
+      const requested = StudentRepository.findById(String(studentId));
+      if (requested) openStudentDetails(requested);
+    }
+  }, [activeCenterId, studentId]);
 
   const openStudentDetails = (student: Student) => {
     setSelectedStudent(student);

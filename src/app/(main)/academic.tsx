@@ -676,7 +676,7 @@ export default function AcademicScreen() {
               renderItem={({ item }) => (
                 <TouchableOpacity
                   activeOpacity={0.8}
-                  onPress={() => openGroupSchedules(item)}
+                  onPress={() => router.push({ pathname: "/(main)/group-details", params: { groupId: item.id } })}
                 >
                   <AppCard style={styles.itemCard}>
                     <View style={{ flex: 1 }}>
