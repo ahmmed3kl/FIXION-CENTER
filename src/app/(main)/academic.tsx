@@ -1,4 +1,5 @@
 import { Ionicons } from "@expo/vector-icons";
+import DateTimePicker from "@expo/ui/community/datetime-picker";
 import { useRouter } from "expo-router";
 import { useEffect, useState } from "react";
 import {
@@ -150,6 +151,14 @@ export default function AcademicScreen() {
     setTimeDraftMinute(Number(value.split(":")[1]) || 0);
     setTimePicker({ day, field });
   };
+
+  const pickerDate = timePicker ? (() => {
+    const value = scheduleTimes[timePicker.day]?.[timePicker.field] || (timePicker.field === "start" ? "17:00" : "19:00");
+    const [hour, minute] = value.split(":").map(Number);
+    const date = new Date();
+    date.setHours(hour || 0, minute || 0, 0, 0);
+    return date;
+  })() : new Date();
 
   useEffect(() => {
     if (!groupNameCustomized) {
@@ -1069,7 +1078,18 @@ export default function AcademicScreen() {
               <TouchableOpacity onPress={() => setTimePicker(null)}><Ionicons name="close" size={24} color={Colors.slate500} /></TouchableOpacity>
             </View>
             <Text style={styles.modalSubtitle}>اختر الساعة والدقيقة من القوائم</Text>
-            <View style={styles.timeColumns}>
+            <DateTimePicker
+              value={pickerDate}
+              mode="time"
+              presentation="dialog"
+              onValueChange={(_event: unknown, selectedDate?: Date) => {
+                if (!selectedDate || !timePicker) return;
+                const value = `${String(selectedDate.getHours()).padStart(2, "0")}:${String(selectedDate.getMinutes()).padStart(2, "0")}`;
+                setScheduleTimes((current) => ({ ...current, [timePicker.day]: { ...(current[timePicker.day] || { start: "17:00", end: "19:00" }), [timePicker.field]: value } }));
+                setTimePicker(null);
+              }}
+            />
+            {false && <View style={styles.timeColumns}>
               <ScrollView style={styles.timeColumn} contentContainerStyle={styles.timeColumnContent}>
                 {Array.from({ length: 24 }, (_, hour) => (
                   <TouchableOpacity key={hour} style={[styles.timeOption, timeDraftHour === hour && styles.timeOptionActive]} onPress={() => setTimeDraftHour(hour)}>
@@ -1085,7 +1105,7 @@ export default function AcademicScreen() {
                   </TouchableOpacity>
                 ))}
               </ScrollView>
-            </View>
+            </View>}
             <AppButton title="تأكيد الوقت" onPress={() => selectTime(timeDraftHour, timeDraftMinute)} />
             <AppButton title="إلغاء" variant="outline" onPress={() => setTimePicker(null)} style={{ marginTop: Spacing.sm }} />
           </View>
