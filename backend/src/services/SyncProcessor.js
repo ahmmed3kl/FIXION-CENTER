@@ -1,3 +1,4 @@
+const crypto = require("crypto");
 const db = require("../db");
 const { AppError } = require("../middleware/errorHandler");
 
@@ -163,6 +164,7 @@ class SyncProcessor {
       }
 
       // 6. Update Per-Device Checkpoint (tracks device progress without modifying global server sequence)
+      const checkpointId = `chk-${crypto.createHash("sha256").update(`${centerId}:${deviceId}`).digest("hex").slice(0, 48)}`;
       await client.query(
         `INSERT INTO sync_checkpoints (id, center_id, device_id, last_pulled_seq, last_pushed_operation_id, updated_at)
          VALUES ($1, $2, $3, $4, $5, NOW())
@@ -170,7 +172,7 @@ class SyncProcessor {
            last_pushed_operation_id = EXCLUDED.last_pushed_operation_id,
            updated_at = NOW();`,
         [
-          `chk-${centerId}-${deviceId}`,
+          checkpointId,
           centerId,
           deviceId,
           maxServerSeq,

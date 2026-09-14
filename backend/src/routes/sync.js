@@ -1,4 +1,5 @@
 const express = require("express");
+const crypto = require("crypto");
 const db = require("../db");
 const { authMiddleware } = require("../middleware/auth");
 const { deviceGuard } = require("../middleware/deviceGuard");
@@ -203,7 +204,7 @@ router.get("/pull", authMiddleware, deviceGuard, async (req, res, next) => {
              last_pulled_seq = EXCLUDED.last_pulled_seq,
              updated_at = NOW();`,
           [
-            `chk-${req.centerId}-${req.deviceId}`,
+          `chk-${crypto.createHash("sha256").update(`${req.centerId}:${req.deviceId}`).digest("hex").slice(0, 48)}`,
             req.centerId,
             req.deviceId,
             parseInt(nextCursor, 10),
