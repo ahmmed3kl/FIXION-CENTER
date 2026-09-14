@@ -104,6 +104,9 @@ router.post("/login", async (req, res, next) => {
     const centerIds = centerMemberships.rows.length > 0
       ? centerMemberships.rows.map((row) => row.center_id)
       : [user.center_id];
+    const centers = centerMemberships.rows.length > 0
+      ? centerMemberships.rows.map((row) => ({ id: row.center_id, name: row.name, code: row.code }))
+      : [{ id: user.center_id, name: user.center_name, code: user.center_code }];
 
     // Minimal JWT claims as specified in approved design:
     // sub, centerId, role, iat, exp
@@ -134,6 +137,7 @@ router.post("/login", async (req, res, next) => {
         centerId: user.center_id,
         centerName: user.center_name,
         centerIds,
+        centers,
         permissions,
       },
       expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),

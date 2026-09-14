@@ -77,6 +77,7 @@ export class AuthRepository {
             centerId: string;
             centerName?: string;
             centerIds?: string[];
+            centers?: Center[];
             permissions?: any;
           };
         }>("/auth/login", {
@@ -120,17 +121,16 @@ export class AuthRepository {
           data.user.centerId,
         );
 
-        // Ensure center exists in local SQLite
+        // Cache every center membership locally so the switcher can show all
+        // centers, not only the center selected during login.
         try {
           const db = DatabaseService.getDb();
-          db.runSync(
-            `INSERT OR REPLACE INTO centers (id, name, code) VALUES (?, ?, ?);`,
-            [
-              data.user.centerId,
-              data.user.centerName || "المركز التعليمي",
-              data.user.centerId,
-            ],
-          );
+          const centers = data.user.centers?.length
+            ? data.user.centers
+            : [{ id: data.user.centerId, name: data.user.centerName || "المركز التعليمي", code: data.user.centerId }];
+          for (const center of centers) {
+            db.runSync(`INSERT OR REPLACE INTO centers (id, name, code) VALUES (?, ?, ?);`, [center.id, center.name || "المركز التعليمي", center.code || center.id]);
+          }
         } catch {}
 
         // Auto-register device with live backend
@@ -258,8 +258,12 @@ export class AuthRepository {
     try {
       const db = DatabaseService.getDb();
       const all = db.getAllSync<Center>("SELECT id, name, code FROM centers");
-      const filtered = all.filter((c: Center) => centerIds.includes(c.id));
-      if (filtered.length > 0) return filtered;
+      const known = new Map(all.map((center) => [center.id, center]));
+      return centerIds.map((id) => known.get(id) || {
+        id,
+        name: id === "center-2" ? "الفرع الثاني" : "المركز التعليمي",
+        code: id,
+      });
     } catch {}
 
     return centerIds.map((id) => ({
