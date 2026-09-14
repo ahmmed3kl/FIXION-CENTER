@@ -25,7 +25,7 @@ import {
     DashboardService,
     DashboardSummary,
 } from "../../features/dashboard/DashboardService";
-import { AppCard, SyncIndicator } from "../../shared/components";
+import { AppCard } from "../../shared/components";
 import { ConnectivityState } from "../../shared/types";
 
 export default function DashboardScreen() {
@@ -82,35 +82,28 @@ export default function DashboardScreen() {
     <SafeAreaView style={styles.safeArea}>
       {/* Top App Header */}
       <View style={styles.headerBar}>
-        <View style={styles.headerUser}>
-          <Text style={styles.centerTitle}>
-            {activeCenter?.name || "المركز التعليمي"}
-          </Text>
-          <View style={styles.userRoleRow}>
-            <Text style={styles.userName}>{currentUser?.fullName}</Text>
-            {availableCenters.length > 1 ? (
-              <TouchableOpacity
-                onPress={() => router.push("/(main)/center-switch")}
-                style={styles.switchCenterBadge}
-              >
-                <Text style={styles.switchCenterText}>تبديل المركز</Text>
-              </TouchableOpacity>
-            ) : null}
-          </View>
+        <TouchableOpacity style={styles.menuButton} onPress={() => router.push("/(main)/more")}>
+          <Ionicons name="menu-outline" size={21} color={Colors.white} />
+        </TouchableOpacity>
+        <View style={styles.brandLockup}>
+          <Text style={styles.brandWord}>FIXION</Text>
+          <Text style={styles.brandTagline}>For a smarter education</Text>
         </View>
-
+        <TouchableOpacity
+          style={styles.centerSelector}
+          onPress={() => availableCenters.length > 1 && router.push("/(main)/center-switch")}
+        >
+          <Ionicons name="business-outline" size={15} color="#D9F5FF" />
+          <Text style={styles.centerSelectorText} numberOfLines={1}>{activeCenter?.name || "المركز التعليمي"}</Text>
+          <Ionicons name="chevron-down" size={13} color="#A9D8EA" />
+        </TouchableOpacity>
         <View style={styles.headerActions}>
-          <SyncIndicator
-            connectivity={connectivity}
-            pendingCount={syncStats.pending}
-            onPress={handleSyncNow}
-          />
-          <TouchableOpacity onPress={logout} style={styles.logoutIcon}>
-            <Ionicons
-              name="log-out-outline"
-              size={22}
-              color={Colors.slate600}
-            />
+          <TouchableOpacity style={styles.headerIconButton} onPress={handleSyncNow}>
+            <Ionicons name="notifications-outline" size={20} color={Colors.white} />
+            {syncStats.pending > 0 ? <View style={styles.notificationBadge}><Text style={styles.notificationBadgeText}>{syncStats.pending > 9 ? "9+" : syncStats.pending}</Text></View> : null}
+          </TouchableOpacity>
+          <TouchableOpacity onPress={logout} style={styles.avatarButton}>
+            <Text style={styles.avatarText}>{(currentUser?.fullName || "AE").slice(0, 2).toUpperCase()}</Text>
           </TouchableOpacity>
         </View>
       </View>
@@ -127,11 +120,13 @@ export default function DashboardScreen() {
           onPress={() => router.push("/(main)/scanner")}
           style={styles.heroBanner}
         >
+          <View style={styles.heroGlow} />
           <View style={styles.heroContent}>
             <View style={styles.heroIconWrapper}>
               <Ionicons name="scan" size={32} color={Colors.white} />
             </View>
             <View style={styles.heroTextWrapper}>
+              <Text style={styles.heroEyebrow}>الوصول السريع</Text>
               <Text style={styles.heroTitle}>
                 {Strings.quickScanHeroButton}
               </Text>
@@ -144,7 +139,10 @@ export default function DashboardScreen() {
         </TouchableOpacity>
 
         {/* TODAY SUMMARY CARD */}
-        <Text style={styles.sectionHeader}>{Strings.todaySummaryTitle}</Text>
+        <View style={styles.sectionHeadingRow}>
+          <Text style={styles.sectionHeader}>{Strings.todaySummaryTitle}</Text>
+          <View style={styles.todayBadge}><Ionicons name="calendar-outline" size={14} color={Colors.primary} /><Text style={styles.todayBadgeText}>اليوم</Text></View>
+        </View>
         <AppCard style={styles.summaryCard}>
           <View style={styles.metricGrid}>
             <View
@@ -259,70 +257,83 @@ const styles = StyleSheet.create({
     backgroundColor: Colors.background,
   },
   headerBar: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
     paddingHorizontal: Spacing.lg,
-    paddingVertical: Spacing.md,
-    backgroundColor: Colors.white,
-    borderBottomWidth: 1,
-    borderBottomColor: Colors.border,
-  },
-  headerUser: {
-    flex: 1,
-  },
-  centerTitle: {
-    ...Typography.h3,
-    color: Colors.slate900,
-  },
-  userRoleRow: {
+    height: 68,
     flexDirection: "row",
     alignItems: "center",
     gap: Spacing.sm,
-    marginTop: 2,
+    backgroundColor: "#062D49",
+    borderBottomWidth: 1,
+    borderBottomColor: "#0D5478",
+    direction: "ltr",
   },
-  userName: {
-    ...Typography.caption,
-    color: Colors.slate500,
+  menuButton: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: "#0B4568",
+    alignItems: "center",
+    justifyContent: "center",
   },
-  switchCenterBadge: {
-    backgroundColor: Colors.slate100,
-    paddingHorizontal: Spacing.sm,
-    paddingVertical: 2,
-    borderRadius: BorderRadius.sm,
+  brandLockup: { width: 82, alignItems: "flex-start", direction: "ltr" },
+  brandWord: { color: Colors.white, fontSize: 19, fontWeight: "900", letterSpacing: 1.2 },
+  brandTagline: { color: "#89B6C9", fontSize: 5.5, letterSpacing: 0.3, marginTop: -1 },
+  centerSelector: {
+    flex: 1,
+    maxWidth: 175,
+    minWidth: 120,
+    height: 36,
+    borderRadius: 18,
+    paddingHorizontal: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 5,
+    backgroundColor: "#0B4568",
+    borderWidth: 1,
+    borderColor: "#17658D",
   },
-  switchCenterText: {
-    fontSize: 11,
-    fontWeight: "600",
-    color: Colors.primary,
-  },
+  centerSelectorText: { color: Colors.white, fontSize: 11, fontWeight: "700", flexShrink: 1, textAlign: "center", writingDirection: "rtl" },
   headerActions: {
     flexDirection: "row",
     alignItems: "center",
-    gap: Spacing.md,
+    gap: Spacing.sm,
   },
-  logoutIcon: {
-    padding: Spacing.xs,
+  headerIconButton: {
+    width: 36,
+    height: 36,
+    borderRadius: 12,
+    backgroundColor: "#0B4568",
+    alignItems: "center",
+    justifyContent: "center",
   },
+  notificationBadge: { position: "absolute", top: -4, right: -4, minWidth: 16, height: 16, borderRadius: 8, paddingHorizontal: 3, backgroundColor: "#F0445E", alignItems: "center", justifyContent: "center", borderWidth: 1, borderColor: "#062D49" },
+  notificationBadgeText: { color: Colors.white, fontSize: 9, fontWeight: "800" },
+  avatarButton: { width: 36, height: 36, borderRadius: 18, backgroundColor: "#D8F2FF", alignItems: "center", justifyContent: "center" },
+  avatarText: { color: "#0B4568", fontSize: 11, fontWeight: "900" },
   scrollContent: {
     padding: Spacing.lg,
+    paddingBottom: Spacing.xxxl,
   },
   heroBanner: {
-    backgroundColor: Colors.primary,
-    borderRadius: BorderRadius.xl,
-    padding: Spacing.lg,
+    backgroundColor: Colors.primaryDark,
+    borderRadius: 24,
+    padding: Spacing.xl,
     marginBottom: Spacing.xl,
-    ...Shadows.card,
+    minHeight: 142,
+    overflow: "hidden",
+    ...Shadows.elevated,
   },
+  heroGlow: { position: "absolute", width: 180, height: 180, borderRadius: 90, backgroundColor: "rgba(96,165,250,0.22)", left: -55, top: -75 },
   heroContent: {
     flexDirection: "row",
     alignItems: "center",
   },
   heroIconWrapper: {
-    width: 52,
-    height: 52,
-    borderRadius: 26,
-    backgroundColor: "rgba(255, 255, 255, 0.2)",
+    width: 58,
+    height: 58,
+    borderRadius: 18,
+    backgroundColor: "rgba(255, 255, 255, 0.18)",
     alignItems: "center",
     justifyContent: "center",
     marginLeft: Spacing.md,
@@ -334,6 +345,7 @@ const styles = StyleSheet.create({
     ...Typography.h2,
     color: Colors.white,
   },
+  heroEyebrow: { color: "#BFDBFE", fontSize: 11, fontWeight: "700", marginBottom: 3, textAlign: "right" },
   heroSubtitle: {
     ...Typography.caption,
     color: Colors.primaryLight,
@@ -342,21 +354,27 @@ const styles = StyleSheet.create({
   sectionHeader: {
     ...Typography.bodyBold,
     color: Colors.slate800,
-    marginBottom: Spacing.sm,
+    marginBottom: 0,
   },
+  sectionHeadingRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: Spacing.sm },
+  todayBadge: { flexDirection: "row", alignItems: "center", gap: 5, backgroundColor: Colors.primaryLight, borderRadius: BorderRadius.full, paddingHorizontal: 10, paddingVertical: 5 },
+  todayBadgeText: { fontSize: 11, fontWeight: "700", color: Colors.primaryDark },
   summaryCard: {
-    padding: Spacing.md,
+    padding: Spacing.lg,
     marginBottom: Spacing.lg,
+    borderRadius: BorderRadius.xl,
   },
   metricGrid: {
     flexDirection: "row",
+    flexWrap: "wrap",
     justifyContent: "space-between",
     gap: Spacing.sm,
   },
   metricBox: {
-    flex: 1,
-    paddingVertical: Spacing.md,
-    borderRadius: BorderRadius.md,
+    width: "48%",
+    minHeight: 86,
+    paddingVertical: Spacing.sm,
+    borderRadius: BorderRadius.lg,
     alignItems: "center",
     justifyContent: "center",
   },
@@ -375,7 +393,9 @@ const styles = StyleSheet.create({
   },
   halfCard: {
     flex: 1,
-    padding: Spacing.md,
+    padding: Spacing.lg,
+    minHeight: 118,
+    borderRadius: BorderRadius.xl,
   },
   cardHeaderRow: {
     flexDirection: "row",
