@@ -9,6 +9,7 @@ import { ConnectivityService } from "../core/connectivity";
 import { initializeRTL } from "../core/localization";
 import { SyncEngine } from "../core/sync";
 import { ThemeProvider } from "../core/theme";
+import { ServiceVisibilityProvider } from "../core/services/ServiceVisibilityContext";
 import { useAuthStore } from "../features/auth/useAuthStore";
 import { LoadingState } from "../shared/components";
 
@@ -78,10 +79,12 @@ export default function RootLayout() {
         <ThemeProvider>
           <StatusBar style="dark" />
           <AuthGuard>
-            <Stack screenOptions={{ headerShown: false }}>
-              <Stack.Screen name="(auth)" />
-              <Stack.Screen name="(main)" />
-            </Stack>
+            <ServiceVisibilityProvider>
+              <Stack screenOptions={{ headerShown: false }}>
+                <Stack.Screen name="(auth)" />
+                <Stack.Screen name="(main)" />
+              </Stack>
+            </ServiceVisibilityProvider>
           </AuthGuard>
         </ThemeProvider>
       </QueryClientProvider>

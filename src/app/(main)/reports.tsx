@@ -10,6 +10,7 @@ import {
   View,
 } from "react-native";
 import { Colors } from "../../core/theme";
+import { useServiceVisibility } from "../../core/services/ServiceVisibilityContext";
 import { useAuthStore } from "../../features/auth/useAuthStore";
 import { OperationalReportsService } from "../../features/reports/OperationalReportsService";
 import { StudentRepository } from "../../features/students/StudentRepository";
@@ -21,6 +22,14 @@ import {
 } from "../../shared/types";
 
 export default function ReportsScreen() {
+  const services = useServiceVisibility();
+  if (!services.loaded) return <View style={styles.centered}><ActivityIndicator size="large" color={Colors.primary} /><Text style={styles.loadingText}>جار تحميل حالة الخدمات...</Text></View>;
+  if (!services.isEnabled("reports")) return <View style={styles.centered}><Text style={styles.loadingText}>خدمة التقارير غير مفعلة لهذا المركز.</Text></View>;
+  return <ReportsContent />;
+}
+
+function ReportsContent() {
+  const services = useServiceVisibility();
   const { activeCenterId } = useAuthStore();
   const [activeReport, setActiveReport] = useState<"dailyAtt" | "studentAtt" | "dailyCash" | "studentFin">("dailyAtt");
 
