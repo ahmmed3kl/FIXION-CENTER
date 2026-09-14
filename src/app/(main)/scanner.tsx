@@ -27,6 +27,8 @@ import {
 import { useServiceVisibility } from "../../core/services/ServiceVisibilityContext";
 import { AttendanceRepository } from "../../features/attendance/AttendanceRepository";
 import { AttendanceSessionService, AttendanceSummary } from "../../features/attendance/AttendanceSessionService";
+import { GroupScheduleRepository } from "../../features/groups/GroupScheduleRepository";
+import { GroupRepository } from "../../features/groups/GroupRepository";
 import { PaymentRepository } from "../../features/payments/PaymentRepository";
 import { ScannerService } from "../../features/scanner/ScannerService";
 import { StudentRepository } from "../../features/students/StudentRepository";
@@ -73,6 +75,9 @@ function ScannerContent() {
     useState<StudentFinancialStatus | null>(null);
   const [searchError, setSearchError] = useState<string | null>(null);
   const [todayGroups, setTodayGroups] = useState<Group[]>([]);
+  const [allGroups, setAllGroups] = useState<Group[]>([]);
+  const [showAllGroups, setShowAllGroups] = useState(false);
+  const [activeSessionsByGroup, setActiveSessionsByGroup] = useState<Record<string, Session>>({});
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [attendanceStarted, setAttendanceStarted] = useState(false);
   const [attendanceSummary, setAttendanceSummary] = useState<AttendanceSummary | null>(null);
@@ -85,14 +90,20 @@ function ScannerContent() {
   const isScanningBlockedRef = useRef(false);
 
   useEffect(() => {
-    try { setTodayGroups(AttendanceSessionService.getTodayGroups()); } catch (error) { setSearchError(getUserErrorMessage(error)); }
+    try {
+      setTodayGroups(AttendanceSessionService.getTodayGroups());
+      const sessions = AttendanceSessionService.getTodaySessions();
+      setActiveSessionsByGroup(Object.fromEntries(sessions.filter((session) => session.status === "open").map((session) => [session.groupId, session])));
+      setAllGroups(GroupRepository.getAll());
+    } catch (error) { setSearchError(getUserErrorMessage(error)); }
   }, []);
 
   const startAttendance = () => {
-    const selectedGroup = todayGroups.find((group) => group.id === activeSessionId);
+    const selectedGroup = (showAllGroups ? allGroups : todayGroups).find((group) => group.id === activeSessionId);
     if (!selectedGroup) return;
     try {
-      const session = AttendanceSessionService.ensureSessionForGroup(selectedGroup.id);
+      const session = activeSessionsByGroup[selectedGroup.id] || AttendanceSessionService.ensureSessionForGroup(selectedGroup.id);
+      setActiveSessionsByGroup((current) => ({ ...current, [selectedGroup.id]: session }));
       setActiveSessionId(session.id);
       AttendanceSessionService.activate(session.id);
       setAttendanceStarted(true);
@@ -280,19 +291,25 @@ function ScannerContent() {
       >
         {!attendanceStarted ? (
           <View style={styles.startAttendancePanel}>
-            <Text style={styles.startTitle}>اختيار المجموعة للحضور</Text>
-            <Text style={styles.startSubtitle}>اختر مجموعة اليوم ثم ابدأ الجلسة لتفعيل المسح.</Text>
-            {todayGroups.length === 0 ? (
+            <Text style={styles.startTitle}>مجموعات اليوم</Text>
+            <View style={styles.attendanceFilterRow}>
+              <TouchableOpacity style={[styles.attendanceFilter, !showAllGroups && styles.attendanceFilterActive]} onPress={() => setShowAllGroups(false)}><Text style={[styles.attendanceFilterText, !showAllGroups && styles.attendanceFilterTextActive]}>مجموعات اليوم</Text></TouchableOpacity>
+              <TouchableOpacity style={[styles.attendanceFilter, showAllGroups && styles.attendanceFilterActive]} onPress={() => setShowAllGroups(true)}><Text style={[styles.attendanceFilterText, showAllGroups && styles.attendanceFilterTextActive]}>كل المجموعات</Text></TouchableOpacity>
+            </View>
+            <Text style={styles.startSubtitle}>اضغط على المجموعة لبدء أو فتح جلسة الحضور.</Text>
+            {(showAllGroups ? allGroups : todayGroups).length === 0 ? (
               <Text style={styles.emptySessionText}>لا توجد جلسات مجدولة اليوم.</Text>
-            ) : todayGroups.map((group) => (
-              <TouchableOpacity key={group.id} onPress={() => setActiveSessionId(group.id)}>
-                <AppCard style={[styles.sessionCard, activeSessionId === group.id ? styles.sessionCardSelected : null]}>
+            ) : (showAllGroups ? allGroups : todayGroups).map((group) => {
+              const activeSession = activeSessionsByGroup[group.id];
+              const schedule = GroupScheduleRepository.getSchedulesForGroup(group.id).find((item) => item.dayOfWeek === new Date().getDay());
+              return <TouchableOpacity key={group.id} onPress={() => activeSession ? (setActiveSessionId(activeSession.id), setAttendanceStarted(true), setAttendanceSummary(AttendanceSessionService.getSummary(activeSession.id))) : setActiveSessionId(group.id)}>
+                <AppCard style={[styles.sessionCard, activeSession ? styles.sessionCardSelected : null]}>
                   <Text style={styles.sessionSubject}>{group.name}</Text>
-                  <Text style={styles.sessionTime}>مجموعة اليوم • {group.subjectName || ""}</Text>
-                  {activeSessionId === group.id ? <Ionicons name="checkmark-circle" size={20} color={Colors.primary} /> : null}
+                  <Text style={styles.sessionTime}>{group.subjectName || ""} • {group.teacherName || ""}{schedule ? ` • ${formatTimeArabic(schedule.startTime)}` : ""}</Text>
+                  <Text style={[styles.groupAttendanceState, activeSession && styles.groupAttendanceStateActive]}>{activeSession ? "● نشطة" : "● غير نشطة"}</Text>
                 </AppCard>
-              </TouchableOpacity>
-            ))}
+              </TouchableOpacity>;
+            })}
             <AppButton title="بدء جلسة الحضور" onPress={startAttendance} disabled={!activeSessionId} size="lg" />
             {searchError ? <Text style={styles.errorAlertText}>{searchError}</Text> : null}
           </View>
@@ -669,6 +686,11 @@ const styles = StyleSheet.create({
   startAttendancePanel: { backgroundColor: Colors.white, borderRadius: BorderRadius.xl, padding: Spacing.lg, marginBottom: Spacing.lg, ...Shadows.card },
   startTitle: { ...Typography.h2, color: Colors.slate900, marginBottom: 4 },
   startSubtitle: { ...Typography.caption, color: Colors.slate500, textAlign: "right", marginBottom: Spacing.md },
+  attendanceFilterRow: { flexDirection: "row", gap: Spacing.sm, marginBottom: Spacing.md },
+  attendanceFilter: { flex: 1, alignItems: "center", paddingVertical: 9, borderRadius: BorderRadius.md, borderWidth: 1, borderColor: Colors.slate200, backgroundColor: Colors.white },
+  attendanceFilterActive: { backgroundColor: Colors.primary, borderColor: Colors.primary },
+  attendanceFilterText: { fontSize: 12, fontWeight: "700", color: Colors.slate600 },
+  attendanceFilterTextActive: { color: Colors.white },
   attendanceCounterBar: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", backgroundColor: Colors.white, borderRadius: BorderRadius.lg, padding: Spacing.md, marginBottom: Spacing.md, ...Shadows.card },
   counterTitle: { fontSize: 13, fontWeight: "800", color: Colors.slate800 },
   counterItem: { fontSize: 12, fontWeight: "700", color: Colors.primaryDark },
@@ -849,6 +871,8 @@ const styles = StyleSheet.create({
     ...Typography.captionBold,
     color: Colors.primary,
   },
+  groupAttendanceState: { fontSize: 12, fontWeight: "800", color: Colors.slate500, marginTop: Spacing.sm },
+  groupAttendanceStateActive: { color: Colors.successText },
   sessionTeacher: {
     ...Typography.caption,
     color: Colors.slate600,
