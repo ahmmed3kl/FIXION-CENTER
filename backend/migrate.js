@@ -1,10 +1,10 @@
 const fs = require("fs");
 const path = require("path");
+require("dotenv").config({ path: path.join(__dirname, ".env") });
 
-const CONNECTION_STRING =
-  "postgresql://neondb_owner:npg_CvDl5LXdj0RZ@ep-spring-queen-a50g0aeo-pooler.us-east-2.aws.neon.tech/neondb?sslmode=require";
-const SQL_ENDPOINT =
-  "https://ep-spring-queen-a50g0aeo-pooler.us-east-2.aws.neon.tech/sql";
+const CONNECTION_STRING = process.env.DATABASE_URL;
+const SQL_ENDPOINT = process.env.NEON_SQL_ENDPOINT;
+if (!CONNECTION_STRING || !SQL_ENDPOINT) throw new Error("DATABASE_URL and NEON_SQL_ENDPOINT must be configured in backend/.env");
 
 async function runQuery(query) {
   const res = await fetch(SQL_ENDPOINT, {

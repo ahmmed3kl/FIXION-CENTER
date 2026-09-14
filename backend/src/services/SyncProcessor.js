@@ -1,6 +1,12 @@
 const db = require("../db");
 const { AppError } = require("../middleware/errorHandler");
 
+async function validateCardCode(client, centerId, cardCode) {
+  if (!/^\d+$/.test(cardCode)) throw new AppError("INVALID_CARD_CODE", "Card code must contain digits only.", "كود الكارت غير صحيح.", 400);
+  const range = await client.query("SELECT 1 FROM card_ranges WHERE center_id = $1 AND status = 'active' AND length(start_code) = length($2) AND start_code <= $2 AND end_code >= $2 LIMIT 1", [centerId, cardCode]);
+  if (!range.rows.length) throw new AppError("CARD_OUTSIDE_ALLOWED_RANGE", "Card is outside the center allowed ranges.", "الكارت خارج النطاق المسموح لهذا المركز.", 403);
+}
+
 class SyncProcessor {
   /**
    * Processes a batch of sync operations inside a true ACID transaction.
@@ -243,6 +249,8 @@ class SyncProcessor {
         if (!studentId || (!cardCode && !existingStudent)) {
           throw new Error("Card code / Student code is required.");
         }
+
+        if (cardCode && cardWasProvided) await validateCardCode(client, centerId, cardCode);
 
         // Check duplicate card/student code in center
         const dupCheck = await client.query(
@@ -616,6 +624,9 @@ class SyncProcessor {
             [card.status === "lost" ? "lost" : "deactivated", cardId, centerId],
           );
         } else {
+          await validateCardCode(client, centerId, cardCode);
+          const globalOwner = await client.query("SELECT center_id FROM student_cards WHERE card_code = $1 AND status = 'active' LIMIT 1", [cardCode]);
+          if (globalOwner.rows[0] && globalOwner.rows[0].center_id !== centerId) throw new AppError("CARD_BELONGS_TO_OTHER_CENTER", "Card belongs to another center.", "الكارت تابع لمركز آخر.", 403);
           await client.query(
             `UPDATE student_cards
              SET status = 'deactivated', deactivated_at = NOW()
@@ -627,14 +638,8 @@ class SyncProcessor {
              WHERE center_id = $1 AND card_code = $2`,
             [centerId, cardCode],
           );
-          if (existingByCode.rows.length > 0 && existingByCode.rows[0].student_id !== studentId) {
-            throw new Error("Card code is owned by another student.");
-          }
-          if (existingByCode.rows.length > 0 && existingByCode.rows[0].id !== cardId) {
-            await client.query(
-              `UPDATE student_cards SET status = 'active', deactivated_at = NULL WHERE id = $1 AND center_id = $2`,
-              [existingByCode.rows[0].id, centerId],
-            );
+          if (existingByCode.rows.length > 0) {
+            throw new AppError("CARD_ALREADY_ASSIGNED", "Card is already assigned.", "الكارت مرتبط بطالب بالفعل ولا يمكن نقله.", 409);
           } else {
             await client.query(
               `INSERT INTO student_cards (id, center_id, student_id, card_code, status, issued_at, created_at)

@@ -3,8 +3,11 @@ import { Tabs } from "expo-router";
 import { StyleSheet, View } from "react-native";
 import { Strings } from "../../core/localization";
 import { Colors } from "../../core/theme";
+import { useServiceVisibility } from "../../core/services/ServiceVisibilityContext";
 
 export default function MainLayout() {
+  const services = useServiceVisibility();
+  const ready = services.loaded;
   return (
     <Tabs
       screenOptions={{
@@ -36,6 +39,7 @@ export default function MainLayout() {
       <Tabs.Screen
         name="scanner"
         options={{
+          href: ready && services.isEnabled("attendance") ? undefined : null,
           title: Strings.tabScanner,
           tabBarIcon: ({ color, focused }) => (
             <View

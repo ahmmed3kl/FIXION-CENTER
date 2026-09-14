@@ -6,6 +6,8 @@ const { AppError } = require("../middleware/errorHandler");
 const SyncProcessor = require("../services/SyncProcessor");
 
 const router = express.Router();
+const { requireService } = require("../middleware/serviceGuard");
+const { getServiceKeyForEntity } = require("../services/serviceCatalog");
 
 /**
  * Full snapshot bootstrap for center
@@ -132,6 +134,11 @@ router.post("/push", authMiddleware, deviceGuard, async (req, res, next) => {
         "قائمة العمليات غير صحيحة.",
         400,
       );
+    }
+
+    for (const operation of operations) {
+      const serviceKey = getServiceKeyForEntity(operation.entityType || operation.entity_type, operation.operationType || operation.operation_type);
+      if (serviceKey) await requireService(req.centerId, serviceKey);
     }
 
     const result = await SyncProcessor.processPush(
