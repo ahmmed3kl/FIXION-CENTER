@@ -24,7 +24,6 @@ import {
     Spacing,
     Typography,
 } from "../../core/theme";
-import { useServiceVisibility } from "../../core/services/ServiceVisibilityContext";
 import { AttendanceRepository } from "../../features/attendance/AttendanceRepository";
 import { PaymentRepository } from "../../features/payments/PaymentRepository";
 import { ScannerService } from "../../features/scanner/ScannerService";
@@ -43,15 +42,6 @@ import {
 } from "../../shared/types";
 
 export default function ScannerScreen() {
-  const services = useServiceVisibility();
-  if (!services.loaded && !services.error) return <View style={styles.centered}><Text style={styles.loadingText}>جار تحميل حالة الخدمات...</Text></View>;
-  if (services.loaded && !services.isEnabled("attendance")) return <View style={styles.centered}><Text style={styles.loadingText}>خدمة الحضور غير مفعلة لهذا المركز.</Text></View>;
-  return <ScannerContent />;
-}
-
-function ScannerContent() {
-  const services = useServiceVisibility();
-  const paymentsEnabled = services.isEnabled("payments");
   const [permission, requestPermission] = useCameraPermissions();
   const [isCameraActive, setIsCameraActive] = useState(false);
   const [manualCode, setManualCode] = useState("00125");
@@ -131,12 +121,8 @@ function ScannerContent() {
       }
 
       // Load financial status calculated dynamically
-      if (paymentsEnabled) {
-        const fin = PaymentRepository.getStudentFinancialStatus(foundStudent.id);
-        setFinancialStatus(fin);
-      } else {
-        setFinancialStatus(null);
-      }
+      const fin = PaymentRepository.getStudentFinancialStatus(foundStudent.id);
+      setFinancialStatus(fin);
     } catch (err) {
       setSearchError(getUserErrorMessage(err));
     } finally {
@@ -477,7 +463,7 @@ function ScannerContent() {
         ) : null}
 
         {/* STEP 4: FINANCIAL STATUS & QUICK PAYMENT */}
-        {paymentsEnabled && student && financialStatus ? (
+        {student && financialStatus ? (
           <View style={styles.sectionContainer}>
             <Text style={styles.sectionTitle}>
               {Strings.financialStatusTitle}
@@ -894,6 +880,4 @@ const styles = StyleSheet.create({
     gap: Spacing.sm,
     marginTop: Spacing.md,
   },
-  centered: { flex: 1, justifyContent: "center", alignItems: "center" },
-  loadingText: { marginTop: 10, fontSize: 14, color: Colors.slate500 },
 });

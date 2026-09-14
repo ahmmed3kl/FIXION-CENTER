@@ -15,7 +15,6 @@ import {
 import { DatabaseService } from "../../core/database";
 import { PermissionGate } from "../../core/permissions";
 import { Colors } from "../../core/theme";
-import { useServiceVisibility } from "../../core/services/ServiceVisibilityContext";
 import { useAuthStore } from "../../features/auth/useAuthStore";
 import { NotificationService } from "../../features/notifications/NotificationService";
 import { NotificationTemplateRepository } from "../../features/notifications/NotificationTemplateRepository";
@@ -26,7 +25,6 @@ import {
 } from "../../shared/types";
 
 export default function NotificationsScreen() {
-  const services = useServiceVisibility();
   const { currentUser, activeCenterId } = useAuthStore();
   const [activeTab, setActiveTab] = useState<"history" | "templates">("history");
 
@@ -38,9 +36,6 @@ export default function NotificationsScreen() {
   // Editing template modal state
   const [editingTemplate, setEditingTemplate] = useState<NotificationTemplate | null>(null);
   const [templateBodyInput, setTemplateBodyInput] = useState("");
-
-  if (!services.loaded && !services.error) return <View style={styles.centered}><Text style={styles.loadingText}>جار تحميل حالة الخدمات...</Text></View>;
-  if (services.loaded && !services.isEnabled("notifications")) return <View style={styles.centered}><Text style={styles.loadingText}>خدمة الإشعارات غير مفعلة لهذا المركز.</Text></View>;
 
   const loadData = () => {
     if (!activeCenterId) return;
