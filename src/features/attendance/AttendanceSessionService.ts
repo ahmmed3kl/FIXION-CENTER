@@ -17,8 +17,43 @@ export interface AttendanceSummary {
   absent: number;
 }
 
+export interface MakeupEligibility {
+  eligible: boolean;
+  sourceGroupId?: string;
+  sourceGroupName?: string;
+  teacherName?: string;
+}
+
 /** Single source of truth for the normal attendance session flow. */
 export class AttendanceSessionService {
+  static getMakeupEligibility(sessionId: string, studentId: string): MakeupEligibility {
+    const { activeCenterId } = useAuthStore.getState();
+    if (!activeCenterId) return { eligible: false };
+    const db = DatabaseService.getDb();
+    const session = db.getFirstSync<any>(
+      `SELECT s.group_id as groupId, s.session_date as sessionDate,
+              g.teacher_id as teacherId, g.name as groupName, t.name as teacherName
+       FROM sessions s
+       JOIN groups g ON g.center_id = s.center_id AND g.id = s.group_id
+       LEFT JOIN teachers t ON t.center_id = g.center_id AND t.id = g.teacher_id
+       WHERE s.center_id = ? AND s.id = ?`,
+      [activeCenterId, sessionId],
+    );
+    if (!session?.teacherId) return { eligible: false };
+    const source = db.getFirstSync<any>(
+      `SELECT g.id as groupId, g.name as groupName
+       FROM student_group_enrollments e
+       JOIN groups g ON g.center_id = e.center_id AND g.id = e.group_id
+       WHERE e.center_id = ? AND e.student_id = ? AND e.status = 'active'
+         AND g.teacher_id = ? AND g.id <> ?
+         AND e.start_date <= ? AND (e.end_date IS NULL OR e.end_date >= ?)
+       ORDER BY e.start_date DESC LIMIT 1`,
+      [activeCenterId, studentId, session.teacherId, session.groupId, session.sessionDate, session.sessionDate],
+    );
+    return source
+      ? { eligible: true, sourceGroupId: source.groupId, sourceGroupName: source.groupName, teacherName: session.teacherName }
+      : { eligible: false };
+  }
   static getTodayGroups(date = AttendanceSessionService.localDate()): Group[] {
     return GroupRepository.getGroupsForDay(new Date(`${date}T12:00:00`).getDay());
   }

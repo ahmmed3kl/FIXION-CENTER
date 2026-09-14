@@ -30,6 +30,7 @@ import { AttendanceSessionService, AttendanceSummary } from "../../features/atte
 import { GroupScheduleRepository } from "../../features/groups/GroupScheduleRepository";
 import { GroupRepository } from "../../features/groups/GroupRepository";
 import { PaymentRepository } from "../../features/payments/PaymentRepository";
+import { SessionRepository } from "../../features/sessions/SessionRepository";
 import { ScannerService } from "../../features/scanner/ScannerService";
 import { StudentRepository } from "../../features/students/StudentRepository";
 import {
@@ -81,6 +82,7 @@ function ScannerContent() {
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [attendanceStarted, setAttendanceStarted] = useState(false);
   const [attendanceSummary, setAttendanceSummary] = useState<AttendanceSummary | null>(null);
+  const [makeupNotice, setMakeupNotice] = useState<{ sourceGroupName?: string; teacherName?: string } | null>(null);
 
   // Quick Payment Modal
   const [showPaymentModal, setShowPaymentModal] = useState(false);
@@ -119,6 +121,7 @@ function ScannerContent() {
     setIsAlreadyAttended(false);
     setAttendanceResult(null);
     setFinancialStatus(null);
+    setMakeupNotice(null);
     setSearchError(null);
     isScanningBlockedRef.current = false;
   };
@@ -153,15 +156,24 @@ function ScannerContent() {
 
       setStudent(foundStudent);
 
-      if (!AttendanceSessionService.isExpected(activeSessionId, foundStudent.id)) {
+      const expected = AttendanceSessionService.isExpected(activeSessionId, foundStudent.id);
+      const makeupEligibility = expected ? { eligible: false } : AttendanceSessionService.getMakeupEligibility(activeSessionId, foundStudent.id);
+      if (!expected && !makeupEligibility.eligible) {
         setStudent(null);
         setSearchError("الطالب غير متوقع في مجموعة الحضور الحالية.");
         setIsProcessing(false);
         return;
       }
 
-      // Load eligible sessions
-      const sessions = ScannerService.getEligibleSessionsForStudent(foundStudent.id).filter((session) => session.id === activeSessionId);
+      if (makeupEligibility.eligible) {
+        setMakeupNotice({ sourceGroupName: makeupEligibility.sourceGroupName, teacherName: makeupEligibility.teacherName });
+        Alert.alert("حضور تعويضي", `الطالب مسجل مع نفس المدرس في مجموعة ${makeupEligibility.sourceGroupName || "أخرى"}. سيتم تسجيل حضوره تعويضياً في المجموعة الحالية.`);
+      } else {
+        setMakeupNotice(null);
+      }
+
+      // Load eligible sessions; a same-teacher makeup uses the current session.
+      const sessions = (expected ? ScannerService.getEligibleSessionsForStudent(foundStudent.id) : [SessionRepository.findById(activeSessionId)].filter(Boolean) as Session[]).filter((session) => session.id === activeSessionId);
       setEligibleSessions(sessions);
 
       if (sessions.length === 1) {
@@ -226,7 +238,7 @@ function ScannerContent() {
         sessionId: session.id,
         status: lateCalc.status,
         isLate: lateCalc.isLate,
-        attendanceType: "present",
+        attendanceType: makeupNotice ? "makeup" : "present",
       });
 
       setAttendanceResult(result);
@@ -420,6 +432,12 @@ function ScannerContent() {
         {/* STEP 1: STUDENT PROFILE RESULT */}
         {student ? (
           <AppCard style={styles.resultCard}>
+            {makeupNotice && (
+              <View style={styles.makeupNotice}>
+                <Ionicons name="swap-horizontal" size={20} color={Colors.warningText} />
+                <Text style={styles.makeupNoticeText}>هذا الطالب مسجل مع نفس المدرس في مجموعة {makeupNotice.sourceGroupName || "أخرى"}، وسيتم تسجيل حضوره تعويضياً في المجموعة الحالية.</Text>
+              </View>
+            )}
             <View style={styles.studentHeader}>
               <View style={styles.studentAvatar}>
                 <Ionicons name="person" size={28} color={Colors.primary} />
@@ -847,6 +865,22 @@ const styles = StyleSheet.create({
   resultCard: {
     padding: Spacing.md,
     marginBottom: Spacing.md,
+  },
+  makeupNotice: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: Colors.warningLight,
+    borderRadius: BorderRadius.md,
+    padding: Spacing.sm,
+    marginBottom: Spacing.md,
+    gap: Spacing.xs,
+  },
+  makeupNoticeText: {
+    flex: 1,
+    color: Colors.warningText,
+    fontSize: 12,
+    fontWeight: "700",
+    textAlign: "right",
   },
   studentHeader: {
     flexDirection: "row",
