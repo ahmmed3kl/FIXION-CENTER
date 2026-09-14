@@ -102,6 +102,8 @@ export default function MainLayout() {
           ),
         }}
       />
+      {/* Internal route opened from academic/group screens; never show as a bottom tab. */}
+      <Tabs.Screen name="group-details" options={{ href: null }} />
       <Tabs.Screen name="packages" options={{ href: null }} />
       <Tabs.Screen name="center-switch" options={{ href: null }} />
       <Tabs.Screen
