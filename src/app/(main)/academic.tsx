@@ -28,6 +28,7 @@ import { SessionGenerationService } from "../../features/sessions/SessionGenerat
 import { SubjectRepository } from "../../features/subjects/SubjectRepository";
 import { TeacherRepository } from "../../features/teachers/TeacherRepository";
 import { TeacherSubjectRepository } from "../../features/teachers/TeacherSubjectRepository";
+import { smartSearch } from "../../shared/utils/smartSearch";
 import { AcademicStage, CenterAcademicStageRepository, DEFAULT_ACADEMIC_STAGES } from "../../features/academic/CenterAcademicStageRepository";
 import {
     AppButton,
@@ -71,6 +72,8 @@ export default function AcademicScreen() {
   const [groups, setGroups] = useState<Group[]>([]);
   const [showTodayGroups, setShowTodayGroups] = useState(false);
   const [todayGroupIds, setTodayGroupIds] = useState<string[]>([]);
+  const [groupTeacherFilter, setGroupTeacherFilter] = useState<string>("");
+  const [teacherSearch, setTeacherSearch] = useState("");
   const [todaySessions, setTodaySessions] = useState<Session[]>([]);
   const [academicStages, setAcademicStages] = useState<AcademicStage[]>(() => DEFAULT_ACADEMIC_STAGES.map((stage) => ({ ...stage, grades: [...stage.grades] })));
 
@@ -127,6 +130,8 @@ export default function AcademicScreen() {
     const subject = subjects.find((item) => item.id === groupSubjectId)?.name;
     return [groupGrade.trim(), subject, teacher].filter(Boolean).join(" - ");
   };
+
+  const filteredTeachers = smartSearch(teachers, teacherSearch, [{ get: (teacher) => teacher.name, weight: 1.2 }, { get: (teacher) => teacher.phone }]);
 
   const formatTimeForName = (value: string) => {
     const [hour, minute] = value.split(":").map(Number);
@@ -648,9 +653,14 @@ export default function AcademicScreen() {
                 <Text style={[styles.filterChipText, showTodayGroups && styles.filterChipTextActive]}>مجموعات اليوم</Text>
               </TouchableOpacity>
             </View>
+            <AppInput label="بحث/فلترة بالمدرس" placeholder="اكتب اسم المدرس" value={teacherSearch} onChangeText={setTeacherSearch} containerStyle={styles.groupTeacherSearch} />
+            <ScrollView horizontal style={{ marginBottom: Spacing.sm }}>
+              <TouchableOpacity style={[styles.filterChip, !groupTeacherFilter && styles.filterChipActive]} onPress={() => setGroupTeacherFilter("")}><Text style={[styles.filterChipText, !groupTeacherFilter && styles.filterChipTextActive]}>كل المدرسين</Text></TouchableOpacity>
+              {filteredTeachers.map((teacher) => <TouchableOpacity key={teacher.id} style={[styles.filterChip, groupTeacherFilter === teacher.id && styles.filterChipActive]} onPress={() => setGroupTeacherFilter(teacher.id)}><Text style={[styles.filterChipText, groupTeacherFilter === teacher.id && styles.filterChipTextActive]}>{teacher.name}</Text></TouchableOpacity>)}
+            </ScrollView>
 
             <FlatList
-              data={showTodayGroups ? groups.filter((group) => todayGroupIds.includes(group.id)) : groups}
+              data={(showTodayGroups ? groups.filter((group) => todayGroupIds.includes(group.id)) : groups).filter((group) => !groupTeacherFilter || group.teacherId === groupTeacherFilter)}
               keyExtractor={(item) => item.id}
               refreshControl={
                 <RefreshControl
@@ -928,8 +938,9 @@ export default function AcademicScreen() {
               />
 
               <Text style={styles.inputLabel}>المعلم المسؤول *:</Text>
+              <AppInput label="بحث عن مدرس" value={teacherSearch} onChangeText={setTeacherSearch} containerStyle={styles.formField} />
               <ScrollView horizontal style={{ marginBottom: Spacing.sm }}>
-                {teachers.map((t) => (
+                {filteredTeachers.map((t) => (
                   <TouchableOpacity
                     key={t.id}
                     style={[
@@ -1525,6 +1536,7 @@ const styles = StyleSheet.create({
     gap: 8,
     marginBottom: Spacing.sm,
   },
+  groupTeacherSearch: { marginBottom: Spacing.xs },
   filterChip: {
     paddingHorizontal: 12,
     paddingVertical: 7,
