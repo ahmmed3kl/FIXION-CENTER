@@ -217,6 +217,28 @@ export class SyncRepository {
    */
   static requeueRecoverableConflicts(centerId: string): number {
     const db = DatabaseService.getDb();
+    // Older server-reset repairs used an entity id + timestamp as the
+    // operation id and exceeded PostgreSQL's VARCHAR(64) limit. Rename those
+    // local-only, never-applied operations before retrying them. The conflict
+    // row is updated too so the UI/history keeps pointing at the same retry.
+    const longIds = db.getAllSync<{ operationId: string }>(
+      `SELECT operation_id as operationId FROM sync_operations
+       WHERE center_id = ? AND status = 'conflict' AND retry_count < 3
+         AND LENGTH(operation_id) > 64
+         AND entity_type IN ('package', 'package_subject', 'package_subscription', 'package_teacher_override')`,
+      [centerId],
+    );
+    for (const row of longIds) {
+      const replacement = `r-${generateUUID()}`;
+      db.runSync(
+        `UPDATE sync_conflicts SET operation_id = ? WHERE operation_id = ?`,
+        [replacement, row.operationId],
+      );
+      db.runSync(
+        `UPDATE sync_operations SET operation_id = ? WHERE operation_id = ?`,
+        [replacement, row.operationId],
+      );
+    }
     const result = db.runSync(
       `UPDATE sync_operations
        SET status = 'pending', retry_count = retry_count + 1, next_retry_at = NULL, last_error = NULL
