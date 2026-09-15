@@ -65,8 +65,44 @@ async function withTransaction(callback) {
   }
 }
 
+/**
+ * Render starts the API directly and does not run backend/migrate.js.
+ * Upgrade legacy Neon package tables before any sync request can use them.
+ */
+async function ensureSchemaCompatibility() {
+  await pool.query(`
+    ALTER TABLE packages
+      ADD COLUMN IF NOT EXISTS grade VARCHAR(64) NOT NULL DEFAULT 'all',
+      ADD COLUMN IF NOT EXISTS total_price NUMERIC(12, 2) NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS max_selections INTEGER NOT NULL DEFAULT 1,
+      ADD COLUMN IF NOT EXISTS billing_cycle VARCHAR(32) NOT NULL DEFAULT 'monthly',
+      ADD COLUMN IF NOT EXISTS status VARCHAR(32) NOT NULL DEFAULT 'active',
+      ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+  `);
+
+  // Older databases called the package amount `price`. Only reference that
+  // column when it actually exists so modern schemas remain compatible.
+  await pool.query(`
+    DO $$
+    BEGIN
+      IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'packages'
+          AND column_name = 'price'
+      ) THEN
+        EXECUTE 'UPDATE packages
+                 SET total_price = COALESCE(NULLIF(total_price, 0), price, 0)
+                 WHERE total_price IS NULL OR total_price = 0';
+      END IF;
+    END $$;
+  `);
+}
+
 module.exports = {
   pool,
   query,
   withTransaction,
+  ensureSchemaCompatibility,
 };

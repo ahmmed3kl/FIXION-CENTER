@@ -1,6 +1,7 @@
 const express = require("express");
 const cors = require("cors");
 const config = require("./config");
+const { ensureSchemaCompatibility } = require("./db");
 const { errorHandler } = require("./middleware/errorHandler");
 
 const healthRouter = require("./routes/health");
@@ -72,16 +73,24 @@ app.use(errorHandler);
 
 // Only listen if started directly (allows importing in integration tests)
 if (require.main === module) {
-  const server = app.listen(config.port, "0.0.0.0", () => {
-    console.log("====================================================");
-    console.log(` FIXION Backend API Service running on port ${config.port}`);
-    console.log(` Environment: ${config.appEnv}`);
-    console.log(` Local: http://localhost:${config.port}/v1/health`);
-    console.log(
-      " Note: When connecting from physical mobile device, use your PC LAN IP.",
-    );
-    console.log("====================================================");
-  });
+  let server;
+  ensureSchemaCompatibility()
+    .then(() => {
+      server = app.listen(config.port, "0.0.0.0", () => {
+        console.log("====================================================");
+        console.log(` FIXION Backend API Service running on port ${config.port}`);
+        console.log(` Environment: ${config.appEnv}`);
+        console.log(` Local: http://localhost:${config.port}/v1/health`);
+        console.log(
+          " Note: When connecting from physical mobile device, use your PC LAN IP.",
+        );
+        console.log("====================================================");
+      });
+    })
+    .catch((err) => {
+      console.error("Database compatibility migration failed:", err);
+      process.exit(1);
+    });
 
   const shutdown = (signal) => {
     console.log(`${signal} signal received. Closing HTTP server gracefully...`);
