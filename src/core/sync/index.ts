@@ -445,6 +445,7 @@ export class SyncRepository {
 }
 
 export class SyncEngine {
+  private static bootstrapCompletedCenters = new Set<string>();
   private static adapter: ISyncApiAdapter = env.enableMockData
     ? new MockSyncApiAdapter()
     : new HttpSyncApiAdapter();
@@ -1521,9 +1522,15 @@ export class SyncEngine {
       } catch {}
 
       let currentCursor = SyncRepository.getServerCursor(centerId);
-      if (currentCursor === "0" || localTeachersCount === 0) {
+      // Always bootstrap once per app process. This is required after a
+      // server reset/reseed: the server sequence may have started again at a
+      // value that is not lower than the client's cursor, so cursor comparison
+      // alone cannot reveal that older local records are missing remotely.
+      const firstBootstrapForCenter = !this.bootstrapCompletedCenters.has(centerId);
+      if (firstBootstrapForCenter || currentCursor === "0" || localTeachersCount === 0) {
         try {
           await this.bootstrapCenter(centerId);
+          this.bootstrapCompletedCenters.add(centerId);
           currentCursor = SyncRepository.getServerCursor(centerId);
         } catch (bootErr: any) {
           Logger.warn("sync", "bootstrap_skipped", {
