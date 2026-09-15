@@ -773,7 +773,10 @@ export class SyncEngine {
           db.runSync(
             `INSERT INTO student_cards (id, center_id, student_id, card_code, status, issued_at, created_at)
              VALUES (?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT(id) DO UPDATE SET student_id=excluded.student_id, card_code=excluded.card_code, status=excluded.status, issued_at=excluded.issued_at`,
+             ON CONFLICT(center_id, card_code) DO UPDATE SET
+               student_id=excluded.student_id,
+               status=excluded.status,
+               issued_at=excluded.issued_at`,
             [
               card.id,
               card.center_id || centerId,
@@ -1087,7 +1090,10 @@ export class SyncEngine {
             db.runSync(
               `INSERT INTO student_cards (id, center_id, student_id, card_code, status, issued_at, created_at)
                VALUES (?, ?, ?, ?, ?, ?, ?)
-               ON CONFLICT(id) DO UPDATE SET student_id=excluded.student_id, card_code=excluded.card_code, status=excluded.status, issued_at=excluded.issued_at`,
+               ON CONFLICT(center_id, card_code) DO UPDATE SET
+                 student_id=excluded.student_id,
+                 status=excluded.status,
+                 issued_at=excluded.issued_at`,
               [
                 `card-${studentId}`,
                 centerId,
