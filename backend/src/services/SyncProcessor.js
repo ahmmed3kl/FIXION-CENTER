@@ -87,7 +87,7 @@ class SyncProcessor {
 
         await client.query("SAVEPOINT op_savepoint");
         try {
-          await SyncProcessor.assertFreshMutation(client, centerId, entityType, entityId, payload);
+          await SyncProcessor.assertFreshMutation(client, centerId, entityType, entityId, payload, operationType);
           // 3. Dispatch and apply domain mutation atomically
           await SyncProcessor.applyDomainMutation(client, {
             centerId,
@@ -230,7 +230,12 @@ class SyncProcessor {
 
   // Lightweight optimistic concurrency: a stale offline update must become a
   // reviewable conflict instead of overwriting a newer server edit.
-  static async assertFreshMutation(client, centerId, entityType, entityId, payload) {
+  static async assertFreshMutation(client, centerId, entityType, entityId, payload, operationType) {
+    // A server-reset repair intentionally restores the device's local
+    // authoritative row. Its local timestamp can predate a server row that
+    // was recreated after the reset, so optimistic stale-write protection does
+    // not apply to this explicit recovery operation.
+    if (operationType === "REPAIR_AFTER_SERVER_RESET") return;
     const incoming = payload && (payload.updatedAt || payload.updated_at);
     if (!incoming || !entityId) return;
     const tableByType = {

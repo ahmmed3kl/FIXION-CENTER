@@ -233,6 +233,8 @@ export class SyncRepository {
            OR last_error LIKE '%total_price%'
            OR last_error LIKE '%billing_cycle%'
            OR last_error LIKE '%column%does not exist%'
+           OR last_error LIKE '%STALE_UPDATE%'
+           OR last_error LIKE '%value too long%'
            OR last_error LIKE '%package%constraint%'
            OR last_error LIKE '%violates foreign key%'
            OR last_error LIKE '%violates check constraint%'
@@ -536,7 +538,9 @@ export class SyncEngine {
         [createdAt, centerId, entityType, entityId],
       );
       SyncRepository.enqueueOperation({
-        operationId: `repair-${entityType}-${entityId}-${Date.now()}-${sequence}`,
+        // server_sync_operations.operation_id is VARCHAR(64). Keep repair
+        // ids compact even when entity ids are UUIDs.
+        operationId: `r-${generateUUID()}`,
         centerId,
         userId,
         deviceId,
