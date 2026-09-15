@@ -169,7 +169,13 @@ export class StudentRepository {
 
     const filtered = includeInactive
       ? rows
-      : rows.filter((r) => r.status === "active");
+      : rows.filter((r) => {
+          // Legacy/synced databases may store status with different casing
+          // (or as SQLite's integer boolean). Treat all active variants as
+          // active so valid students are not silently omitted from the list.
+          const status = String(r.status ?? "").trim().toLowerCase();
+          return status === "active" || status === "1" || r.status === true;
+        });
     return filtered.map((row) => {
       const activeCard = StudentCardRepository.getActiveCardByStudentId(row.id);
       return {

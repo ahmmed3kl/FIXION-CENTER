@@ -68,7 +68,9 @@ export function getOperationPriority(entityType: string): number {
       "enrollment",
       "student_group_enrollment",
       "package",
+      "package_subject",
       "package_subscription",
+      "package_teacher_override",
     ].includes(e)
   ) {
     return 5;
@@ -208,6 +210,33 @@ export class SyncRepository {
       return rows.slice(0, limit);
     }
     return rows;
+  }
+
+  /**
+   * Re-queue conflicts caused by server-side validation/configuration fixes.
+   * Older clients used to permanently park these operations as `conflict`,
+   * so simply deploying the corrected server would never resend them.
+   */
+  static requeueRecoverableConflicts(centerId: string): number {
+    const db = DatabaseService.getDb();
+    const result = db.runSync(
+      `UPDATE sync_operations
+       SET status = 'pending', retry_count = retry_count + 1, next_retry_at = NULL, last_error = NULL
+       WHERE center_id = ?
+         AND status = 'conflict'
+         AND retry_count < 3
+         AND entity_type IN ('student', 'package', 'package_subject', 'package_subscription', 'package_teacher_override')
+         AND (
+           last_error LIKE '%CARD_OUTSIDE_ALLOWED_RANGE%'
+           OR last_error LIKE '%student_type%'
+           OR last_error LIKE '%packages_%'
+           OR last_error LIKE '%package%constraint%'
+           OR last_error LIKE '%violates foreign key%'
+           OR last_error LIKE '%violates check constraint%'
+         )`,
+      [centerId],
+    );
+    return Number(result?.changes || 0);
   }
 
   static getStats(centerId: string) {
@@ -1428,6 +1457,10 @@ export class SyncEngine {
 
     // Recover mutations left in `syncing` by a crashed or force-closed app.
     SyncRepository.recoverInterruptedOperations(centerId);
+    // Retry old student/package conflicts that were caused by the server
+    // validation/schema fixes. Without this, those records remain parked
+    // forever because normal pending selection excludes `conflict` rows.
+    SyncRepository.requeueRecoverableConflicts(centerId);
 
     let syncedCount = 0;
     let errors = 0;

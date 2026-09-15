@@ -100,6 +100,7 @@ export default function AcademicScreen() {
   const [groupName, setGroupName] = useState("");
   const [groupTeacherId, setGroupTeacherId] = useState("");
   const [groupSubjectId, setGroupSubjectId] = useState("");
+  const [groupSubjectOptions, setGroupSubjectOptions] = useState<Subject[]>([]);
   const [groupGrade, setGroupGrade] = useState("الصف الثالث الثانوي");
   const [groupSessionPrice, setGroupSessionPrice] = useState("100");
   const [groupMonthlyPrice, setGroupMonthlyPrice] = useState("400");
@@ -111,6 +112,12 @@ export default function AcademicScreen() {
   const [timePicker, setTimePicker] = useState<{ day: number; field: "start" | "end" } | null>(null);
   const [timeDraftHour, setTimeDraftHour] = useState(17);
   const [timeDraftMinute, setTimeDraftMinute] = useState(0);
+
+  // Only grades enabled in the active center can be assigned to a group.
+  const availableGroupGrades = Array.from(new Set(academicStages.flatMap((stage) => stage.grades)));
+  const groupGradeOptions = editingGroup && groupGrade && !availableGroupGrades.includes(groupGrade)
+    ? [groupGrade, ...availableGroupGrades]
+    : availableGroupGrades;
 
   const [schedDay, setSchedDay] = useState(0);
   const [schedStart, setSchedStart] = useState("14:00");
@@ -169,6 +176,22 @@ export default function AcademicScreen() {
       if (name) setGroupName(name);
     }
   }, [groupGrade, groupTeacherId, groupSubjectId, teachers, subjects, groupNameCustomized, selectedScheduleDays, scheduleTimes]);
+
+  useEffect(() => {
+    if (!groupTeacherId) {
+      setGroupSubjectOptions([]);
+      setGroupSubjectId("");
+      return;
+    }
+    try {
+      const assignedSubjects = TeacherSubjectRepository.getSubjectsForTeacher(groupTeacherId);
+      setGroupSubjectOptions(assignedSubjects);
+      setGroupSubjectId((current) => assignedSubjects.some((subject) => subject.id === current) ? current : "");
+    } catch {
+      setGroupSubjectOptions([]);
+      setGroupSubjectId("");
+    }
+  }, [groupTeacherId, subjects]);
 
   const loadData = () => {
     try {
@@ -302,19 +325,6 @@ export default function AcademicScreen() {
     }
 
     try {
-      // First ensure teacher is assigned to subject
-      if (
-        !TeacherSubjectRepository.isTeacherAssignedToSubject(
-          groupTeacherId,
-          groupSubjectId,
-        )
-      ) {
-        TeacherSubjectRepository.assignTeacherToSubject(
-          groupTeacherId,
-          groupSubjectId,
-        );
-      }
-
       let savedGroup: Group;
       if (editingGroup) savedGroup = GroupRepository.updateGroup(editingGroup.id, {
         name: groupName.trim(), teacherId: groupTeacherId, subjectId: groupSubjectId, grade: groupGrade.trim(), sessionPrice: parseFloat(groupSessionPrice) || 0, monthlyPrice: parseFloat(groupMonthlyPrice) || 0, sessionDurationMinutes: parseInt(groupDuration, 10) || 120, lateAfterMinutes: parseInt(groupLateThreshold, 10) || 15,
@@ -633,6 +643,7 @@ export default function AcademicScreen() {
                   onPress={() => {
                     setEditingGroup(null);
                     setGroupName("");
+                    setGroupGrade(availableGroupGrades[0] || "");
                     setGroupNameCustomized(false);
                     setSelectedScheduleDays([]);
                     setScheduleTimes({});
@@ -683,6 +694,16 @@ export default function AcademicScreen() {
                       <Text style={styles.itemName}>{item.name}</Text>
                       <Text style={styles.itemMeta}>
                         {item.teacherName} • {item.subjectName} • {item.grade}
+                      </Text>
+                      <Text style={styles.scheduleMeta}>
+                        {(() => {
+                          const schedules = GroupScheduleRepository.getSchedulesForGroup(item.id)
+                            .filter((schedule) => schedule.status !== "inactive")
+                            .sort((a, b) => a.dayOfWeek - b.dayOfWeek);
+                          return schedules.length > 0
+                            ? schedules.map((schedule) => `${DAYS_OF_WEEK[schedule.dayOfWeek]} ${schedule.startTime} - ${schedule.endTime}`).join(" • ")
+                            : "لم يتم تحديد يوم أو موعد للمجموعة";
+                        })()}
                       </Text>
                       <View style={styles.priceRow}>
                         <Text style={styles.priceTag}>
@@ -963,7 +984,7 @@ export default function AcademicScreen() {
 
               <Text style={styles.inputLabel}>المادة الدراسية *:</Text>
               <ScrollView horizontal style={{ marginBottom: Spacing.sm }}>
-                {subjects.map((s) => (
+                {groupSubjectOptions.map((s) => (
                   <TouchableOpacity
                     key={s.id}
                     style={[
@@ -983,13 +1004,33 @@ export default function AcademicScreen() {
                   </TouchableOpacity>
                 ))}
               </ScrollView>
+              {groupTeacherId && groupSubjectOptions.length === 0 && (
+                <Text style={styles.gradeSelectionHint}>هذا المدرس غير مرتبط بأي مادة. اربطه بالمادة من تبويب المدرسين أولًا.</Text>
+              )}
 
               <AppInput
                 label="المرحلة الدراسية *"
                 value={groupGrade}
-                onChangeText={setGroupGrade}
+                onChangeText={() => undefined}
+                editable={false}
                 containerStyle={styles.formField}
               />
+              <View style={styles.gradeOptionsRow}>
+                {groupGradeOptions.map((grade) => (
+                  <TouchableOpacity
+                    key={grade}
+                    style={[styles.gradeOptionChip, groupGrade === grade && styles.gradeOptionChipActive]}
+                    onPress={() => setGroupGrade(grade)}
+                  >
+                    <Text style={[styles.gradeOptionChipText, groupGrade === grade && styles.gradeOptionChipTextActive]}>
+                      {groupGrade === grade ? "✓ " : ""}{grade}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+              {groupGradeOptions.length === 0 && (
+                <Text style={styles.gradeSelectionHint}>لا توجد مراحل مفعّلة لهذا السنتر. فعّل مرحلة من تبويب المراحل أولاً.</Text>
+              )}
 
               <Text style={styles.inputLabel}>أيام وجدول المجموعة *</Text>
               <View style={styles.weekDaysGrid}>
@@ -1349,6 +1390,12 @@ const styles = StyleSheet.create({
     color: Colors.slate500,
     marginTop: 2,
   },
+  scheduleMeta: {
+    fontSize: 12,
+    color: Colors.primary,
+    marginTop: 4,
+    textAlign: "right",
+  },
   itemNotes: {
     fontSize: 11,
     color: Colors.slate400,
@@ -1506,6 +1553,38 @@ const styles = StyleSheet.create({
     fontWeight: "600",
     color: Colors.slate700,
     marginBottom: 4,
+  },
+  gradeOptionsRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+    marginBottom: Spacing.sm,
+  },
+  gradeOptionChip: {
+    borderWidth: 1,
+    borderColor: Colors.border,
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    backgroundColor: Colors.white,
+  },
+  gradeOptionChipActive: {
+    backgroundColor: Colors.primary,
+    borderColor: Colors.primary,
+  },
+  gradeOptionChipText: {
+    color: Colors.slate700,
+    fontSize: 12,
+  },
+  gradeOptionChipTextActive: {
+    color: Colors.white,
+    fontWeight: "700",
+  },
+  gradeSelectionHint: {
+    color: Colors.danger,
+    fontSize: 12,
+    marginBottom: Spacing.sm,
+    textAlign: "right",
   },
   chip: {
     paddingHorizontal: 12,

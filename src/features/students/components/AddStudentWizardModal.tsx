@@ -311,15 +311,27 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({
   // Group creation historically allowed entering "الصف ..." while the
   // student wizard stores the same grade without that prefix. Compare the
   // canonical grade text so only groups for this student's grade appear.
-  const normalizeGrade = (value: string) => value.trim().replace(/^الصف\s*/u, "");
+  const normalizeGrade = (value: string) => value
+    .trim()
+    .replace(/^(?:الصف|Ø§Ù„ØµÙ)\s*/u, "")
+    .replace(/\s+/g, " ");
   const groupMatchesGrade = (group: Group) => !grade.trim() || normalizeGrade(String(group.grade || "")) === normalizeGrade(grade);
-  // A teacher with groups is eligible only when at least one of those groups
-  // matches the student's grade. Teachers without groups yet remain visible
-  // so enrollment can be completed later when schedules are created.
+  // A teacher is eligible only when at least one of their groups matches the
+  // student's exact selected grade.
   const teacherMatchesGrade = (teacherId: string) => {
     const teacherGroups = availableGroups.filter((group) => String(group.teacherId) === String(teacherId));
-    return teacherGroups.length === 0 || teacherGroups.some(groupMatchesGrade);
+    return teacherGroups.some(groupMatchesGrade);
   };
+  useEffect(() => {
+    const matchingTeacherIds = new Set(
+      Object.keys(teachersMap).filter((teacherId) => teacherMatchesGrade(teacherId)),
+    );
+    setSelectedTeacherIds((current) => current.filter((teacherId) => matchingTeacherIds.has(teacherId)));
+    setSelectedGroupIds((current) => current.filter((groupId) => {
+      const group = availableGroups.find((item) => item.id === groupId);
+      return !!group && groupMatchesGrade(group);
+    }));
+  }, [grade, availableGroups, teachersMap]);
   const groupsForPackageOption = (option: PackageSubject) => availableGroups.filter((group) => String(group.teacherId) === String(option.defaultTeacherId) && groupMatchesGrade(group));
   const selectPackageGroup = (optionId: string, groupId: string) => setPackageGroupByOption((current) => ({ ...current, [optionId]: groupId }));
   const validatePackageGroups = () => {

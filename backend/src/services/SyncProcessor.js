@@ -4,6 +4,8 @@ const { AppError } = require("../middleware/errorHandler");
 
 async function validateCardCode(client, centerId, cardCode) {
   if (!/^\d+$/.test(cardCode)) throw new AppError("INVALID_CARD_CODE", "Card code must contain digits only.", "كود الكارت غير صحيح.", 400);
+  const ranges = await client.query("SELECT 1 FROM card_ranges WHERE center_id = $1 AND status = 'active' LIMIT 1", [centerId]);
+  if (ranges.rows.length === 0) return;
   const range = await client.query("SELECT 1 FROM card_ranges WHERE center_id = $1 AND status = 'active' AND length(start_code) = length($2) AND start_code <= $2 AND end_code >= $2 LIMIT 1", [centerId, cardCode]);
   if (!range.rows.length) throw new AppError("CARD_OUTSIDE_ALLOWED_RANGE", "Card is outside the center allowed ranges.", "الكارت خارج النطاق المسموح لهذا المركز.", 403);
 }
@@ -292,6 +294,11 @@ class SyncProcessor {
           );
         }
 
+        const rawStudentType = student.student_type || student.studentType || existingStudent?.student_type || "registered";
+        // PostgreSQL's legacy enum uses registered for external/guest-style
+        // students; normalize the mobile value before writing it.
+        const studentType = rawStudentType === "external" ? "registered" : rawStudentType;
+
         // 1. Insert Student with exact leading zeros preserved
         await client.query(
           `INSERT INTO students 
@@ -316,7 +323,7 @@ class SyncProcessor {
             student.phone || existingStudent?.phone || "",
             student.parent_phone || student.parentPhone || existingStudent?.parent_phone || "",
             student.grade || existingStudent?.grade || "",
-            student.student_type || student.studentType || existingStudent?.student_type || "registered",
+            studentType,
             student.notes !== undefined ? student.notes : (existingStudent?.notes || null),
             status,
           ],

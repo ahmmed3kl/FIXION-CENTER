@@ -33,10 +33,14 @@ export class AttendanceSessionService {
     const db = DatabaseService.getDb();
     const session = db.getFirstSync<any>(
       `SELECT s.group_id as groupId, s.session_date as sessionDate,
-              g.teacher_id as teacherId, g.name as groupName, t.name as teacherName
+              COALESCE(s.subject_id, g.subject_id) as subjectId,
+              COALESCE(s.teacher_id, g.teacher_id) as teacherId,
+              g.name as groupName, t.name as teacherName,
+              subj.name as subjectName
        FROM sessions s
        JOIN groups g ON g.center_id = s.center_id AND g.id = s.group_id
        LEFT JOIN teachers t ON t.center_id = g.center_id AND t.id = g.teacher_id
+       LEFT JOIN subjects subj ON subj.center_id = g.center_id AND subj.id = COALESCE(s.subject_id, g.subject_id)
        WHERE s.center_id = ? AND s.id = ?`,
       [activeCenterId, sessionId],
     );
@@ -45,9 +49,11 @@ export class AttendanceSessionService {
       `SELECT g.id as groupId, g.name as groupName, s.id as originalSessionId
        FROM student_group_enrollments e
        JOIN groups g ON g.center_id = e.center_id AND g.id = e.group_id
+       LEFT JOIN teachers sourceTeacher ON sourceTeacher.center_id = g.center_id AND sourceTeacher.id = g.teacher_id
+       LEFT JOIN subjects sourceSubject ON sourceSubject.center_id = g.center_id AND sourceSubject.id = g.subject_id
        JOIN sessions s ON s.center_id = e.center_id AND s.group_id = e.group_id
          AND s.session_date < ? AND s.status <> 'cancelled'
-       JOIN session_expected_students ex ON ex.center_id = s.center_id
+       LEFT JOIN session_expected_students ex ON ex.center_id = s.center_id
          AND ex.session_id = s.id AND ex.student_id = e.student_id
        LEFT JOIN attendance a ON a.center_id = s.center_id
          AND a.session_id = s.id AND a.student_id = e.student_id
@@ -55,15 +61,50 @@ export class AttendanceSessionService {
          AND makeup.student_id = e.student_id
          AND makeup.original_absence_id = ('absence-' || s.id || '-' || e.student_id)
        WHERE e.center_id = ? AND e.student_id = ? AND e.status = 'active'
-         AND g.teacher_id = ? AND g.id <> ?
-         AND e.start_date <= ? AND (e.end_date IS NULL OR e.end_date >= ?)
+         AND (g.teacher_id = ? OR LOWER(TRIM(sourceTeacher.name)) = LOWER(TRIM(?)))
+         AND g.id <> ?
+         AND (g.subject_id = ? OR LOWER(TRIM(sourceSubject.name)) = LOWER(TRIM(?)))
+         -- A generated expected snapshot is preferred, but older/scheduled
+         -- sessions may not have one. In that case the active enrollment and
+         -- missing attendance still establish an absence eligible for makeup.
          AND a.id IS NULL
          AND makeup.id IS NULL
        ORDER BY s.session_date DESC, s.start_time DESC LIMIT 1`,
-      [session.sessionDate, activeCenterId, studentId, session.teacherId, session.groupId, session.sessionDate, session.sessionDate],
+      [session.sessionDate, activeCenterId, studentId, session.teacherId, session.teacherName || "", session.groupId, session.subjectId, session.subjectName || ""],
     );
-    return source
-      ? { eligible: true, sourceGroupId: source.groupId, sourceGroupName: source.groupName, teacherName: session.teacherName, originalAbsenceId: `absence-${source.originalSessionId}-${studentId}` }
+    if (source) {
+      return {
+        eligible: true,
+        sourceGroupId: source.groupId,
+        sourceGroupName: source.groupName,
+        teacherName: session.teacherName,
+        originalAbsenceId: `absence-${source.originalSessionId}-${studentId}`,
+      };
+    }
+
+    // Fallback for centers that have an active enrollment but no historical
+    // expected-student snapshot/session yet. The teacher/group relationship is
+    // still authoritative for allowing a same-teacher makeup attendance.
+    const enrolledWithTeacher = db.getFirstSync<any>(
+      `SELECT g.id as groupId, g.name as groupName
+       FROM student_group_enrollments e
+       JOIN groups g ON g.center_id = e.center_id AND g.id = e.group_id
+       LEFT JOIN teachers sourceTeacher ON sourceTeacher.center_id = g.center_id AND sourceTeacher.id = g.teacher_id
+       LEFT JOIN subjects sourceSubject ON sourceSubject.center_id = g.center_id AND sourceSubject.id = g.subject_id
+       WHERE e.center_id = ? AND e.student_id = ? AND e.status = 'active'
+         AND (g.teacher_id = ? OR LOWER(TRIM(sourceTeacher.name)) = LOWER(TRIM(?))) AND g.id <> ?
+         AND (g.subject_id = ? OR LOWER(TRIM(sourceSubject.name)) = LOWER(TRIM(?)))
+       ORDER BY e.start_date DESC LIMIT 1`,
+      [activeCenterId, studentId, session.teacherId, session.teacherName || "", session.groupId, session.subjectId, session.subjectName || ""],
+    );
+    return enrolledWithTeacher
+      ? {
+          eligible: true,
+          sourceGroupId: enrolledWithTeacher.groupId,
+          sourceGroupName: enrolledWithTeacher.groupName,
+          teacherName: session.teacherName,
+          originalAbsenceId: `absence-${sessionId}-${studentId}`,
+        }
       : { eligible: false };
   }
   static getTodayGroups(date = AttendanceSessionService.localDate()): Group[] {
@@ -75,7 +116,25 @@ export class AttendanceSessionService {
     if (!activeCenterId || !currentUser) throw new ForbiddenError("يجب تسجيل الدخول أولاً.");
     const db = DatabaseService.getDb();
     const existing = SessionRepository.getSessionsForDate(date).find((session) => session.groupId === groupId);
-    if (existing) return existing;
+    if (existing) {
+      // A session can have been generated before enrollments were synced (or
+      // by an older build), leaving its expected-student snapshot empty. Do
+      // not return that stale session as if it had no students; hydrate the
+      // snapshot from the current active enrollments first.
+      if (existing.status !== "closed" && existing.status !== "cancelled") {
+        const enrollments = EnrollmentRepository.getActiveEnrollmentsForGroup(groupId);
+        const now = new Date().toISOString();
+        DatabaseService.runInTransaction(() => {
+          for (const enrollment of enrollments) {
+            db.runSync(
+              "INSERT OR IGNORE INTO session_expected_students (id, center_id, session_id, student_id, created_at) VALUES (?, ?, ?, ?, ?)",
+              [`exp-${existing.id}-${enrollment.studentId}`, existing.centerId, existing.id, enrollment.studentId, now],
+            );
+          }
+        });
+      }
+      return existing;
+    }
     const group = GroupRepository.findById(groupId);
     if (!group) throw new ConflictError("المجموعة غير موجودة.");
     const schedule = GroupScheduleRepository.getSchedulesForGroup(groupId).find((item) => item.dayOfWeek === new Date(`${date}T12:00:00`).getDay());
@@ -83,7 +142,7 @@ export class AttendanceSessionService {
     const now = new Date().toISOString();
     const sessionId = `sess-att-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
     db.runSync(`INSERT INTO sessions (id, center_id, group_id, schedule_id, subject_id, teacher_id, session_price, late_after_minutes, session_date, start_time, end_time, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)`, [sessionId, activeCenterId, group.id, schedule.id, group.subjectId, group.teacherId, group.sessionPrice, group.lateAfterMinutes, date, schedule.startTime, schedule.endTime, now]);
-    const enrollments = EnrollmentRepository.getActiveEnrollmentsForGroup(group.id, date);
+      const enrollments = EnrollmentRepository.getActiveEnrollmentsForGroup(group.id);
     for (const enrollment of enrollments) db.runSync("INSERT OR IGNORE INTO session_expected_students (id, center_id, session_id, student_id, created_at) VALUES (?, ?, ?, ?, ?)", [`exp-${sessionId}-${enrollment.studentId}`, activeCenterId, sessionId, enrollment.studentId, now]);
     const deviceId = DeviceService.getDeviceIdSync();
     const operationId = `op-session-att-${sessionId}`;
@@ -129,9 +188,10 @@ export class AttendanceSessionService {
         payload: { status: "open", updatedAt: new Date().toISOString() },
       });
     }
-    const expectedCount = db.getFirstSync<{ count: number }>("SELECT COUNT(*) as count FROM session_expected_students WHERE session_id = ?", [sessionId]);
-    if (!Number(expectedCount?.count)) {
-      const enrollments = EnrollmentRepository.getActiveEnrollmentsForGroup(session.groupId, session.sessionDate);
+    // Always reconcile the expected snapshot before attendance starts. A
+    // non-zero but stale snapshot must also receive students enrolled later.
+    {
+      const enrollments = EnrollmentRepository.getActiveEnrollmentsForGroup(session.groupId);
       const now = new Date().toISOString();
       for (const enrollment of enrollments) {
         db.runSync(
@@ -155,8 +215,13 @@ export class AttendanceSessionService {
       [sessionId],
     );
     if (!session || (session.status !== "open" && session.status !== "scheduled")) return false;
-    const enrolled = EnrollmentRepository.getActiveEnrollmentsForGroup(session.groupId, session.sessionDate)
-      .some((enrollment) => enrollment.studentId === studentId);
+    const enrolled = Boolean(db.getFirstSync<any>(
+      `SELECT 1 FROM student_group_enrollments
+       WHERE center_id = ? AND group_id = ? AND student_id = ?
+         AND status = 'active'
+       LIMIT 1`,
+      [session.centerId, session.groupId, studentId],
+    ));
     if (!enrolled) return false;
     const now = new Date().toISOString();
     db.runSync(

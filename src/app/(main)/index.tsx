@@ -1,6 +1,6 @@
 import { Ionicons } from "@expo/vector-icons";
 import { useFocusEffect, useRouter } from "expo-router";
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
     RefreshControl,
     SafeAreaView,
@@ -34,7 +34,7 @@ export default function DashboardScreen() {
     useAuthStore();
 
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
-  const [syncStats, setSyncStats] = useState({ pending: 0 });
+  const [syncStats, setSyncStats] = useState({ pending: 0, syncing: 0, synced: 0, failed: 0, conflict: 0, total: 0 });
   const [connectivity, setConnectivity] =
     useState<ConnectivityState>("offline");
   const [refreshing, setRefreshing] = useState(false);
@@ -59,6 +59,15 @@ export default function DashboardScreen() {
     }, [loadData]),
   );
 
+  useEffect(() => {
+    const unsubscribe = ConnectivityService.subscribe(setConnectivity);
+    const refreshTimer = setInterval(loadData, 2000);
+    return () => {
+      unsubscribe();
+      clearInterval(refreshTimer);
+    };
+  }, [loadData]);
+
   const onRefresh = async () => {
     setRefreshing(true);
     if (activeCenter) {
@@ -72,18 +81,45 @@ export default function DashboardScreen() {
     if (!activeCenter) return;
     ConnectivityService.setState("syncing");
     setConnectivity("syncing");
-    await SyncEngine.syncCenterNow(activeCenter.id);
-    ConnectivityService.setState("online");
-    setConnectivity("online");
+    const result = await SyncEngine.syncCenterNow(activeCenter.id);
+    const nextState = result.state === "error" ? "offline" : result.state;
+    ConnectivityService.setState(nextState);
+    setConnectivity(nextState);
     loadData();
   };
+
+  const syncState = connectivity === "syncing"
+    ? "syncing"
+    : syncStats.failed > 0 || syncStats.conflict > 0
+      ? "error"
+      : connectivity === "online" && syncStats.pending === 0
+        ? "online"
+        : connectivity === "offline"
+          ? "offline"
+          : "syncing";
+  const syncLabel = syncState === "online"
+    ? "متزامن"
+    : syncState === "offline"
+      ? "غير متصل"
+      : syncState === "error"
+        ? "مشكلة مزامنة"
+        : "جاري المزامنة";
+  const syncIcon = syncState === "online"
+    ? "cloud-done-outline"
+    : syncState === "offline"
+      ? "cloud-offline-outline"
+      : syncState === "error"
+        ? "warning-outline"
+        : "sync-outline";
 
   return (
     <SafeAreaView style={styles.safeArea}>
       {/* Top App Header */}
       <View style={styles.headerBar}>
-        <TouchableOpacity style={styles.menuButton} onPress={() => router.push("/(main)/more")}>
-          <Ionicons name="menu-outline" size={21} color={Colors.white} />
+        <TouchableOpacity style={styles.syncStatusButton} onPress={handleSyncNow}>
+          <Ionicons name={syncIcon as any} size={17} color={syncState === "online" ? "#A7F3D0" : "#FFE08A"} />
+          <Text style={styles.syncStatusText}>{syncLabel}</Text>
+          {syncStats.pending > 0 ? <Text style={styles.syncPendingText}>({syncStats.pending})</Text> : null}
         </TouchableOpacity>
         <View style={styles.brandLockup}>
           <Text style={styles.brandWord}>FIXION</Text>
@@ -98,12 +134,9 @@ export default function DashboardScreen() {
           <Ionicons name="chevron-down" size={13} color="#A9D8EA" />
         </TouchableOpacity>
         <View style={styles.headerActions}>
-          <TouchableOpacity style={styles.headerIconButton} onPress={handleSyncNow}>
-            <Ionicons name="notifications-outline" size={20} color={Colors.white} />
-            {syncStats.pending > 0 ? <View style={styles.notificationBadge}><Text style={styles.notificationBadgeText}>{syncStats.pending > 9 ? "9+" : syncStats.pending}</Text></View> : null}
-          </TouchableOpacity>
-          <TouchableOpacity onPress={logout} style={styles.avatarButton}>
-            <Text style={styles.avatarText}>{(currentUser?.fullName || "AE").slice(0, 2).toUpperCase()}</Text>
+          <TouchableOpacity onPress={logout} style={styles.logoutButton}>
+            <Ionicons name="log-out-outline" size={17} color={Colors.white} />
+            <Text style={styles.logoutText}>خروج</Text>
           </TouchableOpacity>
         </View>
       </View>
@@ -267,14 +300,19 @@ const styles = StyleSheet.create({
     borderBottomColor: "#0D5478",
     direction: "ltr",
   },
-  menuButton: {
-    width: 34,
+  syncStatusButton: {
+    minWidth: 102,
     height: 34,
     borderRadius: 17,
+    paddingHorizontal: 10,
     backgroundColor: "#0B4568",
+    flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
+    gap: 5,
   },
+  syncStatusText: { color: Colors.white, fontSize: 11, fontWeight: "700" },
+  syncPendingText: { color: "#FFE08A", fontSize: 10, fontWeight: "800" },
   brandLockup: { width: 82, alignItems: "flex-start", direction: "ltr" },
   brandWord: { color: Colors.white, fontSize: 19, fontWeight: "900", letterSpacing: 1.2 },
   brandTagline: { color: "#89B6C9", fontSize: 5.5, letterSpacing: 0.3, marginTop: -1 },
@@ -299,6 +337,17 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: Spacing.sm,
   },
+  logoutButton: {
+    height: 34,
+    borderRadius: 17,
+    paddingHorizontal: 10,
+    backgroundColor: "#B4233D",
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 4,
+  },
+  logoutText: { color: Colors.white, fontSize: 11, fontWeight: "800" },
   headerIconButton: {
     width: 36,
     height: 36,

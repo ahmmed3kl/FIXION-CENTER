@@ -116,7 +116,11 @@ export default function StudentsScreen() {
 
   const loadData = () => {
     try {
-      const all = StudentRepository.getAll();
+      // The students screen is the administrative directory; show inactive
+      // records as well so a locally stored student is never mistaken for a
+      // failed creation. Operational flows (attendance/search) still use the
+      // active-only repository queries where appropriate.
+      const all = StudentRepository.getAll(true);
       setStudents(all);
       const groups = GroupRepository.getAll();
       setAvailableGroups(groups);
