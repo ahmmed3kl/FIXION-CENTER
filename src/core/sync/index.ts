@@ -240,6 +240,44 @@ export class SyncRepository {
     return Number(result?.changes || 0);
   }
 
+  /**
+   * Rebuilds the server after a reset without losing records that were
+   * previously marked synced on this device. Only entities absent from the
+   * authoritative bootstrap snapshot are requeued; server-present rows are
+   * left untouched.
+   */
+  static requeueEntitiesMissingFromServer(centerId: string, snapshot: any): number {
+    const db = DatabaseService.getDb();
+    const idsByType: Record<string, Set<string>> = {
+      student: new Set((snapshot.students || []).map((row: any) => String(row.id))),
+      student_card: new Set((snapshot.cards || []).map((row: any) => String(row.id))),
+      package: new Set((snapshot.packages || []).map((row: any) => String(row.id))),
+      package_subject: new Set((snapshot.packageSubjects || []).map((row: any) => String(row.id))),
+      package_subscription: new Set((snapshot.packageSubscriptions || []).map((row: any) => String(row.id))),
+      package_teacher_override: new Set((snapshot.packageTeacherOverrides || []).map((row: any) => String(row.id))),
+    };
+    const rows = db.getAllSync<{ operationId: string; entityType: string; entityId: string }>(
+      `SELECT operation_id as operationId, entity_type as entityType, entity_id as entityId
+       FROM sync_operations
+       WHERE center_id = ? AND status IN ('synced', 'conflict')
+         AND entity_type IN ('student', 'student_card', 'package', 'package_subject', 'package_subscription', 'package_teacher_override')`,
+      [centerId],
+    );
+    let repaired = 0;
+    for (const row of rows) {
+      const serverIds = idsByType[row.entityType];
+      if (!serverIds || serverIds.has(String(row.entityId))) continue;
+      db.runSync(
+        `UPDATE sync_operations
+         SET status = 'pending', retry_count = 0, next_retry_at = NULL, last_error = NULL
+         WHERE operation_id = ?`,
+        [row.operationId],
+      );
+      repaired += 1;
+    }
+    return repaired;
+  }
+
   static getStats(centerId: string) {
     const db = DatabaseService.getDb();
     const rows = db.getAllSync<{ status: SyncOperationStatus }>(
@@ -847,7 +885,10 @@ export class SyncEngine {
 
       if (data.latestServerSeq > 0) {
         SyncRepository.setServerCursor(centerId, String(data.latestServerSeq));
+      } else {
+        SyncRepository.setServerCursor(centerId, "0");
       }
+      SyncRepository.requeueEntitiesMissingFromServer(centerId, data);
       });
     } catch (bootstrapErr) {
       console.warn("Bootstrap center error:", bootstrapErr);
@@ -1501,6 +1542,12 @@ export class SyncEngine {
         let batches = 0;
         while (hasMore && batches < 100) {
           const pullResponse = await this.adapter.pullChanges(centerId, currentCursor, pullLimit);
+          if (pullResponse.cursorReset) {
+            await this.bootstrapCenter(centerId);
+            currentCursor = SyncRepository.getServerCursor(centerId);
+            hasMore = false;
+            continue;
+          }
           if (pullResponse.changes && pullResponse.changes.length > 0) {
             this.applyServerChanges(centerId, pullResponse.changes);
           }

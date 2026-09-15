@@ -164,6 +164,25 @@ router.get("/pull", authMiddleware, deviceGuard, async (req, res, next) => {
     const cursor = parseInt(rawCursor, 10) || 0;
     const limit = Math.min(parseInt(req.query.limit || "50", 10), 100);
 
+    // A database reset/reseed can make the client's cursor newer than the
+    // server stream. Signal this explicitly so the client bootstraps again
+    // instead of silently believing all old local rows are synchronized.
+    const latestRes = await db.query(
+      "SELECT COALESCE(MAX(server_seq), 0) AS max_seq FROM server_sync_operations WHERE center_id = $1",
+      [req.centerId],
+    );
+    const latestServerSeq = parseInt(latestRes.rows[0]?.max_seq || 0, 10);
+    if (cursor > latestServerSeq) {
+      return res.json({
+        changes: [],
+        nextCursor: "0",
+        hasMore: false,
+        cursorReset: true,
+        latestServerSeq,
+        serverTimestamp: new Date().toISOString(),
+      });
+    }
+
     // Query global server sync stream for the center
     const rowsRes = await db.query(
       `SELECT server_seq, operation_id, entity_type, entity_id, operation_type, payload, applied_at
