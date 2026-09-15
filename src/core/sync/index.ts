@@ -339,10 +339,56 @@ export class SyncRepository {
   static markAsSynced(operationId: string): void {
     const db = DatabaseService.getDb();
     const syncedAt = new Date().toISOString();
+    const operation = db.getFirstSync<{
+      centerId: string;
+      entityType: string;
+      entityId: string;
+      createdAt: string;
+    }>(
+      `SELECT center_id as centerId, entity_type as entityType,
+              entity_id as entityId, created_at as createdAt
+       FROM sync_operations WHERE operation_id = ?`,
+      [operationId],
+    );
     db.runSync(
       `UPDATE sync_operations SET status = 'synced', synced_at = ?, next_retry_at = NULL WHERE operation_id = ?`,
       [syncedAt, operationId],
     );
+
+    // A successful repair is authoritative for the entity. Retire older
+    // failed/conflicted attempts for the same record so historical retries do
+    // not keep the dashboard stuck on "sync problem" forever.
+    if (operation) {
+      db.runSync(
+        `UPDATE sync_operations
+         SET status = 'synced', synced_at = ?, next_retry_at = NULL,
+             last_error = 'Superseded by a successful sync operation'
+         WHERE center_id = ? AND entity_type = ? AND entity_id = ?
+           AND operation_id <> ? AND created_at <= ?
+           AND status IN ('pending', 'syncing', 'failed', 'conflict')`,
+        [
+          syncedAt,
+          operation.centerId,
+          operation.entityType,
+          operation.entityId,
+          operationId,
+          operation.createdAt,
+        ],
+      );
+      db.runSync(
+        `UPDATE sync_conflicts
+         SET resolved_at = ?
+         WHERE center_id = ? AND entity_type = ? AND entity_id = ?
+           AND created_at <= ? AND resolved_at IS NULL`,
+        [
+          syncedAt,
+          operation.centerId,
+          operation.entityType,
+          operation.entityId,
+          operation.createdAt,
+        ],
+      );
+    }
   }
 
   static markAsFailed(operationId: string, errorReason: string): void {
