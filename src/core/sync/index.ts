@@ -306,6 +306,7 @@ export class SyncRepository {
 
   static getStats(centerId: string) {
     const db = DatabaseService.getDb();
+    this.cleanupSupersededConflicts(centerId);
     const rows = db.getAllSync<{ status: SyncOperationStatus }>(
       "SELECT status FROM sync_operations WHERE center_id = ?",
       [centerId],
@@ -326,6 +327,56 @@ export class SyncRepository {
     }
 
     return { pending, syncing, synced, failed, conflict, total: rows.length };
+  }
+
+  /**
+   * Clear historical conflict markers once a newer operation for the same
+   * entity has already synced successfully. This also repairs devices that
+   * completed the package upload before the conflict-cleanup code shipped.
+   */
+  private static cleanupSupersededConflicts(centerId: string): void {
+    const db = DatabaseService.getDb();
+    const successful = db.getAllSync<{
+      entityType: string;
+      entityId: string;
+      createdAt: string;
+    }>(
+      `SELECT entity_type as entityType, entity_id as entityId,
+              created_at as createdAt
+       FROM sync_operations
+       WHERE center_id = ? AND status = 'synced'`,
+      [centerId],
+    );
+    for (const winner of successful) {
+      db.runSync(
+        `UPDATE sync_operations
+         SET status = 'synced', synced_at = COALESCE(synced_at, ?),
+             next_retry_at = NULL,
+             last_error = 'Superseded by a successful sync operation'
+         WHERE center_id = ? AND entity_type = ? AND entity_id = ?
+           AND created_at <= ? AND status IN ('failed', 'conflict')`,
+        [
+          winner.createdAt,
+          centerId,
+          winner.entityType,
+          winner.entityId,
+          winner.createdAt,
+        ],
+      );
+      db.runSync(
+        `UPDATE sync_conflicts
+         SET resolved_at = COALESCE(resolved_at, ?)
+         WHERE center_id = ? AND entity_type = ? AND entity_id = ?
+           AND created_at <= ? AND resolved_at IS NULL`,
+        [
+          winner.createdAt,
+          centerId,
+          winner.entityType,
+          winner.entityId,
+          winner.createdAt,
+        ],
+      );
+    }
   }
 
   static markAsSyncing(operationId: string): void {
