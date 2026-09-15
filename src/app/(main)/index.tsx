@@ -136,7 +136,6 @@ export default function DashboardScreen() {
         <View style={styles.headerActions}>
           <TouchableOpacity onPress={logout} style={styles.logoutButton}>
             <Ionicons name="log-out-outline" size={17} color={Colors.white} />
-            <Text style={styles.logoutText}>خروج</Text>
           </TouchableOpacity>
         </View>
       </View>
@@ -338,16 +337,13 @@ const styles = StyleSheet.create({
     gap: Spacing.sm,
   },
   logoutButton: {
+    width: 34,
     height: 34,
     borderRadius: 17,
-    paddingHorizontal: 10,
     backgroundColor: "#B4233D",
-    flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
-    gap: 4,
   },
-  logoutText: { color: Colors.white, fontSize: 11, fontWeight: "800" },
   headerIconButton: {
     width: 36,
     height: 36,
