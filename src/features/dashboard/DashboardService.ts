@@ -16,6 +16,22 @@ export interface DashboardSummary {
 
 export class DashboardService {
   static getTodaySummary(targetDate?: string): DashboardSummary {
+    try {
+      return this.readTodaySummary(targetDate);
+    } catch (error: any) {
+      const message = String(error?.message || error || "");
+      // Android can keep a stale expo-sqlite native handle after hot reload
+      // or a concurrent native transaction. Reopen it once and retry the
+      // read instead of crashing the dashboard screen.
+      if (message.includes("NativeDatabase.prepareSync") || message.includes("NullPointerException")) {
+        DatabaseService.reinitialize();
+        return this.readTodaySummary(targetDate);
+      }
+      throw error;
+    }
+  }
+
+  private static readTodaySummary(targetDate?: string): DashboardSummary {
     const centerId = useAuthStore.getState().activeCenterId;
     if (!centerId) {
       throw new UnauthorizedError("يجب تحديد مركز نشط.");

@@ -3236,6 +3236,17 @@ export class DatabaseService {
     this.db = mock;
   }
 
+  /** Reopens a stale native SQLite handle after an Android prepare failure. */
+  static reinitialize(): void {
+    const current = this.db as any;
+    try {
+      if (typeof current?.closeSync === "function") current.closeSync();
+    } catch {}
+    this.db = null;
+    this.transactionDepth = 0;
+    this.init();
+  }
+
   /** Runs a synchronous SQLite transaction for snapshot/bootstrap writes. */
   static runInTransaction<T>(callback: (db: SqlDatabase) => T): T {
     const db = this.getDb();
