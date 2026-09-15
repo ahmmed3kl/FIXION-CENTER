@@ -184,31 +184,12 @@ export class HttpSyncApiAdapter implements ISyncApiAdapter {
       const response = await fetchBootstrap();
       return response.data;
     } catch (err: any) {
-      // If endpoint not found on server (404), return empty snapshot gracefully
+      // A missing bootstrap endpoint is not an empty center.  Returning an
+      // empty snapshot here silently erases the device's ability to discover
+      // server data and can advance the cursor incorrectly.  Let SyncEngine
+      // fall back to the incremental pull path instead.
       if (err?.statusCode === 404 || err?.code === "NOT_FOUND") {
-        return {
-          centerId,
-          students: [],
-          cards: [],
-          groups: [],
-          teachers: [],
-          subjects: [],
-          sessions: [],
-          expectedStudents: [],
-          enrollments: [],
-          attendance: [],
-          payments: [],
-          paymentReversals: [],
-          debtAdjustments: [],
-          advanceCoverages: [],
-          notificationTemplates: [],
-          notificationEvents: [],
-          notificationDeliveries: [],
-          sessionClosings: [],
-          dailyClosings: [],
-          latestServerSeq: 0,
-          timestamp: new Date().toISOString(),
-        };
+        throw err;
       }
 
       const isDeviceErr =

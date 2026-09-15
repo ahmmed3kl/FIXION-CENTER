@@ -22,6 +22,7 @@ export interface MakeupEligibility {
   sourceGroupId?: string;
   sourceGroupName?: string;
   teacherName?: string;
+  originalAbsenceId?: string;
 }
 
 /** Single source of truth for the normal attendance session flow. */
@@ -41,17 +42,28 @@ export class AttendanceSessionService {
     );
     if (!session?.teacherId) return { eligible: false };
     const source = db.getFirstSync<any>(
-      `SELECT g.id as groupId, g.name as groupName
+      `SELECT g.id as groupId, g.name as groupName, s.id as originalSessionId
        FROM student_group_enrollments e
        JOIN groups g ON g.center_id = e.center_id AND g.id = e.group_id
+       JOIN sessions s ON s.center_id = e.center_id AND s.group_id = e.group_id
+         AND s.session_date < ? AND s.status <> 'cancelled'
+       JOIN session_expected_students ex ON ex.center_id = s.center_id
+         AND ex.session_id = s.id AND ex.student_id = e.student_id
+       LEFT JOIN attendance a ON a.center_id = s.center_id
+         AND a.session_id = s.id AND a.student_id = e.student_id
+       LEFT JOIN attendance makeup ON makeup.center_id = s.center_id
+         AND makeup.student_id = e.student_id
+         AND makeup.original_absence_id = ('absence-' || s.id || '-' || e.student_id)
        WHERE e.center_id = ? AND e.student_id = ? AND e.status = 'active'
          AND g.teacher_id = ? AND g.id <> ?
          AND e.start_date <= ? AND (e.end_date IS NULL OR e.end_date >= ?)
-       ORDER BY e.start_date DESC LIMIT 1`,
-      [activeCenterId, studentId, session.teacherId, session.groupId, session.sessionDate, session.sessionDate],
+         AND a.id IS NULL
+         AND makeup.id IS NULL
+       ORDER BY s.session_date DESC, s.start_time DESC LIMIT 1`,
+      [session.sessionDate, activeCenterId, studentId, session.teacherId, session.groupId, session.sessionDate, session.sessionDate],
     );
     return source
-      ? { eligible: true, sourceGroupId: source.groupId, sourceGroupName: source.groupName, teacherName: session.teacherName }
+      ? { eligible: true, sourceGroupId: source.groupId, sourceGroupName: source.groupName, teacherName: session.teacherName, originalAbsenceId: `absence-${source.originalSessionId}-${studentId}` }
       : { eligible: false };
   }
   static getTodayGroups(date = AttendanceSessionService.localDate()): Group[] {

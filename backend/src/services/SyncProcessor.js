@@ -85,6 +85,7 @@ class SyncProcessor {
 
         await client.query("SAVEPOINT op_savepoint");
         try {
+          await SyncProcessor.assertFreshMutation(client, centerId, entityType, entityId, payload);
           // 3. Dispatch and apply domain mutation atomically
           await SyncProcessor.applyDomainMutation(client, {
             centerId,
@@ -214,12 +215,35 @@ class SyncProcessor {
       package_subscription: "student_package_subscriptions",
       debt_cycle: "debt_cycles",
       notification_event: "notification_events",
+      notification_template: "notification_templates",
+      notification_delivery: "notification_deliveries",
+      session_closing: "session_closing_records",
       daily_closing: "daily_closing_summaries",
     };
     const table = tableByType[entityType];
     if (!table) return null;
     const result = await client.query(`SELECT * FROM ${table} WHERE center_id = $1 AND id = $2`, [centerId, entityId]);
     return result.rows[0] || null;
+  }
+
+  // Lightweight optimistic concurrency: a stale offline update must become a
+  // reviewable conflict instead of overwriting a newer server edit.
+  static async assertFreshMutation(client, centerId, entityType, entityId, payload) {
+    const incoming = payload && (payload.updatedAt || payload.updated_at);
+    if (!incoming || !entityId) return;
+    const tableByType = {
+      student: "students", teacher: "teachers", subject: "subjects",
+      group: "groups", session: "sessions", enrollment: "student_group_enrollments",
+      package: "packages", package_subscription: "student_package_subscriptions",
+      notification_template: "notification_templates",
+    };
+    const table = tableByType[entityType];
+    if (!table) return;
+    const result = await client.query(`SELECT updated_at FROM ${table} WHERE center_id = $1 AND id = $2`, [centerId, entityId]);
+    const serverUpdated = result.rows[0]?.updated_at;
+    if (serverUpdated && new Date(serverUpdated).getTime() > new Date(incoming).getTime()) {
+      throw new Error("STALE_UPDATE: server has a newer version of this record.");
+    }
   }
 
   /**
@@ -881,6 +905,34 @@ class SyncProcessor {
         await client.query(`INSERT INTO notification_events (id, center_id, student_id, session_id, event_type, recipient_phone, channel, status, payload, created_at)
           VALUES ($1,$2,$3,$4,$5,$6,$7,'pending',$8,NOW()) ON CONFLICT (id) DO UPDATE SET status=EXCLUDED.status, payload=EXCLUDED.payload`,
           [id, centerId, studentId, event.session_id || event.sessionId || null, event.event_type || event.eventType || "attendance", phone, event.channel || "push", JSON.stringify(event)]);
+        break;
+      }
+
+      case "notification_template": {
+        const template = payload.template || payload;
+        const templateId = template.id || template.templateId || context.entityId;
+        if (!templateId || !template.event_type && !template.eventType || !template.channel) {
+          throw new Error("Notification template requires id, event type, and channel.");
+        }
+        await client.query(
+          `INSERT INTO notification_templates
+             (id, center_id, event_type, channel, template_body, is_default, created_by, updated_by, created_at, updated_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW(),NOW())
+           ON CONFLICT (id) DO UPDATE SET
+             event_type=EXCLUDED.event_type, channel=EXCLUDED.channel,
+             template_body=EXCLUDED.template_body, is_default=EXCLUDED.is_default,
+             updated_by=EXCLUDED.updated_by, updated_at=NOW()` ,
+          [
+            templateId,
+            centerId,
+            template.event_type || template.eventType,
+            template.channel,
+            template.template_body || template.templateBody || "",
+            Boolean(template.is_default ?? template.isDefault),
+            template.created_by || template.createdBy || userId,
+            template.updated_by || template.updatedBy || userId,
+          ],
+        );
         break;
       }
 

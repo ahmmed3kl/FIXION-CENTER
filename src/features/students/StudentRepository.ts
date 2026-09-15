@@ -239,9 +239,13 @@ export class StudentRepository {
     const now = new Date().toISOString();
     const studentType = dto.studentType || "registered";
     const notes = dto.notes?.trim() || null;
+    const deviceId = DeviceService.getDeviceIdSync();
+    const operationId = `op-std-create-${Date.now()}-${studentId}`;
 
-    // Atomic creation: insert student + issue card + create enrollments
-    try {
+    // Atomic creation: insert student + issue card + create enrollments.
+    // All writes use the shared transaction helper so a failed enrollment or
+    // card insert cannot leave a partially-created student behind.
+    DatabaseService.runInTransaction(() => {
       db.runSync(
         `INSERT INTO students (id, center_id, student_code, full_name, card_code, phone, parent_phone, grade, status, student_type, notes, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)`,
@@ -275,23 +279,8 @@ export class StudentRepository {
           });
         }
       }
-    } catch (err) {
-      // Rollback inserted records on partial failure
-      try {
-        db.runSync(
-          `DELETE FROM student_group_enrollments WHERE student_id = ?`,
-          [studentId],
-        );
-        db.runSync(`DELETE FROM student_cards WHERE student_id = ?`, [
-          studentId,
-        ]);
-        db.runSync(`DELETE FROM students WHERE id = ?`, [studentId]);
-      } catch {}
-      throw err;
-    }
-
-    const deviceId = DeviceService.getDeviceIdSync();
-    const operationId = `op-std-create-${Date.now()}-${studentId}`;
+      // Audit and outbox are committed with the entity mutation. If either
+      // fails, the whole local operation rolls back.
 
     AuditService.recordEvent({
       operationId,
@@ -359,6 +348,7 @@ export class StudentRepository {
         },
       },
     });
+    });
 
     SyncEngine.syncCenterNow(centerId).catch((e) => {
       console.warn("Background auto-sync student create notice:", e);
@@ -401,27 +391,38 @@ export class StudentRepository {
       dto.notes !== undefined
         ? dto.notes?.trim() || null
         : (existing.notes ?? null);
+
+    // Updates must enforce the same invariants as creation.  Previously an
+    // edit could persist malformed names/phones (and could even overwrite a
+    // valid value with whitespace) because only the create path validated DTOs.
+    if (!isValidName(fullName)) {
+      throw new ValidationError(ValidationMessages.name);
+    }
+    if (!isEgyptianPhone(normalizeDigits(phone)) || !isEgyptianPhone(normalizeDigits(parentPhone))) {
+      throw new ValidationError(ValidationMessages.phone);
+    }
     const now = new Date().toISOString();
-
-    db.runSync(
-      `UPDATE students
-       SET full_name = ?, phone = ?, parent_phone = ?, grade = ?, student_type = ?, notes = ?, updated_at = ?
-       WHERE center_id = ? AND id = ?`,
-      [
-        fullName,
-        phone,
-        parentPhone,
-        grade,
-        studentType,
-        notes,
-        now,
-        centerId,
-        studentId,
-      ],
-    );
-
     const deviceId = DeviceService.getDeviceIdSync();
     const operationId = `op-std-update-${Date.now()}-${studentId}`;
+
+    DatabaseService.runInTransaction(() => {
+      db.runSync(
+        `UPDATE students
+         SET full_name = ?, phone = ?, parent_phone = ?, grade = ?, student_type = ?, notes = ?, updated_at = ?
+         WHERE center_id = ? AND id = ?`,
+        [
+          fullName,
+          phone,
+          parentPhone,
+          grade,
+          studentType,
+          notes,
+          now,
+          centerId,
+          studentId,
+        ],
+      );
+      // Keep audit and outbox in the same local commit as the entity update.
 
     AuditService.recordEvent({
       operationId,
@@ -473,6 +474,7 @@ export class StudentRepository {
         },
       },
     });
+    });
 
     SyncEngine.syncCenterNow(centerId).catch((e) => {
       console.warn("Background auto-sync student update notice:", e);
@@ -508,22 +510,23 @@ export class StudentRepository {
 
     const db = DatabaseService.getDb();
     const now = new Date().toISOString();
-
-    // Soft delete student
-    db.runSync(
-      `UPDATE students SET status = 'inactive', updated_at = ? WHERE center_id = ? AND id = ?`,
-      [now, centerId, studentId],
-    );
-
-    // Deactivate active card if present
-    const activeCard =
-      StudentCardRepository.getActiveCardByStudentId(studentId);
-    if (activeCard) {
-      StudentCardRepository.deactivateCard(activeCard.id);
-    }
-
     const deviceId = DeviceService.getDeviceIdSync();
     const operationId = `op-std-deact-${Date.now()}-${studentId}`;
+
+    // Soft delete student
+    DatabaseService.runInTransaction(() => {
+      db.runSync(
+        `UPDATE students SET status = 'inactive', updated_at = ? WHERE center_id = ? AND id = ?`,
+        [now, centerId, studentId],
+      );
+
+      // Deactivate active card in the same transaction as the student status.
+      const activeCard =
+        StudentCardRepository.getActiveCardByStudentId(studentId);
+      if (activeCard) {
+        StudentCardRepository.deactivateCard(activeCard.id);
+      }
+      // Keep audit and outbox in the same local commit as the status change.
 
     AuditService.recordEvent({
       operationId,
@@ -555,6 +558,7 @@ export class StudentRepository {
           status: "inactive",
         },
       },
+    });
     });
 
     SyncEngine.syncCenterNow(centerId).catch((e) => {

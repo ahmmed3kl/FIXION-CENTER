@@ -437,6 +437,8 @@ export interface DetailedStudentFinancialStatus extends StudentFinancialStatus {
   monthlyPayments: PaymentEvent[];
   reversals: PaymentReversal[];
   sessionDebt?: SessionDebtBreakdown;
+  /** Canonical current-period amount owed by attended sessions. */
+  currentPeriodDebt?: number;
 }
 
 export interface SessionDebtBreakdown {

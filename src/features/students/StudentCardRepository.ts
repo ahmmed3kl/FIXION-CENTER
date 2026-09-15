@@ -93,6 +93,11 @@ export class StudentCardRepository {
     }
 
     const now = new Date().toISOString();
+    const cardId = `card-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+    const deviceId = DeviceService.getDeviceIdSync();
+    const operationId = `op-card-issue-${Date.now()}-${cardId}`;
+    let result!: StudentCard;
+    DatabaseService.runInTransaction(() => {
     // Deactivate any currently active cards for this student
     const activeCurrent = this.getActiveCardByStudentId(studentId);
     if (activeCurrent) {
@@ -102,7 +107,6 @@ export class StudentCardRepository {
       );
     }
 
-    const cardId = `card-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
     db.runSync(
       `INSERT INTO student_cards (id, center_id, student_id, card_code, status, issued_at, created_at)
        VALUES (?, ?, ?, ?, 'active', ?, ?)`,
@@ -114,9 +118,6 @@ export class StudentCardRepository {
       `UPDATE students SET card_code = ?, updated_at = ? WHERE id = ?`,
       [trimmedCard, now, studentId],
     );
-
-    const deviceId = DeviceService.getDeviceIdSync();
-    const operationId = `op-card-issue-${Date.now()}-${cardId}`;
 
     AuditService.recordEvent({
       operationId,
@@ -144,7 +145,7 @@ export class StudentCardRepository {
       payload: { studentId, cardCode: trimmedCard, issuedAt: now },
     });
 
-    return {
+    result = {
       id: cardId,
       centerId,
       studentId,
@@ -153,6 +154,8 @@ export class StudentCardRepository {
       issuedAt: now,
       createdAt: now,
     };
+    });
+    return result;
   }
 
   static replaceCard(studentId: string, newCardCode: string): StudentCard {
@@ -181,34 +184,15 @@ export class StudentCardRepository {
     }
 
     const now = new Date().toISOString();
-    db.runSync(
-      `UPDATE student_cards SET status = 'inactive', deactivated_at = ? WHERE id = ?`,
-      [now, cardId],
-    );
-
     const deviceId = DeviceService.getDeviceIdSync();
     const operationId = `op-card-deact-${Date.now()}-${cardId}`;
-
-    AuditService.recordEvent({
-      operationId,
-      centerId,
-      userId: user.id,
-      deviceId,
-      entityType: "student_card",
-      entityId: cardId,
-      action: "student_card.deactivate",
-      payload: { studentId: row.studentId, cardCode: row.cardCode },
-    });
-
-    SyncRepository.enqueueOperation({
-      operationId,
-      centerId,
-      userId: user.id,
-      deviceId,
-      operationType: "UPDATE",
-      entityType: "student_card",
-      entityId: cardId,
-      payload: { status: "inactive", deactivatedAt: now },
+    DatabaseService.runInTransaction(() => {
+      db.runSync(
+        `UPDATE student_cards SET status = 'inactive', deactivated_at = ? WHERE id = ?`,
+        [now, cardId],
+      );
+      AuditService.recordEvent({ operationId, centerId, userId: user.id, deviceId, entityType: "student_card", entityId: cardId, action: "student_card.deactivate", payload: { studentId: row.studentId, cardCode: row.cardCode } });
+      SyncRepository.enqueueOperation({ operationId, centerId, userId: user.id, deviceId, operationType: "UPDATE", entityType: "student_card", entityId: cardId, payload: { status: "inactive", deactivatedAt: now } });
     });
   }
 }

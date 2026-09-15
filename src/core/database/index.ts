@@ -3223,6 +3223,7 @@ class InMemorySqliteMock implements SqlDatabase {
 
 export class DatabaseService {
   private static db: SqlDatabase | null = null;
+  private static transactionDepth = 0;
 
   static getDb(): SqlDatabase {
     if (!this.db) {
@@ -3238,7 +3239,29 @@ export class DatabaseService {
   /** Runs a synchronous SQLite transaction for snapshot/bootstrap writes. */
   static runInTransaction<T>(callback: (db: SqlDatabase) => T): T {
     const db = this.getDb();
+    // Repositories can compose mutations (for example, creating a student
+    // issues a card and creates enrollments). Use savepoints for nested calls
+    // instead of attempting a second BEGIN, which SQLite rejects.
+    if (this.transactionDepth > 0) {
+      const savepoint = `sp_${this.transactionDepth}`;
+      this.transactionDepth += 1;
+      db.execSync(`SAVEPOINT ${savepoint};`);
+      try {
+        const result = callback(db);
+        db.execSync(`RELEASE SAVEPOINT ${savepoint};`);
+        return result;
+      } catch (error) {
+        try {
+          db.execSync(`ROLLBACK TO SAVEPOINT ${savepoint};`);
+          db.execSync(`RELEASE SAVEPOINT ${savepoint};`);
+        } catch {}
+        throw error;
+      } finally {
+        this.transactionDepth -= 1;
+      }
+    }
     db.execSync("BEGIN IMMEDIATE;");
+    this.transactionDepth = 1;
     try {
       const result = callback(db);
       db.execSync("COMMIT;");
@@ -3248,7 +3271,38 @@ export class DatabaseService {
         db.execSync("ROLLBACK;");
       } catch {}
       throw error;
+    } finally {
+      this.transactionDepth = 0;
     }
+  }
+
+  /** Async counterpart used by repositories that perform awaited work while
+   * keeping their local mutation, audit entry, and outbox enqueue atomic. */
+  static async runInTransactionAsync<T>(callback: (db: SqlDatabase) => Promise<T> | T): Promise<T> {
+    const db = this.getDb();
+    if (this.transactionDepth > 0) {
+      const savepoint = `sp_${this.transactionDepth}`;
+      this.transactionDepth += 1;
+      db.execSync(`SAVEPOINT ${savepoint};`);
+      try {
+        const result = await callback(db);
+        db.execSync(`RELEASE SAVEPOINT ${savepoint};`);
+        return result;
+      } catch (error) {
+        try { db.execSync(`ROLLBACK TO SAVEPOINT ${savepoint};`); db.execSync(`RELEASE SAVEPOINT ${savepoint};`); } catch {}
+        throw error;
+      } finally { this.transactionDepth -= 1; }
+    }
+    db.execSync("BEGIN IMMEDIATE;");
+    this.transactionDepth = 1;
+    try {
+      const result = await callback(db);
+      db.execSync("COMMIT;");
+      return result;
+    } catch (error) {
+      try { db.execSync("ROLLBACK;"); } catch {}
+      throw error;
+    } finally { this.transactionDepth = 0; }
   }
 
   static init(): void {

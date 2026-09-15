@@ -290,6 +290,7 @@ export class FinancialCalculationService {
       monthlyPayments: activeMonthlyPayments,
       reversals,
       sessionDebt,
+      currentPeriodDebt: sessionDebt.currentDebt,
     };
   }
 }

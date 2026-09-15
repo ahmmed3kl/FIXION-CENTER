@@ -1302,6 +1302,12 @@ export class SyncEngine {
           db.runSync(`INSERT INTO notification_deliveries (id, center_id, notification_event_id, channel, status, recipient, rendered_message, sent_at, failure_reason, retry_count, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET channel=excluded.channel, status=excluded.status, sent_at=excluded.sent_at, failure_reason=excluded.failure_reason, retry_count=excluded.retry_count, updated_at=excluded.updated_at`,
             [d.id || change.entityId, centerId, d.notification_event_id || d.notificationEventId, d.provider || d.channel || "push", d.status || "pending", d.recipient || "", d.rendered_message || d.renderedMessage || "", d.sent_at || d.sentAt || null, d.failure_reason || d.failureReason || null, Number(d.retry_count || 0), d.created_at || new Date().toISOString(), d.updated_at || new Date().toISOString()]);
+        } else if (entityType === "notification_template") {
+          const t = data.template || data;
+          db.runSync(`INSERT INTO notification_templates (id, center_id, event_type, channel, template_body, is_default, created_by, updated_by, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET event_type=excluded.event_type, channel=excluded.channel, template_body=excluded.template_body, is_default=excluded.is_default, updated_by=excluded.updated_by, updated_at=excluded.updated_at`,
+            [t.id || t.templateId || change.entityId, centerId, t.event_type || t.eventType, t.channel, t.template_body || t.templateBody || "", t.is_default ? 1 : 0, t.created_by || t.createdBy || "system", t.updated_by || t.updatedBy || null, t.created_at || t.createdAt || new Date().toISOString(), t.updated_at || t.updatedAt || new Date().toISOString()]);
         } else if (entityType === "session_closing") {
           const c = data.closing || data;
           const sessionId = c.session_id || c.sessionId || change.entityId;
@@ -1476,14 +1482,23 @@ export class SyncEngine {
           batches += 1;
         }
       } catch (pullErr: any) {
-        // Pull failure is non-fatal — log it and continue to push phase.
-        // The device may be behind but we should still push pending ops.
+        // Do not push while the local cursor is stale. Otherwise a device can
+        // write changes based on an outdated snapshot and create avoidable
+        // conflicts. The next connectivity retry will pull first.
         errors++;
         Logger.warn("sync", "pull_failed", {
           centerId,
           error:
             pullErr?.userMessage || pullErr?.message || JSON.stringify(pullErr),
         });
+        this.currentState = "error";
+        return {
+          syncedCount,
+          errors,
+          conflicts,
+          state: "error",
+          arabicMessage: "فشل تحميل التغييرات من الخادم. سيتم إعادة المحاولة قبل إرسال العمليات المحلية.",
+        };
       }
 
       // 5. Push Prioritized Local Operations

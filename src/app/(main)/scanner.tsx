@@ -82,7 +82,7 @@ function ScannerContent() {
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [attendanceStarted, setAttendanceStarted] = useState(false);
   const [attendanceSummary, setAttendanceSummary] = useState<AttendanceSummary | null>(null);
-  const [makeupNotice, setMakeupNotice] = useState<{ sourceGroupName?: string; teacherName?: string } | null>(null);
+  const [makeupNotice, setMakeupNotice] = useState<{ sourceGroupName?: string; teacherName?: string; originalAbsenceId?: string } | null>(null);
 
   // Quick Payment Modal
   const [showPaymentModal, setShowPaymentModal] = useState(false);
@@ -166,7 +166,7 @@ function ScannerContent() {
       }
 
       if (makeupEligibility.eligible) {
-        setMakeupNotice({ sourceGroupName: makeupEligibility.sourceGroupName, teacherName: makeupEligibility.teacherName });
+        setMakeupNotice({ sourceGroupName: makeupEligibility.sourceGroupName, teacherName: makeupEligibility.teacherName, originalAbsenceId: makeupEligibility.originalAbsenceId });
         Alert.alert("حضور تعويضي", `الطالب مسجل مع نفس المدرس في مجموعة ${makeupEligibility.sourceGroupName || "أخرى"}. سيتم تسجيل حضوره تعويضياً في المجموعة الحالية.`);
       } else {
         setMakeupNotice(null);
@@ -239,6 +239,7 @@ function ScannerContent() {
         status: lateCalc.status,
         isLate: lateCalc.isLate,
         attendanceType: makeupNotice ? "makeup" : "present",
+        originalAbsenceId: makeupNotice?.originalAbsenceId,
       });
 
       setAttendanceResult(result);

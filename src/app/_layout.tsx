@@ -2,12 +2,14 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Stack, useRouter, useSegments } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import React, { useEffect } from "react";
-import { View } from "react-native";
+import { AppState, View } from "react-native";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import { DatabaseService } from "../core/database";
 import { ConnectivityService } from "../core/connectivity";
 import { initializeRTL } from "../core/localization";
 import { SyncEngine } from "../core/sync";
+import { registerBackgroundSync } from "../core/sync/backgroundTask";
+import "../core/database/registerAtomicRepositories";
 import { ThemeProvider } from "../core/theme";
 import { ServiceVisibilityProvider } from "../core/services/ServiceVisibilityContext";
 import { useAuthStore } from "../features/auth/useAuthStore";
@@ -36,16 +38,28 @@ function AuthGuard({ children }: { children: React.ReactNode }) {
     if (!isAuthenticated || !activeCenterId) return;
 
     let disposed = false;
-    const stopMonitoring = ConnectivityService.startMonitoring(() => {
+    const sync = () => {
       if (disposed) return;
       SyncEngine.syncCenterNow(activeCenterId).catch((error) => {
-        console.warn("Automatic sync after network recovery failed:", error);
+        console.warn("Automatic sync failed:", error);
       });
+    };
+    const stopMonitoring = ConnectivityService.startMonitoring(() => {
+      sync();
     });
+    registerBackgroundSync();
+    const appStateSubscription = AppState.addEventListener("change", (state) => {
+      if (state === "active") sync();
+    });
+    // Retry while the app remains foregrounded. Native background execution
+    // still requires a separately configured Expo background task.
+    const interval = setInterval(sync, 30_000);
 
     return () => {
       disposed = true;
       stopMonitoring();
+      appStateSubscription.remove();
+      clearInterval(interval);
     };
   }, [isAuthenticated, activeCenterId]);
 

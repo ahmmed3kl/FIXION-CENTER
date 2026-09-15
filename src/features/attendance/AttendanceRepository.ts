@@ -114,6 +114,12 @@ export class AttendanceRepository {
     const isLateInt = params.isLate ? 1 : 0;
     const isExternalInt = params.isExternal ? 1 : 0;
 
+    // Attendance and any external-session payment are one local mutation.
+    // The audit and outbox records are committed with them so a crash cannot
+    // leave attendance visible without a retryable sync operation.
+    let attendanceRecord!: Attendance;
+    DatabaseService.runInTransaction(() => {
+
     // 1. Save to SQLite immediately (with UNIQUE constraint safety)
     try {
       db.runSync(
@@ -209,7 +215,7 @@ export class AttendanceRepository {
       }
     }
 
-    const attendanceRecord: Attendance = {
+    attendanceRecord = {
       id: attendanceId,
       centerId,
       studentId: params.studentId,
@@ -254,6 +260,7 @@ export class AttendanceRepository {
         attendanceType,
         isExternal: Boolean(params.isExternal),
       },
+    });
     });
 
     return attendanceRecord;

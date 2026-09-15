@@ -1,0 +1,27 @@
+import { wrapAtomicMethods, wrapAsyncAtomicMethods } from "./atomicMethods";
+import { GroupRepository } from "../../features/groups/GroupRepository";
+import { GroupScheduleRepository } from "../../features/groups/GroupScheduleRepository";
+import { SubjectRepository } from "../../features/subjects/SubjectRepository";
+import { PackageRepository } from "../../features/packages/PackageRepository";
+import { PackageSubscriptionRepository } from "../../features/packages/PackageSubscriptionRepository";
+import { DebtAdjustmentRepository } from "../../features/payments/DebtAdjustmentRepository";
+import { DebtCycleRepository } from "../../features/payments/DebtCycleRepository";
+import { NotificationService } from "../../features/notifications/NotificationService";
+import { SessionGenerationService } from "../../features/sessions/SessionGenerationService";
+import { SessionClosingService } from "../../features/sessions/SessionClosingService";
+import { DailyClosingService } from "../../features/reports/DailyClosingService";
+import { MakeupService } from "../../features/attendance/MakeupService";
+
+wrapAtomicMethods(GroupRepository, ["createGroup", "updateGroup", "deactivateGroup", "reactivateGroup", "deleteGroup"]);
+wrapAtomicMethods(GroupScheduleRepository, ["createSchedule", "deactivateSchedule", "reactivateSchedule"]);
+wrapAtomicMethods(SubjectRepository, ["createSubject", "updateSubject", "deactivateSubject", "reactivateSubject", "deleteSubject"]);
+wrapAsyncAtomicMethods(PackageRepository, ["createPackage", "updatePackage", "addPackageSubject", "removePackageSubject"]);
+wrapAsyncAtomicMethods(PackageSubscriptionRepository, ["subscribeStudent", "cancelSubscription", "setTeacherOverride", "removeTeacherOverride"]);
+wrapAsyncAtomicMethods(DebtAdjustmentRepository, ["createAdjustment"]);
+wrapAtomicMethods(DebtCycleRepository, ["generateCyclesForEnrollment", "generateCyclesForPackageSubscription", "updateCycleStatus"]);
+wrapAtomicMethods(NotificationService, ["createNotificationEvent"]);
+wrapAsyncAtomicMethods(NotificationService, ["sendPendingDeliveries"]);
+wrapAtomicMethods(SessionGenerationService, ["generateSessionsForRange", "cancelSession"]);
+wrapAtomicMethods(SessionClosingService, ["closeSession", "reopenSession"]);
+wrapAtomicMethods(DailyClosingService, ["closeDailyForDate", "reopenDailyClosing"]);
+wrapAsyncAtomicMethods(MakeupService, ["recordAdvanceCoverage", "recordMakeupAttendance"]);

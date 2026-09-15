@@ -95,6 +95,7 @@ export class TeacherRepository {
     const phone = dto.phone?.trim() || null;
     const notes = dto.notes?.trim() || null;
 
+    DatabaseService.runInTransaction(() => {
     db.runSync(
       `INSERT INTO teachers (id, center_id, name, phone, status, notes, created_at)
        VALUES (?, ?, ?, ?, 'active', ?, ?)`,
@@ -132,6 +133,8 @@ export class TeacherRepository {
         status: "active",
         createdAt: now,
       },
+    });
+
     });
 
     SyncEngine.syncCenterNow(centerId).catch((err) => {
@@ -172,6 +175,7 @@ export class TeacherRepository {
       throw new ValidationError(!isValidName(name) ? ValidationMessages.name : ValidationMessages.phone);
     }
 
+    DatabaseService.runInTransaction(() => {
     db.runSync(
       `UPDATE teachers
        SET name = ?, phone = ?, notes = ?, status = ?, updated_at = ?
@@ -210,6 +214,8 @@ export class TeacherRepository {
         status,
         updatedAt: now,
       },
+    });
+
     });
 
     SyncEngine.syncCenterNow(centerId).catch((err) => {

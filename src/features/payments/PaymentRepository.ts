@@ -175,28 +175,6 @@ export class PaymentRepository {
       }
     }
 
-    // 1. Insert immutable payment event
-    db.runSync(
-      `INSERT INTO payments (id, operation_id, center_id, student_id, subscription_id, debt_cycle_id, session_id, amount, payment_type, payment_method, payment_date, notes, is_reversed, created_at, user_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
-      [
-        paymentId,
-        operationId,
-        centerId,
-        params.studentId,
-        params.subscriptionId || null,
-        assignedCycleId,
-        params.sessionId || null,
-        params.amount,
-        normType,
-        paymentMethod,
-        paymentDate,
-        params.notes || null,
-        createdAt,
-        user.id,
-      ],
-    );
-
     const paymentEvent: PaymentEvent = {
       id: paymentId,
       operationId,
@@ -215,33 +193,14 @@ export class PaymentRepository {
       userId: user.id,
     };
 
-    // 2. Queue for sync
-    SyncRepository.enqueueOperation({
-      centerId,
-      userId: user.id,
-      deviceId,
-      operationType: "payment.create",
-      entityType: "payment",
-      entityId: paymentId,
-      payload: paymentEvent,
-      operationId,
-    });
-
-    // 3. Record in audit log
-    AuditService.recordEvent({
-      operationId,
-      centerId,
-      userId: user.id,
-      deviceId,
-      entityType: "payment",
-      entityId: paymentId,
-      action: "payment.record",
-      payload: {
-        amount: params.amount,
-        paymentType: normType,
-        debtCycleId: assignedCycleId,
-        sessionId: params.sessionId,
-      },
+    DatabaseService.runInTransaction(() => {
+      db.runSync(
+        `INSERT INTO payments (id, operation_id, center_id, student_id, subscription_id, debt_cycle_id, session_id, amount, payment_type, payment_method, payment_date, notes, is_reversed, created_at, user_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+        [paymentId, operationId, centerId, params.studentId, params.subscriptionId || null, assignedCycleId, params.sessionId || null, params.amount, normType, paymentMethod, paymentDate, params.notes || null, createdAt, user.id],
+      );
+      SyncRepository.enqueueOperation({ centerId, userId: user.id, deviceId, operationType: "payment.create", entityType: "payment", entityId: paymentId, payload: paymentEvent, operationId });
+      AuditService.recordEvent({ operationId, centerId, userId: user.id, deviceId, entityType: "payment", entityId: paymentId, action: "payment.record", payload: { amount: params.amount, paymentType: normType, debtCycleId: assignedCycleId, sessionId: params.sessionId } });
     });
 
     // 4. Recalculate financial status to update cycle statuses dynamically
@@ -320,30 +279,6 @@ export class PaymentRepository {
     const deviceId = DeviceService.getDeviceIdSync();
     const now = new Date().toISOString();
 
-    // 2. Mark payment as reversed
-    db.runSync(
-      `UPDATE payments SET is_reversed = 1, updated_at = ? WHERE center_id = ? AND id = ?`,
-      [now, centerId, params.paymentId],
-    );
-
-    // 3. Insert into payment_reversals
-    db.runSync(
-      `INSERT INTO payment_reversals (id, operation_id, center_id, payment_id, student_id, reversed_amount, reason, reversed_by, reversed_at, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        reversalId,
-        operationId,
-        centerId,
-        params.paymentId,
-        payment.studentId,
-        Number(payment.amount),
-        params.reason.trim(),
-        user.id,
-        now,
-        now,
-      ],
-    );
-
     const reversal: PaymentReversal = {
       id: reversalId,
       operationId,
@@ -357,32 +292,15 @@ export class PaymentRepository {
       createdAt: now,
     };
 
-    // 4. Queue for sync
-    SyncRepository.enqueueOperation({
-      centerId,
-      userId: user.id,
-      deviceId,
-      operationType: "payment.reverse",
-      entityType: "payment_reversal",
-      entityId: reversalId,
-      payload: reversal,
-      operationId,
-    });
-
-    // 5. Audit log
-    AuditService.recordEvent({
-      operationId,
-      centerId,
-      userId: user.id,
-      deviceId,
-      entityType: "payment",
-      entityId: params.paymentId,
-      action: "payment.reverse",
-      payload: {
-        reversedAmount: Number(payment.amount),
-        reason: params.reason.trim(),
-        reversalId,
-      },
+    DatabaseService.runInTransaction(() => {
+      db.runSync(`UPDATE payments SET is_reversed = 1, updated_at = ? WHERE center_id = ? AND id = ?`, [now, centerId, params.paymentId]);
+      db.runSync(
+        `INSERT INTO payment_reversals (id, operation_id, center_id, payment_id, student_id, reversed_amount, reason, reversed_by, reversed_at, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [reversalId, operationId, centerId, params.paymentId, payment.studentId, Number(payment.amount), params.reason.trim(), user.id, now, now],
+      );
+      SyncRepository.enqueueOperation({ centerId, userId: user.id, deviceId, operationType: "payment.reverse", entityType: "payment_reversal", entityId: reversalId, payload: { ...reversal, updatedAt: now }, operationId });
+      AuditService.recordEvent({ operationId, centerId, userId: user.id, deviceId, entityType: "payment", entityId: params.paymentId, action: "payment.reverse", payload: { reversedAmount: Number(payment.amount), reason: params.reason.trim(), reversalId } });
     });
 
     // 6. Recalculate financial status to update cycle statuses dynamically

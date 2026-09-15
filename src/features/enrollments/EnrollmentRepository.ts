@@ -139,57 +139,26 @@ export class EnrollmentRepository {
     const endDate = dto.endDate || null;
     const specialPrice = dto.specialMonthlyPrice ?? null;
 
-    db.runSync(
-      `INSERT INTO student_group_enrollments (id, center_id, student_id, group_id, start_date, end_date, status, special_monthly_price, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
-      [
-        enrollmentId,
-        centerId,
-        dto.studentId,
-        dto.groupId,
-        dto.startDate,
-        endDate,
-        specialPrice,
-        now,
-      ],
-    );
-
     const deviceId = DeviceService.getDeviceIdSync();
     const operationId = `op-enr-create-${Date.now()}-${enrollmentId}`;
 
-    AuditService.recordEvent({
-      operationId,
-      centerId,
-      userId: user.id,
-      deviceId,
-      entityType: "enrollment",
-      entityId: enrollmentId,
-      action: "enrollment.create",
-      payload: {
-        studentId: dto.studentId,
-        groupId: dto.groupId,
-        startDate: dto.startDate,
-        specialPrice,
-      },
-    });
-
-    SyncRepository.enqueueOperation({
-      operationId,
-      centerId,
-      userId: user.id,
-      deviceId,
-      operationType: "CREATE",
-      entityType: "enrollment",
-      entityId: enrollmentId,
-      payload: {
-        studentId: dto.studentId,
-        groupId: dto.groupId,
-        startDate: dto.startDate,
-        endDate,
-        specialMonthlyPrice: specialPrice,
-        status: "active",
-        createdAt: now,
-      },
+    DatabaseService.runInTransaction(() => {
+      db.runSync(
+        `INSERT INTO student_group_enrollments (id, center_id, student_id, group_id, start_date, end_date, status, special_monthly_price, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
+        [enrollmentId, centerId, dto.studentId, dto.groupId, dto.startDate, endDate, specialPrice, now],
+      );
+      AuditService.recordEvent({
+        operationId, centerId, userId: user.id, deviceId,
+        entityType: "enrollment", entityId: enrollmentId,
+        action: "enrollment.create",
+        payload: { studentId: dto.studentId, groupId: dto.groupId, startDate: dto.startDate, specialPrice },
+      });
+      SyncRepository.enqueueOperation({
+        operationId, centerId, userId: user.id, deviceId,
+        operationType: "CREATE", entityType: "enrollment", entityId: enrollmentId,
+        payload: { studentId: dto.studentId, groupId: dto.groupId, startDate: dto.startDate, endDate, specialMonthlyPrice: specialPrice, status: "active", createdAt: now },
+      });
     });
 
     // Create the first financial cycle immediately when the caller also has
@@ -237,38 +206,15 @@ export class EnrollmentRepository {
     }
 
     const now = new Date().toISOString();
-    db.runSync(
-      `UPDATE student_group_enrollments SET status = 'ended', end_date = ?, updated_at = ? WHERE center_id = ? AND id = ?`,
-      [endDate, now, centerId, enrollmentId],
-    );
-
     const deviceId = DeviceService.getDeviceIdSync();
     const operationId = `op-enr-end-${Date.now()}-${enrollmentId}`;
-
-    AuditService.recordEvent({
-      operationId,
-      centerId,
-      userId: user.id,
-      deviceId,
-      entityType: "enrollment",
-      entityId: enrollmentId,
-      action: "enrollment.end",
-      payload: {
-        studentId: existing.studentId,
-        groupId: existing.groupId,
-        endDate,
-      },
-    });
-
-    SyncRepository.enqueueOperation({
-      operationId,
-      centerId,
-      userId: user.id,
-      deviceId,
-      operationType: "UPDATE",
-      entityType: "enrollment",
-      entityId: enrollmentId,
-      payload: { status: "ended", endDate, updatedAt: now },
+    DatabaseService.runInTransaction(() => {
+      db.runSync(
+        `UPDATE student_group_enrollments SET status = 'ended', end_date = ?, updated_at = ? WHERE center_id = ? AND id = ?`,
+        [endDate, now, centerId, enrollmentId],
+      );
+      AuditService.recordEvent({ operationId, centerId, userId: user.id, deviceId, entityType: "enrollment", entityId: enrollmentId, action: "enrollment.end", payload: { studentId: existing.studentId, groupId: existing.groupId, endDate } });
+      SyncRepository.enqueueOperation({ operationId, centerId, userId: user.id, deviceId, operationType: "UPDATE", entityType: "enrollment", entityId: enrollmentId, payload: { status: "ended", endDate, updatedAt: now } });
     });
   }
 }

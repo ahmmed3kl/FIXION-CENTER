@@ -93,19 +93,33 @@ export class SessionDebtService {
     );
     for (const subscription of packageSubscriptions) {
       const options = db.getAllSync<any>(
-        `SELECT teacher_id as teacherId FROM package_subject_teacher_overrides
-         WHERE center_id = ? AND subscription_id = ?`,
-        [activeCenterId, subscription.id],
+        `SELECT ps.subject_id as subjectId,
+                COALESCE(o.teacher_id, ps.default_teacher_id) as teacherId
+         FROM package_subjects ps
+         LEFT JOIN package_subject_teacher_overrides o
+           ON o.center_id = ps.center_id AND o.subscription_id = ?
+          AND o.subject_id = ps.subject_id
+         WHERE ps.center_id = ? AND ps.package_id = ?
+         UNION ALL
+         SELECT subject_id as subjectId, teacher_id as teacherId
+         FROM package_subject_teacher_overrides
+         WHERE center_id = ? AND subscription_id = ?
+           AND subject_id NOT IN (
+             SELECT subject_id FROM package_subjects
+             WHERE center_id = ? AND package_id = ?
+           )`,
+        [subscription.id, activeCenterId, subscription.packageId, activeCenterId, subscription.id, activeCenterId, subscription.packageId],
       );
       if (!options.length) continue;
       const subjectShare = Number(subscription.price || 0) / options.length;
       for (const option of options) {
         const optionItems = planned.filter((item) => {
           const teacher = db.getFirstSync<any>(
-            `SELECT teacher_id as teacherId FROM groups WHERE center_id = ? AND id = ?`,
+            `SELECT teacher_id as teacherId, subject_id as subjectId FROM groups WHERE center_id = ? AND id = ?`,
             [activeCenterId, item.groupId],
           );
-          return String(teacher?.teacherId) === String(option.teacherId);
+          return String(teacher?.teacherId) === String(option.teacherId)
+            && (!option.subjectId || String(teacher?.subjectId) === String(option.subjectId));
         });
         if (!optionItems.length) continue;
         const sessionShare = subjectShare / optionItems.length;
