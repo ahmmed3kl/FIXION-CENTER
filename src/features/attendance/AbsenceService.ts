@@ -21,7 +21,7 @@ export class AbsenceService {
    */
   static getAbsenteesForSession(sessionId: string): Student[] {
     const { centerId, user } = this.getActiveContext();
-    if (!PermissionService.hasPermission(user.permissions, "attendance.view")) {
+    if (!PermissionService.hasAnyPermission(user.permissions, ["attendance.view", "reports.attendance.view", "reports.view"])) {
       throw new ForbiddenError("ليس لديك صلاحية عرض بيانات الحضور والغياب.");
     }
     const db = DatabaseService.getDb();
@@ -96,7 +96,7 @@ export class AbsenceService {
     nextEligibleSession?: Session | null;
   }[] {
     const { centerId, user } = this.getActiveContext();
-    if (!PermissionService.hasPermission(user.permissions, "attendance.view")) {
+    if (!PermissionService.hasAnyPermission(user.permissions, ["attendance.view", "reports.attendance.view", "reports.view"])) {
       throw new ForbiddenError("ليس لديك صلاحية عرض بيانات الغياب.");
     }
     const db = DatabaseService.getDb();

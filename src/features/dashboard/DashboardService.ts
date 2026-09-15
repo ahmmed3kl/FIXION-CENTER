@@ -1,6 +1,7 @@
 import { DatabaseService } from "../../core/database";
 import { UnauthorizedError } from "../../core/errors";
 import { useAuthStore } from "../auth/useAuthStore";
+import { calculateSessionAttendanceCounts } from "../attendance/AbsenceReportsService";
 
 export interface DashboardSummary {
   expectedCount: number;
@@ -70,39 +71,25 @@ export class DashboardService {
       };
     }
 
-    // 2. Expected students from session_expected_students (Foundation for accurate expected calculations)
-    const expectedRows = db.getAllSync<any>(
-      `SELECT DISTINCT student_id FROM session_expected_students
-       WHERE center_id = ? AND session_id IN (${sessionIds.map(() => "?").join(",")})`,
-      [centerId, ...sessionIds],
-    );
-    const expectedCount = expectedRows.length;
-
-    // 3. Recorded attendance for today's sessions
-    const attendanceRows = db.getAllSync<any>(
-      `SELECT id, status, is_late, attendance_type FROM attendance
-       WHERE center_id = ? AND session_id IN (${sessionIds.map(() => "?").join(",")})`,
-      [centerId, ...sessionIds],
-    );
-
-    let presentCount = 0;
-    let lateCount = 0;
-    let makeupCount = 0;
-
-    for (const att of attendanceRows) {
-      if (att.attendance_type === "makeup") {
-        makeupCount++;
-      }
-      if (att.is_late === 1 || att.status === "late") {
-        lateCount++;
-      } else {
-        presentCount++;
-      }
-    }
-
-    // Calculated absent count based on expected students minus those who checked in
-    const totalAttended = presentCount + lateCount;
-    const absentCount = Math.max(0, expectedCount - totalAttended);
+    // Aggregate each session independently. The expected snapshot is the
+    // roster authority; makeup rows are never allowed to become regular
+    // present rows or to reduce the regular absent count.
+    const counts = sessionIds.map((sessionId) => {
+      const expected = db.getAllSync<any>(
+        "SELECT student_id as studentId FROM session_expected_students WHERE center_id = ? AND session_id = ?",
+        [centerId, sessionId],
+      );
+      const attendance = db.getAllSync<any>(
+        "SELECT student_id as studentId, status, attendance_type as attendanceType FROM attendance WHERE center_id = ? AND session_id = ?",
+        [centerId, sessionId],
+      );
+      return calculateSessionAttendanceCounts(expected.map((row) => row.studentId), attendance);
+    });
+    const expectedCount = counts.reduce((sum, item) => sum + item.expected, 0);
+    const presentCount = counts.reduce((sum, item) => sum + item.present, 0);
+    const lateCount = counts.reduce((sum, item) => sum + item.late, 0);
+    const absentCount = counts.reduce((sum, item) => sum + item.absent, 0);
+    const makeupCount = counts.reduce((sum, item) => sum + item.makeup, 0);
 
     // 4. Today's collections
     const paymentRows = db.getAllSync<any>(

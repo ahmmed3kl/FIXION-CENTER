@@ -10,6 +10,7 @@ import { GroupRepository } from "../groups/GroupRepository";
 import { SessionRepository } from "../sessions/SessionRepository";
 import { GroupScheduleRepository } from "../groups/GroupScheduleRepository";
 import { AuditService } from "../../core/audit";
+import { calculateSessionAttendanceCounts } from "./AbsenceReportsService";
 
 export interface AttendanceSummary {
   total: number;
@@ -233,8 +234,9 @@ export class AttendanceSessionService {
 
   static getSummary(sessionId: string): AttendanceSummary {
     const db = DatabaseService.getDb();
-    const total = Number(db.getFirstSync<any>("SELECT COUNT(*) as count FROM session_expected_students WHERE session_id = ?", [sessionId])?.count || 0);
-    const present = Number(db.getFirstSync<any>("SELECT COUNT(*) as count FROM attendance WHERE session_id = ? AND status IN ('present','late')", [sessionId])?.count || 0);
-    return { total, present, absent: Math.max(0, total - present) };
+    const expected = db.getAllSync<any>("SELECT student_id as studentId FROM session_expected_students WHERE session_id = ?", [sessionId]);
+    const attendance = db.getAllSync<any>("SELECT student_id as studentId, status, attendance_type as attendanceType FROM attendance WHERE session_id = ?", [sessionId]);
+    const counts = calculateSessionAttendanceCounts(expected.map((row) => row.studentId), attendance);
+    return { total: counts.expected, present: counts.present, absent: counts.absent };
   }
 }

@@ -9,6 +9,7 @@ const items = [
   { label: "الباقات", route: "/(main)/packages", icon: "pricetags-outline" as const },
   { label: "الإغلاق اليومي", route: "/(main)/closing", icon: "lock-closed-outline" as const },
   { label: "الإشعارات", route: "/(main)/notifications", icon: "notifications-outline" as const },
+  { label: "تقارير الغياب", route: "/(main)/absence-reports", icon: "document-text-outline" as const },
   { label: "التقارير", route: "/(main)/reports", icon: "bar-chart-outline" as const },
 ];
 

@@ -11,6 +11,7 @@ import {
 } from "../../shared/types";
 import { useAuthStore } from "../auth/useAuthStore";
 import { FinancialCalculationService } from "../payments/FinancialCalculationService";
+import { calculateSessionAttendanceCounts } from "../attendance/AbsenceReportsService";
 
 export class OperationalReportsService {
   private static getActiveContext() {
@@ -59,23 +60,16 @@ export class OperationalReportsService {
         [centerId, s.id],
       );
       const attendanceRows = db.getAllSync<any>(
-        `SELECT status, attendance_type FROM attendance WHERE center_id = ? AND session_id = ?`,
+        `SELECT student_id as studentId, status, attendance_type as attendanceType FROM attendance WHERE center_id = ? AND session_id = ?`,
         [centerId, s.id],
       );
 
-      const expectedCount = expected.length;
-      const presentCount = attendanceRows.filter(
-        (a: any) =>
-          a.attendance_type !== "makeup" &&
-          (a.status === "present" || a.status === "late"),
-      ).length;
-      const lateCount = attendanceRows.filter(
-        (a: any) => a.status === "late" && a.attendance_type !== "makeup",
-      ).length;
-      const makeupCount = attendanceRows.filter(
-        (a: any) => a.attendance_type === "makeup",
-      ).length;
-      const absentCount = Math.max(0, expectedCount - presentCount);
+      const counts = calculateSessionAttendanceCounts(expected.map((row: any) => row.student_id), attendanceRows);
+      const expectedCount = counts.expected;
+      const presentCount = counts.present;
+      const lateCount = counts.late;
+      const makeupCount = counts.makeup;
+      const absentCount = counts.absent;
       const attendanceRate =
         expectedCount > 0
           ? Math.round((presentCount / expectedCount) * 100)

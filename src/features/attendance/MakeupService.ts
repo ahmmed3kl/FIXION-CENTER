@@ -295,7 +295,7 @@ export class MakeupService {
    */
   static getMakeupOpportunities(studentId: string): MakeupOpportunity[] {
     const { centerId, user } = this.getActiveContext();
-    if (!PermissionService.hasPermission(user.permissions, "attendance.view")) {
+    if (!PermissionService.hasAnyPermission(user.permissions, ["attendance.view", "reports.attendance.view", "reports.view"])) {
       throw new ForbiddenError("ليس لديك صلاحية عرض بيانات الحضور.");
     }
 

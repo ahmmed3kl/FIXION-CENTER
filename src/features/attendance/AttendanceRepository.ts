@@ -271,7 +271,7 @@ export class AttendanceRepository {
    */
   static getSessionAttendance(sessionId: string): Attendance[] {
     const { centerId, user } = this.getActiveContext();
-    if (!PermissionService.hasPermission(user.permissions, "attendance.view")) {
+    if (!PermissionService.hasAnyPermission(user.permissions, ["attendance.view", "reports.attendance.view", "reports.view"])) {
       throw new ForbiddenError("ليس لديك صلاحية عرض بيانات الحضور.");
     }
     const db = DatabaseService.getDb();
@@ -293,7 +293,7 @@ export class AttendanceRepository {
    */
   static getStudentAttendance(studentId: string): Attendance[] {
     const { centerId, user } = this.getActiveContext();
-    if (!PermissionService.hasPermission(user.permissions, "attendance.view")) {
+    if (!PermissionService.hasAnyPermission(user.permissions, ["attendance.view", "reports.attendance.view", "reports.view"])) {
       throw new ForbiddenError("ليس لديك صلاحية عرض بيانات الحضور.");
     }
     const db = DatabaseService.getDb();

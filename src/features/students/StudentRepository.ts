@@ -120,6 +120,15 @@ export class StudentRepository {
     return this.findByIdInternal(studentId);
   }
 
+  /** Read-only lookup for attendance/report screens that may not have student-management permission. */
+  static findByIdForAttendanceReport(studentId: string): Student | null {
+    const { user } = this.getActiveContext();
+    if (!PermissionService.hasAnyPermission(user.permissions, ["attendance.view", "reports.attendance.view", "reports.view"])) {
+      throw new ForbiddenError("Ù„ÙŠØ³ Ù„Ø¯ÙŠÙƒ ØµÙ„Ø§Ø­ÙŠØ© Ø¹Ø±Ø¶ Ø¨ÙŠØ§Ù†Ø§Øª Ø§Ù„Ø­Ø¶ÙˆØ±.");
+    }
+    return this.findByIdInternal(studentId);
+  }
+
   /**
    * A duplicate phone is informational only. The lookup is deliberately
    * scoped to the active center and never participates in create/update.
