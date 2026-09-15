@@ -67,12 +67,13 @@ export function getOperationPriority(entityType: string): number {
   if (e === "teacher_subject") return 52;
   if (e === "group") return 53;
   if (e === "group_schedule") return 54;
-  if (e === "student" || e === "student_card") return 55;
-  if (e === "package") return 56;
-  if (e === "package_subject") return 57;
-  if (e === "enrollment" || e === "student_group_enrollment") return 58;
-  if (e === "package_subscription") return 59;
-  if (e === "package_teacher_override") return 60;
+  if (e === "student") return 55;
+  if (e === "student_card") return 56;
+  if (e === "package") return 57;
+  if (e === "package_subject") return 58;
+  if (e === "enrollment" || e === "student_group_enrollment") return 59;
+  if (e === "package_subscription") return 60;
+  if (e === "package_teacher_override") return 61;
   return 6;
 }
 
@@ -257,6 +258,8 @@ export class SyncRepository {
            OR last_error LIKE '%column%does not exist%'
            OR last_error LIKE '%STALE_UPDATE%'
            OR last_error LIKE '%value too long%'
+           OR last_error LIKE '%outside the authenticated center%'
+           OR last_error LIKE '%CARD_BELONGS_TO_OTHER_CENTER%'
            OR last_error LIKE '%package%constraint%'
            OR last_error LIKE '%violates foreign key%'
            OR last_error LIKE '%violates check constraint%'
@@ -950,22 +953,41 @@ export class SyncEngine {
       // Upsert Student Cards
       if (Array.isArray(data.cards)) {
         for (const card of data.cards) {
+          const cardCenterId = card.center_id || card.centerId || centerId;
+          const cardStudentId = card.student_id || card.studentId;
+          const cardCode = card.card_code || card.cardCode;
+          const cardStatus = card.status === "active" ? "active" : "inactive";
+          const issuedAt = card.issued_at || new Date().toISOString();
+          const createdAt = card.created_at || new Date().toISOString();
+          const existingByCode = db.getFirstSync<{ id: string }>(
+            `SELECT id FROM student_cards WHERE center_id = ? AND card_code = ?`,
+            [cardCenterId, cardCode],
+          );
+
+          // A previous bootstrap may have stored the same card code under a
+          // different local id. Keep one canonical row instead of allowing a
+          // primary-key/card-code collision to abort the entire bootstrap.
+          if (existingByCode && existingByCode.id !== card.id) {
+            db.runSync(`DELETE FROM student_cards WHERE id = ?`, [card.id]);
+            db.runSync(
+              `UPDATE student_cards
+               SET student_id = ?, status = ?, issued_at = ?
+               WHERE id = ?`,
+              [cardStudentId, cardStatus, issuedAt, existingByCode.id],
+            );
+            continue;
+          }
+
           db.runSync(
             `INSERT INTO student_cards (id, center_id, student_id, card_code, status, issued_at, created_at)
              VALUES (?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT(center_id, card_code) DO UPDATE SET
+             ON CONFLICT(id) DO UPDATE SET
+               center_id=excluded.center_id,
                student_id=excluded.student_id,
+               card_code=excluded.card_code,
                status=excluded.status,
                issued_at=excluded.issued_at`,
-            [
-              card.id,
-              card.center_id || centerId,
-              card.student_id || card.studentId,
-              card.card_code || card.cardCode,
-              card.status === "active" ? "active" : "inactive",
-              card.issued_at || new Date().toISOString(),
-              card.created_at || new Date().toISOString(),
-            ],
+            [card.id, cardCenterId, cardStudentId, cardCode, cardStatus, issuedAt, createdAt],
           );
         }
       }
