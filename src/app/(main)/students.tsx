@@ -85,6 +85,7 @@ export default function StudentsScreen() {
   const [packageId, setPackageId] = useState("");
   const [packageOptionIds, setPackageOptionIds] = useState<string[]>([]);
   const [packageTeacherIds, setPackageTeacherIds] = useState<Record<string, string>>({});
+  const [packageTeacherSearch, setPackageTeacherSearch] = useState("");
 
   // Financial Form States
   const [paymentAmount, setPaymentAmount] = useState("");
@@ -138,15 +139,18 @@ export default function StudentsScreen() {
     setPackageOptions(first ? PackageRepository.getPackageSubjects(first.id) : []);
     setPackageOptionIds([]);
     setPackageTeacherIds(Object.fromEntries((first ? PackageRepository.getPackageSubjects(first.id) : []).map((subject) => [subject.id, subject.defaultTeacherId])));
+    setPackageTeacherSearch("");
     setIsPackageModalOpen(true);
   };
-  const handlePackageChange = (id: string) => { const options = PackageRepository.getPackageSubjects(id); setPackageId(id); setPackageOptions(options); setPackageOptionIds([]); setPackageTeacherIds(Object.fromEntries(options.map((subject) => [subject.id, subject.defaultTeacherId]))); };
+  const handlePackageChange = (id: string) => { const options = PackageRepository.getPackageSubjects(id); setPackageId(id); setPackageOptions(options); setPackageOptionIds([]); setPackageTeacherIds(Object.fromEntries(options.map((subject) => [subject.id, subject.defaultTeacherId]))); setPackageTeacherSearch(""); };
   const handleSubscribePackage = async () => {
     if (!selectedStudent || !packageId || packageOptionIds.length === 0) return Alert.alert("تنبيه", "اختر الباقة واختيارًا واحدًا على الأقل.");
+    const selectedOptions = packageOptions.filter((option) => packageOptionIds.includes(option.id));
+    if (selectedOptions.some((option) => !packageTeacherIds[option.id])) return Alert.alert("تنبيه", "اختار مدرس للمادة دي.");
     try {
       const subscription = await PackageSubscriptionRepository.subscribeStudent({ studentId: selectedStudent.id, packageId, startDate: new Date().toISOString().split("T")[0], selectedOptionIds: packageOptionIds });
       if (PermissionService.hasPermission(permissions, "packages.manage")) {
-        for (const option of packageOptions.filter((item) => packageOptionIds.includes(item.id))) {
+        for (const option of selectedOptions) {
           const teacherId = packageTeacherIds[option.id] || option.defaultTeacherId;
           if (teacherId !== option.defaultTeacherId) await PackageSubscriptionRepository.setTeacherOverride({ subscriptionId: subscription.id, subjectId: option.subjectId, teacherId });
         }
@@ -947,12 +951,13 @@ export default function StudentsScreen() {
       )}
 
       <Modal visible={isPackageModalOpen} animationType="slide" transparent>
-        <View style={styles.modalOverlay}><View style={styles.smallModalCard}>
+        <View style={styles.modalOverlay}><View style={styles.packageModalCard}>
           <Text style={styles.modalTitle}>تحويل الطالب إلى باقة</Text>
           <Text style={styles.fieldNote}>يبدأ الاشتراك من اليوم، ولا يتم حذف التسجيلات أو الدورات السابقة.</Text>
+          <AppInput label="بحث المدرس" placeholder="ابحث بالاسم" value={packageTeacherSearch} onChangeText={setPackageTeacherSearch} containerStyle={{ marginBottom: Spacing.sm }} />
           <ScrollView style={{ maxHeight: 360 }}>
             {availablePackages.map((pkg) => <TouchableOpacity key={pkg.id} onPress={() => handlePackageChange(pkg.id)} style={[styles.enrollChoice, packageId === pkg.id && styles.enrollChoiceActive]}><Text>{pkg.name} • {pkg.price} ج.م • حد {pkg.maxSelections}</Text></TouchableOpacity>)}
-            {packageOptions.map((option) => { const selected = packageOptionIds.includes(option.id); const max = availablePackages.find((p) => p.id === packageId)?.maxSelections || 1; const subjectTeachers = teachers.filter((teacher) => TeacherSubjectRepository.isTeacherAssignedToSubject(teacher.id, option.subjectId)); return <View key={option.id} style={styles.packageSubjectSection}><TouchableOpacity onPress={() => { if (!selected && packageOptionIds.length >= max) return Alert.alert("تنبيه", `يمكنك اختيار ${max} فقط.`); setPackageOptionIds((old) => selected ? old.filter((id) => id !== option.id) : [...old, option.id]); }} style={[styles.enrollChoice, selected && styles.enrollChoiceActive]}><Text>{selected ? "✓ " : "□ "}{option.subjectName}</Text></TouchableOpacity><Text style={styles.packageTeacherLabel}>المدرس</Text><ScrollView horizontal>{subjectTeachers.map((teacher) => <TouchableOpacity key={teacher.id} style={[styles.chip, packageTeacherIds[option.id] === teacher.id && styles.chipActive]} onPress={() => setPackageTeacherIds((old) => ({ ...old, [option.id]: teacher.id }))}><Text style={[styles.chipText, packageTeacherIds[option.id] === teacher.id && styles.chipTextActive]}>{teacher.name}</Text></TouchableOpacity>)}</ScrollView></View>; })}
+            {packageOptions.map((option) => { const selected = packageOptionIds.includes(option.id); const max = availablePackages.find((p) => p.id === packageId)?.maxSelections || 1; const subjectTeachers = smartSearch(teachers.filter((teacher) => TeacherSubjectRepository.isTeacherAssignedToSubject(teacher.id, option.subjectId)), packageTeacherSearch, [{ get: (teacher) => teacher.name }]); return <View key={option.id} style={styles.packageSubjectSection}><TouchableOpacity onPress={() => { if (!selected && packageOptionIds.length >= max) return Alert.alert("تنبيه", `يمكنك اختيار ${max} فقط.`); setPackageOptionIds((old) => selected ? old.filter((id) => id !== option.id) : [...old, option.id]); }} style={[styles.enrollChoice, selected && styles.enrollChoiceActive]}><Text>{selected ? "✓ " : "□ "}{option.subjectName}</Text></TouchableOpacity><Text style={styles.packageTeacherLabel}>المدرس</Text><ScrollView horizontal>{subjectTeachers.map((teacher) => <TouchableOpacity key={teacher.id} style={[styles.chip, packageTeacherIds[option.id] === teacher.id && styles.chipActive]} onPress={() => setPackageTeacherIds((old) => ({ ...old, [option.id]: teacher.id }))}><Text style={[styles.chipText, packageTeacherIds[option.id] === teacher.id && styles.chipTextActive]}>{teacher.name}</Text></TouchableOpacity>)}</ScrollView>{selected ? <Text style={styles.packageSelectionSummary}>المادة: {option.subjectName} ← المدرس: {teachers.find((teacher) => teacher.id === packageTeacherIds[option.id])?.name || option.defaultTeacherName || "غير محدد"}</Text> : null}</View>; })}
           </ScrollView>
           <View style={{ flexDirection: "row", gap: 8, marginTop: Spacing.md }}><AppButton title="تأكيد التحويل" onPress={handleSubscribePackage} style={{ flex: 1 }} /><AppButton title="إلغاء" variant="outline" onPress={() => setIsPackageModalOpen(false)} style={{ flex: 1 }} /></View>
         </View></View>
@@ -1326,10 +1331,18 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     padding: Spacing.lg,
   },
-  enrollChoice: { padding: 12, borderWidth: 1, borderColor: Colors.border, borderRadius: 8, marginBottom: 8, backgroundColor: Colors.white },
-  packageSubjectSection: { backgroundColor: Colors.slate50, borderRadius: 12, padding: 10, marginBottom: 10 },
+  packageModalCard: {
+    width: "100%",
+    maxHeight: "88%",
+    backgroundColor: Colors.white,
+    borderRadius: 18,
+    padding: Spacing.md,
+  },
+  enrollChoice: { padding: 10, borderWidth: 1, borderColor: Colors.border, borderRadius: 8, marginBottom: 6, backgroundColor: Colors.white },
+  packageSubjectSection: { backgroundColor: Colors.slate50, borderRadius: 10, padding: 8, marginBottom: 7, borderWidth: 1, borderColor: Colors.slate200 },
   packageTeacherLabel: { fontSize: 12, fontWeight: "700", color: Colors.slate700, marginBottom: 6, textAlign: "right" },
-  chip: { paddingHorizontal: 12, paddingVertical: 7, borderRadius: 8, backgroundColor: Colors.slate100, marginRight: 6 },
+  packageSelectionSummary: { fontSize: 12, color: Colors.primaryDark, fontWeight: "700", marginTop: 8, textAlign: "right" },
+  chip: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8, backgroundColor: Colors.slate100, marginRight: 5 },
   chipActive: { backgroundColor: Colors.primary },
   chipText: { fontSize: 12, color: Colors.slate700 },
   chipTextActive: { color: Colors.white, fontWeight: "700" },
