@@ -225,9 +225,10 @@ export class SyncRepository {
        WHERE center_id = ?
          AND status = 'conflict'
          AND retry_count < 3
-         AND entity_type IN ('student', 'package', 'package_subject', 'package_subscription', 'package_teacher_override')
+         AND entity_type IN ('student', 'student_card', 'package', 'package_subject', 'package_subscription', 'package_teacher_override')
          AND (
            last_error LIKE '%CARD_OUTSIDE_ALLOWED_RANGE%'
+           OR last_error LIKE '%CARD_ALREADY_ASSIGNED%'
            OR last_error LIKE '%student_type%'
            OR last_error LIKE '%packages_%'
            OR last_error LIKE '%package%constraint%'

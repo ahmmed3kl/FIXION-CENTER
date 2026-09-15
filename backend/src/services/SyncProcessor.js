@@ -672,7 +672,12 @@ class SyncProcessor {
             [centerId, cardCode],
           );
           if (existingByCode.rows.length > 0) {
-            throw new AppError("CARD_ALREADY_ASSIGNED", "Card is already assigned.", "الكارت مرتبط بطالب بالفعل ولا يمكن نقله.", 409);
+            // Student creation already persists this card. A follow-up
+            // student_card operation for the same student is duplicate
+            // delivery and must be idempotent, not a conflict.
+            if (existingByCode.rows[0].student_id !== studentId) {
+              throw new AppError("CARD_ALREADY_ASSIGNED", "Card is already assigned.", "الكارت مرتبط بطالب بالفعل ولا يمكن نقله.", 409);
+            }
           } else {
             await client.query(
               `INSERT INTO student_cards (id, center_id, student_id, card_code, status, issued_at, created_at)
