@@ -4,11 +4,12 @@ import {
   HttpSyncApiAdapter,
   ISyncApiAdapter,
   MockSyncApiAdapter,
+  BootstrapResponse,
   SyncOperationPayload,
 } from "../api";
 import { ConnectivityService } from "../connectivity";
 import { DatabaseService } from "../database";
-import { DeviceRepository } from "../device";
+import { DeviceRepository, DeviceService } from "../device";
 import { DatabaseError } from "../errors";
 import { Logger } from "../logger";
 
@@ -476,6 +477,145 @@ export class SyncEngine {
   }
 
   /**
+   * A server reset can erase the remote sync ledger while this device still
+   * marks its original creates as synced. Rebuild fresh outbox records from
+   * the actual local tables so recovery does not depend on old outbox rows.
+   */
+  private static queueLocalRecordsMissingFromSnapshot(
+    centerId: string,
+    snapshot: BootstrapResponse,
+  ): number {
+    const db = DatabaseService.getDb();
+    const existingRemoteIds = {
+      student: new Set((snapshot.students || []).map((row: any) => String(row.id))),
+      enrollment: new Set((snapshot.enrollments || []).map((row: any) => String(row.id))),
+      package: new Set((snapshot.packages || []).map((row: any) => String(row.id))),
+      package_subject: new Set((snapshot.packageSubjects || []).map((row: any) => String(row.id))),
+      package_subscription: new Set((snapshot.packageSubscriptions || []).map((row: any) => String(row.id))),
+      package_teacher_override: new Set((snapshot.packageTeacherOverrides || []).map((row: any) => String(row.id))),
+    };
+    const actor = db.getFirstSync<{ userId: string }>(
+      `SELECT user_id as userId FROM sync_operations
+       WHERE center_id = ? AND user_id <> 'repair'
+       ORDER BY created_at DESC LIMIT 1`,
+      [centerId],
+    );
+    const userId = actor?.userId || "repair";
+    const deviceId = DeviceService.getDeviceIdSync();
+    let sequence = 0;
+    let queued = 0;
+
+    const queue = (entityType: string, entityId: string, payload: any) => {
+      if (existingRemoteIds[entityType as keyof typeof existingRemoteIds]?.has(entityId)) return;
+      const waiting = db.getFirstSync<{ operationId: string }>(
+        `SELECT operation_id as operationId FROM sync_operations
+         WHERE center_id = ? AND entity_type = ? AND entity_id = ?
+           AND operation_type = 'REPAIR_AFTER_SERVER_RESET'
+           AND status IN ('pending', 'syncing', 'failed')
+         LIMIT 1`,
+        [centerId, entityType, entityId],
+      );
+      if (waiting) return;
+      const createdAt = new Date(Date.now() + sequence++).toISOString();
+      // The fresh repair payload is authoritative. Retire stale queued or
+      // conflicted operations for this entity so their old partial payloads
+      // cannot keep the sync indicator in an error state after recovery.
+      db.runSync(
+        `UPDATE sync_operations
+         SET status = 'synced', synced_at = ?, next_retry_at = NULL,
+             last_error = 'Superseded by server-reset repair operation'
+         WHERE center_id = ? AND entity_type = ? AND entity_id = ?
+           AND operation_type <> 'REPAIR_AFTER_SERVER_RESET'
+           AND status IN ('pending', 'syncing', 'failed', 'conflict')`,
+        [createdAt, centerId, entityType, entityId],
+      );
+      SyncRepository.enqueueOperation({
+        operationId: `repair-${entityType}-${entityId}-${Date.now()}-${sequence}`,
+        centerId,
+        userId,
+        deviceId,
+        operationType: "REPAIR_AFTER_SERVER_RESET",
+        entityType,
+        entityId,
+        payload: { ...payload, updatedAt: payload.updatedAt || createdAt },
+      });
+      queued += 1;
+    };
+
+    const students = db.getAllSync<any>(
+      `SELECT id, student_code as studentCode, full_name as fullName,
+              card_code as cardCode, phone, parent_phone as parentPhone,
+              grade, status, student_type as studentType, notes,
+              created_at as createdAt, updated_at as updatedAt
+       FROM students WHERE center_id = ?`,
+      [centerId],
+    );
+    for (const student of students) {
+      const card = db.getFirstSync<any>(
+        `SELECT id, card_code as cardCode FROM student_cards
+         WHERE center_id = ? AND student_id = ? AND status = 'active'
+         ORDER BY issued_at DESC LIMIT 1`,
+        [centerId, student.id],
+      );
+      const cardCode = card?.cardCode || student.cardCode || student.studentCode;
+      if (!cardCode) continue;
+      queue("student", student.id, {
+        ...student,
+        cardCode,
+        card_code: cardCode,
+        student: { ...student, cardCode, card_code: cardCode },
+        card: { id: card?.id || `card-${student.id}`, cardCode, card_code: cardCode },
+      });
+    }
+
+    const enrollments = db.getAllSync<any>(
+      `SELECT id, student_id as studentId, group_id as groupId,
+              start_date as startDate, end_date as endDate, status,
+              special_monthly_price as specialMonthlyPrice,
+              created_at as createdAt, updated_at as updatedAt
+       FROM student_group_enrollments WHERE center_id = ?`,
+      [centerId],
+    );
+    for (const enrollment of enrollments) queue("enrollment", enrollment.id, enrollment);
+
+    const packages = db.getAllSync<any>(
+      `SELECT id, name, price, max_selections as maxSelections, description,
+              status, created_at as createdAt, updated_at as updatedAt
+       FROM packages WHERE center_id = ?`,
+      [centerId],
+    );
+    for (const pkg of packages) queue("package", pkg.id, pkg);
+
+    const packageSubjects = db.getAllSync<any>(
+      `SELECT id, package_id as packageId, subject_id as subjectId,
+              default_teacher_id as defaultTeacherId, created_at as createdAt
+       FROM package_subjects WHERE center_id = ?`,
+      [centerId],
+    );
+    for (const link of packageSubjects) queue("package_subject", link.id, link);
+
+    const subscriptions = db.getAllSync<any>(
+      `SELECT id, student_id as studentId, package_id as packageId,
+              start_date as startDate, end_date as endDate,
+              cancellation_date as cancellationDate, status,
+              created_at as createdAt, updated_at as updatedAt
+       FROM student_package_subscriptions WHERE center_id = ?`,
+      [centerId],
+    );
+    for (const subscription of subscriptions) queue("package_subscription", subscription.id, subscription);
+
+    const overrides = db.getAllSync<any>(
+      `SELECT id, subscription_id as subscriptionId, subject_id as subjectId,
+              teacher_id as teacherId, created_at as createdAt
+       FROM package_subject_teacher_overrides WHERE center_id = ?`,
+      [centerId],
+    );
+    for (const override of overrides) queue("package_teacher_override", override.id, override);
+
+    return queued;
+  }
+
+  /**
    * Authoritative Bootstrap: Pulls full center data from Neon and populates local SQLite.
    */
   static async bootstrapCenter(centerId: string): Promise<void> {
@@ -891,6 +1031,7 @@ export class SyncEngine {
       }
       SyncRepository.requeueEntitiesMissingFromServer(centerId, data);
       });
+      this.queueLocalRecordsMissingFromSnapshot(centerId, data);
     } catch (bootstrapErr) {
       console.warn("Bootstrap center error:", bootstrapErr);
     }
