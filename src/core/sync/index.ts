@@ -59,26 +59,20 @@ export function getOperationPriority(entityType: string): number {
   if (e === "payment" || e === "payment_reversal" || e === "debt_adjustment")
     return 3;
   if (e === "session_closing" || e === "daily_closing") return 4;
-  if (
-    [
-      "student",
-      "student_card",
-      "group",
-      "teacher",
-      "subject",
-      "teacher_subject",
-      "enrollment",
-      "student_group_enrollment",
-      "group",
-      "group_schedule",
-      "package",
-      "package_subject",
-      "package_subscription",
-      "package_teacher_override",
-    ].includes(e)
-  ) {
-    return 5;
-  }
+  // These records share one batch and have foreign-key dependencies. Keep
+  // the dependency order deterministic even when an older operation was
+  // created before a newer repair operation:
+  // teachers/subjects -> links/groups -> students -> packages -> details.
+  if (e === "teacher" || e === "subject") return 51;
+  if (e === "teacher_subject") return 52;
+  if (e === "group") return 53;
+  if (e === "group_schedule") return 54;
+  if (e === "student" || e === "student_card") return 55;
+  if (e === "package") return 56;
+  if (e === "package_subject") return 57;
+  if (e === "enrollment" || e === "student_group_enrollment") return 58;
+  if (e === "package_subscription") return 59;
+  if (e === "package_teacher_override") return 60;
   return 6;
 }
 
@@ -633,7 +627,17 @@ export class SyncEngine {
        FROM packages WHERE center_id = ?`,
       [centerId],
     );
-    for (const pkg of packages) queue("package", pkg.id, pkg);
+    for (const pkg of packages) {
+      queue("package", pkg.id, {
+        ...pkg,
+        // The mobile schema predates the server's package fields. Supply
+        // safe canonical aliases so a repaired package satisfies the Neon
+        // schema instead of relying on implicit defaults.
+        grade: pkg.grade || "all",
+        totalPrice: pkg.totalPrice ?? pkg.price ?? 0,
+        billingCycle: pkg.billingCycle || "monthly",
+      });
+    }
 
     const packageSubjects = db.getAllSync<any>(
       `SELECT id, package_id as packageId, subject_id as subjectId,
