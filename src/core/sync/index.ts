@@ -66,8 +66,11 @@ export function getOperationPriority(entityType: string): number {
       "group",
       "teacher",
       "subject",
+      "teacher_subject",
       "enrollment",
       "student_group_enrollment",
+      "group",
+      "group_schedule",
       "package",
       "package_subject",
       "package_subscription",
@@ -487,6 +490,11 @@ export class SyncEngine {
   ): number {
     const db = DatabaseService.getDb();
     const existingRemoteIds = {
+      teacher: new Set((snapshot.teachers || []).map((row: any) => String(row.id))),
+      subject: new Set((snapshot.subjects || []).map((row: any) => String(row.id))),
+      teacher_subject: new Set((snapshot.teacherSubjects || []).map((row: any) => String(row.id))),
+      group: new Set((snapshot.groups || []).map((row: any) => String(row.id))),
+      group_schedule: new Set((snapshot.schedules || []).map((row: any) => String(row.id))),
       student: new Set((snapshot.students || []).map((row: any) => String(row.id))),
       enrollment: new Set((snapshot.enrollments || []).map((row: any) => String(row.id))),
       package: new Set((snapshot.packages || []).map((row: any) => String(row.id))),
@@ -541,6 +549,47 @@ export class SyncEngine {
       });
       queued += 1;
     };
+
+    const teachers = db.getAllSync<any>(
+      `SELECT id, name, phone, status, notes, created_at as createdAt, updated_at as updatedAt
+       FROM teachers WHERE center_id = ?`,
+      [centerId],
+    );
+    for (const teacher of teachers) queue("teacher", teacher.id, teacher);
+
+    const subjects = db.getAllSync<any>(
+      `SELECT id, name, code, status, created_at as createdAt, updated_at as updatedAt
+       FROM subjects WHERE center_id = ?`,
+      [centerId],
+    );
+    for (const subject of subjects) queue("subject", subject.id, subject);
+
+    const teacherSubjects = db.getAllSync<any>(
+      `SELECT id, teacher_id as teacherId, subject_id as subjectId, created_at as createdAt
+       FROM teacher_subjects WHERE center_id = ?`,
+      [centerId],
+    );
+    for (const link of teacherSubjects) queue("teacher_subject", link.id, link);
+
+    const groups = db.getAllSync<any>(
+      `SELECT id, name, teacher_id as teacherId, subject_id as subjectId, grade,
+              default_fee as defaultFee, session_price as sessionPrice,
+              monthly_price as monthlyPrice, session_duration_minutes as sessionDurationMinutes,
+              late_after_minutes as lateAfterMinutes, status,
+              created_at as createdAt, updated_at as updatedAt
+       FROM groups WHERE center_id = ?`,
+      [centerId],
+    );
+    for (const group of groups) queue("group", group.id, group);
+
+    const schedules = db.getAllSync<any>(
+      `SELECT id, group_id as groupId, day_of_week as dayOfWeek,
+              start_time as startTime, end_time as endTime, status,
+              created_at as createdAt, updated_at as updatedAt
+       FROM group_schedules WHERE center_id = ?`,
+      [centerId],
+    );
+    for (const schedule of schedules) queue("group_schedule", schedule.id, schedule);
 
     const students = db.getAllSync<any>(
       `SELECT id, student_code as studentCode, full_name as fullName,
@@ -1777,6 +1826,19 @@ export class SyncEngine {
 
           // Handle conflicts
           for (const conflict of pushResponse.conflicts) {
+            const operation = pendingOps.find(
+              (item) => item.operationId === conflict.operationId,
+            );
+            Logger.warn("sync", "operation_conflict", {
+              centerId,
+              operationId: conflict.operationId,
+              entityType: conflict.entityType || operation?.entityType,
+              metadata: {
+                entityId: conflict.entityId || operation?.entityId,
+                reason: conflict.reason,
+                resolution: conflict.resolution,
+              },
+            });
             SyncRepository.markAsConflict(
               conflict.operationId,
               `تضارب مع الخادم: ${conflict.reason} (${conflict.resolution})`,

@@ -827,13 +827,14 @@ class SyncProcessor {
         const packageId = pkg.id || pkg.packageId || context.entityId;
         const existing = await client.query("SELECT name, grade, total_price, max_selections, billing_cycle, status FROM packages WHERE center_id = $1 AND id = $2", [centerId, packageId]);
         const prev = existing.rows[0] || {};
+        const packageStatus = pkg.status === "canceled" ? "inactive" : (pkg.status ?? prev.status ?? "active");
         await client.query(
           `INSERT INTO packages (id, center_id, name, grade, total_price, max_selections, billing_cycle, status, created_at, updated_at)
            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW(),NOW())
            ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name, grade=EXCLUDED.grade,
              total_price=EXCLUDED.total_price, max_selections=EXCLUDED.max_selections, billing_cycle=EXCLUDED.billing_cycle,
              status=EXCLUDED.status, updated_at=NOW()` ,
-          [packageId, centerId, pkg.name ?? prev.name, pkg.grade ?? prev.grade ?? "all", Number(pkg.total_price ?? pkg.totalPrice ?? pkg.price ?? prev.total_price ?? 0), Number(pkg.max_selections ?? pkg.maxSelections ?? prev.max_selections ?? 1), pkg.billing_cycle ?? pkg.billingCycle ?? prev.billing_cycle ?? "monthly", pkg.status ?? prev.status ?? "active"],
+          [packageId, centerId, pkg.name ?? prev.name, pkg.grade ?? prev.grade ?? "all", Number(pkg.total_price ?? pkg.totalPrice ?? pkg.price ?? prev.total_price ?? 0), Math.max(1, Number(pkg.max_selections ?? pkg.maxSelections ?? prev.max_selections ?? 1)), pkg.billing_cycle ?? pkg.billingCycle ?? prev.billing_cycle ?? "monthly", packageStatus],
         );
         break;
       }
@@ -860,7 +861,8 @@ class SyncProcessor {
         const id = sub.id || sub.subscriptionId || context.entityId;
         const existing = await client.query("SELECT student_id, package_id, price_override, status, start_date, end_date FROM student_package_subscriptions WHERE center_id=$1 AND id=$2", [centerId, id]);
         const prev = existing.rows[0] || {};
-        const status = sub.status || (sub.cancellationDate || sub.cancellation_date ? "cancelled" : prev.status || "active");
+        const requestedStatus = sub.status || (sub.cancellationDate || sub.cancellation_date ? "cancelled" : prev.status || "active");
+        const status = requestedStatus === "ended" ? "completed" : requestedStatus === "canceled" ? "cancelled" : requestedStatus;
         await client.query(
           `INSERT INTO student_package_subscriptions (id, center_id, student_id, package_id, price_override, status, start_date, end_date, created_at, updated_at)
            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW(),NOW())
