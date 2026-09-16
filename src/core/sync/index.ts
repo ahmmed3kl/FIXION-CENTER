@@ -54,6 +54,11 @@ function generateUUID(): string {
 export function getOperationPriority(entityType: string): number {
   const e = (entityType || "").toLowerCase();
   if (e === "user" || e === "device" || e === "auth") return 1;
+  // A session must reach the server before attendance/makeup rows that
+  // reference it. Starting a session locally immediately enables scanning,
+  // so leaving this as the fallback priority (6) makes the attendance batch
+  // arrive first and get rejected by the session foreign key.
+  if (e === "session" || e === "session_created") return 1;
   if (e === "attendance" || e === "advance_coverage" || e === "makeup")
     return 2;
   if (e === "payment" || e === "payment_reversal" || e === "debt_adjustment")
