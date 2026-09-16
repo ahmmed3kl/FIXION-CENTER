@@ -55,6 +55,11 @@ export interface ISyncApiAdapter {
   bootstrapCenter(centerId: string): Promise<BootstrapResponse>;
 }
 
+// Render cold starts and the full bootstrap snapshot can legitimately take
+// longer than ordinary API calls. Keep the general client timeout unchanged,
+// but give only sync requests enough time to complete.
+const SYNC_REQUEST_TIMEOUT_MS = 45_000;
+
 /**
  * Real HTTP Axios adapter connecting to FIXION backend contracts:
  * POST /sync/push
@@ -77,6 +82,7 @@ export class HttpSyncApiAdapter implements ISyncApiAdapter {
           appVersion: env.appVersion,
         },
         {
+          timeout: SYNC_REQUEST_TIMEOUT_MS,
           headers: {
             "X-Center-Id": centerId,
             "X-Device-Id": deviceId,
@@ -107,6 +113,7 @@ export class HttpSyncApiAdapter implements ISyncApiAdapter {
         "/sync/push",
         requestBody,
         {
+          timeout: SYNC_REQUEST_TIMEOUT_MS,
           headers: {
             "X-Center-Id": centerId,
             "X-Device-Id": deviceId,
@@ -136,6 +143,7 @@ export class HttpSyncApiAdapter implements ISyncApiAdapter {
 
     const fetchPull = () =>
       client.get<PullSyncResponse>("/sync/pull", {
+        timeout: SYNC_REQUEST_TIMEOUT_MS,
         params: {
           centerId,
           cursor,
@@ -173,6 +181,7 @@ export class HttpSyncApiAdapter implements ISyncApiAdapter {
 
     const fetchBootstrap = () =>
       client.get<BootstrapResponse>("/sync/bootstrap", {
+        timeout: SYNC_REQUEST_TIMEOUT_MS,
         params: { centerId },
         headers: {
           "X-Center-Id": centerId,
