@@ -2,7 +2,7 @@ import { DatabaseService } from "../../core/database";
 import { DeviceService } from "../../core/device";
 import { ConflictError, ForbiddenError } from "../../core/errors";
 import { PermissionService } from "../../core/permissions";
-import { SyncRepository } from "../../core/sync";
+import { SyncEngine, SyncRepository } from "../../core/sync";
 import { Group, Session } from "../../shared/types";
 import { useAuthStore } from "../auth/useAuthStore";
 import { EnrollmentRepository } from "../enrollments/EnrollmentRepository";
@@ -149,6 +149,12 @@ export class AttendanceSessionService {
     const operationId = `op-session-att-${sessionId}`;
     AuditService.recordEvent({ operationId, centerId: activeCenterId, userId: currentUser.id, deviceId, entityType: "session", entityId: sessionId, action: "session.attendance_start", payload: { groupId: group.id, scheduleId: schedule.id, sessionDate: date } });
     SyncRepository.enqueueOperation({ operationId, centerId: activeCenterId, userId: currentUser.id, deviceId, operationType: "CREATE", entityType: "session", entityId: sessionId, payload: { groupId: group.id, scheduleId: schedule.id, subjectId: group.subjectId, teacherId: group.teacherId, sessionPrice: group.sessionPrice, lateAfterMinutes: group.lateAfterMinutes, sessionDate: date, startTime: schedule.startTime, endTime: schedule.endTime, expectedStudentIds: enrollments.map((item) => item.studentId), status: "open", createdAt: now } });
+    // A session is a dependency for every attendance record. Queue its sync
+    // immediately when attendance starts instead of waiting for the global
+    // foreground interval, while preserving offline-first local operation.
+    SyncEngine.syncCenterNow(activeCenterId).catch((error) => {
+      console.warn("Background session-start sync notice:", error);
+    });
     return { id: sessionId, centerId: activeCenterId, groupId: group.id, scheduleId: schedule.id, subjectId: group.subjectId, teacherId: group.teacherId, sessionPrice: group.sessionPrice, lateAfterMinutes: group.lateAfterMinutes, sessionDate: date, startTime: schedule.startTime, endTime: schedule.endTime, status: "open", createdAt: now, groupName: group.name, teacherName: group.teacherName, subjectName: group.subjectName };
   }
 
@@ -175,19 +181,10 @@ export class AttendanceSessionService {
     if (session.status === "closed" || session.status === "cancelled") throw new ConflictError("لا يمكن بدء جلسة مغلقة أو ملغاة.");
 
     const db = DatabaseService.getDb();
+    let sessionWasActivated = false;
     if (session.status === "scheduled") {
       db.runSync("UPDATE sessions SET status = 'open', updated_at = ? WHERE center_id = ? AND id = ?", [new Date().toISOString(), session.centerId, session.id]);
-      const deviceId = DeviceService.getDeviceIdSync();
-      SyncRepository.enqueueOperation({
-        operationId: `op-session-activate-${session.id}`,
-        centerId: session.centerId,
-        userId: currentUser.id,
-        deviceId,
-        operationType: "UPDATE",
-        entityType: "session",
-        entityId: session.id,
-        payload: { status: "open", updatedAt: new Date().toISOString() },
-      });
+      sessionWasActivated = true;
     }
     // Always reconcile the expected snapshot before attendance starts. A
     // non-zero but stale snapshot must also receive students enrolled later.
@@ -201,6 +198,42 @@ export class AttendanceSessionService {
         );
       }
     }
+    const deviceId = DeviceService.getDeviceIdSync();
+    const expectedStudentIds = db.getAllSync<{ studentId: string }>(
+      "SELECT student_id as studentId FROM session_expected_students WHERE center_id = ? AND session_id = ?",
+      [session.centerId, session.id],
+    ).map((row) => row.studentId);
+    SyncRepository.enqueueOperation({
+      centerId: session.centerId,
+      userId: currentUser.id,
+      deviceId,
+      operationType: sessionWasActivated ? "UPDATE" : "session.reconcile",
+      entityType: "session",
+      entityId: session.id,
+      // Send a complete session representation. This safely repairs older
+      // local sessions that were created before a failed sync and therefore
+      // do not yet exist on the server.
+      payload: {
+        groupId: session.groupId,
+        scheduleId: session.scheduleId,
+        subjectId: session.subjectId,
+        teacherId: session.teacherId,
+        sessionPrice: session.sessionPrice,
+        lateAfterMinutes: session.lateAfterMinutes,
+        sessionDate: session.sessionDate,
+        startTime: session.startTime,
+        endTime: session.endTime,
+        expectedStudentIds,
+        status: "open",
+        updatedAt: new Date().toISOString(),
+      },
+    });
+    // This is intentionally outside the activation branch: a locally open
+    // session that predates this fix is reconciled with the server each time
+    // an operator starts attendance for it.
+    SyncEngine.syncCenterNow(session.centerId).catch((error) => {
+      console.warn("Background session-activation sync notice:", error);
+    });
     return session;
   }
 
