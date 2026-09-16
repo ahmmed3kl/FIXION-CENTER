@@ -4,13 +4,13 @@ import React, { useEffect, useMemo, useState } from "react";
 import {
   Alert,
   Modal,
-  SafeAreaView,
   ScrollView,
   StyleSheet,
   Text,
   TouchableOpacity,
   View,
 } from "react-native";
+import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { formatCurrency, formatTimeArabic } from "../../../core/localization";
 import { Colors } from "../../../core/theme";
 import { AppButton, AppInput } from "../../../shared/components";
@@ -262,6 +262,7 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({ vi
   return (
     <Modal visible={visible} animationType="slide" transparent onRequestClose={close}>
       <View style={styles.overlay}>
+        <SafeAreaProvider style={{ flex: 1 }}>
         <SafeAreaView style={styles.sheet}>
           <View style={styles.header}>
             <TouchableOpacity accessibilityLabel="رجوع" style={styles.headerButton} onPress={close}><Ionicons name="chevron-forward" color="#FFF" size={27} /></TouchableOpacity>
@@ -308,6 +309,7 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({ vi
             <AppButton title="إضافة الطالب" onPress={submit} loading={submitting} style={styles.submitButton} icon={<Ionicons name="person-add-outline" size={19} color="#FFF" />} />
           </ScrollView>
         </SafeAreaView>
+        </SafeAreaProvider>
       </View>
     </Modal>
   );

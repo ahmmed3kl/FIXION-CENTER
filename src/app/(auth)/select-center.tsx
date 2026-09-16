@@ -1,11 +1,11 @@
 import { useRouter } from "expo-router";
 import { useEffect } from "react";
 import {
-  SafeAreaView,
   StyleSheet,
   Text,
   View
 } from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
 import { Colors, Spacing, Typography } from "../../core/theme";
 import { useAuthStore } from "../../features/auth/useAuthStore";
 

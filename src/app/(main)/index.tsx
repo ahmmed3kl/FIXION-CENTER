@@ -3,13 +3,13 @@ import { useFocusEffect, useRouter } from "expo-router";
 import { useCallback, useEffect, useState } from "react";
 import {
     RefreshControl,
-    SafeAreaView,
     ScrollView,
     StyleSheet,
     Text,
     TouchableOpacity,
     View,
 } from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
 import { ConnectivityService } from "../../core/connectivity";
 import { Strings, formatCurrency, formatNumber } from "../../core/localization";
 import { SyncEngine, SyncRepository } from "../../core/sync";

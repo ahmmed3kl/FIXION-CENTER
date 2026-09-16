@@ -1,6 +1,7 @@
 import { useRouter } from "expo-router";
 import { useEffect, useState } from "react";
-import { Alert, SafeAreaView, ScrollView, StyleSheet, Text, TouchableOpacity, View } from "react-native";
+import { Alert, ScrollView, StyleSheet, Text, TouchableOpacity, View } from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
 import { PackageRepository } from "../../features/packages/PackageRepository";
 import { TeacherRepository } from "../../features/teachers/TeacherRepository";
 import { TeacherSubjectRepository } from "../../features/teachers/TeacherSubjectRepository";

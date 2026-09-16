@@ -1,12 +1,14 @@
 import { Ionicons } from "@expo/vector-icons";
 import { Tabs } from "expo-router";
 import { StyleSheet, View } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Strings } from "../../core/localization";
 import { Colors } from "../../core/theme";
 import { useServiceVisibility } from "../../core/services/ServiceVisibilityContext";
 
 export default function MainLayout() {
   const services = useServiceVisibility();
+  const insets = useSafeAreaInsets();
   const ready = services.loaded;
   return (
     <Tabs
@@ -15,8 +17,8 @@ export default function MainLayout() {
         tabBarActiveTintColor: Colors.primary,
         tabBarInactiveTintColor: Colors.slate400,
         tabBarStyle: {
-          height: 64,
-          paddingBottom: 8,
+          height: 64 + insets.bottom,
+          paddingBottom: 8 + insets.bottom,
           paddingTop: 8,
           backgroundColor: Colors.white,
           borderTopColor: Colors.border,

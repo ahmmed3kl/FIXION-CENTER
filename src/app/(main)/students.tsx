@@ -5,13 +5,13 @@ import {
     Alert,
     FlatList,
     Modal,
-    SafeAreaView,
     ScrollView,
     StyleSheet,
     Text,
     TouchableOpacity,
     View,
 } from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
 import { formatCurrency, Strings } from "../../core/localization";
 import { PermissionService } from "../../core/permissions";
 import { Colors, Spacing, Typography } from "../../core/theme";
