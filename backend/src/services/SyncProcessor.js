@@ -48,6 +48,28 @@ function normalizeDebtCycleType(value, hasPackageSubscription) {
   return "monthly";
 }
 
+function normalizeDebtCycleStatus(value) {
+  const raw = String(value || "").trim().toLowerCase().replace(/[\s-]/g, "_");
+  const aliases = {
+    open: "pending",
+    active: "pending",
+    current: "pending",
+    due: "pending",
+    pending: "pending",
+    partially_paid: "partially_paid",
+    partial: "partially_paid",
+    partial_paid: "partially_paid",
+    paid: "paid",
+    closed: "paid",
+    ended: "paid",
+    cancelled: "cancelled",
+    canceled: "cancelled",
+    waived: "waived",
+    written_off: "waived",
+  };
+  return aliases[raw] || "pending";
+}
+
 class SyncProcessor {
   /**
    * Processes a batch of sync operations inside a true ACID transaction.
@@ -1003,7 +1025,6 @@ class SyncProcessor {
       case "debt_cycle": {
         const cycle = payload.debtCycle || payload;
         const id = cycle.id || cycle.debtCycleId || context.entityId;
-        const statusMap = { open: "pending", ended: "paid", cancelled: "cancelled" };
         const studentId = cycle.student_id || cycle.studentId;
         const requestedEnrollmentId = cycle.enrollment_id || cycle.enrollmentId || null;
         if (!studentId) throw new Error("Debt cycle requires studentId.");
@@ -1041,7 +1062,7 @@ class SyncProcessor {
             package_subscription_id=EXCLUDED.package_subscription_id, cycle_type=EXCLUDED.cycle_type,
             period_start=EXCLUDED.period_start, period_end=EXCLUDED.period_end, amount_due=EXCLUDED.amount_due,
             status=EXCLUDED.status, notes=EXCLUDED.notes, updated_at=NOW()`,
-          [targetId, centerId, studentId, enrollmentId, packageSubscriptionId, cycleType, cycle.start_date || cycle.startDate || cycle.period_start, cycle.end_date || cycle.endDate || cycle.period_end, Number(cycle.cycle_price ?? cycle.cyclePrice ?? cycle.amount_due ?? cycle.amountDue ?? 0), statusMap[cycle.status] || cycle.status || "pending", cycle.notes || null]);
+          [targetId, centerId, studentId, enrollmentId, packageSubscriptionId, cycleType, cycle.start_date || cycle.startDate || cycle.period_start, cycle.end_date || cycle.endDate || cycle.period_end, Number(cycle.cycle_price ?? cycle.cyclePrice ?? cycle.amount_due ?? cycle.amountDue ?? 0), normalizeDebtCycleStatus(cycle.status), cycle.notes || null]);
         break;
       }
 
