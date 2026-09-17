@@ -418,7 +418,7 @@ export class SyncRepository {
     // row is updated too so the UI/history keeps pointing at the same retry.
     const longIds = db.getAllSync<{ operationId: string }>(
       `SELECT operation_id as operationId FROM sync_operations
-       WHERE center_id = ? AND status = 'conflict' AND retry_count < 3
+       WHERE center_id = ? AND status = 'conflict' AND retry_count < 10
          AND LENGTH(operation_id) > 64
          AND entity_type IN ('student', 'student_card', 'teacher', 'subject', 'group', 'group_schedule', 'session', 'enrollment', 'student_group_enrollment', 'attendance', 'payment', 'payment_reversal', 'debt_adjustment', 'debt_cycle', 'package', 'package_subject', 'package_subscription', 'package_teacher_override')`,
       [centerId],
@@ -439,7 +439,7 @@ export class SyncRepository {
        SET status = 'pending', retry_count = retry_count + 1, next_retry_at = NULL, last_error = NULL
        WHERE center_id = ?
          AND status = 'conflict'
-         AND retry_count < 3
+         AND retry_count < 10
          AND entity_type IN ('student', 'student_card', 'package', 'package_subject', 'package_subscription', 'package_teacher_override', 'session', 'attendance', 'makeup', 'debt_cycle', 'payment', 'debt_adjustment', 'grade_exam', 'grade_score')
          AND (
            last_error LIKE '%CARD_OUTSIDE_ALLOWED_RANGE%'
