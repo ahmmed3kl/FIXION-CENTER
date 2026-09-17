@@ -31,6 +31,13 @@ async function main() {
 
   const hash = await bcrypt.hash(password, 12);
   await db.withTransaction(async (client) => {
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS center_data_state (
+        center_id VARCHAR(64) PRIMARY KEY,
+        reset_generation BIGINT NOT NULL DEFAULT 0,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
     // Keep schema/migrations and platform administrators. Every other table
     // is operational or tenant-scoped and is intentionally emptied.
     const result = await client.query(`
@@ -38,20 +45,27 @@ async function main() {
       FROM information_schema.tables
       WHERE table_schema = 'public'
         AND table_type = 'BASE TABLE'
-        AND table_name NOT IN ('platform_admins', 'schema_migrations')
+        AND table_name NOT IN ('platform_admins', 'schema_migrations', 'center_data_state')
     `);
     const tables = result.rows
       .map((row) => `public."${row.table_name.replace(/"/g, '""')}"`)
       .join(", ");
     if (tables) await client.query(`TRUNCATE TABLE ${tables} RESTART IDENTITY CASCADE`);
 
-    for (const center of centers) {
+  for (const center of centers) {
       await client.query(
         `INSERT INTO centers (id, name, code, status)
          VALUES ($1, $2, $3, 'active')`,
-        [center.id, center.name, center.code],
-      );
-    }
+      [center.id, center.name, center.code],
+    );
+    await client.query(
+      `INSERT INTO center_data_state (center_id, reset_generation, updated_at)
+       VALUES ($1, 1, NOW())
+       ON CONFLICT (center_id) DO UPDATE
+       SET reset_generation = center_data_state.reset_generation + 1, updated_at = NOW()`,
+      [center.id],
+    );
+  }
 
     await client.query(
       `INSERT INTO users

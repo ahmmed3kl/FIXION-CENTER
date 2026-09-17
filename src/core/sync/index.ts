@@ -816,6 +816,62 @@ export class SyncRepository {
       );
     }
   }
+
+  static getResetGeneration(centerId: string): number {
+    const db = DatabaseService.getDb();
+    try {
+      const row = db.getFirstSync<{ resetGeneration?: number; reset_generation?: number }>(
+        `SELECT reset_generation as resetGeneration FROM sync_cursors WHERE center_id = ?`,
+        [centerId],
+      );
+      return Number(row?.resetGeneration ?? row?.reset_generation ?? 0) || 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  static setResetGeneration(centerId: string, generation: number): void {
+    const db = DatabaseService.getDb();
+    const now = new Date().toISOString();
+    const value = Math.max(0, Math.floor(Number(generation) || 0));
+    const existing = db.getFirstSync<any>(
+      `SELECT center_id FROM sync_cursors WHERE center_id = ?`,
+      [centerId],
+    );
+    if (existing) {
+      db.runSync(
+        `UPDATE sync_cursors SET reset_generation = ?, updated_at = ? WHERE center_id = ?`,
+        [value, now, centerId],
+      );
+    } else {
+      db.runSync(
+        `INSERT INTO sync_cursors (center_id, server_cursor, reset_generation, updated_at) VALUES (?, ?, ?, ?)`,
+        [centerId, "0", value, now],
+      );
+    }
+  }
+
+  /** Clears center operational data after an authoritative server reset. */
+  static resetLocalOperationalData(centerId: string): void {
+    const db = DatabaseService.getDb();
+    const tables = [
+      "session_closing_records", "daily_closing_summaries",
+      "notification_deliveries", "notification_events", "notification_templates",
+      "payment_reversals", "payments", "debt_adjustments", "advance_coverages",
+      "attendance", "session_expected_students", "sessions", "debt_cycles",
+      "package_subject_teacher_overrides", "student_package_subscriptions",
+      "package_subjects", "packages", "student_group_enrollments", "student_cards",
+      "students", "group_schedules", "groups", "teacher_subjects", "teachers",
+      "subjects", "grade_scores", "grade_exams", "audit_logs", "sync_operations",
+      "sync_conflicts",
+    ];
+    DatabaseService.runInTransaction(() => {
+      for (const table of tables) {
+        try { db.runSync(`DELETE FROM ${table} WHERE center_id = ?`, [centerId]); } catch {}
+      }
+      this.setServerCursor(centerId, "0");
+    });
+  }
 }
 
 export class SyncEngine {
@@ -1066,6 +1122,14 @@ export class SyncEngine {
   static async bootstrapCenter(centerId: string): Promise<void> {
     try {
       const data = await this.adapter.bootstrapCenter(centerId);
+      const serverResetGeneration = Number(data.resetGeneration || 0);
+      const localResetGeneration = SyncRepository.getResetGeneration(centerId);
+      if (serverResetGeneration > localResetGeneration) {
+        // The server has intentionally started a new term. Drop local
+        // operational rows before applying the fresh authoritative snapshot;
+        // otherwise the recovery logic would upload the old term again.
+        SyncRepository.resetLocalOperationalData(centerId);
+      }
       DatabaseService.runInTransaction((db) => {
 
       if (Array.isArray(data.gradeExams)) {
@@ -1509,6 +1573,7 @@ export class SyncEngine {
       } else {
         SyncRepository.setServerCursor(centerId, "0");
       }
+      SyncRepository.setResetGeneration(centerId, serverResetGeneration);
       SyncRepository.requeueEntitiesMissingFromServer(centerId, data);
       });
       this.queueLocalRecordsMissingFromSnapshot(centerId, data);
@@ -2183,6 +2248,12 @@ export class SyncEngine {
         let batches = 0;
         while (hasMore && batches < 100) {
           const pullResponse = await this.adapter.pullChanges(centerId, currentCursor, pullLimit);
+          if (Number(pullResponse.resetGeneration || 0) > SyncRepository.getResetGeneration(centerId)) {
+            await this.bootstrapCenter(centerId);
+            currentCursor = SyncRepository.getServerCursor(centerId);
+            hasMore = false;
+            continue;
+          }
           if (pullResponse.cursorReset) {
             await this.bootstrapCenter(centerId);
             currentCursor = SyncRepository.getServerCursor(centerId);

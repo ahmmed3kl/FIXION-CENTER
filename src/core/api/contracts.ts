@@ -64,6 +64,7 @@ export interface PullSyncResponse {
   hasMore: boolean;
   cursorReset?: boolean;
   latestServerSeq?: number;
+  resetGeneration?: number;
   serverTimestamp: string;
 }
 

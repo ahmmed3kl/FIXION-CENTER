@@ -26,6 +26,14 @@ CREATE TABLE IF NOT EXISTS centers (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- Monotonic operational-data generation. Clients clear local operational
+-- SQLite data when this value changes after a center reset.
+CREATE TABLE IF NOT EXISTS center_data_state (
+    center_id VARCHAR(64) PRIMARY KEY,
+    reset_generation BIGINT NOT NULL DEFAULT 0,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 -- Users
 CREATE TABLE IF NOT EXISTS users (
     id VARCHAR(64) PRIMARY KEY,

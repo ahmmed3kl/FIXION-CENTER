@@ -38,6 +38,7 @@ export interface BootstrapResponse {
   dailyClosings?: any[];
   gradeExams?: any[];
   gradeScores?: any[];
+  resetGeneration?: number;
   latestServerSeq: number;
   timestamp: string;
 }

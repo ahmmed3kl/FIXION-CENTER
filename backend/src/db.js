@@ -71,6 +71,16 @@ async function withTransaction(callback) {
  */
 async function ensureSchemaCompatibility() {
   await pool.query(`
+    CREATE TABLE IF NOT EXISTS center_data_state (
+      center_id VARCHAR(64) PRIMARY KEY,
+      reset_generation BIGINT NOT NULL DEFAULT 0,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    INSERT INTO center_data_state (center_id)
+      SELECT id FROM centers
+      ON CONFLICT (center_id) DO NOTHING;
+  `);
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS grade_exams (
       id TEXT PRIMARY KEY,
       center_id TEXT NOT NULL,

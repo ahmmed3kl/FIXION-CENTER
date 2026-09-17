@@ -811,6 +811,15 @@ export const MIGRATIONS: Migration[] = [
       `);
     },
   },
+  {
+    version: 10,
+    name: "central_reset_generation",
+    up: (db: SqlDatabase) => {
+      try {
+        db.execSync("ALTER TABLE sync_cursors ADD COLUMN reset_generation INTEGER NOT NULL DEFAULT 0;");
+      } catch {}
+    },
+  },
 ];
 
 // In-Memory SQLite Mock for Jest / Test environments
@@ -1539,8 +1548,13 @@ class InMemorySqliteMock implements SqlDatabase {
           const centerId = params[params.length - 1];
           const row = list.find((r) => r.center_id === centerId);
           if (row) {
-            row.server_cursor = params[0];
-            row.updated_at = params[1];
+            if (trimmed.includes("reset_generation")) {
+              row.reset_generation = params[0];
+              row.updated_at = params[1];
+            } else {
+              row.server_cursor = params[0];
+              row.updated_at = params[1];
+            }
           }
         }
         return { lastInsertRowId: 0, changes: 1 };
@@ -3272,10 +3286,12 @@ class InMemorySqliteMock implements SqlDatabase {
       const mapped = list.map((r) => ({
         centerId: r.center_id,
         serverCursor: r.server_cursor,
+        resetGeneration: r.reset_generation ?? 0,
         updatedAt: r.updated_at,
         // snake_case
         center_id: r.center_id,
         server_cursor: r.server_cursor,
+        reset_generation: r.reset_generation ?? 0,
         updated_at: r.updated_at,
       }));
       if (params.length >= 1 && trimmed.includes("center_id = ?")) {

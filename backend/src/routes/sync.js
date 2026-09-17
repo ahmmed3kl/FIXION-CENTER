@@ -2,6 +2,7 @@ const express = require("express");
 const crypto = require("crypto");
 const db = require("../db");
 const { authMiddleware } = require("../middleware/auth");
+const { requirePermission } = require("../middleware/auth");
 const { deviceGuard } = require("../middleware/deviceGuard");
 const { AppError } = require("../middleware/errorHandler");
 const SyncProcessor = require("../services/SyncProcessor");
@@ -54,6 +55,7 @@ router.get(
           dailyClosingsRes,
           gradeExamsRes,
           gradeScoresRes,
+          resetStateRes,
           maxSeqRes,
         ] = await Promise.all([
           client.query("SELECT * FROM students WHERE center_id = $1", [centerId]),
@@ -83,6 +85,7 @@ router.get(
           client.query("SELECT * FROM daily_closing_summaries WHERE center_id = $1", [centerId]),
           client.query("SELECT * FROM grade_exams WHERE center_id = $1", [centerId]),
           client.query("SELECT * FROM grade_scores WHERE center_id = $1", [centerId]),
+          client.query("SELECT reset_generation FROM center_data_state WHERE center_id = $1", [centerId]),
           client.query("SELECT COALESCE(MAX(server_seq), 0) as max_seq FROM server_sync_operations WHERE center_id = $1", [centerId]),
         ]);
 
@@ -115,6 +118,7 @@ router.get(
         dailyClosings: dailyClosingsRes.rows,
         gradeExams: gradeExamsRes.rows,
         gradeScores: gradeScoresRes.rows,
+        resetGeneration: Number(resetStateRes.rows[0]?.reset_generation || 0),
         latestServerSeq: parseInt(maxSeqRes.rows[0]?.max_seq || 0, 10),
         timestamp: new Date().toISOString(),
         };
@@ -126,6 +130,40 @@ router.get(
     }
   },
 );
+
+/**
+ * Destructive center reset for a new term. The generation is incremented so
+ * every online APK clears its local operational database on next bootstrap.
+ */
+router.post("/reset", authMiddleware, deviceGuard, requirePermission("center.reset"), async (req, res, next) => {
+  try {
+    const centerId = req.centerId;
+    const result = await db.withTransaction(async (client) => {
+      // Delete children before parents to remain compatible with strict FKs.
+      const tables = [
+        "session_closing_records", "daily_closing_summaries",
+        "notification_deliveries", "notification_events", "notification_templates",
+        "payment_reversals", "payments", "debt_adjustments", "advance_coverages",
+        "attendance", "session_expected_students", "sessions", "debt_cycles",
+        "package_subject_teacher_overrides", "student_package_subscriptions",
+        "package_subjects", "packages", "student_group_enrollments",
+        "student_cards", "students", "group_schedules", "groups",
+        "teacher_subjects", "teachers", "subjects", "grade_scores", "grade_exams",
+        "audit_logs", "server_sync_operations", "sync_checkpoints",
+      ];
+      for (const table of tables) await client.query(`DELETE FROM ${table} WHERE center_id = $1`, [centerId]);
+      const state = await client.query(
+        `INSERT INTO center_data_state (center_id, reset_generation, updated_at)
+         VALUES ($1, 1, NOW())
+         ON CONFLICT (center_id) DO UPDATE SET reset_generation = center_data_state.reset_generation + 1, updated_at = NOW()
+         RETURNING reset_generation`,
+        [centerId],
+      );
+      return Number(state.rows[0].reset_generation);
+    });
+    res.json({ success: true, centerId, resetGeneration: result });
+  } catch (error) { next(error); }
+});
 
 /**
  * Push offline operations to server
@@ -177,13 +215,19 @@ router.get("/pull", authMiddleware, deviceGuard, async (req, res, next) => {
       "SELECT COALESCE(MAX(server_seq), 0) AS max_seq FROM server_sync_operations WHERE center_id = $1",
       [req.centerId],
     );
+    const resetStateRes = await db.query(
+      "SELECT reset_generation FROM center_data_state WHERE center_id = $1",
+      [req.centerId],
+    );
     const latestServerSeq = parseInt(latestRes.rows[0]?.max_seq || 0, 10);
+    const resetGeneration = Number(resetStateRes.rows[0]?.reset_generation || 0);
     if (cursor > latestServerSeq) {
       return res.json({
         changes: [],
         nextCursor: "0",
         hasMore: false,
         cursorReset: true,
+        resetGeneration,
         latestServerSeq,
         serverTimestamp: new Date().toISOString(),
       });
@@ -250,6 +294,7 @@ router.get("/pull", authMiddleware, deviceGuard, async (req, res, next) => {
       nextCursor,
       hasMore,
       serverTimestamp: new Date().toISOString(),
+      resetGeneration,
     });
   } catch (err) {
     next(err);
