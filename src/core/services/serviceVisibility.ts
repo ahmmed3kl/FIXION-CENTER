@@ -21,11 +21,17 @@ export interface ServiceVisibilityState {
 
 export const initialServiceVisibilityState: ServiceVisibilityState = {
   loading: false,
-  loaded: false,
+  loaded: true,
   centerId: null,
-  enabled: {},
+  enabled: Object.fromEntries(SERVICE_KEYS.map((key) => [key, true])) as ServiceVisibilityState["enabled"],
   error: null,
 };
+
+// Keep local-first workflows visible when the policy endpoint is unreachable.
+// Repository mutations still enforce permissions and the backend remains
+// authoritative once connectivity is restored.
+export const offlineServiceDefaults: ServiceVisibilityState["enabled"] =
+  Object.fromEntries(SERVICE_KEYS.map((key) => [key, true])) as ServiceVisibilityState["enabled"];
 
 export function isServiceEnabled(
   state: ServiceVisibilityState,

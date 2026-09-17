@@ -22,6 +22,8 @@ export type Permission =
   | "groups.update"
   | "groups.deactivate"
   | "groups.schedule.manage"
+  | "grades.view"
+  | "grades.manage"
   | "enrollments.view"
   | "enrollments.create"
   | "enrollments.update"

@@ -1722,6 +1722,18 @@ export class SyncEngine {
           db.runSync(`INSERT INTO advance_coverages (id, operation_id, center_id, student_id, advance_session_id, target_future_session_id, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET target_future_session_id=excluded.target_future_session_id`,
             [c.id || change.entityId, change.operationId || `srv-coverage-${c.id || change.entityId}`, centerId, c.student_id || c.studentId, c.advance_session_id || c.advanceSessionId, c.target_future_session_id || c.targetFutureSessionId, c.created_by || c.createdBy || "system", c.created_at || new Date().toISOString()]);
+        } else if (entityType === "grade_exam") {
+          const exam = data.exam || data;
+          db.runSync(`INSERT INTO grade_exams (id, center_id, name, grade, max_score, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET name=excluded.name, grade=excluded.grade, max_score=excluded.max_score, status=excluded.status, updated_at=excluded.updated_at`,
+            [exam.id || change.entityId, centerId, exam.name || "امتحان", exam.grade || "", Number(exam.max_score ?? exam.maxScore ?? 100), exam.status || "active", exam.created_at || exam.createdAt || new Date().toISOString(), exam.updated_at || exam.updatedAt || new Date().toISOString()]);
+        } else if (entityType === "grade_score") {
+          const score = data.scoreRecord || data;
+          db.runSync(`INSERT INTO grade_scores (id, center_id, exam_id, student_id, score, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(center_id, exam_id, student_id) DO UPDATE SET score=excluded.score, updated_at=excluded.updated_at`,
+            [score.id || change.entityId, centerId, score.exam_id || score.examId, score.student_id || score.studentId, score.score === "" ? null : (score.score ?? null), score.created_at || score.createdAt || new Date().toISOString(), score.updated_at || score.updatedAt || new Date().toISOString()]);
         } else if (entityType === "notification_event") {
           const e = data.event || data;
           db.runSync(`INSERT INTO notification_events (id, operation_id, center_id, student_id, session_id, attendance_id, event_type, template_id, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)

@@ -519,17 +519,26 @@ export default function StudentsScreen() {
           <View style={styles.modalOverlay}>
             <View style={styles.detailsModalCard}>
               <View style={styles.modalHeader}>
-                <View>
+                <View style={styles.profileIdentity}>
+                  <View style={styles.avatar}><Text style={styles.avatarText}>{selectedStudent.fullName.trim().charAt(0) || "ط"}</Text></View>
+                  <View style={styles.profileCopy}>
                   <Text style={styles.modalTitle}>
                     {selectedStudent.fullName}
                   </Text>
                   <Text style={styles.modalSubtitle}>
                     كود: {formatDisplayIdentifier(selectedStudent.studentCode)}
                   </Text>
+                    <View style={styles.profileStatus}><View style={styles.statusDot} /><Text style={styles.profileStatusText}>{selectedStudent.status === "active" ? "نشط" : "غير نشط"} · {selectedStudent.grade}</Text></View>
+                  </View>
                 </View>
                 <TouchableOpacity onPress={() => setSelectedStudent(null)}>
                   <Ionicons name="close" size={24} color={Colors.slate500} />
                 </TouchableOpacity>
+              </View>
+              <View style={styles.profileActions}>
+                <TouchableOpacity style={styles.profileAction} onPress={() => setIsCardModalOpen(true)}><Ionicons name="card-outline" size={18} color={Colors.primary} /><Text style={styles.profileActionText}>الكارت</Text></TouchableOpacity>
+                <TouchableOpacity style={styles.profileAction}><Ionicons name="chatbubble-ellipses-outline" size={18} color={Colors.primary} /><Text style={styles.profileActionText}>رسالة</Text></TouchableOpacity>
+                <TouchableOpacity style={styles.profileAction}><Ionicons name="call-outline" size={18} color={Colors.primary} /><Text style={styles.profileActionText}>اتصال</Text></TouchableOpacity>
               </View>
 
               <ScrollView style={{ maxHeight: 500 }}>
@@ -1353,6 +1362,16 @@ const styles = StyleSheet.create({
     alignItems: "center",
     marginBottom: Spacing.md,
   },
+  profileIdentity: { flexDirection: "row", alignItems: "center", flex: 1, gap: 10 },
+  profileCopy: { flex: 1, alignItems: "flex-end" },
+  avatar: { width: 58, height: 58, borderRadius: 29, backgroundColor: Colors.primaryLight, borderWidth: 2, borderColor: Colors.primary, alignItems: "center", justifyContent: "center" },
+  avatarText: { color: Colors.primaryDark, fontSize: 26, fontWeight: "800" },
+  profileStatus: { flexDirection: "row", alignItems: "center", gap: 5, marginTop: 4 },
+  statusDot: { width: 7, height: 7, borderRadius: 4, backgroundColor: Colors.success },
+  profileStatusText: { color: Colors.slate500, fontSize: 11 },
+  profileActions: { flexDirection: "row", gap: 8, marginBottom: Spacing.md },
+  profileAction: { flex: 1, alignItems: "center", gap: 4, backgroundColor: Colors.primaryLight + "35", borderRadius: 10, paddingVertical: 9 },
+  profileActionText: { color: Colors.primaryDark, fontSize: 11, fontWeight: "700" },
   modalTitle: {
     ...Typography.h2,
     fontWeight: "700",

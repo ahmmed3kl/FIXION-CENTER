@@ -30,7 +30,7 @@ import { ConnectivityState } from "../../shared/types";
 
 export default function DashboardScreen() {
   const router = useRouter();
-  const { currentUser, activeCenter, availableCenters, logout } =
+  const { currentUser, activeCenter, availableCenters } =
     useAuthStore();
 
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
@@ -133,11 +133,6 @@ export default function DashboardScreen() {
           <Text style={styles.centerSelectorText} numberOfLines={1}>{activeCenter?.name || "المركز التعليمي"}</Text>
           <Ionicons name="chevron-down" size={13} color="#A9D8EA" />
         </TouchableOpacity>
-        <View style={styles.headerActions}>
-          <TouchableOpacity onPress={logout} style={styles.logoutButton}>
-            <Ionicons name="log-out-outline" size={17} color={Colors.white} />
-          </TouchableOpacity>
-        </View>
       </View>
 
       <ScrollView

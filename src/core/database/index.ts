@@ -780,6 +780,37 @@ export const MIGRATIONS: Migration[] = [
       db.execSync("CREATE INDEX IF NOT EXISTS idx_packages_selection_limit ON packages(center_id, max_selections);");
     },
   },
+  {
+    version: 9,
+    name: "grade_book",
+    up: (db: SqlDatabase) => {
+      db.execSync(`
+        CREATE TABLE IF NOT EXISTS grade_exams (
+          id TEXT PRIMARY KEY,
+          center_id TEXT NOT NULL,
+          name TEXT NOT NULL,
+          grade TEXT NOT NULL,
+          max_score REAL NOT NULL DEFAULT 100,
+          status TEXT NOT NULL DEFAULT 'active',
+          created_at TEXT NOT NULL,
+          updated_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS grade_scores (
+          id TEXT PRIMARY KEY,
+          center_id TEXT NOT NULL,
+          exam_id TEXT NOT NULL,
+          student_id TEXT NOT NULL,
+          score REAL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT,
+          CONSTRAINT uq_grade_score UNIQUE (center_id, exam_id, student_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_grade_exams_grade ON grade_exams(center_id, grade, status);
+        CREATE INDEX IF NOT EXISTS idx_grade_scores_exam ON grade_scores(center_id, exam_id);
+        CREATE INDEX IF NOT EXISTS idx_grade_scores_student ON grade_scores(center_id, student_id);
+      `);
+    },
+  },
 ];
 
 // In-Memory SQLite Mock for Jest / Test environments
@@ -824,6 +855,8 @@ class InMemorySqliteMock implements SqlDatabase {
     // Sprint 6 tables
     this.tables.set("devices", []);
     this.tables.set("sync_cursors", []);
+    this.tables.set("grade_exams", []);
+    this.tables.set("grade_scores", []);
   }
 
   execSync(sql: string): void {

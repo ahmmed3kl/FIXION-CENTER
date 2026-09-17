@@ -215,6 +215,8 @@ class SyncProcessor {
       student_group_enrollment: "student_group_enrollments",
       package: "packages",
       package_subscription: "student_package_subscriptions",
+      grade_exam: "grade_exams",
+      grade_score: "grade_scores",
       debt_cycle: "debt_cycles",
       notification_event: "notification_events",
       notification_template: "notification_templates",
@@ -907,6 +909,30 @@ class SyncProcessor {
         await client.query(`INSERT INTO advance_coverages (id, center_id, student_id, advance_session_id, target_future_session_id, created_at)
           VALUES ($1,$2,$3,$4,$5,NOW()) ON CONFLICT (id) DO UPDATE SET target_future_session_id=EXCLUDED.target_future_session_id`,
           [coverage.id || context.entityId, centerId, coverage.student_id || coverage.studentId, coverage.advance_session_id || coverage.advanceSessionId, coverage.target_future_session_id || coverage.targetFutureSessionId]);
+        break;
+      }
+
+      case "grade_exam": {
+        const exam = payload.exam || payload;
+        const id = exam.id || context.entityId;
+        if (!id || !exam.name || !exam.grade) throw new Error("Grade exam requires name and grade.");
+        await client.query(`INSERT INTO grade_exams (id, center_id, name, grade, max_score, status, created_at, updated_at)
+          VALUES ($1,$2,$3,$4,$5,$6,COALESCE($7,NOW()),NOW())
+          ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name, grade=EXCLUDED.grade, max_score=EXCLUDED.max_score, status=EXCLUDED.status, updated_at=NOW()`,
+          [id, centerId, exam.name, exam.grade, Number(exam.max_score ?? exam.maxScore ?? 100), exam.status || "active", exam.created_at || exam.createdAt || null]);
+        break;
+      }
+
+      case "grade_score": {
+        const score = payload.scoreRecord || payload;
+        const id = score.id || context.entityId;
+        const examId = score.exam_id || score.examId;
+        const studentId = score.student_id || score.studentId;
+        if (!id || !examId || !studentId) throw new Error("Grade score requires exam and student.");
+        await client.query(`INSERT INTO grade_scores (id, center_id, exam_id, student_id, score, created_at, updated_at)
+          VALUES ($1,$2,$3,$4,$5,COALESCE($6,NOW()),NOW())
+          ON CONFLICT (center_id, exam_id, student_id) DO UPDATE SET score=EXCLUDED.score, updated_at=NOW()`,
+          [id, centerId, examId, studentId, score.score === "" ? null : (score.score ?? null), score.created_at || score.createdAt || null]);
         break;
       }
 

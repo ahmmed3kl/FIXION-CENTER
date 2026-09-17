@@ -624,5 +624,26 @@ VALUES
   ('grp-3', 'center-1', 'مجموعة التفوق في الرياضيات - الإثنين والخميس', 'tch-3', 'subj-3', 'الصف الثاني الثانوي', 200.00, 'active')
 ON CONFLICT (id) DO NOTHING;
 
+CREATE TABLE IF NOT EXISTS grade_exams (
+  id TEXT PRIMARY KEY,
+  center_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  grade VARCHAR(128) NOT NULL,
+  max_score NUMERIC(10,2) NOT NULL DEFAULT 100,
+  status VARCHAR(32) NOT NULL DEFAULT 'active',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ
+);
+CREATE TABLE IF NOT EXISTS grade_scores (
+  id TEXT PRIMARY KEY,
+  center_id TEXT NOT NULL,
+  exam_id TEXT NOT NULL REFERENCES grade_exams(id) ON DELETE CASCADE,
+  student_id TEXT NOT NULL,
+  score NUMERIC(10,2),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ,
+  CONSTRAINT uq_grade_score UNIQUE (center_id, exam_id, student_id)
+);
+
 COMMIT;
 

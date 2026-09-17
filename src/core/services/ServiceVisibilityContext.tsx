@@ -1,7 +1,7 @@
 import React, { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { AppState } from "react-native";
 import { ApiClient } from "../api";
-import { ServiceKey, ServiceVisibilityState, initialServiceVisibilityState, isServiceEnabled } from "./serviceVisibility";
+import { ServiceKey, ServiceVisibilityState, initialServiceVisibilityState, isServiceEnabled, offlineServiceDefaults } from "./serviceVisibility";
 import { useAuthStore } from "../../features/auth/useAuthStore";
 
 interface ServiceVisibilityContextValue extends ServiceVisibilityState {
@@ -33,7 +33,7 @@ export function ServiceVisibilityProvider({ children }: { children: React.ReactN
       setState({ loading: false, loaded: true, centerId: response.data.centerId, enabled, error: null });
     } catch (error: any) {
       if (version !== requestVersion.current) return;
-      setState((current) => ({ ...current, loading: false, error: error?.userMessage || error?.message || "تعذر تحميل حالة الخدمات" }));
+      setState((current) => ({ ...current, loading: false, loaded: true, enabled: Object.keys(current.enabled).length ? current.enabled : offlineServiceDefaults, error: error?.userMessage || error?.message || "تعذر تحميل حالة الخدمات" }));
     }
   };
 

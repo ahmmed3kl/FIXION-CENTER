@@ -71,6 +71,30 @@ async function withTransaction(callback) {
  */
 async function ensureSchemaCompatibility() {
   await pool.query(`
+    CREATE TABLE IF NOT EXISTS grade_exams (
+      id TEXT PRIMARY KEY,
+      center_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      grade VARCHAR(128) NOT NULL,
+      max_score NUMERIC(10, 2) NOT NULL DEFAULT 100,
+      status VARCHAR(32) NOT NULL DEFAULT 'active',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ
+    );
+    CREATE TABLE IF NOT EXISTS grade_scores (
+      id TEXT PRIMARY KEY,
+      center_id TEXT NOT NULL,
+      exam_id TEXT NOT NULL REFERENCES grade_exams(id) ON DELETE CASCADE,
+      student_id TEXT NOT NULL,
+      score NUMERIC(10, 2),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ,
+      CONSTRAINT uq_grade_score UNIQUE (center_id, exam_id, student_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_grade_exams_grade ON grade_exams(center_id, grade, status);
+    CREATE INDEX IF NOT EXISTS idx_grade_scores_exam ON grade_scores(center_id, exam_id);
+  `);
+  await pool.query(`
     ALTER TABLE packages
       ADD COLUMN IF NOT EXISTS grade VARCHAR(64) NOT NULL DEFAULT 'all',
       ADD COLUMN IF NOT EXISTS total_price NUMERIC(12, 2) NOT NULL DEFAULT 0,
