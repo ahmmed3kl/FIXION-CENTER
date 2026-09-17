@@ -37,6 +37,17 @@ function normalizeDateOnly(value) {
   return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString().slice(0, 10);
 }
 
+// Keep debt-cycle values compatible with the canonical PostgreSQL enum/check
+// constraint. Older mobile builds used names such as "group" and "session".
+function normalizeDebtCycleType(value, hasPackageSubscription) {
+  const raw = String(value || "").trim().toLowerCase().replace(/[-\s]/g, "_");
+  if (raw === "package" || raw === "pkg" || hasPackageSubscription) return "package";
+  if (["per_session", "persession", "session", "perclass", "per_class"].includes(raw)) {
+    return "per_session";
+  }
+  return "monthly";
+}
+
 class SyncProcessor {
   /**
    * Processes a batch of sync operations inside a true ACID transaction.
@@ -1018,6 +1029,11 @@ class SyncProcessor {
         // Idempotency is provided by the operation/entity id (ON CONFLICT id),
         // while enrollment/period remain ordinary debt-cycle attributes.
         const targetId = id;
+        const packageSubscriptionId = cycle.package_subscription_id || cycle.packageSubscriptionId || null;
+        const cycleType = normalizeDebtCycleType(
+          cycle.cycle_type || cycle.cycleType,
+          Boolean(packageSubscriptionId),
+        );
         await client.query(`INSERT INTO debt_cycles
           (id, center_id, student_id, enrollment_id, package_subscription_id, cycle_type, period_start, period_end, amount_due, status, notes, created_at, updated_at)
           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW(),NOW())
@@ -1025,7 +1041,7 @@ class SyncProcessor {
             package_subscription_id=EXCLUDED.package_subscription_id, cycle_type=EXCLUDED.cycle_type,
             period_start=EXCLUDED.period_start, period_end=EXCLUDED.period_end, amount_due=EXCLUDED.amount_due,
             status=EXCLUDED.status, notes=EXCLUDED.notes, updated_at=NOW()`,
-          [targetId, centerId, studentId, enrollmentId, cycle.package_subscription_id || cycle.packageSubscriptionId || null, cycle.cycle_type || cycle.cycleType || "monthly", cycle.start_date || cycle.startDate || cycle.period_start, cycle.end_date || cycle.endDate || cycle.period_end, Number(cycle.cycle_price ?? cycle.cyclePrice ?? cycle.amount_due ?? cycle.amountDue ?? 0), statusMap[cycle.status] || cycle.status || "pending", cycle.notes || null]);
+          [targetId, centerId, studentId, enrollmentId, packageSubscriptionId, cycleType, cycle.start_date || cycle.startDate || cycle.period_start, cycle.end_date || cycle.endDate || cycle.period_end, Number(cycle.cycle_price ?? cycle.cyclePrice ?? cycle.amount_due ?? cycle.amountDue ?? 0), statusMap[cycle.status] || cycle.status || "pending", cycle.notes || null]);
         break;
       }
 

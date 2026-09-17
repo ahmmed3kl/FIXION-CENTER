@@ -136,7 +136,17 @@ function upsertLocalDebtCycle(db: any, cycle: any, centerId: string): void {
   const createdAt = cycle.created_at || cycle.createdAt || new Date().toISOString();
   const updatedAt = cycle.updated_at || cycle.updatedAt || createdAt;
   const packageSubscriptionId = cycle.package_subscription_id || cycle.packageSubscriptionId || null;
-  const cycleType = cycle.cycle_type || cycle.cycleType || "group";
+  // PostgreSQL accepts only monthly, per_session, or package. Legacy local
+  // rows used "group"; treat those as monthly when repairing/bootstraping.
+  const rawCycleType = String(cycle.cycle_type || cycle.cycleType || "monthly")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]/g, "_");
+  const cycleType = cycle.package_subscription_id || cycle.packageSubscriptionId || rawCycleType === "package"
+    ? "package"
+    : ["session", "per_session", "persession", "per_class", "perclass"].includes(rawCycleType)
+      ? "per_session"
+      : "monthly";
 
   const natural = enrollmentId
     ? db.getFirstSync(
