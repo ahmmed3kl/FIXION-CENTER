@@ -1,6 +1,6 @@
 import { Ionicons } from "@expo/vector-icons";
 import { useFocusEffect } from "expo-router";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { Alert, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Colors, Spacing, Typography } from "../../core/theme";
@@ -10,6 +10,7 @@ import { Group, Student } from "../../shared/types";
 export default function GradesScreen() {
   const [groups, setGroups] = useState<Group[]>([]);
   const [selectedGroup, setSelectedGroup] = useState<Group | null>(null);
+  const selectedGroupRef = useRef<Group | null>(null);
   const [students, setStudents] = useState<Student[]>([]);
   const [exams, setExams] = useState<GradeExam[]>([]);
   const [scores, setScores] = useState<Record<string, string>>({});
@@ -21,13 +22,15 @@ export default function GradesScreen() {
     try {
       const nextGroups = GradeBookRepository.getGroups();
       setGroups(nextGroups);
-      if (selectedGroup) {
-        const fresh = nextGroups.find((g) => g.id === selectedGroup.id) || nextGroups[0] || null;
+      const currentGroup = selectedGroupRef.current;
+      if (currentGroup) {
+        const fresh = nextGroups.find((g) => g.id === currentGroup.id) || nextGroups[0] || null;
+        selectedGroupRef.current = fresh;
         setSelectedGroup(fresh);
         if (fresh) loadGroup(fresh);
       }
     } catch (error: any) { Alert.alert("خطأ", error?.message || "تعذر تحميل رصد الدرجات."); }
-  }, [selectedGroup]);
+  }, []);
 
   const loadGroup = (group: Group) => {
     const nextStudents = GradeBookRepository.getStudentsForGroup(group.id);
@@ -40,7 +43,7 @@ export default function GradesScreen() {
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
-  const selectGroup = (group: Group) => { setSelectedGroup(group); loadGroup(group); };
+  const selectGroup = (group: Group) => { selectedGroupRef.current = group; setSelectedGroup(group); loadGroup(group); };
   const createExam = () => {
     if (!selectedGroup) return;
     try {
