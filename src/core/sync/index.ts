@@ -333,8 +333,8 @@ export class SyncRepository {
   static getStats(centerId: string) {
     const db = DatabaseService.getDb();
     this.cleanupSupersededConflicts(centerId);
-    const rows = db.getAllSync<{ status: SyncOperationStatus }>(
-      "SELECT status FROM sync_operations WHERE center_id = ?",
+    const rows = db.getAllSync<{ status: SyncOperationStatus; retryCount: number }>(
+      "SELECT status, retry_count as retryCount FROM sync_operations WHERE center_id = ?",
       [centerId],
     );
 
@@ -348,7 +348,13 @@ export class SyncRepository {
       if (r.status === "pending") pending++;
       else if (r.status === "syncing") syncing++;
       else if (r.status === "synced") synced++;
-      else if (r.status === "failed") failed++;
+      else if (r.status === "failed") {
+        // A transient/network failure remains eligible for automatic retry;
+        // surface it as pending instead of poisoning the whole sync status
+        // forever because an old SQLite row is still retained.
+        if (Number(r.retryCount || 0) < 10) pending++;
+        else failed++;
+      }
       else if (r.status === "conflict") conflict++;
     }
 
