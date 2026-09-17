@@ -5,8 +5,8 @@ import {
   ISyncApiAdapter,
   MockSyncApiAdapter,
   BootstrapResponse,
-  SyncOperationPayload,
-} from "../api";
+} from "../api/SyncApiAdapter";
+import { SyncOperationPayload } from "../api/contracts";
 import { ConnectivityService } from "../connectivity";
 import { DatabaseService } from "../database";
 import { DeviceRepository, DeviceService } from "../device";

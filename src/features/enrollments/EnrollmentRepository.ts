@@ -13,7 +13,6 @@ import { SyncRepository } from "../../core/sync";
 import { StudentGroupEnrollment } from "../../shared/types";
 import { useAuthStore } from "../auth/useAuthStore";
 import { GroupRepository } from "../groups/GroupRepository";
-import { StudentRepository } from "../students/StudentRepository";
 import { DebtCycleRepository } from "../payments/DebtCycleRepository";
 
 export interface EnrollStudentDTO {
@@ -110,7 +109,16 @@ export class EnrollmentRepository {
       throw new ValidationError("تاريخ بدء الاشتراك مطلوب.");
     }
 
-    const student = StudentRepository.findById(dto.studentId);
+    // Keep this validation local to the enrollment repository. Importing
+    // StudentRepository here creates a runtime cycle because student creation
+    // delegates selected-group enrollment back to this repository.
+    const db = DatabaseService.getDb();
+    const student = db.getFirstSync<{ id: string; fullName: string; status: "active" | "inactive" }>(
+      `SELECT id, full_name as fullName, status
+       FROM students
+       WHERE center_id = ? AND id = ?`,
+      [centerId, dto.studentId],
+    );
     if (!student || student.status !== "active") {
       throw new ValidationError("الطالب غير موجود أو غير مفعل في هذا المركز.");
     }
@@ -133,7 +141,6 @@ export class EnrollmentRepository {
       );
     }
 
-    const db = DatabaseService.getDb();
     const enrollmentId = `enr-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
     const now = new Date().toISOString();
     const endDate = dto.endDate || null;

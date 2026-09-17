@@ -17,7 +17,31 @@ import {
 import { SecureStorageService } from "../storage";
 
 export * from "./contracts";
-export * from "./SyncApiAdapter";
+
+// Keep the historical barrel exports available to existing callers without
+// statically importing SyncApiAdapter. The adapter imports ApiClient from this
+// module, so a static re-export would recreate a Metro require cycle.
+export const HttpSyncApiAdapter: {
+  new (...args: any[]): import("./SyncApiAdapter").HttpSyncApiAdapter;
+} = class {
+  constructor(...args: any[]) {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { HttpSyncApiAdapter: Adapter } = require("./SyncApiAdapter");
+    return new Adapter(...args);
+  }
+} as any;
+export type HttpSyncApiAdapter = import("./SyncApiAdapter").HttpSyncApiAdapter;
+
+export const MockSyncApiAdapter: {
+  new (...args: any[]): import("./SyncApiAdapter").MockSyncApiAdapter;
+} = class {
+  constructor(...args: any[]) {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { MockSyncApiAdapter: Adapter } = require("./SyncApiAdapter");
+    return new Adapter(...args);
+  }
+} as any;
+export type MockSyncApiAdapter = import("./SyncApiAdapter").MockSyncApiAdapter;
 
 export type UnauthorizedHandler = () => void | Promise<void>;
 
