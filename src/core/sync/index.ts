@@ -223,6 +223,17 @@ export class SyncRepository {
    */
   static requeueRecoverableConflicts(centerId: string): number {
     const db = DatabaseService.getDb();
+    // A grade-book operation can have been parked by an older backend that
+    // did not know the entity yet. Keep it retryable after the backend deploys
+    // instead of letting a stale retry counter permanently block it.
+    db.runSync(
+      `UPDATE sync_operations
+       SET status = 'pending', retry_count = 0, next_retry_at = NULL, last_error = NULL
+       WHERE center_id = ? AND status = 'conflict'
+         AND entity_type IN ('grade_exam', 'grade_score')
+         AND last_error LIKE '%Unsupported sync entity type%'`,
+      [centerId],
+    );
     // Older server-reset repairs used an entity id + timestamp as the
     // operation id and exceeded PostgreSQL's VARCHAR(64) limit. Rename those
     // local-only, never-applied operations before retrying them. The conflict
@@ -268,6 +279,7 @@ export class SyncRepository {
            OR last_error LIKE '%package%constraint%'
            OR last_error LIKE '%grade_%'
            OR last_error LIKE '%Unknown entity%'
+           OR last_error LIKE '%Unsupported sync entity type%'
            OR last_error LIKE '%violates foreign key%'
            OR last_error LIKE '%violates check constraint%'
            OR (
