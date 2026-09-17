@@ -251,7 +251,7 @@ export class SyncRepository {
        WHERE center_id = ?
          AND status = 'conflict'
          AND retry_count < 3
-         AND entity_type IN ('student', 'student_card', 'package', 'package_subject', 'package_subscription', 'package_teacher_override', 'attendance', 'makeup')
+         AND entity_type IN ('student', 'student_card', 'package', 'package_subject', 'package_subscription', 'package_teacher_override', 'attendance', 'makeup', 'grade_exam', 'grade_score')
          AND (
            last_error LIKE '%CARD_OUTSIDE_ALLOWED_RANGE%'
            OR last_error LIKE '%CARD_ALREADY_ASSIGNED%'
@@ -266,6 +266,8 @@ export class SyncRepository {
            OR last_error LIKE '%outside the authenticated center%'
            OR last_error LIKE '%CARD_BELONGS_TO_OTHER_CENTER%'
            OR last_error LIKE '%package%constraint%'
+           OR last_error LIKE '%grade_%'
+           OR last_error LIKE '%Unknown entity%'
            OR last_error LIKE '%violates foreign key%'
            OR last_error LIKE '%violates check constraint%'
            OR (
