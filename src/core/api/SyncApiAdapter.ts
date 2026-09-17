@@ -36,6 +36,8 @@ export interface BootstrapResponse {
   notificationDeliveries?: any[];
   sessionClosings?: any[];
   dailyClosings?: any[];
+  gradeExams?: any[];
+  gradeScores?: any[];
   latestServerSeq: number;
   timestamp: string;
 }

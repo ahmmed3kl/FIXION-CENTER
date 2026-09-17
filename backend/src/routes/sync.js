@@ -52,6 +52,8 @@ router.get(
           notificationDeliveriesRes,
           sessionClosingsRes,
           dailyClosingsRes,
+          gradeExamsRes,
+          gradeScoresRes,
           maxSeqRes,
         ] = await Promise.all([
           client.query("SELECT * FROM students WHERE center_id = $1", [centerId]),
@@ -79,6 +81,8 @@ router.get(
           client.query("SELECT * FROM notification_deliveries WHERE center_id = $1", [centerId]),
           client.query("SELECT * FROM session_closing_records WHERE center_id = $1", [centerId]),
           client.query("SELECT * FROM daily_closing_summaries WHERE center_id = $1", [centerId]),
+          client.query("SELECT * FROM grade_exams WHERE center_id = $1", [centerId]),
+          client.query("SELECT * FROM grade_scores WHERE center_id = $1", [centerId]),
           client.query("SELECT COALESCE(MAX(server_seq), 0) as max_seq FROM server_sync_operations WHERE center_id = $1", [centerId]),
         ]);
 
@@ -109,6 +113,8 @@ router.get(
         notificationDeliveries: notificationDeliveriesRes.rows,
         sessionClosings: sessionClosingsRes.rows,
         dailyClosings: dailyClosingsRes.rows,
+        gradeExams: gradeExamsRes.rows,
+        gradeScores: gradeScoresRes.rows,
         latestServerSeq: parseInt(maxSeqRes.rows[0]?.max_seq || 0, 10),
         timestamp: new Date().toISOString(),
         };

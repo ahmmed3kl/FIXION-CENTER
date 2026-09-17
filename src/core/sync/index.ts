@@ -815,6 +815,23 @@ export class SyncEngine {
       const data = await this.adapter.bootstrapCenter(centerId);
       DatabaseService.runInTransaction((db) => {
 
+      if (Array.isArray(data.gradeExams)) {
+        for (const exam of data.gradeExams) {
+          db.runSync(`INSERT INTO grade_exams (id, center_id, name, grade, max_score, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET name=excluded.name, grade=excluded.grade, max_score=excluded.max_score, status=excluded.status, updated_at=excluded.updated_at`,
+            [exam.id, exam.center_id || centerId, exam.name, exam.grade, Number(exam.max_score ?? exam.maxScore ?? 100), exam.status || "active", exam.created_at || new Date().toISOString(), exam.updated_at || new Date().toISOString()]);
+        }
+      }
+      if (Array.isArray(data.gradeScores)) {
+        for (const score of data.gradeScores) {
+          db.runSync(`INSERT INTO grade_scores (id, center_id, exam_id, student_id, score, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(center_id, exam_id, student_id) DO UPDATE SET score=excluded.score, updated_at=excluded.updated_at`,
+            [score.id, score.center_id || centerId, score.exam_id || score.examId, score.student_id || score.studentId, score.score ?? null, score.created_at || new Date().toISOString(), score.updated_at || new Date().toISOString()]);
+        }
+      }
+
       // Upsert Teachers
       if (Array.isArray(data.teachers)) {
         for (const t of data.teachers) {
