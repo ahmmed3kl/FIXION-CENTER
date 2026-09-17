@@ -432,15 +432,29 @@ class SyncProcessor {
              WHERE center_id = $1 AND student_id = $2 AND status = 'active' AND id <> $3`,
             [centerId, studentId, cardId],
           );
-          await client.query(
-            `INSERT INTO student_cards (id, center_id, student_id, card_code, status, issued_at, created_at)
-             VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
-             ON CONFLICT (id) DO UPDATE SET
-               card_code = EXCLUDED.card_code,
-               status = EXCLUDED.status,
-               deactivated_at = CASE WHEN EXCLUDED.status = 'active' THEN NULL ELSE student_cards.deactivated_at END;`,
-            [cardId, centerId, studentId, persistedCardCode, status === "active" ? "active" : "deactivated"],
-          );
+          try {
+            await client.query(
+              `INSERT INTO student_cards (id, center_id, student_id, card_code, status, issued_at, created_at)
+               VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
+               ON CONFLICT (id) DO UPDATE SET
+                 card_code = EXCLUDED.card_code,
+                 status = EXCLUDED.status,
+                 deactivated_at = CASE WHEN EXCLUDED.status = 'active' THEN NULL ELSE student_cards.deactivated_at END;`,
+              [cardId, centerId, studentId, persistedCardCode, status === "active" ? "active" : "deactivated"],
+            );
+          } catch (cardErr) {
+            // A server-reset repair must not fail the student upload merely
+            // because its historical physical card is now owned by another
+            // student. Keep the student row and leave that card untouched.
+            const cardErrText = String(cardErr?.constraint || cardErr?.message || "");
+            if (operationType !== "REPAIR_AFTER_SERVER_RESET" || !cardErrText.includes("uq_center_card_code")) {
+              throw cardErr;
+            }
+            await client.query(
+              "UPDATE students SET card_code = NULL, updated_at = NOW() WHERE center_id = $1 AND id = $2",
+              [centerId, studentId],
+            );
+          }
         }
 
         // 3. Insert Selected Group Enrollments atomically
