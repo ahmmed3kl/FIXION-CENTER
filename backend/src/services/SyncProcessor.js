@@ -995,7 +995,6 @@ class SyncProcessor {
         const statusMap = { open: "pending", ended: "paid", cancelled: "cancelled" };
         const studentId = cycle.student_id || cycle.studentId;
         const requestedEnrollmentId = cycle.enrollment_id || cycle.enrollmentId || null;
-        const cycleNumber = Math.max(1, Number(cycle.cycle_number ?? cycle.cycleNumber ?? 1));
         if (!studentId) throw new Error("Debt cycle requires studentId.");
         const studentExists = await client.query(
           "SELECT 1 FROM students WHERE center_id = $1 AND id = $2",
@@ -1015,25 +1014,18 @@ class SyncProcessor {
           );
           if (enrollmentExists.rows.length === 0) enrollmentId = null;
         }
-        // A retry can arrive with a new id for the same natural cycle. Reuse
-        // the already stored id so the composite unique key is idempotent.
-        let targetId = id;
-        if (enrollmentId) {
-          const existingNatural = await client.query(
-            `SELECT id FROM debt_cycles
-             WHERE center_id = $1 AND enrollment_id = $2 AND cycle_number = $3`,
-            [centerId, enrollmentId, cycleNumber],
-          );
-          targetId = existingNatural.rows[0]?.id || id;
-        }
+        // The deployed PostgreSQL schema does not have a cycle_number column.
+        // Idempotency is provided by the operation/entity id (ON CONFLICT id),
+        // while enrollment/period remain ordinary debt-cycle attributes.
+        const targetId = id;
         await client.query(`INSERT INTO debt_cycles
-          (id, center_id, student_id, enrollment_id, package_subscription_id, cycle_type, period_start, period_end, amount_due, status, notes, cycle_number, created_at, updated_at)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NOW(),NOW())
+          (id, center_id, student_id, enrollment_id, package_subscription_id, cycle_type, period_start, period_end, amount_due, status, notes, created_at, updated_at)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW(),NOW())
           ON CONFLICT (id) DO UPDATE SET student_id=EXCLUDED.student_id, enrollment_id=EXCLUDED.enrollment_id,
             package_subscription_id=EXCLUDED.package_subscription_id, cycle_type=EXCLUDED.cycle_type,
             period_start=EXCLUDED.period_start, period_end=EXCLUDED.period_end, amount_due=EXCLUDED.amount_due,
-            status=EXCLUDED.status, notes=EXCLUDED.notes, cycle_number=EXCLUDED.cycle_number, updated_at=NOW()`,
-          [targetId, centerId, studentId, enrollmentId, cycle.package_subscription_id || cycle.packageSubscriptionId || null, cycle.cycle_type || cycle.cycleType || "monthly", cycle.start_date || cycle.startDate || cycle.period_start, cycle.end_date || cycle.endDate || cycle.period_end, Number(cycle.cycle_price ?? cycle.cyclePrice ?? cycle.amount_due ?? cycle.amountDue ?? 0), statusMap[cycle.status] || cycle.status || "pending", cycle.notes || null, cycleNumber]);
+            status=EXCLUDED.status, notes=EXCLUDED.notes, updated_at=NOW()`,
+          [targetId, centerId, studentId, enrollmentId, cycle.package_subscription_id || cycle.packageSubscriptionId || null, cycle.cycle_type || cycle.cycleType || "monthly", cycle.start_date || cycle.startDate || cycle.period_start, cycle.end_date || cycle.endDate || cycle.period_end, Number(cycle.cycle_price ?? cycle.cyclePrice ?? cycle.amount_due ?? cycle.amountDue ?? 0), statusMap[cycle.status] || cycle.status || "pending", cycle.notes || null]);
         break;
       }
 
