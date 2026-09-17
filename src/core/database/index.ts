@@ -2662,6 +2662,33 @@ class InMemorySqliteMock implements SqlDatabase {
         nextRetryAt: r.next_retry_at || null,
       }));
 
+      // Support the diagnostic queries used by Sync Debug in the in-memory
+      // database as well as native SQLite (status filters, ordering and
+      // LIMIT). Keeping the mock behaviour close to SQLite prevents tests
+      // and web fallback builds from showing synced rows as unsynced.
+      if (trimmed.includes("status IN (")) {
+        const statusMatch = trimmed.match(/status\s+IN\s*\(([^)]+)\)/i);
+        const statuses = statusMatch
+          ? statusMatch[1]
+              .split(",")
+              .map((value) => value.trim().replace(/^['\"]|['\"]$/g, "").toLowerCase())
+          : [];
+        const centerId = params[0];
+        let result = mapped.filter((row) =>
+          row.centerId === centerId && statuses.includes(String(row.status).toLowerCase()),
+        );
+        result.sort((a, b) => {
+          const descending = /ORDER BY\s+created_at\s+DESC/i.test(trimmed);
+          const direction = descending ? -1 : 1;
+          return String(a.createdAt || "").localeCompare(String(b.createdAt || "")) * direction;
+        });
+        if (/LIMIT\s+\?/i.test(trimmed)) {
+          const limit = Number(params[params.length - 1]);
+          if (Number.isFinite(limit) && limit > 0) result = result.slice(0, limit);
+        }
+        return result as T[];
+      }
+
       if (params.length >= 1 && trimmed.includes("WHERE operation_id = ?")) {
         return mapped.filter((r) => r.operationId === params[0]) as T[];
       }
@@ -2671,7 +2698,19 @@ class InMemorySqliteMock implements SqlDatabase {
           (r.status === "pending" || (r.status === "failed" && Number(r.retryCount || 0) < 10 && (!r.nextRetryAt || new Date(r.nextRetryAt).getTime() <= now)))) as T[];
       }
       if (params.length >= 1 && trimmed.includes("center_id = ?")) {
-        return mapped.filter((r) => r.centerId === params[0]) as T[];
+        let result = mapped.filter((r) => r.centerId === params[0]);
+        if (/ORDER BY\s+created_at\s+(ASC|DESC)/i.test(trimmed)) {
+          const descending = /ORDER BY\s+created_at\s+DESC/i.test(trimmed);
+          const direction = descending ? -1 : 1;
+          result.sort((a, b) =>
+            String(a.createdAt || "").localeCompare(String(b.createdAt || "")) * direction,
+          );
+        }
+        if (/LIMIT\s+\?/i.test(trimmed)) {
+          const limit = Number(params[params.length - 1]);
+          if (Number.isFinite(limit) && limit > 0) result = result.slice(0, limit);
+        }
+        return result as T[];
       }
       return mapped as T[];
     }

@@ -104,11 +104,10 @@ export class AttendanceRepository {
     const deviceId = await DeviceService.getDeviceId();
 
     const now = new Date();
-    const checkInTime =
-      params.checkInTime ||
-      `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}:${String(
-        now.getSeconds(),
-      ).padStart(2, "0")}`;
+    // Keep a full ISO timestamp in SQLite and the outbox. PostgreSQL stores
+    // this field as timestamptz; the old HH:mm:ss-only value could never be
+    // uploaded and was parked as a permanent conflict.
+    const checkInTime = params.checkInTime || now.toISOString();
 
     const attendanceType = params.attendanceType || "present";
     const isLateInt = params.isLate ? 1 : 0;

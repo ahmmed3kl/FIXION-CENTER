@@ -6,6 +6,7 @@ import { Colors, Spacing, Typography } from "../../core/theme";
 import { useAuthStore } from "../../features/auth/useAuthStore";
 
 const items = [
+  { label: "Sync Debug", route: "/(main)/sync-debug", icon: "bug-outline" as const },
   { label: "تبديل المركز", route: "/(main)/center-switch", icon: "business-outline" as const },
   { label: "الإدارة الأكاديمية", route: "/(main)/academic", icon: "school-outline" as const },
   { label: "رصد الدرجات", route: "/(main)/grades", icon: "reader-outline" as const },

@@ -10,6 +10,33 @@ async function validateCardCode(client, centerId, cardCode) {
   if (!range.rows.length) throw new AppError("CARD_OUTSIDE_ALLOWED_RANGE", "Card is outside the center allowed ranges.", "الكارت خارج النطاق المسموح لهذا المركز.", 403);
 }
 
+/**
+ * Mobile clients historically stored check-in values as HH:mm:ss. PostgreSQL
+ * expects a full timestamptz for attendance.check_in_time, so normalize both
+ * legacy time-only values and normal ISO/date values at the API boundary.
+ */
+function normalizeTimestamp(value, dateHint) {
+  if (!value) return new Date().toISOString();
+  const raw = String(value).trim();
+  if (/^\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?$/.test(raw)) {
+    const date = dateHint && /^\d{4}-\d{2}-\d{2}/.test(String(dateHint))
+      ? String(dateHint).slice(0, 10)
+      : new Date().toISOString().slice(0, 10);
+    const time = raw.length === 5 ? `${raw}:00` : raw;
+    return `${date}T${time}Z`;
+  }
+  const parsed = new Date(raw);
+  return Number.isNaN(parsed.getTime()) ? new Date().toISOString() : parsed.toISOString();
+}
+
+function normalizeDateOnly(value) {
+  if (!value) return null;
+  const raw = String(value).trim();
+  if (/^\d{4}-\d{2}-\d{2}/.test(raw)) return raw.slice(0, 10);
+  const parsed = new Date(raw);
+  return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString().slice(0, 10);
+}
+
 class SyncProcessor {
   /**
    * Processes a batch of sync operations inside a true ACID transaction.
@@ -259,7 +286,7 @@ class SyncProcessor {
    * Applies specific entity domain logic in PostgreSQL.
    */
   static async applyDomainMutation(client, context) {
-    const { centerId, userId, operationId, entityType, payload } = context;
+    const { centerId, userId, operationId, operationType, entityType, payload } = context;
 
     switch (entityType) {
       case "student":
@@ -287,19 +314,46 @@ class SyncProcessor {
 
         if (cardCode && cardWasProvided) await validateCardCode(client, centerId, cardCode);
 
-        // Check duplicate card/student code in center
-        const dupCheck = await client.query(
-          `SELECT id FROM students WHERE center_id = $1 AND student_code = $2
-           UNION
-           SELECT student_id FROM student_cards WHERE center_id = $1 AND card_code = $2`,
-          [centerId, cardCode],
+        // A student code is an identity key and can never be reassigned. A
+        // physical card code is different: after a server reset an old
+        // repair may collide with a card that is already owned remotely. In
+        // that repair-only case keep the student row and omit the card; the
+        // separate student_card operation remains reviewable instead of
+        // rolling back the entire student upload.
+        const studentCodeOwner = await client.query(
+          `SELECT id FROM students
+           WHERE center_id = $1 AND student_code = $2 AND id <> $3`,
+          [centerId, studentCode, studentId],
         );
-
-        if (dupCheck.rows.length > 0 && dupCheck.rows[0].id !== studentId) {
+        if (studentCodeOwner.rows.length > 0) {
           throw new Error(
-            `Student code / Card code '${cardCode}' is already registered in this center.`,
+            `Student code '${studentCode}' is already registered in this center.`,
           );
         }
+        let cardConflictWithAnotherStudent = false;
+        if (cardCode) {
+          const cardOwner = await client.query(
+            `SELECT student_id AS owner_id FROM student_cards
+             WHERE center_id = $1 AND card_code = $2
+             UNION
+             SELECT id AS owner_id FROM students
+             WHERE center_id = $1 AND card_code = $2`,
+            [centerId, cardCode],
+          );
+          const otherOwner = cardOwner.rows.find((row) => row.owner_id !== studentId);
+          if (otherOwner) {
+            if (operationType === "REPAIR_AFTER_SERVER_RESET") {
+              cardConflictWithAnotherStudent = true;
+            } else {
+              throw new Error(
+                `Card code '${cardCode}' is already assigned to another student in this center.`,
+              );
+            }
+          }
+        }
+        const persistedCardCode = cardConflictWithAnotherStudent
+          ? (existingStudent?.card_code || null)
+          : cardCode;
 
         const rawStudentType = student.student_type || student.studentType || existingStudent?.student_type || "registered";
         // PostgreSQL's legacy enum uses registered for external/guest-style
@@ -326,7 +380,7 @@ class SyncProcessor {
             centerId,
             studentCode,
             student.full_name || student.fullName || existingStudent?.full_name || "",
-            cardCode,
+            persistedCardCode,
             student.phone || existingStudent?.phone || "",
             student.parent_phone || student.parentPhone || existingStudent?.parent_phone || "",
             student.grade || existingStudent?.grade || "",
@@ -338,7 +392,7 @@ class SyncProcessor {
 
         // 2. Insert Active Physical Card
         const cardId = payload.card?.id || `card-${studentId}`;
-        if (cardCode && cardWasProvided) {
+        if (persistedCardCode && cardWasProvided) {
           await client.query(
             `UPDATE student_cards
              SET status = 'deactivated', deactivated_at = NOW()
@@ -352,7 +406,7 @@ class SyncProcessor {
                card_code = EXCLUDED.card_code,
                status = EXCLUDED.status,
                deactivated_at = CASE WHEN EXCLUDED.status = 'active' THEN NULL ELSE student_cards.deactivated_at END;`,
-            [cardId, centerId, studentId, cardCode, status === "active" ? "active" : "deactivated"],
+            [cardId, centerId, studentId, persistedCardCode, status === "active" ? "active" : "deactivated"],
           );
         }
 
@@ -384,6 +438,14 @@ class SyncProcessor {
       case "attendance":
       case "attendance_marked": {
         const att = payload;
+        const sessionDateRes = await client.query(
+          "SELECT session_date FROM sessions WHERE center_id = $1::varchar AND id = $2::varchar",
+          [centerId, att.session_id || att.sessionId],
+        );
+        const checkInTime = normalizeTimestamp(
+          att.check_in_time || att.checkInTime,
+          sessionDateRes.rows[0]?.session_date,
+        );
         // Enforce deduplication via UNIQUE(session_id, student_id)
         await client.query(
           `INSERT INTO attendance
@@ -395,7 +457,7 @@ class SyncProcessor {
             centerId,
             att.session_id || att.sessionId,
             att.student_id || att.studentId,
-            att.check_in_time || att.checkInTime || new Date().toISOString(),
+            checkInTime,
             att.status || "present",
             att.is_late ? true : false,
             att.attendance_type || att.attendanceType || "present",
@@ -409,6 +471,26 @@ class SyncProcessor {
       case "payment":
       case "payment_collected": {
         const pay = payload;
+        const paymentStudentId = pay.student_id || pay.studentId;
+        const requestedDebtCycleId = pay.debt_cycle_id || pay.debtCycleId || null;
+        const requestedSessionId = pay.session_id || pay.sessionId || null;
+        const debtCycleExists = requestedDebtCycleId
+          ? await client.query(
+              "SELECT 1 FROM debt_cycles WHERE center_id = $1 AND id = $2",
+              [centerId, requestedDebtCycleId],
+            )
+          : { rows: [] };
+        const sessionExists = requestedSessionId
+          ? await client.query(
+              "SELECT 1 FROM sessions WHERE center_id = $1 AND id = $2",
+              [centerId, requestedSessionId],
+            )
+          : { rows: [] };
+        // Relations can be absent when an old offline payment is retried
+        // after a server reset. Keep the cash event uploadable; it remains
+        // visible in the ledger and can be linked later by reconciliation.
+        const debtCycleId = debtCycleExists.rows.length ? requestedDebtCycleId : null;
+        const sessionId = sessionExists.rows.length ? requestedSessionId : null;
         // Append-only ledger insert
         await client.query(
           `INSERT INTO payments 
@@ -419,9 +501,9 @@ class SyncProcessor {
             pay.id,
             operationId,
             centerId,
-            pay.student_id || pay.studentId,
-            pay.debt_cycle_id || pay.debtCycleId || null,
-            pay.session_id || pay.sessionId || null,
+            paymentStudentId,
+            debtCycleId,
+            sessionId,
             pay.subscription_id || pay.subscriptionId || null,
             parseFloat(pay.amount),
             pay.payment_method || pay.paymentMethod || "cash",
@@ -484,12 +566,12 @@ class SyncProcessor {
         const sessionId = sess.id || context.entityId;
         const existingSessionRes = await client.query(
           `SELECT group_id, session_date, start_time, end_time, status
-           FROM sessions WHERE center_id = $1 AND id = $2`,
+           FROM sessions WHERE center_id = $1::varchar AND id = $2::varchar`,
           [centerId, sessionId],
         );
         const existingSession = existingSessionRes.rows[0];
         const groupId = sess.group_id || sess.groupId || existingSession?.group_id;
-        const sessionDate = sess.session_date || sess.sessionDate || existingSession?.session_date;
+        const sessionDate = normalizeDateOnly(sess.session_date || sess.sessionDate || existingSession?.session_date);
         const startTime = sess.start_time || sess.startTime || existingSession?.start_time;
         const endTime = sess.end_time || sess.endTime || existingSession?.end_time;
         const action = String(sess.action || context.operationType || "").toLowerCase();
@@ -499,7 +581,7 @@ class SyncProcessor {
         }
         await client.query(
           `INSERT INTO sessions (id, center_id, group_id, session_date, start_time, end_time, status, created_at, updated_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
+           VALUES ($1::varchar, $2::varchar, $3::varchar, $4::date, $5::varchar, $6::varchar, $7::varchar, NOW(), NOW())
            ON CONFLICT (id) DO UPDATE SET
              status = EXCLUDED.status,
              updated_at = NOW();`,
@@ -520,9 +602,9 @@ class SyncProcessor {
           for (const studentId of sess.expectedStudentIds) {
             await client.query(
               `INSERT INTO session_expected_students (id, center_id, session_id, student_id)
-               SELECT $1, $2, $3, s.id
+              SELECT $1::varchar, $2::varchar, $3::varchar, s.id
                FROM students s
-               WHERE s.id = $4 AND s.center_id = $2
+               WHERE s.id = $4::varchar AND s.center_id = $2::varchar
                ON CONFLICT (session_id, student_id) DO NOTHING`,
               [`exp-${sessionId}-${studentId}`, centerId, sessionId, studentId],
             );
@@ -686,15 +768,33 @@ class SyncProcessor {
               throw new AppError("CARD_ALREADY_ASSIGNED", "Card is already assigned.", "الكارت مرتبط بطالب بالفعل ولا يمكن نقله.", 409);
             }
           } else {
-            await client.query(
-              `INSERT INTO student_cards (id, center_id, student_id, card_code, status, issued_at, created_at)
-               VALUES ($1, $2, $3, $4, 'active', NOW(), NOW())
-               ON CONFLICT (id) DO UPDATE SET
-                 card_code = EXCLUDED.card_code,
-                 status = 'active',
-                 deactivated_at = NULL`,
-              [cardId, centerId, studentId, cardCode],
-            );
+            try {
+              await client.query(
+                `INSERT INTO student_cards (id, center_id, student_id, card_code, status, issued_at, created_at)
+                 VALUES ($1, $2, $3, $4, 'active', NOW(), NOW())
+                 ON CONFLICT (id) DO UPDATE SET
+                   card_code = EXCLUDED.card_code,
+                   status = 'active',
+                   deactivated_at = NULL`,
+                [cardId, centerId, studentId, cardCode],
+              );
+            } catch (cardErr) {
+              // A concurrent/replayed delivery may win the card-code unique
+              // index between the owner check above and this insert. Treat it
+              // as idempotent when the winning row belongs to this student;
+              // otherwise return a stable domain conflict instead of exposing
+              // a raw PostgreSQL constraint error.
+              if (cardErr?.code !== "23505" || !String(cardErr?.constraint || cardErr?.message || "").includes("uq_center_card_code")) {
+                throw cardErr;
+              }
+              const winner = await client.query(
+                "SELECT student_id FROM student_cards WHERE center_id = $1 AND card_code = $2",
+                [centerId, cardCode],
+              );
+              if (winner.rows[0]?.student_id !== studentId) {
+                throw new AppError("CARD_ALREADY_ASSIGNED", "Card is already assigned.", "الكارت مرتبط بطالب آخر.", 409);
+              }
+            }
           }
         }
         break;
@@ -893,14 +993,47 @@ class SyncProcessor {
         const cycle = payload.debtCycle || payload;
         const id = cycle.id || cycle.debtCycleId || context.entityId;
         const statusMap = { open: "pending", ended: "paid", cancelled: "cancelled" };
+        const studentId = cycle.student_id || cycle.studentId;
+        const requestedEnrollmentId = cycle.enrollment_id || cycle.enrollmentId || null;
+        const cycleNumber = Math.max(1, Number(cycle.cycle_number ?? cycle.cycleNumber ?? 1));
+        if (!studentId) throw new Error("Debt cycle requires studentId.");
+        const studentExists = await client.query(
+          "SELECT 1 FROM students WHERE center_id = $1 AND id = $2",
+          [centerId, studentId],
+        );
+        if (studentExists.rows.length === 0) {
+          throw new Error("Debt cycle student is not present in this center yet.");
+        }
+        // Package cycles historically used the subscription id in
+        // enrollmentId. The server FK points to the enrollment table, so
+        // retain the relation only when the referenced enrollment exists.
+        let enrollmentId = requestedEnrollmentId;
+        if (enrollmentId) {
+          const enrollmentExists = await client.query(
+            "SELECT 1 FROM student_group_enrollments WHERE center_id = $1 AND id = $2",
+            [centerId, enrollmentId],
+          );
+          if (enrollmentExists.rows.length === 0) enrollmentId = null;
+        }
+        // A retry can arrive with a new id for the same natural cycle. Reuse
+        // the already stored id so the composite unique key is idempotent.
+        let targetId = id;
+        if (enrollmentId) {
+          const existingNatural = await client.query(
+            `SELECT id FROM debt_cycles
+             WHERE center_id = $1 AND enrollment_id = $2 AND cycle_number = $3`,
+            [centerId, enrollmentId, cycleNumber],
+          );
+          targetId = existingNatural.rows[0]?.id || id;
+        }
         await client.query(`INSERT INTO debt_cycles
-          (id, center_id, student_id, enrollment_id, package_subscription_id, cycle_type, period_start, period_end, amount_due, status, notes, created_at, updated_at)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW(),NOW())
+          (id, center_id, student_id, enrollment_id, package_subscription_id, cycle_type, period_start, period_end, amount_due, status, notes, cycle_number, created_at, updated_at)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NOW(),NOW())
           ON CONFLICT (id) DO UPDATE SET student_id=EXCLUDED.student_id, enrollment_id=EXCLUDED.enrollment_id,
             package_subscription_id=EXCLUDED.package_subscription_id, cycle_type=EXCLUDED.cycle_type,
             period_start=EXCLUDED.period_start, period_end=EXCLUDED.period_end, amount_due=EXCLUDED.amount_due,
-            status=EXCLUDED.status, notes=EXCLUDED.notes, updated_at=NOW()`,
-          [id, centerId, cycle.student_id || cycle.studentId, cycle.enrollment_id || cycle.enrollmentId || null, cycle.package_subscription_id || cycle.packageSubscriptionId || null, cycle.cycle_type || cycle.cycleType || "monthly", cycle.start_date || cycle.startDate || cycle.period_start, cycle.end_date || cycle.endDate || cycle.period_end, Number(cycle.cycle_price ?? cycle.cyclePrice ?? cycle.amount_due ?? cycle.amountDue ?? 0), statusMap[cycle.status] || cycle.status || "pending", cycle.notes || null]);
+            status=EXCLUDED.status, notes=EXCLUDED.notes, cycle_number=EXCLUDED.cycle_number, updated_at=NOW()`,
+          [targetId, centerId, studentId, enrollmentId, cycle.package_subscription_id || cycle.packageSubscriptionId || null, cycle.cycle_type || cycle.cycleType || "monthly", cycle.start_date || cycle.startDate || cycle.period_start, cycle.end_date || cycle.endDate || cycle.period_end, Number(cycle.cycle_price ?? cycle.cyclePrice ?? cycle.amount_due ?? cycle.amountDue ?? 0), statusMap[cycle.status] || cycle.status || "pending", cycle.notes || null, cycleNumber]);
         break;
       }
 

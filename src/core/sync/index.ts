@@ -64,22 +64,194 @@ export function getOperationPriority(entityType: string): number {
   if (e === "payment" || e === "payment_reversal" || e === "debt_adjustment")
     return 3;
   if (e === "session_closing" || e === "daily_closing") return 4;
-  // These records share one batch and have foreign-key dependencies. Keep
-  // the dependency order deterministic even when an older operation was
-  // created before a newer repair operation:
-  // teachers/subjects -> links/groups -> students -> packages -> details.
-  if (e === "teacher" || e === "subject") return 51;
-  if (e === "teacher_subject") return 52;
-  if (e === "group") return 53;
-  if (e === "group_schedule") return 54;
-  if (e === "student") return 55;
-  if (e === "student_card") return 56;
-  if (e === "package") return 57;
-  if (e === "package_subject") return 58;
-  if (e === "enrollment" || e === "student_group_enrollment") return 59;
-  if (e === "package_subscription") return 60;
-  if (e === "package_teacher_override") return 61;
+  // CRUD mutations remain priority 5 for callers that consume the public
+  // category value. The queue sorter below adds dependency-aware ordering
+  // without changing this backwards-compatible contract.
+  if (e === "teacher" || e === "subject" || e === "teacher_subject" ||
+      e === "group" || e === "group_schedule" || e === "student" ||
+      e === "student_card" || e === "package" || e === "package_subject" ||
+      e === "enrollment" || e === "student_group_enrollment" ||
+      e === "package_subscription" || e === "package_teacher_override" ||
+      e === "debt_cycle") return 5;
   return 6;
+}
+
+const REPAIR_DEPENDENCY_PRIORITY: Record<string, number> = {
+  teacher: 10,
+  subject: 10,
+  teacher_subject: 20,
+  group: 30,
+  group_schedule: 35,
+  student: 40,
+  student_card: 45,
+  package: 50,
+  package_subject: 55,
+  enrollment: 60,
+  student_group_enrollment: 60,
+  package_subscription: 65,
+  package_teacher_override: 70,
+};
+
+function canonicalEntityType(entityType: string): string {
+  const normalized = String(entityType || "").toLowerCase().replace(/_created$|_updated$/, "");
+  return normalized === "student_group_enrollment" ? "enrollment" : normalized;
+}
+
+function parseOperationPayload(payload: unknown): any {
+  if (!payload) return {};
+  if (typeof payload !== "string") return payload;
+  try {
+    return JSON.parse(payload || "{}");
+  } catch {
+    return {};
+  }
+}
+
+function firstValue(source: any, ...keys: string[]): any {
+  for (const key of keys) {
+    if (source?.[key] !== undefined && source?.[key] !== null && source?.[key] !== "") {
+      return source[key];
+    }
+  }
+  return undefined;
+}
+
+/**
+ * SQLite has a natural unique key for debt cycles in addition to the primary
+ * id. A server bootstrap can legitimately contain the same cycle under a
+ * different id after a reset, so an id-only UPSERT is not sufficient.
+ */
+function upsertLocalDebtCycle(db: any, cycle: any, centerId: string): void {
+  const id = cycle.id || cycle.debtCycleId;
+  if (!id) return;
+  const cycleCenterId = cycle.center_id || cycle.centerId || centerId;
+  const studentId = cycle.student_id || cycle.studentId || "";
+  const enrollmentId = cycle.enrollment_id || cycle.enrollmentId || "";
+  const groupId = cycle.group_id || cycle.groupId || "";
+  const cycleNumber = Number(cycle.cycle_number || cycle.cycleNumber || 1);
+  const startDate = cycle.start_date || cycle.period_start || cycle.startDate || new Date().toISOString().slice(0, 10);
+  const endDate = cycle.end_date || cycle.period_end || cycle.endDate || startDate;
+  const cyclePrice = Number(cycle.cycle_price ?? cycle.amount_due ?? cycle.amountDue ?? cycle.cyclePrice ?? 0);
+  const status = cycle.status === "pending" ? "open" : (cycle.status || "open");
+  const createdAt = cycle.created_at || cycle.createdAt || new Date().toISOString();
+  const updatedAt = cycle.updated_at || cycle.updatedAt || createdAt;
+  const packageSubscriptionId = cycle.package_subscription_id || cycle.packageSubscriptionId || null;
+  const cycleType = cycle.cycle_type || cycle.cycleType || "group";
+
+  const natural = enrollmentId
+    ? db.getFirstSync(
+        `SELECT id FROM debt_cycles
+         WHERE center_id = ? AND enrollment_id = ? AND cycle_number = ?`,
+        [cycleCenterId, enrollmentId, cycleNumber],
+      )
+    : null;
+  const targetId = natural?.id || id;
+  db.runSync(
+    `INSERT INTO debt_cycles
+       (id, center_id, student_id, enrollment_id, group_id, cycle_number,
+        start_date, end_date, cycle_price, status, created_at, updated_at,
+        package_subscription_id, cycle_type)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       student_id = excluded.student_id,
+       enrollment_id = excluded.enrollment_id,
+       group_id = excluded.group_id,
+       cycle_number = excluded.cycle_number,
+       start_date = excluded.start_date,
+       end_date = excluded.end_date,
+       cycle_price = excluded.cycle_price,
+       status = excluded.status,
+       updated_at = excluded.updated_at,
+       package_subscription_id = excluded.package_subscription_id,
+       cycle_type = excluded.cycle_type`,
+    [targetId, cycleCenterId, studentId, enrollmentId, groupId, cycleNumber,
+      startDate, endDate, cyclePrice, status, createdAt, updatedAt,
+      packageSubscriptionId, cycleType],
+  );
+}
+
+/**
+ * Sorts the outbox by its normal business priority while also honoring
+ * foreign-key dependencies present in the same batch. This keeps the legacy
+ * public priority values intact, but prevents payment/debt-cycle and
+ * attendance/session operations from racing their parent records.
+ */
+function orderOperationsByDependencies(rows: SyncOperation[]): SyncOperation[] {
+  const baseSorted = [...rows].sort((a, b) => {
+    const repairA = a.operationType === "REPAIR_AFTER_SERVER_RESET";
+    const repairB = b.operationType === "REPAIR_AFTER_SERVER_RESET";
+    if (repairA !== repairB) return repairA ? -1 : 1;
+    if (repairA && repairB) {
+      const pA = REPAIR_DEPENDENCY_PRIORITY[canonicalEntityType(a.entityType)] ?? 90;
+      const pB = REPAIR_DEPENDENCY_PRIORITY[canonicalEntityType(b.entityType)] ?? 90;
+      if (pA !== pB) return pA - pB;
+    } else {
+      const pA = getOperationPriority(a.entityType);
+      const pB = getOperationPriority(b.entityType);
+      if (pA !== pB) return pA - pB;
+    }
+    return a.createdAt.localeCompare(b.createdAt);
+  });
+
+  const byKey = new Map<string, SyncOperation>();
+  for (const operation of baseSorted) {
+    const key = `${canonicalEntityType(operation.entityType)}:${operation.entityId}`;
+    if (!byKey.has(key) || operation.operationType === "REPAIR_AFTER_SERVER_RESET") {
+      byKey.set(key, operation);
+    }
+  }
+
+  const dependencies = (operation: SyncOperation): string[] => {
+    const payload = parseOperationPayload(operation.payload);
+    const entity = canonicalEntityType(operation.entityType);
+    const value = (...keys: string[]) => firstValue(payload, ...keys);
+    const refs: Array<[string, any]> = [];
+    if (entity === "session") refs.push(["group", value("groupId", "group_id")]);
+    if (entity === "attendance" || entity === "makeup") {
+      refs.push(["session", value("sessionId", "session_id")]);
+      refs.push(["student", value("studentId", "student_id")]);
+    }
+    if (entity === "payment" || entity === "debt_adjustment") {
+      refs.push(["debt_cycle", value("debtCycleId", "debt_cycle_id")]);
+      refs.push(["session", value("sessionId", "session_id")]);
+      refs.push(["student", value("studentId", "student_id")]);
+    }
+    if (entity === "debt_cycle") {
+      refs.push(["enrollment", value("enrollmentId", "enrollment_id")]);
+      refs.push(["student", value("studentId", "student_id")]);
+      refs.push(["package_subscription", value("packageSubscriptionId", "package_subscription_id")]);
+    }
+    if (entity === "enrollment") {
+      refs.push(["student", value("studentId", "student_id")]);
+      refs.push(["group", value("groupId", "group_id")]);
+    }
+    if (entity === "student_card") refs.push(["student", value("studentId", "student_id")]);
+    if (entity === "package_subject") refs.push(["package", value("packageId", "package_id")]);
+    if (entity === "package_subscription") {
+      refs.push(["student", value("studentId", "student_id")]);
+      refs.push(["package", value("packageId", "package_id")]);
+    }
+    if (entity === "package_teacher_override") refs.push(["package_subscription", value("subscriptionId", "subscription_id")]);
+    return refs.filter(([, id]) => id !== undefined).map(([type, id]) => `${type}:${id}`);
+  };
+
+  const visiting = new Set<string>();
+  const visited = new Set<string>();
+  const ordered: SyncOperation[] = [];
+  const visit = (operation: SyncOperation) => {
+    const operationKey = operation.operationId;
+    if (visited.has(operationKey) || visiting.has(operationKey)) return;
+    visiting.add(operationKey);
+    for (const dependencyKey of dependencies(operation)) {
+      const dependency = byKey.get(dependencyKey);
+      if (dependency) visit(dependency);
+    }
+    visiting.delete(operationKey);
+    visited.add(operationKey);
+    ordered.push(operation);
+  };
+  for (const operation of baseSorted) visit(operation);
+  return ordered;
 }
 
 function retryDelayMs(retryCount: number): number {
@@ -202,18 +374,14 @@ export class SyncRepository {
       [centerId, new Date().toISOString()],
     );
 
-    // Sort by priority ASC, then createdAt ASC
-    rows.sort((a, b) => {
-      const pA = getOperationPriority(a.entityType);
-      const pB = getOperationPriority(b.entityType);
-      if (pA !== pB) return pA - pB;
-      return a.createdAt.localeCompare(b.createdAt);
-    });
+    // Sort by business priority and then move any same-batch parent operation
+    // ahead of a child that references it through a foreign key.
+    const ordered = orderOperationsByDependencies(rows);
 
     if (limit && limit > 0) {
-      return rows.slice(0, limit);
+      return ordered.slice(0, limit);
     }
-    return rows;
+    return ordered;
   }
 
   /**
@@ -242,7 +410,7 @@ export class SyncRepository {
       `SELECT operation_id as operationId FROM sync_operations
        WHERE center_id = ? AND status = 'conflict' AND retry_count < 3
          AND LENGTH(operation_id) > 64
-         AND entity_type IN ('package', 'package_subject', 'package_subscription', 'package_teacher_override')`,
+         AND entity_type IN ('student', 'student_card', 'teacher', 'subject', 'group', 'group_schedule', 'session', 'enrollment', 'student_group_enrollment', 'attendance', 'payment', 'payment_reversal', 'debt_adjustment', 'debt_cycle', 'package', 'package_subject', 'package_subscription', 'package_teacher_override')`,
       [centerId],
     );
     for (const row of longIds) {
@@ -262,7 +430,7 @@ export class SyncRepository {
        WHERE center_id = ?
          AND status = 'conflict'
          AND retry_count < 3
-         AND entity_type IN ('student', 'student_card', 'package', 'package_subject', 'package_subscription', 'package_teacher_override', 'attendance', 'makeup', 'grade_exam', 'grade_score')
+         AND entity_type IN ('student', 'student_card', 'package', 'package_subject', 'package_subscription', 'package_teacher_override', 'session', 'attendance', 'makeup', 'debt_cycle', 'payment', 'debt_adjustment', 'grade_exam', 'grade_score')
          AND (
            last_error LIKE '%CARD_OUTSIDE_ALLOWED_RANGE%'
            OR last_error LIKE '%CARD_ALREADY_ASSIGNED%'
@@ -276,11 +444,16 @@ export class SyncRepository {
            OR last_error LIKE '%value too long%'
            OR last_error LIKE '%outside the authenticated center%'
            OR last_error LIKE '%CARD_BELONGS_TO_OTHER_CENTER%'
+           OR last_error LIKE '%uq_center_card_code%'
            OR last_error LIKE '%package%constraint%'
            OR last_error LIKE '%grade_%'
            OR last_error LIKE '%Unknown entity%'
            OR last_error LIKE '%Unsupported sync entity type%'
            OR last_error LIKE '%violates foreign key%'
+           OR last_error LIKE '%inconsistent types deduced%'
+           OR last_error LIKE '%invalid input syntax for type timestamp%'
+           OR last_error LIKE '%debt_cycles_%'
+           OR last_error LIKE '%payments_debt_cycle_id_fkey%'
            OR last_error LIKE '%violates check constraint%'
            OR (
              entity_type IN ('attendance', 'makeup')
@@ -359,6 +532,42 @@ export class SyncRepository {
     }
 
     return { pending, syncing, synced, failed, conflict, total: rows.length };
+  }
+
+  /** Recent local outbox activity for the sync diagnostics screen. */
+  static getRecentOperations(centerId: string, limit = 100): SyncOperation[] {
+    const safeLimit = Math.max(1, Math.min(500, Math.floor(limit)));
+    return DatabaseService.getDb().getAllSync<SyncOperation>(
+      `SELECT id, operation_id as operationId, center_id as centerId,
+              user_id as userId, device_id as deviceId,
+              operation_type as operationType, entity_type as entityType,
+              entity_id as entityId, payload, status,
+              created_at as createdAt, synced_at as syncedAt,
+              retry_count as retryCount, last_error as lastError
+       FROM sync_operations
+       WHERE center_id = ?
+       ORDER BY created_at DESC
+       LIMIT ?`,
+      [centerId, safeLimit],
+    );
+  }
+
+  /** Operations that still need server acknowledgement. */
+  static getUnsyncedOperations(centerId: string, limit = 200): SyncOperation[] {
+    const safeLimit = Math.max(1, Math.min(500, Math.floor(limit)));
+    return DatabaseService.getDb().getAllSync<SyncOperation>(
+      `SELECT id, operation_id as operationId, center_id as centerId,
+              user_id as userId, device_id as deviceId,
+              operation_type as operationType, entity_type as entityType,
+              entity_id as entityId, payload, status,
+              created_at as createdAt, synced_at as syncedAt,
+              retry_count as retryCount, last_error as lastError
+       FROM sync_operations
+       WHERE center_id = ? AND status IN ('pending', 'syncing', 'failed', 'conflict')
+       ORDER BY created_at ASC
+       LIMIT ?`,
+      [centerId, safeLimit],
+    );
   }
 
   /**
@@ -648,6 +857,7 @@ export class SyncEngine {
       group_schedule: new Set((snapshot.schedules || []).map((row: any) => String(row.id))),
       student: new Set((snapshot.students || []).map((row: any) => String(row.id))),
       enrollment: new Set((snapshot.enrollments || []).map((row: any) => String(row.id))),
+      debt_cycle: new Set((snapshot.debtCycles || []).map((row: any) => String(row.id))),
       package: new Set((snapshot.packages || []).map((row: any) => String(row.id))),
       package_subject: new Set((snapshot.packageSubjects || []).map((row: any) => String(row.id))),
       package_subscription: new Set((snapshot.packageSubscriptions || []).map((row: any) => String(row.id))),
@@ -779,6 +989,19 @@ export class SyncEngine {
       [centerId],
     );
     for (const enrollment of enrollments) queue("enrollment", enrollment.id, enrollment);
+
+    const debtCycles = db.getAllSync<any>(
+      `SELECT id, student_id as studentId, enrollment_id as enrollmentId,
+              group_id as groupId, cycle_number as cycleNumber,
+              start_date as startDate, end_date as endDate,
+              cycle_price as cyclePrice, status,
+              package_subscription_id as packageSubscriptionId,
+              cycle_type as cycleType, created_at as createdAt,
+              updated_at as updatedAt
+       FROM debt_cycles WHERE center_id = ?`,
+      [centerId],
+    );
+    for (const cycle of debtCycles) queue("debt_cycle", cycle.id, cycle);
 
     const packages = db.getAllSync<any>(
       `SELECT id, name, price, max_selections as maxSelections, description,
@@ -1014,7 +1237,6 @@ export class SyncEngine {
           // different local id. Keep one canonical row instead of allowing a
           // primary-key/card-code collision to abort the entire bootstrap.
           if (existingByCode && existingByCode.id !== card.id) {
-            db.runSync(`DELETE FROM student_cards WHERE id = ?`, [card.id]);
             db.runSync(
               `UPDATE student_cards
                SET student_id = ?, status = ?, issued_at = ?
@@ -1236,11 +1458,7 @@ export class SyncEngine {
       }
       if (Array.isArray(data.debtCycles)) {
         for (const c of data.debtCycles) {
-          db.runSync(`INSERT INTO debt_cycles (id, center_id, student_id, enrollment_id, group_id, cycle_number, start_date, end_date, cycle_price, status, created_at, updated_at, package_subscription_id, cycle_type)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET student_id=excluded.student_id, enrollment_id=excluded.enrollment_id, start_date=excluded.start_date, end_date=excluded.end_date, cycle_price=excluded.cycle_price, status=excluded.status, updated_at=excluded.updated_at, package_subscription_id=excluded.package_subscription_id, cycle_type=excluded.cycle_type
-            ON CONFLICT(center_id, enrollment_id, cycle_number) DO UPDATE SET student_id=excluded.student_id, group_id=excluded.group_id, start_date=excluded.start_date, end_date=excluded.end_date, cycle_price=excluded.cycle_price, status=excluded.status, updated_at=excluded.updated_at, package_subscription_id=excluded.package_subscription_id, cycle_type=excluded.cycle_type`,
-            [c.id, c.center_id || centerId, c.student_id || c.studentId, c.enrollment_id || c.enrollmentId || "", c.group_id || c.groupId || "", Number(c.cycle_number || c.cycleNumber || 1), c.start_date || c.period_start || new Date().toISOString().slice(0,10), c.end_date || c.period_end || new Date().toISOString().slice(0,10), Number(c.cycle_price ?? c.amount_due ?? c.amountDue ?? 0), c.status === "pending" ? "open" : (c.status || "open"), c.created_at || new Date().toISOString(), c.updated_at || new Date().toISOString(), c.package_subscription_id || c.packageSubscriptionId || null, c.cycle_type || c.cycleType || "monthly"]);
+          upsertLocalDebtCycle(db, c, centerId);
         }
       }
       if (Array.isArray(data.notificationEvents)) {
@@ -1750,12 +1968,9 @@ export class SyncEngine {
           else db.runSync(`INSERT INTO package_subject_teacher_overrides (id, center_id, subscription_id, subject_id, teacher_id, created_at) VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET teacher_id=excluded.teacher_id`,
             [o.id || change.entityId, centerId, o.subscription_id || o.subscriptionId, o.subject_id || o.subjectId, o.teacher_id || o.teacherId, o.created_at || new Date().toISOString()]);
-        } else if (entityType === "debt_cycle") {
-          const c = data.debtCycle || data;
-          db.runSync(`INSERT INTO debt_cycles (id, center_id, student_id, enrollment_id, group_id, cycle_number, start_date, end_date, cycle_price, status, created_at, updated_at, package_subscription_id, cycle_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET student_id=excluded.student_id, enrollment_id=excluded.enrollment_id, start_date=excluded.start_date, end_date=excluded.end_date, cycle_price=excluded.cycle_price, status=excluded.status, updated_at=excluded.updated_at, package_subscription_id=excluded.package_subscription_id, cycle_type=excluded.cycle_type
-            ON CONFLICT(center_id, enrollment_id, cycle_number) DO UPDATE SET student_id=excluded.student_id, group_id=excluded.group_id, start_date=excluded.start_date, end_date=excluded.end_date, cycle_price=excluded.cycle_price, status=excluded.status, updated_at=excluded.updated_at, package_subscription_id=excluded.package_subscription_id, cycle_type=excluded.cycle_type`,
-            [c.id || change.entityId, centerId, c.student_id || c.studentId, c.enrollment_id || c.enrollmentId || "", c.group_id || c.groupId || "", Number(c.cycle_number || c.cycleNumber || 1), c.start_date || c.period_start || new Date().toISOString().slice(0,10), c.end_date || c.period_end || new Date().toISOString().slice(0,10), Number(c.cycle_price ?? c.cyclePrice ?? c.amount_due ?? c.amountDue ?? 0), c.status === "pending" ? "open" : (c.status || "open"), c.created_at || new Date().toISOString(), c.updated_at || new Date().toISOString(), c.package_subscription_id || c.packageSubscriptionId || null, c.cycle_type || c.cycleType || "monthly"]);
+         } else if (entityType === "debt_cycle") {
+           const c = data.debtCycle || data;
+           upsertLocalDebtCycle(db, { ...c, id: c.id || change.entityId }, centerId);
         } else if (entityType === "advance_coverage") {
           const c = data.coverage || data;
           db.runSync(`INSERT INTO advance_coverages (id, operation_id, center_id, student_id, advance_session_id, target_future_session_id, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)

@@ -70,6 +70,12 @@ async function main() {
 }
 
 main().catch((error) => {
-  console.error(`Reset failed: ${error.message}`);
+  const details = [
+    error?.message || String(error),
+    error?.code ? `code=${error.code}` : null,
+    error?.detail ? `detail=${error.detail}` : null,
+    error?.hint ? `hint=${error.hint}` : null,
+  ].filter(Boolean).join(" | ");
+  console.error(`Reset failed: ${details}`);
   process.exitCode = 1;
 });
