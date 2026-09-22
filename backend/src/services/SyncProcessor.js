@@ -83,6 +83,15 @@ function normalizeAttendanceStatus(value, isLate) {
   return "present";
 }
 
+// Several older mobile operation IDs embedded both exam and student IDs and
+// exceeded PostgreSQL's VARCHAR(64) operation_id columns. Keep a deterministic
+// bounded key on the server so those queued operations can still be retried.
+function normalizeOperationId(value) {
+  const raw = String(value || "");
+  if (raw.length <= 64) return raw;
+  return `op-${crypto.createHash("sha256").update(raw).digest("hex").slice(0, 61)}`;
+}
+
 class SyncProcessor {
   /**
    * Processes a batch of sync operations inside a true ACID transaction.
@@ -102,7 +111,7 @@ class SyncProcessor {
 
       for (const op of operations) {
         const {
-          operationId,
+          operationId: rawOperationId,
           operationType,
           entityType,
           entityId,
@@ -110,7 +119,7 @@ class SyncProcessor {
           createdAt,
         } = op;
 
-        if (!operationId) {
+        if (!rawOperationId) {
           conflicts.push({
             operationId: null,
             entityType,
@@ -120,6 +129,7 @@ class SyncProcessor {
           });
           continue;
         }
+        const operationId = normalizeOperationId(rawOperationId);
 
         // 1. Check if operation was already processed (Database-level Idempotency)
         const existingOp = await client.query(
@@ -138,7 +148,7 @@ class SyncProcessor {
             });
             continue;
           }
-          syncedOperationIds.push(operationId);
+          syncedOperationIds.push(rawOperationId);
           const existingSeq = parseInt(existingOp.rows[0].server_seq, 10);
           if (existingSeq > maxServerSeq) {
             maxServerSeq = existingSeq;
@@ -218,7 +228,7 @@ class SyncProcessor {
           );
 
           await client.query("RELEASE SAVEPOINT op_savepoint");
-          syncedOperationIds.push(operationId);
+          syncedOperationIds.push(rawOperationId);
         } catch (opErr) {
           await client.query("ROLLBACK TO SAVEPOINT op_savepoint");
           let serverState = null;
@@ -252,7 +262,7 @@ class SyncProcessor {
           centerId,
           deviceId,
           maxServerSeq,
-          syncedOperationIds[syncedOperationIds.length - 1] || null,
+          normalizeOperationId(syncedOperationIds[syncedOperationIds.length - 1]) || null,
         ],
       );
 
