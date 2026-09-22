@@ -66,7 +66,12 @@ export default function LoginScreen() {
       <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : "height"} style={styles.keyboard}>
         <ScrollView contentContainerStyle={styles.scrollContent} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
           <View style={styles.brandArea}>
-            <Image source={require("../../../assets/images/icon.png")} style={styles.logoImage} resizeMode="contain" />
+            <Image
+              source={require("../../../assets/images/icon.png")}
+              style={styles.logoImage}
+              resizeMode="contain"
+              accessibilityLabel="FIXION F logo"
+            />
             <Text style={styles.brandName}>FIXION</Text>
             <Text style={styles.brandTagline}>EDUCATION. ORGANIZED.</Text>
           </View>
@@ -141,16 +146,16 @@ const styles = StyleSheet.create({
   shapeTop: { position: "absolute", width: 380, height: 300, borderRadius: 180, backgroundColor: "#E7F2FF", top: -170, left: -150, transform: [{ rotate: "-28deg" }] },
   shapeBottom: { position: "absolute", width: 520, height: 190, borderRadius: 260, backgroundColor: "#E5F1FF", bottom: -75, left: -180, transform: [{ rotate: "18deg" }] },
   shapeBottomAccent: { position: "absolute", width: 370, height: 140, borderRadius: 200, backgroundColor: "#D5E9FF", bottom: -70, right: -120, transform: [{ rotate: "-22deg" }] },
-  scrollContent: { flexGrow: 1, justifyContent: "center", paddingHorizontal: 24, paddingVertical: 28 },
-  brandArea: { alignItems: "center", marginBottom: 22 },
-  logoImage: { width: 142, height: 142, borderRadius: 32, marginBottom: 10 },
-  brandName: { color: Colors.slate900, fontSize: 42, fontWeight: "900", letterSpacing: 1.5 },
-  brandTagline: { color: Colors.slate400, fontSize: 11, fontWeight: "700", letterSpacing: 3.5, marginTop: 1 },
-  welcomeArea: { alignItems: "center", marginBottom: 24 },
-  title: { color: Colors.slate900, fontSize: 34, fontWeight: "800", textAlign: "center" },
-  subtitle: { color: Colors.slate500, fontSize: 18, marginTop: 6, textAlign: "center" },
-  form: { width: "100%", gap: 12 },
-  inputShell: { minHeight: 80, backgroundColor: "rgba(255,255,255,0.94)", borderWidth: 1.5, borderColor: "#DCE7F5", borderRadius: 20, paddingHorizontal: 18, paddingVertical: 10, flexDirection: "row", alignItems: "center", gap: 13, ...Shadows.subtle },
+  scrollContent: { flexGrow: 1, justifyContent: "center", paddingHorizontal: 24, paddingVertical: 20 },
+  brandArea: { alignItems: "center", marginBottom: 18 },
+  logoImage: { width: 92, height: 92, borderRadius: 23, marginBottom: 8 },
+  brandName: { color: Colors.slate900, fontSize: 32, fontWeight: "900", letterSpacing: 1.2 },
+  brandTagline: { color: Colors.slate400, fontSize: 9, fontWeight: "700", letterSpacing: 2.8, marginTop: 1 },
+  welcomeArea: { alignItems: "center", marginBottom: 20 },
+  title: { color: Colors.slate900, fontSize: 30, fontWeight: "800", textAlign: "center" },
+  subtitle: { color: Colors.slate500, fontSize: 16, marginTop: 5, textAlign: "center" },
+  form: { width: "100%", maxWidth: 520, alignSelf: "center", gap: 10 },
+  inputShell: { minHeight: 74, backgroundColor: "rgba(255,255,255,0.94)", borderWidth: 1.5, borderColor: "#DCE7F5", borderRadius: 18, paddingHorizontal: 16, paddingVertical: 9, flexDirection: "row", alignItems: "center", gap: 11, ...Shadows.subtle },
   inputShellError: { borderColor: Colors.danger },
   inputContent: { flex: 1, alignItems: "stretch" },
   inputLabel: { color: Colors.slate600, fontSize: 15, fontWeight: "700", textAlign: "right", marginBottom: 1 },
@@ -163,9 +168,9 @@ const styles = StyleSheet.create({
   rememberText: { color: Colors.slate700, fontSize: 17, fontWeight: "600" },
   checkbox: { width: 28, height: 28, borderRadius: 7, borderWidth: 1.5, borderColor: Colors.slate300, alignItems: "center", justifyContent: "center", backgroundColor: Colors.white },
   checkboxActive: { backgroundColor: Colors.primary, borderColor: Colors.primary },
-  loginButton: { height: 62, borderRadius: 20, backgroundColor: Colors.primary, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 12, marginTop: 5, ...Shadows.elevated },
-  loginButtonText: { color: Colors.white, fontSize: 22, fontWeight: "800" },
-  footer: { alignItems: "center", marginTop: 42, paddingBottom: 4 },
+  loginButton: { height: 58, borderRadius: 18, backgroundColor: Colors.primary, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 11, marginTop: 5, ...Shadows.elevated },
+  loginButtonText: { color: Colors.white, fontSize: 20, fontWeight: "800" },
+  footer: { alignItems: "center", marginTop: 30, paddingBottom: 4 },
   footerLine: { width: 66, height: 4, borderRadius: 3, backgroundColor: Colors.primary, marginBottom: 14 },
-  footerText: { color: Colors.slate500, fontSize: 18, fontWeight: "600", textAlign: "center" },
+  footerText: { color: Colors.slate500, fontSize: 16, fontWeight: "600", textAlign: "center" },
 });
