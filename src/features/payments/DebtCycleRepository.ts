@@ -22,11 +22,39 @@ function generateUUID(): string {
 /** The billing period is four weeks, independent of calendar month length. */
 export const BILLING_CYCLE_DAYS = 28;
 
+/**
+ * Normalizes both SQLite DATE values and ISO timestamps to YYYY-MM-DD.
+ * Old/bootstrap data can contain timestamps or malformed/empty dates; those
+ * must never be passed to Date#toISOString because that throws a RangeError.
+ */
+function normalizeDateOnly(value: unknown): string | null {
+  const raw = String(value ?? "").trim();
+  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(raw);
+  if (!match) return null;
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (
+    !Number.isFinite(date.getTime()) ||
+    date.getUTCFullYear() !== year ||
+    date.getUTCMonth() !== month - 1 ||
+    date.getUTCDate() !== day
+  ) {
+    return null;
+  }
+  return `${match[1]}-${match[2]}-${match[3]}`;
+}
+
 function addDays(dateOnly: string, days: number): string {
-  const [year, month, day] = dateOnly.split("-").map((part) => Number(part));
+  const normalized = normalizeDateOnly(dateOnly);
+  if (!normalized || !Number.isFinite(days)) return normalized || "";
+
+  const [year, month, day] = normalized.split("-").map((part) => Number(part));
   const date = new Date(Date.UTC(year, month - 1, day));
   date.setUTCDate(date.getUTCDate() + days);
-  return date.toISOString().slice(0, 10);
+  return Number.isFinite(date.getTime()) ? date.toISOString().slice(0, 10) : normalized;
 }
 
 export function getNextCycleStartDate(currentStartDate: string): string {
@@ -39,6 +67,8 @@ export function getCycleEndDate(nextCycleStartDate: string): string {
 
 export class DebtCycleRepository {
   private static getFirstScheduledDate(groupId: string, startDate: string): string {
+    const normalizedStartDate = normalizeDateOnly(startDate);
+    if (!normalizedStartDate) return "";
     const { activeCenterId } = useAuthStore.getState();
     const db = DatabaseService.getDb();
     const schedules = db.getAllSync<{ dayOfWeek: number }>(
@@ -46,8 +76,8 @@ export class DebtCycleRepository {
        WHERE center_id = ? AND group_id = ? AND status = 'active'`,
       [activeCenterId, groupId],
     );
-    if (!schedules.length) return startDate;
-    const start = new Date(`${startDate}T12:00:00`);
+    if (!schedules.length) return normalizedStartDate;
+    const start = new Date(`${normalizedStartDate}T12:00:00`);
     for (let offset = 0; offset < 7; offset += 1) {
       const candidate = new Date(start);
       candidate.setDate(start.getDate() + offset);
@@ -55,7 +85,7 @@ export class DebtCycleRepository {
         return candidate.toISOString().slice(0, 10);
       }
     }
-    return startDate;
+    return normalizedStartDate;
   }
   private static getActiveContext() {
     const { activeCenterId, currentUser } = useAuthStore.getState();
@@ -222,7 +252,13 @@ export class DebtCycleRepository {
       return existingCycles;
     }
 
-    const cutoffDate = targetDate || new Date().toISOString().slice(0, 10);
+    const cutoffDate = normalizeDateOnly(targetDate) || new Date().toISOString().slice(0, 10);
+    const enrollmentStartDate = normalizeDateOnly(enrollment.startDate);
+    const enrollmentEndDate = normalizeDateOnly(enrollment.endDate);
+    // A malformed legacy enrollment must not crash the student details screen.
+    // Leave its existing cycles visible and wait for a repaired date to create
+    // any new cycle.
+    if (!enrollmentStartDate) return existingCycles;
     const deviceId = DeviceService.getDeviceIdSync();
 
     let nextStart: string;
@@ -231,23 +267,26 @@ export class DebtCycleRepository {
     if (existingCycles.length === 0) {
       // A new enrollment starts financially on the first actual scheduled
       // class on/after the enrollment date, never before the student can attend.
-      nextStart = this.getFirstScheduledDate(enrollment.groupId, enrollment.startDate);
+      nextStart = this.getFirstScheduledDate(enrollment.groupId, enrollmentStartDate);
       nextCycleNum = 1;
     } else {
       const lastCycle = existingCycles[existingCycles.length - 1];
       // Continue immediately after the stored period. This also migrates
       // legacy calendar-month cycles without overlapping the new 28-day
       // periods.
-      nextStart = lastCycle.endDate
-        ? addDays(lastCycle.endDate, 1)
-        : getNextCycleStartDate(lastCycle.startDate);
+      const lastEndDate = normalizeDateOnly(lastCycle.endDate);
+      const lastStartDate = normalizeDateOnly(lastCycle.startDate);
+      if (!lastEndDate && !lastStartDate) return existingCycles;
+      nextStart = lastEndDate
+        ? addDays(lastEndDate, 1)
+        : getNextCycleStartDate(lastStartDate!);
       nextCycleNum = lastCycle.cycleNumber + 1;
     }
 
     // Generate cycles while nextStart <= cutoffDate and within enrollment validity
     while (nextStart <= cutoffDate) {
       // Bounding check: No cycle may start after the enrollment's effective end date
-      if (enrollment.endDate && nextStart > enrollment.endDate) {
+      if (enrollmentEndDate && nextStart > enrollmentEndDate) {
         break;
       }
 
@@ -264,8 +303,8 @@ export class DebtCycleRepository {
       }
 
       const nextCycleStart = getNextCycleStartDate(nextStart);
-      const cycleEndDate = enrollment.endDate && enrollment.endDate < getCycleEndDate(nextCycleStart)
-        ? enrollment.endDate
+      const cycleEndDate = enrollmentEndDate && enrollmentEndDate < getCycleEndDate(nextCycleStart)
+        ? enrollmentEndDate
         : getCycleEndDate(nextCycleStart);
 
       const cycleId = `dc-${generateUUID()}`;
@@ -382,20 +421,26 @@ export class DebtCycleRepository {
       return existingCycles;
     }
 
-    const cutoffDate = targetDate || new Date().toISOString().slice(0, 10);
+    const cutoffDate = normalizeDateOnly(targetDate) || new Date().toISOString().slice(0, 10);
+    const subscriptionStartDate = normalizeDateOnly(subscription.startDate);
+    const subscriptionEndDate = normalizeDateOnly(subscription.endDate);
+    if (!subscriptionStartDate) return existingCycles;
     const deviceId = DeviceService.getDeviceIdSync();
 
     let nextStart: string;
     let nextCycleNum: number;
 
     if (existingCycles.length === 0) {
-      nextStart = subscription.startDate;
+      nextStart = subscriptionStartDate;
       nextCycleNum = 1;
     } else {
       const lastCycle = existingCycles[existingCycles.length - 1];
-      nextStart = lastCycle.endDate
-        ? addDays(lastCycle.endDate, 1)
-        : getNextCycleStartDate(lastCycle.startDate);
+      const lastEndDate = normalizeDateOnly(lastCycle.endDate);
+      const lastStartDate = normalizeDateOnly(lastCycle.startDate);
+      if (!lastEndDate && !lastStartDate) return existingCycles;
+      nextStart = lastEndDate
+        ? addDays(lastEndDate, 1)
+        : getNextCycleStartDate(lastStartDate!);
       nextCycleNum = lastCycle.cycleNumber + 1;
     }
 
@@ -409,13 +454,13 @@ export class DebtCycleRepository {
     // Generate cycles while nextStart <= cutoffDate and within subscription validity
     while (nextStart <= cutoffDate) {
       // Bounding check: No cycle may start after the subscription's effective end date
-      if (subscription.endDate && nextStart > subscription.endDate) {
+      if (subscriptionEndDate && nextStart > subscriptionEndDate) {
         break;
       }
 
       const nextCycleStart = getNextCycleStartDate(nextStart);
-      const cycleEndDate = subscription.endDate && subscription.endDate < getCycleEndDate(nextCycleStart)
-        ? subscription.endDate
+      const cycleEndDate = subscriptionEndDate && subscriptionEndDate < getCycleEndDate(nextCycleStart)
+        ? subscriptionEndDate
         : getCycleEndDate(nextCycleStart);
 
       const cycleId = `dc-${generateUUID()}`;
