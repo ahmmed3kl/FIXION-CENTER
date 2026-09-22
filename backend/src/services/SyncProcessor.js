@@ -70,6 +70,19 @@ function normalizeDebtCycleStatus(value) {
   return aliases[raw] || "pending";
 }
 
+// The mobile app historically used `late` as an attendance status, while the
+// PostgreSQL schema stores lateness in `is_late` and only accepts `present`,
+// `absent`, `excused`, or `attended_elsewhere` in status. Normalize at the API
+// boundary so old queued operations remain retryable after a deployment.
+function normalizeAttendanceStatus(value, isLate) {
+  const raw = String(value || "present").trim().toLowerCase();
+  if (raw === "late") return "present";
+  if (["present", "absent", "excused", "attended_elsewhere"].includes(raw)) {
+    return raw;
+  }
+  return "present";
+}
+
 class SyncProcessor {
   /**
    * Processes a batch of sync operations inside a true ACID transaction.
@@ -493,6 +506,12 @@ class SyncProcessor {
           att.check_in_time || att.checkInTime,
           sessionDateRes.rows[0]?.session_date,
         );
+        const rawAttendanceStatus = att.status;
+        const normalizedAttendanceStatus = normalizeAttendanceStatus(
+          rawAttendanceStatus,
+          att.is_late,
+        );
+        const isLate = Boolean(att.is_late) || String(rawAttendanceStatus || "").toLowerCase() === "late";
         // Enforce deduplication via UNIQUE(session_id, student_id)
         await client.query(
           `INSERT INTO attendance
@@ -505,8 +524,8 @@ class SyncProcessor {
             att.session_id || att.sessionId,
             att.student_id || att.studentId,
             checkInTime,
-            att.status || "present",
-            att.is_late ? true : false,
+            normalizedAttendanceStatus,
+            isLate,
             att.attendance_type || att.attendanceType || "present",
             att.original_absence_id || att.originalAbsenceId || null,
             operationId,
