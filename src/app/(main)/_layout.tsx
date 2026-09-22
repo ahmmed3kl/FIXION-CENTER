@@ -4,14 +4,12 @@ import { StyleSheet, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Strings } from "../../core/localization";
 import { Colors } from "../../core/theme";
-import { useServiceVisibility } from "../../core/services/ServiceVisibilityContext";
 
 export default function MainLayout() {
-  const services = useServiceVisibility();
   const insets = useSafeAreaInsets();
-  const ready = services.loaded;
   return (
     <Tabs
+      backBehavior="history"
       screenOptions={{
         headerShown: false,
         tabBarActiveTintColor: Colors.primary,
@@ -41,7 +39,10 @@ export default function MainLayout() {
       <Tabs.Screen
         name="scanner"
         options={{
-          href: ready && services.isEnabled("attendance") ? undefined : null,
+          // Attendance scanning is opened from the dashboard/more menu. Keep
+          // it out of the persistent bottom bar so navigation back follows the
+          // actual previous screen instead of landing on the dashboard tab.
+          href: null,
           title: Strings.tabScanner,
           tabBarIcon: ({ color, focused }) => (
             <View

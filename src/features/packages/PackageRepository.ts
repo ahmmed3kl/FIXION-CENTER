@@ -317,11 +317,11 @@ export class PackageRepository {
 
     const db = DatabaseService.getDb();
     const existing = db.getFirstSync<any>(
-      `SELECT id FROM package_subjects WHERE center_id = ? AND package_id = ? AND subject_id = ?`,
-      [centerId, params.packageId, params.subjectId],
+      `SELECT id FROM package_subjects WHERE center_id = ? AND package_id = ? AND default_teacher_id = ?`,
+      [centerId, params.packageId, params.defaultTeacherId],
     );
     if (existing) {
-      throw new ConflictError("هذه المادة مضافة بالفعل إلى هذه الباقة.");
+      throw new ConflictError("هذا المدرس مضاف بالفعل إلى هذه الباقة.");
     }
 
     const id = `ps-${generateUUID()}`;

@@ -347,7 +347,7 @@ CREATE TABLE IF NOT EXISTS package_subjects (
     subject_id VARCHAR(64) NOT NULL REFERENCES subjects(id) ON DELETE RESTRICT,
     default_teacher_id VARCHAR(64) REFERENCES teachers(id) ON DELETE SET NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT uq_center_pkg_subject UNIQUE (center_id, package_id, subject_id)
+    CONSTRAINT uq_center_pkg_subject_teacher UNIQUE (center_id, package_id, subject_id, default_teacher_id)
 );
 
 -- Student Package Subscriptions

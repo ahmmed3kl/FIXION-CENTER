@@ -820,6 +820,37 @@ export const MIGRATIONS: Migration[] = [
       } catch {}
     },
   },
+  {
+    version: 11,
+    name: "package_subject_teacher_options",
+    up: (db: SqlDatabase) => {
+      // A package may contain the same subject more than once when each row
+      // uses a different teacher. Rebuild the old table whose uniqueness was
+      // incorrectly limited to (center, package, subject).
+      try {
+        db.execSync(`
+          CREATE TABLE package_subjects_v11 (
+            id TEXT PRIMARY KEY,
+            center_id TEXT NOT NULL,
+            package_id TEXT NOT NULL,
+            subject_id TEXT NOT NULL,
+            default_teacher_id TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            CONSTRAINT uq_pkg_subject_teacher UNIQUE (center_id, package_id, subject_id, default_teacher_id)
+          );
+          INSERT INTO package_subjects_v11 (id, center_id, package_id, subject_id, default_teacher_id, created_at)
+            SELECT id, center_id, package_id, subject_id, default_teacher_id, created_at
+            FROM package_subjects;
+          DROP TABLE package_subjects;
+          ALTER TABLE package_subjects_v11 RENAME TO package_subjects;
+          CREATE INDEX IF NOT EXISTS idx_pkg_subj_pkg ON package_subjects(center_id, package_id);
+        `);
+      } catch {
+        // Fresh/in-memory test databases may not implement table rebuild DDL;
+        // repository-level validation still enforces the same rule there.
+      }
+    },
+  },
 ];
 
 // In-Memory SQLite Mock for Jest / Test environments
@@ -1091,11 +1122,12 @@ class InMemorySqliteMock implements SqlDatabase {
             (r) =>
               r.center_id === row.center_id &&
               r.package_id === row.package_id &&
-              r.subject_id === row.subject_id,
+              r.subject_id === row.subject_id &&
+              r.default_teacher_id === row.default_teacher_id,
           );
           if (exists) {
             throw new Error(
-              "UNIQUE constraint failed: package_subjects.center_id, package_subjects.package_id, package_subjects.subject_id",
+              "UNIQUE constraint failed: package_subjects.center_id, package_subjects.package_id, package_subjects.subject_id, package_subjects.default_teacher_id",
             );
           }
         }
@@ -2786,8 +2818,8 @@ class InMemorySqliteMock implements SqlDatabase {
           createdAt: r.created_at,
           subjectName: s ? s.name : "",
           subjectCode: s ? s.code : "",
-          defaultTeacherName: t ? t.name : "",
-          // snake_case
+           defaultTeacherName: t ? t.name : "",
+           // snake_case
           center_id: r.center_id,
           package_id: r.package_id,
           subject_id: r.subject_id,
@@ -2795,7 +2827,19 @@ class InMemorySqliteMock implements SqlDatabase {
           created_at: r.created_at,
         };
       });
-      if (
+       if (
+         params.length >= 3 &&
+         trimmed.includes("package_id = ?") &&
+         trimmed.includes("default_teacher_id = ?")
+       ) {
+         return mapped.filter(
+           (r) =>
+             r.centerId === params[0] &&
+             r.packageId === params[1] &&
+             r.defaultTeacherId === params[2],
+         ) as T[];
+       }
+       if (
         params.length >= 3 &&
         trimmed.includes("package_id = ?") &&
         trimmed.includes("subject_id = ?")

@@ -26,6 +26,7 @@ export default function PackagesScreen() {
   const [description, setDescription] = useState("");
   const [options, setOptions] = useState<OptionDraft[]>([]);
   const [openTeacherPicker, setOpenTeacherPicker] = useState<number | null>(null);
+  const [saving, setSaving] = useState(false);
   const canView = PermissionService.hasPermission(permissions, "packages.view");
   const canCreate = PermissionService.hasPermission(permissions, "packages.create");
   const canUpdate = PermissionService.hasPermission(permissions, "packages.update");
@@ -38,18 +39,24 @@ export default function PackagesScreen() {
   const addOption = () => { const t = teachers[0]; const taught = t ? subjectsForTeacher(t.id) : []; setOptions((old) => [...old, { teacherId: t?.id || "", subjectId: taught[0]?.id || "" }]); };
   const chooseTeacher = (index: number, teacherId: string) => setOptions((all) => all.map((option, i) => { if (i !== index) return option; const taught = subjectsForTeacher(teacherId); return { teacherId, subjectId: taught[0]?.id || "" }; }));
   const save = async () => {
+    if (saving) return;
     const amount = Number(price); const max = Number(maxSelections);
     if (!name.trim() || !Number.isFinite(amount) || amount < 0 || !Number.isInteger(max) || max < 1) return Alert.alert("تنبيه", "أدخل اسمًا وسعرًا وحدًا أقصى صحيحًا.");
     if (!editing && !canCreate) return Alert.alert("غير مسموح", "لا تملك صلاحية إنشاء الباقات.");
     if (editing && !canUpdate) return Alert.alert("غير مسموح", "لا تملك صلاحية تعديل الباقات.");
     const valid = options.filter((x) => x.teacherId && x.subjectId);
+    if (new Set(valid.map((x) => x.teacherId)).size !== valid.length) {
+      return Alert.alert("Duplicate teacher", "Each teacher can be added only once to a package.");
+    }
     if (!valid.length || max > valid.length) return Alert.alert("تنبيه", "أضف مدرسين، والحد الأقصى لا يتجاوز عددهم.");
+    setSaving(true);
     try {
       const pkg = editing ? await PackageRepository.updatePackage(editing.id, { name: name.trim(), price: amount, maxSelections: max, description: description.trim() }) : await PackageRepository.createPackage({ name: name.trim(), price: amount, maxSelections: max, description: description.trim() });
       if (editing) for (const old of PackageRepository.getPackageSubjects(pkg.id)) await PackageRepository.removePackageSubject({ packageId: pkg.id, subjectId: old.subjectId });
       for (const option of valid) await PackageRepository.addPackageSubject({ packageId: pkg.id, subjectId: option.subjectId, defaultTeacherId: option.teacherId });
       Alert.alert("تم بنجاح", editing ? "تم تحديث الباقة." : "تم إنشاء الباقة."); reset(); load();
     } catch (e: any) { Alert.alert("خطأ", e?.message || "تعذر حفظ الباقة."); }
+    finally { setSaving(false); }
   };
   const toggleStatus = async (pkg: Package) => { try { await PackageRepository.updatePackage(pkg.id, { status: pkg.status === "active" ? "inactive" : "active" }); load(); } catch (e: any) { Alert.alert("خطأ", e?.message || "تعذر تحديث الحالة."); } };
   if (!canView) return <SafeAreaView style={styles.center}><Text style={styles.denied}>ليس لديك صلاحية عرض الباقات</Text></SafeAreaView>;

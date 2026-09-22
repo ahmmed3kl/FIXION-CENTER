@@ -1026,7 +1026,7 @@ class SyncProcessor {
           await client.query(
             `INSERT INTO package_subjects (id, center_id, package_id, subject_id, default_teacher_id, created_at)
              VALUES ($1,$2,$3,$4,$5,NOW())
-             ON CONFLICT (center_id, package_id, subject_id) DO UPDATE SET default_teacher_id=EXCLUDED.default_teacher_id`,
+             ON CONFLICT (center_id, package_id, subject_id, default_teacher_id) DO NOTHING`,
             [link.id || context.entityId || `pkg-sub-${centerId}-${link.package_id || link.packageId}-${link.subject_id || link.subjectId}`, centerId, link.package_id || link.packageId, link.subject_id || link.subjectId, link.default_teacher_id || link.defaultTeacherId || link.teacher_id || link.teacherId],
           );
         }

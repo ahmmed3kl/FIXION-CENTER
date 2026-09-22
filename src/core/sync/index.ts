@@ -401,6 +401,25 @@ export class SyncRepository {
    */
   static requeueRecoverableConflicts(centerId: string): number {
     const db = DatabaseService.getDb();
+    // A stale update means the server intentionally won the optimistic
+    // concurrency check. It must not remain as an endless retry/conflict on
+    // the device; the authoritative server row is already the resolution.
+    const staleResolvedAt = new Date().toISOString();
+    db.runSync(
+      `UPDATE sync_operations
+       SET status = 'synced', synced_at = ?, next_retry_at = NULL,
+           last_error = 'Superseded by server newer version'
+       WHERE center_id = ? AND status = 'conflict'
+         AND last_error LIKE '%STALE_UPDATE%'`,
+      [staleResolvedAt, centerId],
+    );
+    db.runSync(
+      `UPDATE sync_conflicts
+       SET resolved_at = COALESCE(resolved_at, ?)
+       WHERE center_id = ? AND resolved_at IS NULL
+         AND reason LIKE '%STALE_UPDATE%'`,
+      [staleResolvedAt, centerId],
+    );
     // A grade-book operation can have been parked by an older backend that
     // did not know the entity yet. Keep it retryable after the backend deploys
     // instead of letting a stale retry counter permanently block it.
@@ -1510,7 +1529,7 @@ export class SyncEngine {
         for (const p of data.packageSubjects) {
           db.runSync(`INSERT INTO package_subjects (id, center_id, package_id, subject_id, default_teacher_id, created_at)
             VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET package_id=excluded.package_id, subject_id=excluded.subject_id, default_teacher_id=excluded.default_teacher_id`,
+             ON CONFLICT(center_id, package_id, subject_id, default_teacher_id) DO NOTHING`,
             [p.id, p.center_id || centerId, p.package_id || p.packageId, p.subject_id || p.subjectId, p.default_teacher_id || p.defaultTeacherId || "", p.created_at || new Date().toISOString()]);
         }
       }
@@ -2028,7 +2047,7 @@ export class SyncEngine {
           const remove = packageAction === "DELETE" || packageAction.includes("REMOVE") || p.status === "inactive";
           if (remove) db.runSync(`DELETE FROM package_subjects WHERE center_id=? AND package_id=? AND subject_id=?`, [centerId, p.package_id || p.packageId, p.subject_id || p.subjectId]);
           else db.runSync(`INSERT INTO package_subjects (id, center_id, package_id, subject_id, default_teacher_id, created_at) VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET package_id=excluded.package_id, subject_id=excluded.subject_id, default_teacher_id=excluded.default_teacher_id`,
+            ON CONFLICT(center_id, package_id, subject_id, default_teacher_id) DO NOTHING`,
             [p.id || change.entityId, centerId, p.package_id || p.packageId, p.subject_id || p.subjectId, p.default_teacher_id || p.defaultTeacherId || p.teacher_id || p.teacherId || "", p.created_at || new Date().toISOString()]);
         } else if (entityType === "package_subscription") {
           const s = data.subscription || data;
