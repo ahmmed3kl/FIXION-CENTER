@@ -21,9 +21,9 @@ export interface ServiceVisibilityState {
 
 export const initialServiceVisibilityState: ServiceVisibilityState = {
   loading: false,
-  loaded: true,
+  loaded: false,
   centerId: null,
-  enabled: Object.fromEntries(SERVICE_KEYS.map((key) => [key, true])) as ServiceVisibilityState["enabled"],
+  enabled: {},
   error: null,
 };
 
