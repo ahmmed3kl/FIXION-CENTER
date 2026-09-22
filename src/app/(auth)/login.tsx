@@ -67,13 +67,11 @@ export default function LoginScreen() {
         <ScrollView contentContainerStyle={styles.scrollContent} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
           <View style={styles.brandArea}>
             <Image
-              source={require("../../../assets/images/icon.png")}
-              style={styles.logoImage}
+              source={require("../../../assets/images/fixion-wordmark.png")}
+              style={styles.wordmarkImage}
               resizeMode="contain"
-              accessibilityLabel="FIXION F logo"
+              accessibilityLabel="FIXION official wordmark"
             />
-            <Text style={styles.brandName}>FIXION</Text>
-            <Text style={styles.brandTagline}>EDUCATION. ORGANIZED.</Text>
           </View>
 
           <View style={styles.welcomeArea}>
@@ -148,9 +146,7 @@ const styles = StyleSheet.create({
   shapeBottomAccent: { position: "absolute", width: 370, height: 140, borderRadius: 200, backgroundColor: "#D5E9FF", bottom: -70, right: -120, transform: [{ rotate: "-22deg" }] },
   scrollContent: { flexGrow: 1, justifyContent: "center", paddingHorizontal: 24, paddingVertical: 20 },
   brandArea: { alignItems: "center", marginBottom: 18 },
-  logoImage: { width: 92, height: 92, borderRadius: 23, marginBottom: 8 },
-  brandName: { color: Colors.slate900, fontSize: 32, fontWeight: "900", letterSpacing: 1.2 },
-  brandTagline: { color: Colors.slate400, fontSize: 9, fontWeight: "700", letterSpacing: 2.8, marginTop: 1 },
+  wordmarkImage: { width: "100%", maxWidth: 330, height: 112 },
   welcomeArea: { alignItems: "center", marginBottom: 20 },
   title: { color: Colors.slate900, fontSize: 30, fontWeight: "800", textAlign: "center" },
   subtitle: { color: Colors.slate500, fontSize: 16, marginTop: 5, textAlign: "center" },
