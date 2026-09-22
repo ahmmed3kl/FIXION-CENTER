@@ -756,7 +756,7 @@ export default function StudentsScreen() {
                           {Strings.remainingBalanceLabel}
                         </Text>
                         <Text style={styles.finSummaryValue}>
-                          {formatCurrency(financialStatus.sessionDebt?.currentDebt ?? financialStatus.monthlyRemainingDebt)}
+                          {formatCurrency(financialStatus.monthlyRemainingDebt)}
                         </Text>
                       </View>
                     </View>
