@@ -75,10 +75,18 @@ export class ApiClient {
       // Request interceptor: Attach session token, center context, and device id
       this.instance.interceptors.request.use(
         async (config: InternalAxiosRequestConfig) => {
+          // Login is the operation that establishes a new session. Never send
+          // a stale token from SecureStore with it; a previous expired token
+          // must not affect a fresh login attempt.
+          const requestUrl = String(config.url || "");
+          const isLoginRequest = /\/auth\/login(?:\?|$)/.test(requestUrl);
+
           // 1. Session token
-          const token = await SecureStorageService.getItem("session_token");
-          if (token && config.headers) {
-            config.headers.Authorization = `Bearer ${token}`;
+          if (!isLoginRequest) {
+            const token = await SecureStorageService.getItem("session_token");
+            if (token && config.headers) {
+              config.headers.Authorization = `Bearer ${token}`;
+            }
           }
 
           // 2. Active Center ID header
@@ -122,6 +130,8 @@ export class ApiClient {
           }
 
           const status = error.response.status;
+          const requestUrl = String(error.config?.url || "");
+          const isLoginRequest = /\/auth\/login(?:\?|$)/.test(requestUrl);
           const serverData = error.response.data;
           const serverErr = serverData?.error;
 
@@ -141,7 +151,10 @@ export class ApiClient {
           }
 
           if (status === 401) {
-            if (ApiClient.onUnauthorizedCallback) {
+            // A failed login is not an expired authenticated session. Do not
+            // invoke the global logout handler here; doing so can race with a
+            // new login attempt and erase the token that was just stored.
+            if (!isLoginRequest && ApiClient.onUnauthorizedCallback) {
               try {
                 await ApiClient.onUnauthorizedCallback();
               } catch {}

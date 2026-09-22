@@ -15,8 +15,10 @@ import { useAuthStore } from "../../features/auth/useAuthStore";
 import { AppButton, AppCard, AppInput } from "../../shared/components";
 
 export default function LoginScreen() {
-  const [email, setEmail] = useState("admin@center1.com");
-  const [password, setPassword] = useState("123456");
+  // Do not prefill credentials from the old demo database. After a server
+  // reset, users must enter the account created by the reset script.
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [fieldError, setFieldError] = useState("");
 
   const { login, isLoading, error, clearError } = useAuthStore();

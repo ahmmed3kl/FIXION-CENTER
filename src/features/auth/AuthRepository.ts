@@ -64,6 +64,10 @@ export class AuthRepository {
 
     // 1. Live Cloud API Authentication (Render + Neon PostgreSQL)
     if (!env.enableMockData) {
+      // A login attempt must start from a clean client session. Otherwise a
+      // stale token from a previous install/reset can be attached to other
+      // requests while the new credentials are being verified.
+      await SecureStorageService.clearSession();
       try {
         const client = ApiClient.getInstance();
         const response = await client.post<{
