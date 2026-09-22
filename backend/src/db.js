@@ -131,6 +131,10 @@ async function ensureSchemaCompatibility() {
     END $$;
     CREATE UNIQUE INDEX IF NOT EXISTS uq_center_pkg_subject_teacher
       ON package_subjects(center_id, package_id, subject_id, default_teacher_id);
+    ALTER TABLE package_subjects
+      ADD COLUMN IF NOT EXISTS group_id VARCHAR(64);
+    CREATE INDEX IF NOT EXISTS idx_pkg_subj_group
+      ON package_subjects(center_id, group_id);
   `);
 
   // Older databases called the package amount `price`. Only reference that

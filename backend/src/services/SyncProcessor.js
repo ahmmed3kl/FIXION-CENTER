@@ -1021,13 +1021,22 @@ class SyncProcessor {
         const removeOperation = String(context.operationType || "").toUpperCase();
         const remove = ["DELETE", "REMOVE"].includes(removeOperation) || removeOperation.includes("REMOVE") || link.status === "inactive";
         if (remove) {
-          await client.query("DELETE FROM package_subjects WHERE center_id = $1 AND package_id = $2 AND subject_id = $3", [centerId, link.package_id || link.packageId, link.subject_id || link.subjectId]);
+          if (link.id) {
+            await client.query("DELETE FROM package_subjects WHERE center_id = $1 AND id = $2", [centerId, link.id]);
+          } else if (link.default_teacher_id || link.defaultTeacherId || link.teacher_id || link.teacherId) {
+            await client.query(
+              "DELETE FROM package_subjects WHERE center_id = $1 AND package_id = $2 AND subject_id = $3 AND default_teacher_id = $4",
+              [centerId, link.package_id || link.packageId, link.subject_id || link.subjectId, link.default_teacher_id || link.defaultTeacherId || link.teacher_id || link.teacherId],
+            );
+          } else {
+            await client.query("DELETE FROM package_subjects WHERE center_id = $1 AND package_id = $2 AND subject_id = $3", [centerId, link.package_id || link.packageId, link.subject_id || link.subjectId]);
+          }
         } else {
           await client.query(
-            `INSERT INTO package_subjects (id, center_id, package_id, subject_id, default_teacher_id, created_at)
-             VALUES ($1,$2,$3,$4,$5,NOW())
+            `INSERT INTO package_subjects (id, center_id, package_id, subject_id, default_teacher_id, group_id, created_at)
+             VALUES ($1,$2,$3,$4,$5,$6,NOW())
              ON CONFLICT (center_id, package_id, subject_id, default_teacher_id) DO NOTHING`,
-            [link.id || context.entityId || `pkg-sub-${centerId}-${link.package_id || link.packageId}-${link.subject_id || link.subjectId}`, centerId, link.package_id || link.packageId, link.subject_id || link.subjectId, link.default_teacher_id || link.defaultTeacherId || link.teacher_id || link.teacherId],
+            [link.id || context.entityId || `pkg-sub-${centerId}-${link.package_id || link.packageId}-${link.subject_id || link.subjectId}`, centerId, link.package_id || link.packageId, link.subject_id || link.subjectId, link.default_teacher_id || link.defaultTeacherId || link.teacher_id || link.teacherId, link.group_id || link.groupId || null],
           );
         }
         break;

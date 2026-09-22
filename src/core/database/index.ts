@@ -851,6 +851,20 @@ export const MIGRATIONS: Migration[] = [
       }
     },
   },
+  {
+    version: 12,
+    name: "package_subject_groups",
+    up: (db: SqlDatabase) => {
+      try {
+        db.execSync(`
+          ALTER TABLE package_subjects ADD COLUMN group_id TEXT;
+          CREATE INDEX IF NOT EXISTS idx_pkg_subj_group ON package_subjects(center_id, group_id);
+        `);
+      } catch {
+        // Column may already exist on upgraded or in-memory test databases.
+      }
+    },
+  },
 ];
 
 // In-Memory SQLite Mock for Jest / Test environments
@@ -2806,24 +2820,29 @@ class InMemorySqliteMock implements SqlDatabase {
       const list = this.tables.get("package_subjects") || [];
       const subjects = this.tables.get("subjects") || [];
       const teachers = this.tables.get("teachers") || [];
+      const groups = this.tables.get("groups") || [];
       const mapped = list.map((r) => {
         const s = subjects.find((sub) => sub.id === r.subject_id);
         const t = teachers.find((tch) => tch.id === r.default_teacher_id);
+        const g = groups.find((grp) => grp.id === r.group_id);
         return {
           id: r.id,
           centerId: r.center_id,
           packageId: r.package_id,
           subjectId: r.subject_id,
           defaultTeacherId: r.default_teacher_id,
+          groupId: r.group_id || null,
           createdAt: r.created_at,
           subjectName: s ? s.name : "",
           subjectCode: s ? s.code : "",
            defaultTeacherName: t ? t.name : "",
+           groupName: g ? g.name : "",
            // snake_case
           center_id: r.center_id,
           package_id: r.package_id,
           subject_id: r.subject_id,
           default_teacher_id: r.default_teacher_id,
+          group_id: r.group_id || null,
           created_at: r.created_at,
         };
       });

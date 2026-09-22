@@ -262,6 +262,8 @@ export interface PackageSubject {
   packageId: string;
   subjectId: string;
   defaultTeacherId: string;
+  groupId?: string | null;
+  groupName?: string;
   teacherId?: string;
   status?: "active" | "inactive";
   createdAt: string;
