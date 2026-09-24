@@ -18,6 +18,7 @@ import { Colors, Spacing, Typography } from "../../core/theme";
 import { useServiceVisibility } from "../../core/services/ServiceVisibilityContext";
 import { useAuthStore } from "../../features/auth/useAuthStore";
 import { EnrollmentRepository } from "../../features/enrollments/EnrollmentRepository";
+import { AttendanceRepository } from "../../features/attendance/AttendanceRepository";
 import { PackageRepository } from "../../features/packages/PackageRepository";
 import { PackageSubscriptionRepository } from "../../features/packages/PackageSubscriptionRepository";
 import { GroupRepository } from "../../features/groups/GroupRepository";
@@ -45,6 +46,7 @@ import {
     Student,
     StudentCard,
     StudentGroupEnrollment,
+    StudentGroupAttendanceSummary,
     Package,
     PackageSubject,
 } from "../../shared/types";
@@ -71,6 +73,7 @@ export default function StudentsScreen() {
   const [teachers, setTeachers] = useState<any[]>([]);
   const [financialStatus, setFinancialStatus] =
     useState<DetailedStudentFinancialStatus | null>(null);
+  const [attendanceSummaries, setAttendanceSummaries] = useState<StudentGroupAttendanceSummary[]>([]);
 
   // Modal States
   const [isAddStudentOpen, setIsAddStudentOpen] = useState(false);
@@ -167,6 +170,7 @@ export default function StudentsScreen() {
     setStudentCards([]);
     setStudentEnrollments([]);
     setFinancialStatus(null);
+    setAttendanceSummaries([]);
     if (studentId) {
       const requested = StudentRepository.findById(String(studentId));
       if (requested) openStudentDetails(requested);
@@ -182,6 +186,11 @@ export default function StudentsScreen() {
         student.id,
       );
       setStudentEnrollments(enrollments);
+      try {
+        setAttendanceSummaries(AttendanceRepository.getStudentGroupAttendanceSummaries(student.id));
+      } catch {
+        setAttendanceSummaries([]);
+      }
       if (paymentsEnabled && PermissionService.hasPermission(permissions, "payments.view")) {
         const fin = FinancialCalculationService.getStudentFinancialStatus(
           student.id,
@@ -683,6 +692,45 @@ export default function StudentsScreen() {
                             <Text style={styles.endEnrollBtnText}>إنهاء</Text>
                           </TouchableOpacity>
                         )}
+                      </View>
+                    ))
+                  )}
+                </View>
+
+                {/* Attendance profile: totals are grouped by the session's group. */}
+                <View style={styles.sectionBox}>
+                  <View style={styles.sectionHeaderRow}>
+                    <Text style={styles.sectionTitle}>سجل الحضور والغياب حسب المجموعة</Text>
+                    <Ionicons name="calendar-outline" size={18} color={Colors.primary} />
+                  </View>
+                  {attendanceSummaries.length === 0 ? (
+                    <Text style={styles.emptyText}>لا توجد حصص مسجلة لهذا الطالب حتى الآن.</Text>
+                  ) : (
+                    attendanceSummaries.map((summary) => (
+                      <View key={summary.groupId} style={styles.attendanceSummaryCard}>
+                        <Text style={styles.attendanceSummaryTitle}>{summary.groupName}</Text>
+                        <Text style={styles.attendanceSummaryMeta}>
+                          {[summary.subjectName, summary.teacherName].filter(Boolean).join(" • ") || "بيانات المجموعة"}
+                        </Text>
+                        <View style={styles.attendanceMetricRow}>
+                          <View style={styles.attendanceMetric}>
+                            <Text style={styles.attendanceMetricValue}>{summary.expectedSessions}</Text>
+                            <Text style={styles.attendanceMetricLabel}>حصص متوقعة</Text>
+                          </View>
+                          <View style={styles.attendanceMetric}>
+                            <Text style={[styles.attendanceMetricValue, { color: Colors.successText }]}>{summary.presentCount}</Text>
+                            <Text style={styles.attendanceMetricLabel}>حضور</Text>
+                          </View>
+                          <View style={styles.attendanceMetric}>
+                            <Text style={[styles.attendanceMetricValue, { color: Colors.dangerText }]}>{summary.absentCount}</Text>
+                            <Text style={styles.attendanceMetricLabel}>غياب</Text>
+                          </View>
+                          <View style={styles.attendanceMetric}>
+                            <Text style={[styles.attendanceMetricValue, { color: Colors.warningText }]}>{summary.makeupCount}</Text>
+                            <Text style={styles.attendanceMetricLabel}>تعويض</Text>
+                          </View>
+                        </View>
+                        {summary.makeupCount > 0 ? <Text style={styles.makeupSummaryText}>حضر في هذه المجموعة كحصة تعويضية.</Text> : null}
                       </View>
                     ))
                   )}
@@ -1410,6 +1458,49 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: "700",
     color: Colors.slate800,
+  },
+  attendanceSummaryCard: {
+    backgroundColor: Colors.white,
+    borderRadius: 10,
+    padding: Spacing.sm,
+    marginTop: Spacing.xs,
+    borderWidth: 1,
+    borderColor: Colors.border,
+  },
+  attendanceSummaryTitle: {
+    fontSize: 13,
+    fontWeight: "800",
+    color: Colors.slate900,
+  },
+  attendanceSummaryMeta: {
+    fontSize: 11,
+    color: Colors.slate500,
+    marginTop: 2,
+  },
+  attendanceMetricRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    marginTop: Spacing.sm,
+  },
+  attendanceMetric: {
+    alignItems: "center",
+    minWidth: 58,
+  },
+  attendanceMetricValue: {
+    fontSize: 16,
+    fontWeight: "800",
+    color: Colors.slate800,
+  },
+  attendanceMetricLabel: {
+    fontSize: 10,
+    color: Colors.slate500,
+    marginTop: 2,
+  },
+  makeupSummaryText: {
+    fontSize: 11,
+    color: Colors.warningText,
+    fontWeight: "700",
+    marginTop: Spacing.sm,
   },
   smallActionBtn: {
     flexDirection: "row",

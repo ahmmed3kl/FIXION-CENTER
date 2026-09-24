@@ -227,6 +227,21 @@ export interface Attendance {
   originalAbsenceId?: string;
   isExternal?: boolean;
   operationId: string;
+  groupId?: string;
+  groupName?: string;
+  subjectName?: string;
+  teacherName?: string;
+}
+
+export interface StudentGroupAttendanceSummary {
+  groupId: string;
+  groupName: string;
+  subjectName?: string;
+  teacherName?: string;
+  expectedSessions: number;
+  presentCount: number;
+  absentCount: number;
+  makeupCount: number;
 }
 
 export interface StudentSubscription {

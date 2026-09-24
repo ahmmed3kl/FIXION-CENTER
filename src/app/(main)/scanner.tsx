@@ -41,10 +41,11 @@ import {
 } from "../../shared/components";
 import {
     Attendance,
+    DetailedStudentFinancialStatus,
     Group,
     Session,
     Student,
-    StudentFinancialStatus,
+    StudentGroupAttendanceSummary,
 } from "../../shared/types";
 
 export default function ScannerScreen() {
@@ -59,6 +60,7 @@ function ScannerContent() {
   const paymentsEnabled = services.isEnabled("payments");
   const [permission, requestPermission] = useCameraPermissions();
   const [isCameraActive, setIsCameraActive] = useState(false);
+  const [cameraInstanceKey, setCameraInstanceKey] = useState(0);
   const [isTorchOn, setIsTorchOn] = useState(false);
   const [manualCode, setManualCode] = useState("00125");
   const [isProcessing, setIsProcessing] = useState(false);
@@ -74,7 +76,10 @@ function ScannerContent() {
     null,
   );
   const [financialStatus, setFinancialStatus] =
-    useState<StudentFinancialStatus | null>(null);
+    useState<DetailedStudentFinancialStatus | null>(null);
+  const [groupAttendanceSummary, setGroupAttendanceSummary] =
+    useState<StudentGroupAttendanceSummary | null>(null);
+  const [currentGroupLabel, setCurrentGroupLabel] = useState("");
   const [searchError, setSearchError] = useState<string | null>(null);
   const [todayGroups, setTodayGroups] = useState<Group[]>([]);
   const [allGroups, setAllGroups] = useState<Group[]>([]);
@@ -91,6 +96,7 @@ function ScannerContent() {
   const [isRecordingPayment, setIsRecordingPayment] = useState(false);
 
   const isScanningBlockedRef = useRef(false);
+  const lastScannedRef = useRef<{ code: string; at: number } | null>(null);
 
   useEffect(() => {
     try {
@@ -122,9 +128,12 @@ function ScannerContent() {
     setIsAlreadyAttended(false);
     setAttendanceResult(null);
     setFinancialStatus(null);
+    setGroupAttendanceSummary(null);
+    setCurrentGroupLabel("");
     setMakeupNotice(null);
     setSearchError(null);
     isScanningBlockedRef.current = false;
+    lastScannedRef.current = null;
   };
 
   const handleBackToGroups = () => {
@@ -156,6 +165,21 @@ function ScannerContent() {
       }
 
       setStudent(foundStudent);
+      const currentSession = SessionRepository.findById(activeSessionId);
+      const currentGroupId = currentSession?.groupId;
+      setCurrentGroupLabel(
+        [currentSession?.groupName, currentSession?.subjectName, currentSession?.teacherName]
+          .filter(Boolean)
+          .join(" • "),
+      );
+      if (currentGroupId) {
+        setGroupAttendanceSummary(
+          AttendanceRepository.getStudentGroupAttendanceSummaries(foundStudent.id)
+            .find((summary) => summary.groupId === currentGroupId) || null,
+        );
+      } else {
+        setGroupAttendanceSummary(null);
+      }
 
       const expected = AttendanceSessionService.isExpected(activeSessionId, foundStudent.id);
       const makeupEligibility = expected ? { eligible: false } : AttendanceSessionService.getMakeupEligibility(activeSessionId, foundStudent.id);
@@ -190,8 +214,8 @@ function ScannerContent() {
       }
 
       // Load financial status calculated dynamically
-      if (paymentsEnabled) {
-        const fin = PaymentRepository.getStudentFinancialStatus(foundStudent.id);
+      if (paymentsEnabled && currentGroupId) {
+        const fin = PaymentRepository.getStudentFinancialStatusForGroup(foundStudent.id, currentGroupId);
         setFinancialStatus(fin);
       } else {
         setFinancialStatus(null);
@@ -206,6 +230,10 @@ function ScannerContent() {
 
   const handleBarcodeScanned = ({ data }: { data: string }) => {
     if (isScanningBlockedRef.current || isProcessing) return;
+    const normalized = ScannerService.normalizeCardCode(data);
+    const now = Date.now();
+    if (lastScannedRef.current && lastScannedRef.current.code === normalized && now - lastScannedRef.current.at < 1200) return;
+    lastScannedRef.current = { code: normalized, at: now };
     isScanningBlockedRef.current = true;
     setIsTorchOn(false);
     setIsCameraActive(false);
@@ -247,6 +275,10 @@ function ScannerContent() {
       setAttendanceResult(result);
       setIsAlreadyAttended(true);
       setAttendanceSummary(AttendanceSessionService.getSummary(session.id));
+      setGroupAttendanceSummary(
+        AttendanceRepository.getStudentGroupAttendanceSummaries(student.id)
+          .find((summary) => summary.groupId === session.groupId) || null,
+      );
     } catch (err: any) {
       Alert.alert(Strings.errorTitle, getUserErrorMessage(err));
     } finally {
@@ -268,10 +300,16 @@ function ScannerContent() {
         studentId: student.id,
         amount,
         paymentType: "partial",
+        debtCycleId: financialStatus?.cycles.find((cycle) => (cycle.remainingDebt ?? 0) > 0)?.id,
       });
 
       // Recalculate financial status dynamically
-      const updated = PaymentRepository.getStudentFinancialStatus(student.id);
+      const currentGroupId = activeSessionId
+        ? SessionRepository.findById(activeSessionId)?.groupId
+        : undefined;
+      const updated = currentGroupId
+        ? PaymentRepository.getStudentFinancialStatusForGroup(student.id, currentGroupId)
+        : PaymentRepository.getStudentFinancialStatus(student.id);
       setFinancialStatus(updated);
       setShowPaymentModal(false);
       setPaymentAmount("");
@@ -346,6 +384,7 @@ function ScannerContent() {
                 {permission?.granted ? (
                   <View style={styles.cameraFrameWrap}>
                   <CameraView
+                    key={`attendance-camera-${cameraInstanceKey}`}
                     style={styles.camera}
                     autofocus="on"
                     zoom={0.2}
@@ -390,7 +429,7 @@ function ScannerContent() {
               <View style={styles.cameraPlaceholder}>
                 <TouchableOpacity
                   activeOpacity={0.8}
-                  onPress={() => { isScanningBlockedRef.current = false; setIsCameraActive(true); }}
+                  onPress={() => { isScanningBlockedRef.current = false; lastScannedRef.current = null; setCameraInstanceKey((value) => value + 1); setIsCameraActive(true); }}
                   style={styles.cameraLaunchButton}
                 >
                   <Ionicons
@@ -469,6 +508,21 @@ function ScannerContent() {
                 }
                 type={student.status === "active" ? "success" : "neutral"}
               />
+            </View>
+            <View style={styles.groupProfileCard}>
+              <View style={styles.groupProfileHeader}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.groupProfileTitle}>ملف الطالب في المجموعة الحالية</Text>
+                  <Text style={styles.groupProfileMeta}>{currentGroupLabel || "المجموعة الحالية"}</Text>
+                </View>
+                <Ionicons name="people-outline" size={20} color={Colors.primary} />
+              </View>
+              <View style={styles.groupProfileMetrics}>
+                <View style={styles.groupProfileMetric}><Text style={styles.groupProfileMetricValue}>{groupAttendanceSummary?.expectedSessions ?? 0}</Text><Text style={styles.groupProfileMetricLabel}>حصص</Text></View>
+                <View style={styles.groupProfileMetric}><Text style={[styles.groupProfileMetricValue, { color: Colors.successText }]}>{groupAttendanceSummary?.presentCount ?? 0}</Text><Text style={styles.groupProfileMetricLabel}>حضور</Text></View>
+                <View style={styles.groupProfileMetric}><Text style={[styles.groupProfileMetricValue, { color: Colors.dangerText }]}>{groupAttendanceSummary?.absentCount ?? 0}</Text><Text style={styles.groupProfileMetricLabel}>غياب</Text></View>
+                <View style={styles.groupProfileMetric}><Text style={[styles.groupProfileMetricValue, { color: Colors.warningText }]}>{groupAttendanceSummary?.makeupCount ?? 0}</Text><Text style={styles.groupProfileMetricLabel}>تعويض</Text></View>
+              </View>
             </View>
           </AppCard>
         ) : null}
@@ -602,7 +656,7 @@ function ScannerContent() {
         {paymentsEnabled && student && financialStatus ? (
           <View style={styles.sectionContainer}>
             <Text style={styles.sectionTitle}>
-              {Strings.financialStatusTitle}
+              مديونية المجموعة الحالية
             </Text>
             <AppCard style={styles.financialCard}>
               {financialStatus.subscriptions.length > 0 ? (
@@ -883,6 +937,49 @@ const styles = StyleSheet.create({
   resultCard: {
     padding: Spacing.md,
     marginBottom: Spacing.md,
+  },
+  groupProfileCard: {
+    backgroundColor: Colors.slate50,
+    borderRadius: BorderRadius.md,
+    padding: Spacing.sm,
+    marginTop: Spacing.md,
+    borderWidth: 1,
+    borderColor: Colors.border,
+  },
+  groupProfileHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+  },
+  groupProfileTitle: {
+    fontSize: 13,
+    fontWeight: "800",
+    color: Colors.slate900,
+    textAlign: "right",
+  },
+  groupProfileMeta: {
+    fontSize: 11,
+    color: Colors.slate500,
+    marginTop: 2,
+    textAlign: "right",
+  },
+  groupProfileMetrics: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    marginTop: Spacing.sm,
+  },
+  groupProfileMetric: {
+    alignItems: "center",
+    minWidth: 52,
+  },
+  groupProfileMetricValue: {
+    fontSize: 17,
+    fontWeight: "800",
+    color: Colors.slate800,
+  },
+  groupProfileMetricLabel: {
+    fontSize: 10,
+    color: Colors.slate500,
+    marginTop: 2,
   },
   makeupNotice: {
     flexDirection: "row",

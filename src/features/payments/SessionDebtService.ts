@@ -26,7 +26,11 @@ const addDays = (date: Date, days: number) => {
  * against concrete scheduled sessions.
  */
 export class SessionDebtService {
-  static getCurrentMonthBreakdown(studentId: string, targetDate = isoDate(new Date())): SessionDebtBreakdown {
+  static getCurrentMonthBreakdown(
+    studentId: string,
+    targetDate = isoDate(new Date()),
+    groupId?: string,
+  ): SessionDebtBreakdown {
     const { activeCenterId } = useAuthStore.getState();
     if (!activeCenterId) throw new Error("يجب تحديد السنتر أولاً.");
 
@@ -43,7 +47,11 @@ export class SessionDebtService {
        FROM student_group_enrollments
        WHERE center_id = ? AND student_id = ? AND status = 'active'`,
       [activeCenterId, studentId],
-    ).filter((enrollment) => enrollment.startDate <= periodEnd && (!enrollment.endDate || enrollment.endDate >= periodStart));
+    ).filter((enrollment) =>
+      (!groupId || enrollment.groupId === groupId) &&
+      enrollment.startDate <= periodEnd &&
+      (!enrollment.endDate || enrollment.endDate >= periodStart),
+    );
     for (const enrollment of enrollments) {
       const group = db.getFirstSync<any>(
         `SELECT id, session_price as sessionPrice, monthly_price as monthlyPrice, default_fee as defaultFee

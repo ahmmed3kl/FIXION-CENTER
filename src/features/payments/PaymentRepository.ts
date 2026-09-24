@@ -51,6 +51,18 @@ export class PaymentRepository {
     );
   }
 
+  static getStudentFinancialStatusForGroup(
+    studentId: string,
+    groupId: string,
+    targetDate?: string,
+  ): DetailedStudentFinancialStatus {
+    return FinancialCalculationService.getStudentFinancialStatusForGroup(
+      studentId,
+      groupId,
+      targetDate,
+    );
+  }
+
   /**
    * Fetches all payments for a student in the active center.
    */

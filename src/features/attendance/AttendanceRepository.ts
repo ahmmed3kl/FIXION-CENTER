@@ -8,7 +8,7 @@ import {
 } from "../../core/errors";
 import { PermissionService } from "../../core/permissions";
 import { SyncEngine, SyncRepository } from "../../core/sync";
-import { Attendance, AttendanceType } from "../../shared/types";
+import { Attendance, AttendanceType, StudentGroupAttendanceSummary } from "../../shared/types";
 import { useAuthStore } from "../auth/useAuthStore";
 
 function generateUUID(): string {
@@ -304,15 +304,121 @@ export class AttendanceRepository {
     }
     const db = DatabaseService.getDb();
     return db.getAllSync<any>(
-      `SELECT id, center_id as centerId, student_id as studentId, session_id as sessionId,
-              check_in_time as checkInTime, status, is_late = 1 as isLate,
-              attendance_type as attendanceType, original_absence_id as originalAbsenceId,
-              is_external = 1 as isExternal,
-              operation_id as operationId
-       FROM attendance
-       WHERE center_id = ? AND student_id = ?
-       ORDER BY check_in_time DESC`,
+      `SELECT a.id, a.center_id as centerId, a.student_id as studentId, a.session_id as sessionId,
+              a.check_in_time as checkInTime, a.status, a.is_late = 1 as isLate,
+              a.attendance_type as attendanceType, a.original_absence_id as originalAbsenceId,
+              a.is_external = 1 as isExternal,
+              a.operation_id as operationId,
+              ss.group_id as groupId, g.name as groupName,
+              subj.name as subjectName, t.name as teacherName
+       FROM attendance a
+       JOIN sessions ss ON ss.center_id = a.center_id AND ss.id = a.session_id
+       LEFT JOIN groups g ON g.center_id = ss.center_id AND g.id = ss.group_id
+       LEFT JOIN subjects subj ON subj.center_id = g.center_id AND subj.id = g.subject_id
+       LEFT JOIN teachers t ON t.center_id = g.center_id AND t.id = g.teacher_id
+       WHERE a.center_id = ? AND a.student_id = ?
+       ORDER BY a.check_in_time DESC`,
       [centerId, studentId],
     );
+  }
+
+  /**
+   * Returns attendance and derived absence totals per group. Absence is
+   * calculated from the expected-student snapshot, so a student who never
+   * checked in is counted even though there is no attendance row for them.
+   * Makeup attendance is kept on the group where it was actually recorded.
+   */
+  static getStudentGroupAttendanceSummaries(
+    studentId: string,
+  ): StudentGroupAttendanceSummary[] {
+    const { centerId, user } = this.getActiveContext();
+    if (!PermissionService.hasAnyPermission(user.permissions, ["attendance.view", "reports.attendance.view", "reports.view"])) {
+      throw new ForbiddenError("Ù„ÙŠØ³ Ù„Ø¯ÙŠÙƒ ØµÙ„Ø§Ø­ÙŠØ© Ø¹Ø±Ø¶ Ø¨ÙŠØ§Ù†Ø§Øª Ø§Ù„Ø­Ø¶ÙˆØ±.");
+    }
+    const db = DatabaseService.getDb();
+    const expectedRows = db.getAllSync<any>(
+      `SELECT ses.session_id as sessionId, ss.group_id as groupId,
+              g.name as groupName, subj.name as subjectName, t.name as teacherName
+       FROM session_expected_students ses
+       JOIN sessions ss ON ss.center_id = ses.center_id AND ss.id = ses.session_id
+       LEFT JOIN groups g ON g.center_id = ss.center_id AND g.id = ss.group_id
+       LEFT JOIN subjects subj ON subj.center_id = g.center_id AND subj.id = g.subject_id
+       LEFT JOIN teachers t ON t.center_id = g.center_id AND t.id = g.teacher_id
+       WHERE ses.center_id = ? AND ses.student_id = ?`,
+      [centerId, studentId],
+    );
+    const attendanceRows = db.getAllSync<any>(
+      `SELECT a.id, a.session_id as sessionId, a.status,
+              a.attendance_type as attendanceType,
+              ss.group_id as groupId, g.name as groupName,
+              subj.name as subjectName, t.name as teacherName
+       FROM attendance a
+       JOIN sessions ss ON ss.center_id = a.center_id AND ss.id = a.session_id
+       LEFT JOIN groups g ON g.center_id = ss.center_id AND g.id = ss.group_id
+       LEFT JOIN subjects subj ON subj.center_id = g.center_id AND subj.id = g.subject_id
+       LEFT JOIN teachers t ON t.center_id = g.center_id AND t.id = g.teacher_id
+       WHERE a.center_id = ? AND a.student_id = ?`,
+      [centerId, studentId],
+    );
+    const attendanceBySession = new Map<string, any>();
+    for (const row of attendanceRows) attendanceBySession.set(row.sessionId, row);
+    const summaries = new Map<string, StudentGroupAttendanceSummary>();
+    const ensure = (row: any) => {
+      if (!row.groupId) return null;
+      let summary = summaries.get(row.groupId);
+      if (!summary) {
+        summary = {
+          groupId: row.groupId,
+          groupName: row.groupName || "Ù…Ø¬Ù…ÙˆØ¹Ø©",
+          subjectName: row.subjectName || undefined,
+          teacherName: row.teacherName || undefined,
+          expectedSessions: 0,
+          presentCount: 0,
+          absentCount: 0,
+          makeupCount: 0,
+        };
+        summaries.set(row.groupId, summary);
+      }
+      return summary;
+    };
+    const countedAttendance = new Set<string>();
+
+    for (const row of expectedRows) {
+      const summary = ensure(row);
+      if (!summary) continue;
+      summary.expectedSessions += 1;
+      const attendance = attendanceBySession.get(row.sessionId);
+      if (attendance) {
+        countedAttendance.add(attendance.id);
+        if (attendance.status === "absent") summary.absentCount += 1;
+        else {
+          summary.presentCount += 1;
+          if (attendance.attendanceType === "makeup") summary.makeupCount += 1;
+        }
+        continue;
+      }
+      const covered = db.getFirstSync<any>(
+        `SELECT id FROM advance_coverages
+         WHERE center_id = ? AND student_id = ? AND target_future_session_id = ? LIMIT 1`,
+        [centerId, studentId, row.sessionId],
+      );
+      if (!covered) summary.absentCount += 1;
+    }
+
+    // A makeup session is normally not in the student's expected snapshot.
+    // Add it to the destination group so the profile shows where the makeup
+    // was actually attended instead of losing that information.
+    for (const attendance of attendanceRows) {
+      if (countedAttendance.has(attendance.id)) continue;
+      const summary = ensure(attendance);
+      if (!summary) continue;
+      if (attendance.status === "absent") summary.absentCount += 1;
+      else {
+        summary.presentCount += 1;
+        if (attendance.attendanceType === "makeup") summary.makeupCount += 1;
+      }
+    }
+
+    return [...summaries.values()].sort((a, b) => a.groupName.localeCompare(b.groupName));
   }
 }

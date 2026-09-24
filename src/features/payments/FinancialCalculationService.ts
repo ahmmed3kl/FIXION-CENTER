@@ -293,4 +293,104 @@ export class FinancialCalculationService {
       currentPeriodDebt: sessionDebt.currentDebt,
     };
   }
+
+  /**
+   * Same financial calculation scoped to one group. This is used by the
+   * attendance scanner so a teacher only sees this student's debt for the
+   * session/group currently being processed.
+   */
+  static getStudentFinancialStatusForGroup(
+    studentId: string,
+    groupId: string,
+    targetDate?: string,
+  ): DetailedStudentFinancialStatus {
+    const full = this.getStudentFinancialStatus(studentId, targetDate);
+    const db = DatabaseService.getDb();
+    const sessionRows = db.getAllSync<{ id: string }>(
+      `SELECT id FROM sessions WHERE center_id = ? AND group_id = ?`,
+      [this.getActiveContext().centerId, groupId],
+    );
+    const sessionIds = new Set(sessionRows.map((row) => row.id));
+    const cycles = full.cycles.filter((cycle) => cycle.groupId === groupId);
+    const cycleIds = new Set(cycles.map((cycle) => cycle.id));
+    const payments = full.payments.filter(
+      (payment) =>
+        (payment.debtCycleId && cycleIds.has(payment.debtCycleId)) ||
+        (payment.sessionId && sessionIds.has(payment.sessionId)),
+    );
+    const adjustments = full.adjustments.filter((adjustment) =>
+      cycleIds.has(adjustment.debtCycleId),
+    );
+    const monthlyPayments = payments.filter(
+      (payment) =>
+        !payment.isReversed &&
+        payment.paymentType !== "session" &&
+        !payment.sessionId,
+    );
+    const sessionPayments = payments.filter(
+      (payment) =>
+        !payment.isReversed &&
+        (payment.paymentType === "session" || !!payment.sessionId),
+    );
+    const monthlyTotalDue = cycles.reduce(
+      (sum, cycle) => sum + Number(cycle.effectivePrice ?? cycle.cyclePrice ?? 0),
+      0,
+    );
+    const monthlyTotalPaid = monthlyPayments.reduce(
+      (sum, payment) => sum + Number(payment.amount || 0),
+      0,
+    );
+    const monthlyAdjustments = adjustments.reduce(
+      (sum, adjustment) => sum + Number(adjustment.adjustmentAmount || 0),
+      0,
+    );
+    const sessionTotalPaid = sessionPayments.reduce(
+      (sum, payment) => sum + Number(payment.amount || 0),
+      0,
+    );
+    const sessionDebt = SessionDebtService.getCurrentMonthBreakdown(
+      studentId,
+      targetDate,
+      groupId,
+    );
+    const monthlyRemainingDebt = cycles.reduce(
+      (sum, cycle) => sum + Number(cycle.remainingDebt ?? 0),
+      0,
+    );
+    const subscriptions = full.subscriptions.filter(
+      (subscription) => subscription.groupId === groupId,
+    );
+    const reversals = full.reversals.filter((reversal) =>
+      payments.some((payment) => payment.id === reversal.paymentId),
+    );
+
+    return {
+      ...full,
+      totalDue: monthlyTotalDue,
+      totalPaid: monthlyTotalPaid,
+      remainingBalance: monthlyRemainingDebt,
+      subscriptions,
+      payments,
+      monthlyTotalDue,
+      monthlyTotalPaid,
+      monthlyAdjustments,
+      monthlyRemainingDebt,
+      totalRemainingDebt: monthlyRemainingDebt,
+      sessionTotalPaid,
+      sessionPaymentsTotal: sessionTotalPaid,
+      groupMonthlyDue: monthlyTotalDue,
+      groupMonthlyPaid: monthlyTotalPaid,
+      groupRemainingDebt: monthlyRemainingDebt,
+      packageMonthlyDue: 0,
+      packageMonthlyPaid: 0,
+      packageRemainingDebt: 0,
+      cycles,
+      adjustments,
+      sessionPayments,
+      monthlyPayments,
+      reversals,
+      sessionDebt,
+      currentPeriodDebt: sessionDebt.currentDebt,
+    };
+  }
 }
