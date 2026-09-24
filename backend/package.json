@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node src/server.js",
     "test": "node tests/backend_integration.test.js",
-    "platform:bootstrap-admin": "node scripts/bootstrap-platform-admin.js"
+    "platform:bootstrap-admin": "node scripts/bootstrap-platform-admin.js",
+    "sms:test": "node scripts/test-zadx-sms.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
