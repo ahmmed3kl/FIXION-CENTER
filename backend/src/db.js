@@ -132,6 +132,11 @@ async function ensureSchemaCompatibility() {
       END IF;
     END $$;
   `);
+
+  await pool.query(`
+    ALTER TABLE notification_deliveries
+      ADD COLUMN IF NOT EXISTS provider_message_id VARCHAR(128);
+  `);
 }
 
 module.exports = {

@@ -1,6 +1,7 @@
 const crypto = require("crypto");
 const db = require("../db");
 const { AppError } = require("../middleware/errorHandler");
+const zadxSmsProvider = require("./zadxSmsProvider");
 
 async function validateCardCode(client, centerId, cardCode) {
   if (!/^\d+$/.test(cardCode)) throw new AppError("INVALID_CARD_CODE", "Card code must contain digits only.", "كود الكارت غير صحيح.", 400);
@@ -162,7 +163,14 @@ class SyncProcessor {
             createdAt,
           });
 
-          // 4. Ingest operation into monotonic server ledger
+          // 4. Ingest operation into monotonic server ledger. For SMS
+          // deliveries, publish the authoritative post-provider status so
+          // clients converge on sent/failed state during the next pull.
+          let ledgerPayload = payload || {};
+          if (entityType === "notification_delivery") {
+            const deliveryState = await client.query("SELECT id, notification_event_id, provider, status, retry_count, provider_message_id FROM notification_deliveries WHERE center_id=$1 AND id=$2", [centerId, entityId]);
+            if (deliveryState.rows[0]) ledgerPayload = { delivery: { ...deliveryState.rows[0] } };
+          }
           const ingestRes = await client.query(
             `INSERT INTO server_sync_operations 
              (operation_id, center_id, user_id, device_id, operation_type, entity_type, entity_id, payload, status, created_at, applied_at)
@@ -176,7 +184,7 @@ class SyncProcessor {
               operationType || entityType || "mutation",
               entityType || "unknown",
               entityId || operationId,
-              JSON.stringify(payload || {}),
+              JSON.stringify(ledgerPayload),
               createdAt || new Date().toISOString(),
             ],
           );
@@ -200,7 +208,7 @@ class SyncProcessor {
               entityType || "unknown",
               entityId || operationId,
               `${entityType || "entity"}.${operationType || "mutate"}`,
-              JSON.stringify(payload || {}),
+              JSON.stringify(ledgerPayload),
             ],
           );
 
@@ -1154,12 +1162,38 @@ class SyncProcessor {
       case "notification_delivery": {
         const delivery = payload.delivery || payload;
         const id = delivery.id || delivery.deliveryId || context.entityId;
+        const channel = delivery.channel || delivery.provider || "push";
         await client.query(`INSERT INTO notification_deliveries
           (id, center_id, notification_event_id, provider, status, retry_count, response_payload, created_at)
           VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())
           ON CONFLICT (id) DO UPDATE SET provider=EXCLUDED.provider, status=EXCLUDED.status,
             retry_count=EXCLUDED.retry_count, response_payload=EXCLUDED.response_payload`,
-          [id, centerId, delivery.notification_event_id || delivery.notificationEventId, delivery.provider || delivery.channel || "push", delivery.status === "pending" ? "queued" : (delivery.status || "queued"), Number(delivery.retry_count || 0), JSON.stringify(delivery.response_payload || delivery.responsePayload || {})]);
+          [id, centerId, delivery.notification_event_id || delivery.notificationEventId, channel, delivery.status === "pending" ? "queued" : (delivery.status || "queued"), Number(delivery.retry_count || 0), JSON.stringify(delivery.response_payload || delivery.responsePayload || {})]);
+        if (channel === "sms") {
+          const serviceState = await client.query("SELECT enabled FROM center_services WHERE center_id=$1 AND service_key='sms'", [centerId]);
+          if ((serviceState.rows[0] && serviceState.rows[0].enabled === false) || !zadxSmsProvider.isConfigured()) {
+            await client.query(`UPDATE notification_deliveries SET status='failed', response_payload=$1 WHERE id=$2 AND center_id=$3`, [JSON.stringify({ category: "sms_disabled" }), id, centerId]);
+            break;
+          }
+          try {
+            const result = await zadxSmsProvider.send({
+              to: delivery.recipient || delivery.recipientPhone,
+              message: delivery.rendered_message || delivery.renderedMessage || "",
+              idempotencyKey: `fixion-sms-${id}`,
+            });
+            await client.query(`UPDATE notification_deliveries
+              SET status='sent', provider_message_id=$1, response_payload=$2
+              WHERE id=$3 AND center_id=$4`,
+              [result.providerMessageId, JSON.stringify({ httpStatus: result.httpStatus, providerMessageId: result.providerMessageId }), id, centerId]);
+            console.info("SMS delivery accepted", { deliveryId: id, centerId, provider: "zadx", httpStatus: result.httpStatus, providerMessageId: result.providerMessageId || null });
+          } catch (error) {
+            await client.query(`UPDATE notification_deliveries
+              SET status='failed', retry_count=retry_count+1, response_payload=$1
+              WHERE id=$2 AND center_id=$3`,
+              [JSON.stringify({ category: error.category || "provider_error", httpStatus: error.httpStatus || null, retryable: Boolean(error.retryable) }), id, centerId]);
+            console.warn("SMS delivery failed", { deliveryId: id, centerId, provider: "zadx", category: error.category || "provider_error", httpStatus: error.httpStatus || null });
+          }
+        }
         break;
       }
 

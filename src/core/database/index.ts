@@ -820,6 +820,15 @@ export const MIGRATIONS: Migration[] = [
       } catch {}
     },
   },
+  {
+    version: 11,
+    name: "sms_provider_message_id",
+    up: (db: SqlDatabase) => {
+      try {
+        db.execSync("ALTER TABLE notification_deliveries ADD COLUMN provider_message_id TEXT;");
+      } catch {}
+    },
+  },
 ];
 
 // In-Memory SQLite Mock for Jest / Test environments

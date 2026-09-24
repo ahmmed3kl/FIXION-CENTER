@@ -182,8 +182,12 @@ router.post("/push", authMiddleware, deviceGuard, async (req, res, next) => {
     }
 
     for (const operation of operations) {
-      const serviceKey = getServiceKeyForEntity(operation.entityType || operation.entity_type, operation.operationType || operation.operation_type);
-      if (serviceKey) await requireService(req.centerId, serviceKey);
+      const serviceKey = getServiceKeyForEntity(operation.entityType || operation.entity_type, operation.operationType || operation.operation_type, operation.payload);
+      // SMS delivery is deliberately handled as an isolated operation. A
+      // disabled/unconfigured SMS service must not block unrelated sync work;
+      // SyncProcessor records the delivery as skipped/failed without calling
+      // the provider.
+      if (serviceKey && serviceKey !== "sms") await requireService(req.centerId, serviceKey);
     }
 
     const result = await SyncProcessor.processPush(

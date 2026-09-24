@@ -1,7 +1,7 @@
 const express = require("express");
 const db = require("../db");
 const { authMiddleware } = require("../middleware/auth");
-const { SERVICE_CATALOG } = require("../services/serviceCatalog");
+const { SERVICE_CATALOG, isSmsProviderConfigured } = require("../services/serviceCatalog");
 
 // Read-only service visibility for the authenticated center user. The center
 // is always derived by authMiddleware; no client-supplied center is trusted.
@@ -21,7 +21,7 @@ router.get("/", async (req, res, next) => {
         serviceKey,
         name: meta.name,
         description: meta.description,
-        availability: meta.availability,
+        availability: serviceKey === "sms" && !isSmsProviderConfigured() ? "not_configured" : "available",
         // Missing overrides retain the backend's default-enabled behavior.
         enabled: override ? override.enabled === true : true,
         updatedAt: override?.updated_at || null,

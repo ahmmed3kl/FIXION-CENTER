@@ -429,6 +429,7 @@ CREATE TABLE IF NOT EXISTS notification_deliveries (
     status VARCHAR(32) NOT NULL CHECK (status IN ('queued', 'sent', 'failed', 'delivered')),
     retry_count INTEGER NOT NULL DEFAULT 0,
     response_payload JSONB,
+    provider_message_id VARCHAR(128),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 

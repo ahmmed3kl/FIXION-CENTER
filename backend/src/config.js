@@ -10,6 +10,13 @@ const config = {
     "https://ep-spring-queen-a50g0aeo-pooler.us-east-2.aws.neon.tech/sql",
   jwtSecret: process.env.JWT_SECRET || "fallback_secret_for_local_tests_only",
   corsOrigin: process.env.CORS_ORIGIN || (process.env.APP_ENV === "production" ? "" : "*"),
+  sms: {
+    provider: String(process.env.SMS_PROVIDER || "").trim().toLowerCase(),
+    apiUrl: String(process.env.SMS_API_URL || "https://smsapi.zadx.net").replace(/\/$/, ""),
+    apiKey: process.env.SMS_API_KEY || "",
+    apiSecret: process.env.SMS_API_SECRET || "",
+    timeoutMs: parseInt(process.env.SMS_TIMEOUT_MS || "15000", 10),
+  },
 };
 
 if (!config.databaseUrl) {

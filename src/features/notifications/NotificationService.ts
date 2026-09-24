@@ -48,19 +48,8 @@ export class LocalPushNotificationProvider implements NotificationProvider {
 }
 
 /** Mock SMS provider — queues locally, does not call external APIs */
-export class LocalSmsNotificationProvider implements NotificationProvider {
-  channel: NotificationChannel = "sms";
-  async send(
-    recipient: string,
-    message: string,
-  ): Promise<{ success: boolean }> {
-    return { success: true };
-  }
-}
-
-const PROVIDERS: Record<NotificationChannel, NotificationProvider> = {
+const PROVIDERS: Partial<Record<NotificationChannel, NotificationProvider>> = {
   push: new LocalPushNotificationProvider(),
-  sms: new LocalSmsNotificationProvider(),
 };
 
 export class NotificationService {
@@ -220,6 +209,31 @@ export class NotificationService {
       } catch {
         // If delivery already exists (idempotency), skip silently
       }
+
+      // SMS is sent only by the backend provider. The mobile app stores the
+      // rendered delivery and queues a stable operation; it never calls ZADX.
+      if (channel === "sms") {
+        SyncRepository.enqueueOperation({
+          centerId,
+          userId: user.id,
+          deviceId,
+          operationType: "create",
+          entityType: "notification_delivery",
+          entityId: deliveryId,
+          operationId: `op-sms-${deliveryId}`,
+          payload: {
+            delivery: {
+              id: deliveryId,
+              notificationEventId: eventId,
+              channel: "sms",
+              status: "pending",
+              recipient,
+              renderedMessage: rendered,
+              retryCount: 0,
+            },
+          },
+        });
+      }
     }
 
     AuditService.recordEvent({
@@ -339,6 +353,9 @@ export class NotificationService {
     const now = new Date().toISOString();
 
     for (const delivery of deliveries) {
+      // SMS deliveries are processed by the backend ZADX provider after the
+      // queued notification_delivery operation reaches the server.
+      if (delivery.channel === "sms") continue;
       const provider = PROVIDERS[delivery.channel as NotificationChannel];
       if (!provider) continue;
 
