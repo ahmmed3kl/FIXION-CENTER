@@ -236,7 +236,14 @@ export class AttendanceRepository {
       operationType: "attendance.create",
       entityType: "attendance",
       entityId: attendanceId,
-      payload: attendanceRecord,
+      // PostgreSQL does not accept `late` as a status; lateness is carried by
+      // isLate. Keep the local record as `late` for reports, but send the
+      // canonical server status so new and retried operations cannot hit the
+      // attendance_status_check constraint.
+      payload: {
+        ...attendanceRecord,
+        status: attendanceRecord.isLate ? "present" : attendanceRecord.status,
+      },
       operationId,
     });
 

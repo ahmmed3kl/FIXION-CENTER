@@ -85,11 +85,13 @@ export class PackageRepository {
     const db = DatabaseService.getDb();
     return db.getAllSync<PackageSubject>(
       `SELECT ps.id, ps.center_id as centerId, ps.package_id as packageId, ps.subject_id as subjectId,
-              ps.default_teacher_id as defaultTeacherId, ps.created_at as createdAt,
-              s.name as subjectName, s.code as subjectCode, t.name as defaultTeacherName
+              ps.default_teacher_id as defaultTeacherId, ps.group_id as groupId, ps.created_at as createdAt,
+              s.name as subjectName, s.code as subjectCode, t.name as defaultTeacherName,
+              g.name as groupName
        FROM package_subjects ps
        JOIN subjects s ON ps.subject_id = s.id
        JOIN teachers t ON ps.default_teacher_id = t.id
+       LEFT JOIN groups g ON ps.group_id = g.id AND g.center_id = ps.center_id
        WHERE ps.center_id = ? AND ps.package_id = ?`,
       [centerId, packageId],
     );
@@ -285,6 +287,7 @@ export class PackageRepository {
     packageId: string;
     subjectId: string;
     defaultTeacherId: string;
+    groupId?: string;
   }): Promise<PackageSubject> {
     const { centerId, user } = this.getActiveContext();
     if (!PermissionService.hasPermission(user.permissions, "packages.manage")) {
@@ -316,26 +319,39 @@ export class PackageRepository {
     }
 
     const db = DatabaseService.getDb();
+    let groupName: string | undefined;
+    if (params.groupId) {
+      const group = db.getFirstSync<{ id: string; name: string }>(
+        `SELECT id, name FROM groups
+         WHERE center_id = ? AND id = ? AND teacher_id = ? AND subject_id = ? AND status = 'active'`,
+        [centerId, params.groupId, params.defaultTeacherId, params.subjectId],
+      );
+      if (!group) {
+        throw new ValidationError("Selected group does not belong to this teacher and subject.");
+      }
+      groupName = group.name;
+    }
     const existing = db.getFirstSync<any>(
-      `SELECT id FROM package_subjects WHERE center_id = ? AND package_id = ? AND subject_id = ?`,
-      [centerId, params.packageId, params.subjectId],
+      `SELECT id FROM package_subjects WHERE center_id = ? AND package_id = ? AND default_teacher_id = ?`,
+      [centerId, params.packageId, params.defaultTeacherId],
     );
     if (existing) {
-      throw new ConflictError("هذه المادة مضافة بالفعل إلى هذه الباقة.");
+      throw new ConflictError("هذا المدرس مضاف بالفعل إلى هذه الباقة.");
     }
 
     const id = `ps-${generateUUID()}`;
     const now = new Date().toISOString();
 
     db.runSync(
-      `INSERT INTO package_subjects (id, center_id, package_id, subject_id, default_teacher_id, created_at)
-       VALUES (?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO package_subjects (id, center_id, package_id, subject_id, default_teacher_id, group_id, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
       [
         id,
         centerId,
         params.packageId,
         params.subjectId,
         params.defaultTeacherId,
+        params.groupId || null,
         now,
       ],
     );
@@ -349,10 +365,12 @@ export class PackageRepository {
       packageId: params.packageId,
       subjectId: params.subjectId,
       defaultTeacherId: params.defaultTeacherId,
+      groupId: params.groupId || null,
       createdAt: now,
       subjectName: subject.name,
       subjectCode: subject.code,
       defaultTeacherName: teacher.name,
+      groupName,
     };
 
     SyncRepository.enqueueOperation({
@@ -390,6 +408,8 @@ export class PackageRepository {
   static async removePackageSubject(params: {
     packageId: string;
     subjectId: string;
+    id?: string;
+    defaultTeacherId?: string;
   }): Promise<void> {
     const { centerId, user } = this.getActiveContext();
     if (!PermissionService.hasPermission(user.permissions, "packages.manage")) {
@@ -397,10 +417,23 @@ export class PackageRepository {
     }
 
     const db = DatabaseService.getDb();
-    db.runSync(
-      `DELETE FROM package_subjects WHERE center_id = ? AND package_id = ? AND subject_id = ?`,
-      [centerId, params.packageId, params.subjectId],
-    );
+    if (params.id) {
+      db.runSync(
+        `DELETE FROM package_subjects WHERE center_id = ? AND id = ?`,
+        [centerId, params.id],
+      );
+    } else if (params.defaultTeacherId) {
+      db.runSync(
+        `DELETE FROM package_subjects
+         WHERE center_id = ? AND package_id = ? AND subject_id = ? AND default_teacher_id = ?`,
+        [centerId, params.packageId, params.subjectId, params.defaultTeacherId],
+      );
+    } else {
+      db.runSync(
+        `DELETE FROM package_subjects WHERE center_id = ? AND package_id = ? AND subject_id = ?`,
+        [centerId, params.packageId, params.subjectId],
+      );
+    }
 
     const deviceId = await DeviceService.getDeviceId();
     const operationId = `op-pkg-rm-subj-${generateUUID()}`;
@@ -412,8 +445,13 @@ export class PackageRepository {
       deviceId,
       operationType: "packages.remove_subject",
       entityType: "package_subject",
-      entityId: `${params.packageId}-${params.subjectId}`,
-      payload: { packageId: params.packageId, subjectId: params.subjectId },
+      entityId: params.id || `${params.packageId}-${params.subjectId}-${params.defaultTeacherId || "all"}`,
+      payload: {
+        id: params.id,
+        packageId: params.packageId,
+        subjectId: params.subjectId,
+        defaultTeacherId: params.defaultTeacherId,
+      },
     });
 
     AuditService.recordEvent({
@@ -422,9 +460,14 @@ export class PackageRepository {
       userId: user.id,
       deviceId,
       entityType: "package_subject",
-      entityId: `${params.packageId}-${params.subjectId}`,
+      entityId: params.id || `${params.packageId}-${params.subjectId}-${params.defaultTeacherId || "all"}`,
       action: "package_subject.remove",
-      payload: { packageId: params.packageId, subjectId: params.subjectId },
+      payload: {
+        id: params.id,
+        packageId: params.packageId,
+        subjectId: params.subjectId,
+        defaultTeacherId: params.defaultTeacherId,
+      },
     });
   }
 }

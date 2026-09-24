@@ -57,7 +57,7 @@ describe("Sprint 3 - FIXION Financial Core & Cash Payments", () => {
       });
     });
 
-    it("generates debt cycle starting on enrollment start_date (e.g. 15th to 14th of next month), NOT calendar months", async () => {
+    it("generates debt cycle starting on enrollment start_date and lasting exactly 28 days", async () => {
       const cycles = await DebtCycleRepository.generateCyclesForEnrollment(
         enrollmentA.id,
         "2026-09-20",
@@ -67,12 +67,12 @@ describe("Sprint 3 - FIXION Financial Core & Cash Payments", () => {
       const cycle1 = cycles[0];
       expect(cycle1.cycleNumber).toBe(1);
       expect(cycle1.startDate).toBe("2026-09-15");
-      expect(cycle1.endDate).toBe("2026-10-14");
+      expect(cycle1.endDate).toBe("2026-10-12");
       expect(cycle1.cyclePrice).toBe(600);
       expect(cycle1.status).toBe("open");
     });
 
-    it("generates subsequent cycle advancing 1 month (2026-10-15 to 2026-11-14)", async () => {
+    it("generates subsequent cycles in fixed 28-day periods", async () => {
       const cycles = await DebtCycleRepository.generateCyclesForEnrollment(
         enrollmentA.id,
         "2026-10-25",
@@ -81,8 +81,8 @@ describe("Sprint 3 - FIXION Financial Core & Cash Payments", () => {
       expect(cycles.length).toBe(2);
       const cycle2 = cycles[1];
       expect(cycle2.cycleNumber).toBe(2);
-      expect(cycle2.startDate).toBe("2026-10-15");
-      expect(cycle2.endDate).toBe("2026-11-14");
+      expect(cycle2.startDate).toBe("2026-10-13");
+      expect(cycle2.endDate).toBe("2026-11-09");
       expect(cycle2.cyclePrice).toBe(600);
     });
 
@@ -107,8 +107,8 @@ describe("Sprint 3 - FIXION Financial Core & Cash Payments", () => {
 
       // New cycle 3 snapshots the new group price of 750
       expect(cycles[2].cycleNumber).toBe(3);
-      expect(cycles[2].startDate).toBe("2026-11-15");
-      expect(cycles[2].endDate).toBe("2026-12-14");
+      expect(cycles[2].startDate).toBe("2026-11-10");
+      expect(cycles[2].endDate).toBe("2026-12-07");
       expect(cycles[2].cyclePrice).toBe(750);
     });
 
@@ -137,11 +137,11 @@ describe("Sprint 3 - FIXION Financial Core & Cash Payments", () => {
       );
 
       // Cycle 1: 2026-09-15 (starts <= 2026-11-20) -> Valid
-      // Cycle 2: 2026-10-15 (starts <= 2026-11-20) -> Valid
-      // Cycle 3: 2026-11-15 (starts <= 2026-11-20) -> Valid
-      // Next cycle would start 2026-12-15 (> 2026-11-20) -> MUST NOT BE GENERATED!
+      // Cycle 2: 2026-10-13 (starts <= 2026-11-20) -> Valid
+      // Cycle 3: 2026-11-10 (starts <= 2026-11-20) -> Valid
+      // Next cycle would start 2026-12-08 (> 2026-11-20) -> MUST NOT BE GENERATED!
       expect(cycles.length).toBe(3);
-      expect(cycles[2].startDate).toBe("2026-11-15");
+      expect(cycles[2].startDate).toBe("2026-11-10");
 
       // Verify no cycle starts after 2026-11-20
       const afterEndDate = cycles.filter((c) => c.startDate > "2026-11-20");

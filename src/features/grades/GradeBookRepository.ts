@@ -117,7 +117,9 @@ export class GradeBookRepository {
     const existing = db.getFirstSync<GradeScore>("SELECT id, center_id as centerId, exam_id as examId, student_id as studentId, score, created_at as createdAt, updated_at as updatedAt FROM grade_scores WHERE center_id = ? AND exam_id = ? AND student_id = ?", [centerId, exam.id, studentId]);
     const now = new Date().toISOString();
     const id = existing?.id || `score-${exam.id}-${studentId}`;
-    const operationId = `op-grade-score-${exam.id}-${studentId}-${Date.now()}`;
+    // Keep the outbox key below PostgreSQL's VARCHAR(64) limit. The exam and
+    // student IDs are already carried in the payload for reconciliation.
+    const operationId = `op-grade-score-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const result: GradeScore = { id, centerId, examId: exam.id, studentId, score, createdAt: existing?.createdAt || now, updatedAt: now };
     DatabaseService.runInTransaction(() => {
       db.runSync(`INSERT INTO grade_scores (id, center_id, exam_id, student_id, score, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(center_id, exam_id, student_id) DO UPDATE SET score = excluded.score, updated_at = excluded.updated_at`, [id, centerId, exam.id, studentId, score, result.createdAt, now]);

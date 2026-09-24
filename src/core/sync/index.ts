@@ -401,6 +401,51 @@ export class SyncRepository {
    */
   static requeueRecoverableConflicts(centerId: string): number {
     const db = DatabaseService.getDb();
+    // A stale update means the server intentionally won the optimistic
+    // concurrency check. It must not remain as an endless retry/conflict on
+    // the device; the authoritative server row is already the resolution.
+    const staleResolvedAt = new Date().toISOString();
+    db.runSync(
+      `UPDATE sync_operations
+       SET status = 'synced', synced_at = ?, next_retry_at = NULL,
+           last_error = 'Superseded by server newer version'
+       WHERE center_id = ? AND status = 'conflict'
+         AND last_error LIKE '%STALE_UPDATE%'`,
+      [staleResolvedAt, centerId],
+    );
+    db.runSync(
+      `UPDATE sync_conflicts
+       SET resolved_at = COALESCE(resolved_at, ?)
+       WHERE center_id = ? AND resolved_at IS NULL
+         AND reason LIKE '%STALE_UPDATE%'`,
+      [staleResolvedAt, centerId],
+    );
+    // Rewrite legacy attendance payloads before retrying them. Older builds
+    // queued `status: late`, while PostgreSQL stores lateness in is_late and
+    // only accepts present/absent/excused/attended_elsewhere.
+    const legacyAttendance = db.getAllSync<{ operationId: string; payload: any }>(
+      `SELECT operation_id as operationId, payload
+       FROM sync_operations
+       WHERE center_id = ? AND status = 'conflict' AND entity_type = 'attendance'
+         AND last_error LIKE '%attendance_status_check%'`,
+      [centerId],
+    );
+    for (const row of legacyAttendance) {
+      try {
+        const payload = typeof row.payload === "string" ? JSON.parse(row.payload) : row.payload;
+        if (payload && String(payload.status).toLowerCase() === "late") {
+          payload.status = "present";
+          payload.isLate = true;
+          payload.is_late = true;
+          db.runSync(
+            `UPDATE sync_operations SET payload = ? WHERE operation_id = ?`,
+            [JSON.stringify(payload), row.operationId],
+          );
+        }
+      } catch {
+        // Leave malformed history visible in Sync Debug for manual review.
+      }
+    }
     // A grade-book operation can have been parked by an older backend that
     // did not know the entity yet. Keep it retryable after the backend deploys
     // instead of letting a stale retry counter permanently block it.
@@ -1089,7 +1134,7 @@ export class SyncEngine {
 
     const packageSubjects = db.getAllSync<any>(
       `SELECT id, package_id as packageId, subject_id as subjectId,
-              default_teacher_id as defaultTeacherId, created_at as createdAt
+              default_teacher_id as defaultTeacherId, group_id as groupId, created_at as createdAt
        FROM package_subjects WHERE center_id = ?`,
       [centerId],
     );
@@ -1451,7 +1496,7 @@ export class SyncEngine {
           db.runSync(`INSERT INTO attendance (id, center_id, student_id, session_id, check_in_time, status, is_late, attendance_type, original_absence_id, operation_id)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET status=excluded.status, check_in_time=excluded.check_in_time, is_late=excluded.is_late, attendance_type=excluded.attendance_type, original_absence_id=excluded.original_absence_id`,
-            [a.id, a.center_id || centerId, a.student_id || a.studentId, a.session_id || a.sessionId, a.check_in_time || a.checkInTime || a.created_at || new Date().toISOString(), a.status || "present", a.is_late ? 1 : 0, a.attendance_type || a.attendanceType || "present", a.original_absence_id || a.originalAbsenceId || null, a.operation_id || a.operationId || `bootstrap-attendance-${a.id}`]);
+            [a.id, a.center_id || centerId, a.student_id || a.studentId, a.session_id || a.sessionId, a.check_in_time || a.checkInTime || a.created_at || new Date().toISOString(), (a.is_late || a.isLate) ? "late" : (a.status || "present"), a.is_late || a.isLate ? 1 : 0, a.attendance_type || a.attendanceType || "present", a.original_absence_id || a.originalAbsenceId || null, a.operation_id || a.operationId || `bootstrap-attendance-${a.id}`]);
         }
       }
       if (Array.isArray(data.payments)) {
@@ -1508,10 +1553,10 @@ export class SyncEngine {
       }
       if (Array.isArray(data.packageSubjects)) {
         for (const p of data.packageSubjects) {
-          db.runSync(`INSERT INTO package_subjects (id, center_id, package_id, subject_id, default_teacher_id, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET package_id=excluded.package_id, subject_id=excluded.subject_id, default_teacher_id=excluded.default_teacher_id`,
-            [p.id, p.center_id || centerId, p.package_id || p.packageId, p.subject_id || p.subjectId, p.default_teacher_id || p.defaultTeacherId || "", p.created_at || new Date().toISOString()]);
+          db.runSync(`INSERT INTO package_subjects (id, center_id, package_id, subject_id, default_teacher_id, group_id, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(center_id, package_id, subject_id, default_teacher_id) DO NOTHING`,
+            [p.id, p.center_id || centerId, p.package_id || p.packageId, p.subject_id || p.subjectId, p.default_teacher_id || p.defaultTeacherId || "", p.group_id || p.groupId || null, p.created_at || new Date().toISOString()]);
         }
       }
       if (Array.isArray(data.packageSubscriptions)) {
@@ -1978,7 +2023,7 @@ export class SyncEngine {
               att.student_id || att.studentId,
               att.session_id || att.sessionId,
               att.check_in_time || att.checkInTime || new Date().toISOString(),
-              att.status || "present",
+              att.is_late || att.isLate ? "late" : (att.status || "present"),
               att.is_late || att.isLate ? 1 : 0,
               att.attendance_type || att.attendanceType || "present",
               att.original_absence_id || att.originalAbsenceId || null,
@@ -2027,9 +2072,9 @@ export class SyncEngine {
           const packageAction = String(change.action || "").toUpperCase();
           const remove = packageAction === "DELETE" || packageAction.includes("REMOVE") || p.status === "inactive";
           if (remove) db.runSync(`DELETE FROM package_subjects WHERE center_id=? AND package_id=? AND subject_id=?`, [centerId, p.package_id || p.packageId, p.subject_id || p.subjectId]);
-          else db.runSync(`INSERT INTO package_subjects (id, center_id, package_id, subject_id, default_teacher_id, created_at) VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET package_id=excluded.package_id, subject_id=excluded.subject_id, default_teacher_id=excluded.default_teacher_id`,
-            [p.id || change.entityId, centerId, p.package_id || p.packageId, p.subject_id || p.subjectId, p.default_teacher_id || p.defaultTeacherId || p.teacher_id || p.teacherId || "", p.created_at || new Date().toISOString()]);
+          else db.runSync(`INSERT INTO package_subjects (id, center_id, package_id, subject_id, default_teacher_id, group_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(center_id, package_id, subject_id, default_teacher_id) DO NOTHING`,
+            [p.id || change.entityId, centerId, p.package_id || p.packageId, p.subject_id || p.subjectId, p.default_teacher_id || p.defaultTeacherId || p.teacher_id || p.teacherId || "", p.group_id || p.groupId || null, p.created_at || new Date().toISOString()]);
         } else if (entityType === "package_subscription") {
           const s = data.subscription || data;
           db.runSync(`INSERT INTO student_package_subscriptions (id, center_id, student_id, package_id, start_date, end_date, cancellation_date, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)

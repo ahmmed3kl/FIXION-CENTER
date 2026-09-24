@@ -115,6 +115,28 @@ async function ensureSchemaCompatibility() {
       ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
   `);
 
+  // Package subjects are unique by teacher, not by subject alone. This lets a
+  // package include the same subject with different teachers while preventing
+  // the same teacher from being added twice.
+  await pool.query(`
+    DO $$
+    BEGIN
+      IF EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = to_regclass('public.package_subjects')
+          AND conname = 'uq_center_pkg_subject'
+      ) THEN
+        ALTER TABLE package_subjects DROP CONSTRAINT uq_center_pkg_subject;
+      END IF;
+    END $$;
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_center_pkg_subject_teacher
+      ON package_subjects(center_id, package_id, subject_id, default_teacher_id);
+    ALTER TABLE package_subjects
+      ADD COLUMN IF NOT EXISTS group_id VARCHAR(64);
+    CREATE INDEX IF NOT EXISTS idx_pkg_subj_group
+      ON package_subjects(center_id, group_id);
+  `);
+
   // Older databases called the package amount `price`. Only reference that
   // column when it actually exists so modern schemas remain compatible.
   await pool.query(`

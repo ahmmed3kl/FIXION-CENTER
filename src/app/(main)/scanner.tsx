@@ -59,6 +59,7 @@ function ScannerContent() {
   const paymentsEnabled = services.isEnabled("payments");
   const [permission, requestPermission] = useCameraPermissions();
   const [isCameraActive, setIsCameraActive] = useState(false);
+  const [isTorchOn, setIsTorchOn] = useState(false);
   const [manualCode, setManualCode] = useState("00125");
   const [isProcessing, setIsProcessing] = useState(false);
 
@@ -206,6 +207,7 @@ function ScannerContent() {
   const handleBarcodeScanned = ({ data }: { data: string }) => {
     if (isScanningBlockedRef.current || isProcessing) return;
     isScanningBlockedRef.current = true;
+    setIsTorchOn(false);
     setIsCameraActive(false);
     setManualCode(data);
     lookupCard(data);
@@ -347,6 +349,7 @@ function ScannerContent() {
                     style={styles.camera}
                     autofocus="on"
                     zoom={0.2}
+                    enableTorch={isTorchOn}
                     barcodeScannerSettings={{
                       barcodeTypes: ["qr", "code128", "ean13", "upc_a"],
                     }}
@@ -366,13 +369,22 @@ function ScannerContent() {
                     />
                   </View>
                 )}
+                <View style={styles.cameraControls}>
+                  <AppButton
+                    title={isTorchOn ? "Ø¥ØºÙ„Ø§Ù‚ Ø§Ù„ÙÙ„Ø§Ø´" : "ØªØ´ØºÙŠÙ„ Ø§Ù„ÙÙ„Ø§Ø´"}
+                    variant="outline"
+                    size="sm"
+                    onPress={() => setIsTorchOn((current) => !current)}
+                    style={{ flex: 1 }}
+                  />
                 <AppButton
                   title="إغلاق الكاميرا"
                   variant="outline"
                   size="sm"
-                  onPress={() => setIsCameraActive(false)}
-                  style={{ marginTop: Spacing.sm }}
+                  onPress={() => { setIsTorchOn(false); setIsCameraActive(false); }}
+                  style={{ flex: 1 }}
                 />
+                </View>
               </View>
             ) : (
               <View style={styles.cameraPlaceholder}>
@@ -768,6 +780,11 @@ const styles = StyleSheet.create({
   camera: {
     width: "100%",
     height: 240,
+  },
+  cameraControls: {
+    flexDirection: "row",
+    gap: Spacing.sm,
+    marginTop: Spacing.sm,
   },
   scanGuide: {
     position: "absolute",

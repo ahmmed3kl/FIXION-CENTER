@@ -71,6 +71,28 @@ function normalizeDebtCycleStatus(value) {
   return aliases[raw] || "pending";
 }
 
+// The mobile app historically used `late` as an attendance status, while the
+// PostgreSQL schema stores lateness in `is_late` and only accepts `present`,
+// `absent`, `excused`, or `attended_elsewhere` in status. Normalize at the API
+// boundary so old queued operations remain retryable after a deployment.
+function normalizeAttendanceStatus(value, isLate) {
+  const raw = String(value || "present").trim().toLowerCase();
+  if (raw === "late") return "present";
+  if (["present", "absent", "excused", "attended_elsewhere"].includes(raw)) {
+    return raw;
+  }
+  return "present";
+}
+
+// Several older mobile operation IDs embedded both exam and student IDs and
+// exceeded PostgreSQL's VARCHAR(64) operation_id columns. Keep a deterministic
+// bounded key on the server so those queued operations can still be retried.
+function normalizeOperationId(value) {
+  const raw = String(value || "");
+  if (raw.length <= 64) return raw;
+  return `op-${crypto.createHash("sha256").update(raw).digest("hex").slice(0, 61)}`;
+}
+
 class SyncProcessor {
   /**
    * Processes a batch of sync operations inside a true ACID transaction.
@@ -90,7 +112,7 @@ class SyncProcessor {
 
       for (const op of operations) {
         const {
-          operationId,
+          operationId: rawOperationId,
           operationType,
           entityType,
           entityId,
@@ -98,7 +120,7 @@ class SyncProcessor {
           createdAt,
         } = op;
 
-        if (!operationId) {
+        if (!rawOperationId) {
           conflicts.push({
             operationId: null,
             entityType,
@@ -108,6 +130,7 @@ class SyncProcessor {
           });
           continue;
         }
+        const operationId = normalizeOperationId(rawOperationId);
 
         // 1. Check if operation was already processed (Database-level Idempotency)
         const existingOp = await client.query(
@@ -126,7 +149,7 @@ class SyncProcessor {
             });
             continue;
           }
-          syncedOperationIds.push(operationId);
+          syncedOperationIds.push(rawOperationId);
           const existingSeq = parseInt(existingOp.rows[0].server_seq, 10);
           if (existingSeq > maxServerSeq) {
             maxServerSeq = existingSeq;
@@ -213,7 +236,7 @@ class SyncProcessor {
           );
 
           await client.query("RELEASE SAVEPOINT op_savepoint");
-          syncedOperationIds.push(operationId);
+          syncedOperationIds.push(rawOperationId);
         } catch (opErr) {
           await client.query("ROLLBACK TO SAVEPOINT op_savepoint");
           let serverState = null;
@@ -247,7 +270,7 @@ class SyncProcessor {
           centerId,
           deviceId,
           maxServerSeq,
-          syncedOperationIds[syncedOperationIds.length - 1] || null,
+          normalizeOperationId(syncedOperationIds[syncedOperationIds.length - 1]) || null,
         ],
       );
 
@@ -501,6 +524,12 @@ class SyncProcessor {
           att.check_in_time || att.checkInTime,
           sessionDateRes.rows[0]?.session_date,
         );
+        const rawAttendanceStatus = att.status;
+        const normalizedAttendanceStatus = normalizeAttendanceStatus(
+          rawAttendanceStatus,
+          att.is_late,
+        );
+        const isLate = Boolean(att.is_late) || String(rawAttendanceStatus || "").toLowerCase() === "late";
         // Enforce deduplication via UNIQUE(session_id, student_id)
         await client.query(
           `INSERT INTO attendance
@@ -513,8 +542,8 @@ class SyncProcessor {
             att.session_id || att.sessionId,
             att.student_id || att.studentId,
             checkInTime,
-            att.status || "present",
-            att.is_late ? true : false,
+            normalizedAttendanceStatus,
+            isLate,
             att.attendance_type || att.attendanceType || "present",
             att.original_absence_id || att.originalAbsenceId || null,
             operationId,
@@ -1000,13 +1029,22 @@ class SyncProcessor {
         const removeOperation = String(context.operationType || "").toUpperCase();
         const remove = ["DELETE", "REMOVE"].includes(removeOperation) || removeOperation.includes("REMOVE") || link.status === "inactive";
         if (remove) {
-          await client.query("DELETE FROM package_subjects WHERE center_id = $1 AND package_id = $2 AND subject_id = $3", [centerId, link.package_id || link.packageId, link.subject_id || link.subjectId]);
+          if (link.id) {
+            await client.query("DELETE FROM package_subjects WHERE center_id = $1 AND id = $2", [centerId, link.id]);
+          } else if (link.default_teacher_id || link.defaultTeacherId || link.teacher_id || link.teacherId) {
+            await client.query(
+              "DELETE FROM package_subjects WHERE center_id = $1 AND package_id = $2 AND subject_id = $3 AND default_teacher_id = $4",
+              [centerId, link.package_id || link.packageId, link.subject_id || link.subjectId, link.default_teacher_id || link.defaultTeacherId || link.teacher_id || link.teacherId],
+            );
+          } else {
+            await client.query("DELETE FROM package_subjects WHERE center_id = $1 AND package_id = $2 AND subject_id = $3", [centerId, link.package_id || link.packageId, link.subject_id || link.subjectId]);
+          }
         } else {
           await client.query(
-            `INSERT INTO package_subjects (id, center_id, package_id, subject_id, default_teacher_id, created_at)
-             VALUES ($1,$2,$3,$4,$5,NOW())
-             ON CONFLICT (center_id, package_id, subject_id) DO UPDATE SET default_teacher_id=EXCLUDED.default_teacher_id`,
-            [link.id || context.entityId || `pkg-sub-${centerId}-${link.package_id || link.packageId}-${link.subject_id || link.subjectId}`, centerId, link.package_id || link.packageId, link.subject_id || link.subjectId, link.default_teacher_id || link.defaultTeacherId || link.teacher_id || link.teacherId],
+            `INSERT INTO package_subjects (id, center_id, package_id, subject_id, default_teacher_id, group_id, created_at)
+             VALUES ($1,$2,$3,$4,$5,$6,NOW())
+             ON CONFLICT (center_id, package_id, subject_id, default_teacher_id) DO NOTHING`,
+            [link.id || context.entityId || `pkg-sub-${centerId}-${link.package_id || link.packageId}-${link.subject_id || link.subjectId}`, centerId, link.package_id || link.packageId, link.subject_id || link.subjectId, link.default_teacher_id || link.defaultTeacherId || link.teacher_id || link.teacherId, link.group_id || link.groupId || null],
           );
         }
         break;
