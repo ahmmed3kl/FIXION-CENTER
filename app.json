@@ -28,6 +28,7 @@
       "expo-router",
       "expo-sqlite",
       "expo-secure-store",
+      "expo-background-task",
       [
         "expo-camera",
         {

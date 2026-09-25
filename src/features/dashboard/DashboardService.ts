@@ -2,6 +2,7 @@ import { DatabaseService } from "../../core/database";
 import { UnauthorizedError } from "../../core/errors";
 import { useAuthStore } from "../auth/useAuthStore";
 import { calculateSessionAttendanceCounts } from "../attendance/AbsenceReportsService";
+import { getLocalDateOnly } from "../../shared/utils/date";
 
 export interface DashboardSummary {
   expectedCount: number;
@@ -39,7 +40,7 @@ export class DashboardService {
     }
 
     const db = DatabaseService.getDb();
-    const dateStr = targetDate || new Date().toISOString().split("T")[0];
+    const dateStr = targetDate || getLocalDateOnly();
 
     // 1. Sessions for today
     const sessions = db.getAllSync<any>(

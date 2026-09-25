@@ -16,6 +16,29 @@ import { GroupRepository } from "../groups/GroupRepository";
 import { GroupScheduleRepository } from "../groups/GroupScheduleRepository";
 import { StudentRepository } from "../students/StudentRepository";
 
+/** Parse a DATE at local noon so weekday calculations cannot cross a timezone boundary. */
+function parseLocalDateOnly(dateValue: string): Date {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateValue);
+  if (!match) return new Date(Number.NaN);
+  return new Date(
+    Number(match[1]),
+    Number(match[2]) - 1,
+    Number(match[3]),
+    12,
+    0,
+    0,
+    0,
+  );
+}
+
+function formatLocalDateOnly(date: Date): string {
+  return [
+    date.getFullYear(),
+    String(date.getMonth() + 1).padStart(2, "0"),
+    String(date.getDate()).padStart(2, "0"),
+  ].join("-");
+}
+
 export class SessionGenerationService {
   private static getActiveContext() {
     const { activeCenterId, currentUser } = useAuthStore.getState();
@@ -51,13 +74,16 @@ export class SessionGenerationService {
     const groupsMap = new Map(groups.map((g) => [g.id, g]));
 
     const generatedSessions: Session[] = [];
-    const currentDate = new Date(fromDate);
-    const endDate = new Date(toDate);
+    const currentDate = parseLocalDateOnly(fromDate);
+    const endDate = parseLocalDateOnly(toDate);
+    if (!Number.isFinite(currentDate.getTime()) || !Number.isFinite(endDate.getTime())) {
+      throw new ValidationError("صيغة التاريخ يجب أن تكون YYYY-MM-DD.");
+    }
 
     const deviceId = DeviceService.getDeviceIdSync();
 
     while (currentDate <= endDate) {
-      const dateStr = currentDate.toISOString().split("T")[0];
+      const dateStr = formatLocalDateOnly(currentDate);
       const dayOfWeek = currentDate.getDay(); // 0-6
 
       const matchingSchedules = schedules.filter(
@@ -70,8 +96,9 @@ export class SessionGenerationService {
 
         // Check if session already exists for (group_id, schedule_id, session_date)
         const existingSession = db.getFirstSync<Session>(
-          `SELECT id FROM sessions WHERE group_id = ? AND schedule_id = ? AND session_date = ?`,
-          [sched.groupId, sched.id, dateStr],
+          `SELECT id FROM sessions
+           WHERE center_id = ? AND group_id = ? AND schedule_id = ? AND session_date = ?`,
+          [centerId, sched.groupId, sched.id, dateStr],
         );
 
         if (existingSession) {

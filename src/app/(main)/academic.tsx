@@ -14,6 +14,7 @@ import {
     View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { getLocalDateOnly } from "../../shared/utils/date";
 import { Strings } from "../../core/localization";
 import {
     PermissionService,
@@ -124,7 +125,7 @@ export default function AcademicScreen() {
   const [schedEnd, setSchedEnd] = useState("16:00");
 
   // Session Generation State
-  const todayStr = new Date().toISOString().split("T")[0];
+  const todayStr = getLocalDateOnly();
   const nextWeekStr = new Date(Date.now() + 7 * 86400000)
     .toISOString()
     .split("T")[0];

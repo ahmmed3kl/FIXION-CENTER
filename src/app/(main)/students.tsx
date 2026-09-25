@@ -14,6 +14,7 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { formatCurrency, Strings } from "../../core/localization";
+import { getLocalDateOnly } from "../../shared/utils/date";
 import { PermissionService } from "../../core/permissions";
 import { Colors, Spacing, Typography } from "../../core/theme";
 import { useServiceVisibility } from "../../core/services/ServiceVisibilityContext";
@@ -127,7 +128,7 @@ export default function StudentsScreen() {
   // Enrollment Form State
   const [enrollGroupId, setEnrollGroupId] = useState("");
   const [enrollStartDate, setEnrollStartDate] = useState(
-    new Date().toISOString().split("T")[0],
+    getLocalDateOnly(),
   );
   const [enrollSpecialPrice, setEnrollSpecialPrice] = useState("");
   const [enrollGroupSearch, setEnrollGroupSearch] = useState("");
@@ -165,7 +166,7 @@ export default function StudentsScreen() {
     const selectedOptions = packageOptions.filter((option) => packageOptionIds.includes(option.id));
     if (selectedOptions.some((option) => !packageTeacherIds[option.id])) return Alert.alert("تنبيه", "اختار مدرس للمادة دي.");
     try {
-      const subscription = await PackageSubscriptionRepository.subscribeStudent({ studentId: selectedStudent.id, packageId, startDate: new Date().toISOString().split("T")[0], selectedOptionIds: packageOptionIds });
+      const subscription = await PackageSubscriptionRepository.subscribeStudent({ studentId: selectedStudent.id, packageId, startDate: getLocalDateOnly(), selectedOptionIds: packageOptionIds });
       if (PermissionService.hasPermission(permissions, "packages.manage")) {
         for (const option of selectedOptions) {
           const teacherId = packageTeacherIds[option.id] || option.defaultTeacherId;
@@ -454,7 +455,7 @@ export default function StudentsScreen() {
 
   const handleEndEnrollment = (enrollmentId: string) => {
     if (!selectedStudent) return;
-    const today = new Date().toISOString().split("T")[0];
+    const today = getLocalDateOnly();
     Alert.alert("تأكيد", "هل ترغب في إنهاء اشتراك الطالب في هذه المجموعة؟", [
       { text: "إلغاء", style: "cancel" },
       {
@@ -554,7 +555,7 @@ export default function StudentsScreen() {
   const openEnrollModal = () => {
     setEnrollGroupId("");
     setEnrollGroupSearch("");
-    setEnrollStartDate(new Date().toISOString().split("T")[0]);
+    setEnrollStartDate(getLocalDateOnly());
     setEnrollSpecialPrice("");
     setIsEnrollModalOpen(true);
   };

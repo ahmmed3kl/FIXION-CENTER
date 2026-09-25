@@ -1,5 +1,6 @@
 import { DatabaseService } from "../../core/database";
 import { SessionDebtBreakdown } from "../../shared/types";
+import { getLocalDateOnly } from "../../shared/utils/date";
 import { useAuthStore } from "../auth/useAuthStore";
 import { GroupScheduleRepository } from "../groups/GroupScheduleRepository";
 
@@ -12,7 +13,7 @@ type PlannedSession = {
   directlyPaid: number;
 };
 
-const isoDate = (date: Date) => date.toISOString().slice(0, 10);
+const isoDate = (date: Date) => getLocalDateOnly(date);
 const addDays = (date: Date, days: number) => {
   const copy = new Date(date);
   copy.setDate(copy.getDate() + days);

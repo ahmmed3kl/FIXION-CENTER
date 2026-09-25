@@ -19,13 +19,14 @@ import { DailyClosingService } from "../../features/reports/DailyClosingService"
 import { SessionClosingService } from "../../features/sessions/SessionClosingService";
 import { SessionRepository } from "../../features/sessions/SessionRepository";
 import { DailyClosingSummary, Session } from "../../shared/types";
+import { getLocalDateOnly } from "../../shared/utils/date";
 
 export default function ClosingScreen() {
   const { currentUser, activeCenterId } = useAuthStore();
   const [activeTab, setActiveTab] = useState<"daily" | "sessions">("daily");
 
   const [loading, setLoading] = useState(false);
-  const [todayDate] = useState(() => new Date().toISOString().split("T")[0]);
+  const [todayDate] = useState(() => getLocalDateOnly());
 
   // Daily Closing State
   const [todayDailyClosing, setTodayDailyClosing] = useState<DailyClosingSummary | null>(null);

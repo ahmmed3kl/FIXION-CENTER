@@ -10,6 +10,7 @@ import { PermissionService } from "../../core/permissions";
 import { SyncEngine, SyncRepository } from "../../core/sync";
 import { Attendance, AttendanceType, StudentGroupAttendanceSummary } from "../../shared/types";
 import { useAuthStore } from "../auth/useAuthStore";
+import { AttendanceSessionService } from "./AttendanceSessionService";
 
 function generateUUID(): string {
   return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
@@ -84,14 +85,30 @@ export class AttendanceRepository {
 
     // Check session status
     const session = db.getFirstSync<any>(
-      `SELECT status FROM sessions WHERE center_id = ? AND id = ?`,
+      `SELECT id, status FROM sessions WHERE center_id = ? AND id = ?`,
       [centerId, params.sessionId],
     );
+    if (!session) {
+      throw new ConflictError("الحصة غير موجودة في المركز الحالي.");
+    }
     if (session?.status === "closed") {
       throw new ConflictError("لا يمكن تسجيل الحضور في حصة مغلقة.");
     }
     if (session?.status === "cancelled") {
       throw new ConflictError("لا يمكن تسجيل الحضور في حصة ملغاة.");
+    }
+
+    // Do not rely only on the scanner UI for eligibility. Attendance can also
+    // be recorded by imports, retries, or future screens, so enforce the same
+    // expected-student/package/teacher/group rule at the repository boundary.
+    // Makeup and explicitly external attendance use their own eligibility
+    // rules and are intentionally exempt here.
+    if (
+      !params.isExternal &&
+      params.attendanceType !== "makeup" &&
+      !AttendanceSessionService.isExpected(params.sessionId, params.studentId)
+    ) {
+      throw new ConflictError("الطالب غير متوقع في المجموعة/الحصة الحالية.");
     }
 
     // Check duplicate
@@ -247,10 +264,6 @@ export class AttendanceRepository {
       operationId,
     });
 
-    SyncEngine.syncCenterNow(centerId).catch((e) => {
-      console.warn("Background auto-sync attendance notice:", e);
-    });
-
     // 4. Create audit log
     AuditService.recordEvent({
       operationId,
@@ -267,6 +280,13 @@ export class AttendanceRepository {
         isExternal: Boolean(params.isExternal),
       },
     });
+    });
+
+    // Sync only after the transaction commits. Starting a sync from inside
+    // the transaction can race the SQLite commit and leave the operation
+    // invisible until a later retry.
+    SyncEngine.syncCenterNow(centerId).catch((e) => {
+      console.warn("Background auto-sync attendance notice:", e);
     });
 
     return attendanceRecord;

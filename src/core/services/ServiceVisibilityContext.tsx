@@ -13,7 +13,15 @@ const ServiceVisibilityContext = createContext<ServiceVisibilityContextValue | n
 
 export function ServiceVisibilityProvider({ children }: { children: React.ReactNode }) {
   const { isAuthenticated, activeCenterId } = useAuthStore();
-  const [state, setState] = useState<ServiceVisibilityState>(initialServiceVisibilityState);
+  // Service visibility is a server policy, but it must never block the
+  // local-first app while the device is offline or the API is cold-starting.
+  // Start with the safe offline policy and reconcile it with the server in
+  // the background. Repository permission checks remain authoritative.
+  const [state, setState] = useState<ServiceVisibilityState>({
+    ...initialServiceVisibilityState,
+    loaded: true,
+    enabled: offlineServiceDefaults,
+  });
   const requestVersion = useRef(0);
 
   const refresh = async () => {
@@ -22,7 +30,17 @@ export function ServiceVisibilityProvider({ children }: { children: React.ReactN
       return;
     }
     const version = ++requestVersion.current;
-    setState((current) => ({ ...current, loading: true, centerId: activeCenterId, error: null }));
+    setState((current) => ({
+      ...current,
+      loading: true,
+      // Keep local workflows usable while this policy request is pending.
+      loaded: true,
+      centerId: activeCenterId,
+      enabled: Object.keys(current.enabled).length
+        ? current.enabled
+        : offlineServiceDefaults,
+      error: null,
+    }));
     try {
       const response = await ApiClient.getInstance().get<{ centerId: string; services: Array<{ serviceKey: ServiceKey; enabled: boolean }> }>("/services");
       if (version !== requestVersion.current) return;

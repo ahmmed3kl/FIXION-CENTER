@@ -20,6 +20,7 @@ import {
   Student,
   StudentAttendanceReport,
 } from "../../shared/types";
+import { getLocalDateOnly } from "../../shared/utils/date";
 
 export default function ReportsScreen() {
   const services = useServiceVisibility();
@@ -34,7 +35,7 @@ function ReportsContent() {
   const [activeReport, setActiveReport] = useState<"dailyAtt" | "studentAtt" | "dailyCash" | "studentFin">("dailyAtt");
 
   const [loading, setLoading] = useState(false);
-  const [selectedDate, setSelectedDate] = useState(() => new Date().toISOString().split("T")[0]);
+  const [selectedDate, setSelectedDate] = useState(() => getLocalDateOnly());
 
   // Report A: Daily Attendance
   const [dailyAttReport, setDailyAttReport] = useState<DailyAttendanceReport | null>(null);

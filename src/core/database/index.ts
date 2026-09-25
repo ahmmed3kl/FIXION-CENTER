@@ -1852,9 +1852,15 @@ class InMemorySqliteMock implements SqlDatabase {
           "group_id = ? AND schedule_id = ? AND session_date = ?",
         )
       ) {
-        const [grpId, schedId, sDate] = params;
+        const hasCenterScope = trimmed.includes(
+          "center_id = ? AND group_id = ? AND schedule_id = ? AND session_date = ?",
+        );
+        const [centerId, grpId, schedId, sDate] = hasCenterScope
+          ? params
+          : [undefined, ...params];
         return joined.filter(
           (s) =>
+            (!hasCenterScope || s.centerId === centerId) &&
             s.groupId === grpId &&
             s.scheduleId === schedId &&
             s.sessionDate === sDate,

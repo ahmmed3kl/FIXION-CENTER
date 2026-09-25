@@ -16,6 +16,7 @@ import { Colors } from "../../../core/theme";
 import { AppButton, AppInput } from "../../../shared/components";
 import { Group, GroupSchedule, Package, PackageSubject, Teacher } from "../../../shared/types";
 import { smartSearch } from "../../../shared/utils/smartSearch";
+import { getLocalDateOnly } from "../../../shared/utils/date";
 import { isEgyptianPhone, isNumericCode, isValidName, ValidationMessages } from "../../../shared/utils/validation";
 import { CenterAcademicStageRepository, DEFAULT_ACADEMIC_STAGES, AcademicStage } from "../../academic/CenterAcademicStageRepository";
 import { useAuthStore } from "../../auth/useAuthStore";
@@ -261,7 +262,7 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({ vi
     try {
       const student = StudentRepository.createStudent({ studentCode: cardCode.trim(), cardCode: cardCode.trim(), fullName: fullName.trim(), phone: phone.trim(), parentPhone: parentPhone.trim(), grade, notes: notes.trim(), groupIds: selectedGroupIds });
       if (packageId) {
-        const subscription = await PackageSubscriptionRepository.subscribeStudent({ studentId: student.id, packageId, startDate: new Date().toISOString().slice(0, 10), selectedOptionIds: packageOptionIds });
+        const subscription = await PackageSubscriptionRepository.subscribeStudent({ studentId: student.id, packageId, startDate: getLocalDateOnly(), selectedOptionIds: packageOptionIds });
         if (currentUser?.permissions?.includes("packages.manage")) {
           for (const option of selectedPackageOptions) {
             const teacherId = packageTeacherIds[option.id];

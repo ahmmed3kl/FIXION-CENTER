@@ -238,17 +238,40 @@ export class AttendanceSessionService {
   }
 
   static isExpected(sessionId: string, studentId: string): boolean {
+    const { activeCenterId } = useAuthStore.getState();
+    if (!activeCenterId) return false;
     const db = DatabaseService.getDb();
-    if (db.getFirstSync("SELECT 1 FROM session_expected_students WHERE session_id = ? AND student_id = ?", [sessionId, studentId])) return true;
+    const rawSession = db.getFirstSync<{ id: string; centerId: string; groupId: string; subjectId?: string | null; teacherId?: string | null; sessionDate: string; status: string }>(
+      "SELECT id, center_id as centerId, group_id as groupId, subject_id as subjectId, teacher_id as teacherId, session_date as sessionDate, status FROM sessions WHERE center_id = ? AND id = ?",
+      [activeCenterId, sessionId],
+    );
+    if (!rawSession || (rawSession.status !== "open" && rawSession.status !== "scheduled")) return false;
+
+    // Older locally-generated sessions may not have the historical subject and
+    // teacher snapshot columns populated. Resolve those values from the group
+    // before checking package eligibility; otherwise a valid package student
+    // is incorrectly rejected as "not expected" after an app update.
+    let session = rawSession;
+    if (!rawSession.subjectId || !rawSession.teacherId) {
+      const group = db.getFirstSync<{ subjectId?: string | null; teacherId?: string | null }>(
+        "SELECT subject_id as subjectId, teacher_id as teacherId FROM groups WHERE center_id = ? AND id = ?",
+        [rawSession.centerId, rawSession.groupId],
+      );
+      session = {
+        ...rawSession,
+        subjectId: rawSession.subjectId || group?.subjectId || null,
+        teacherId: rawSession.teacherId || group?.teacherId || null,
+      };
+    }
+    if (db.getFirstSync(
+      `SELECT 1 FROM session_expected_students
+       WHERE center_id = ? AND session_id = ? AND student_id = ?`,
+      [session.centerId, sessionId, studentId],
+    )) return true;
 
     // A student can be enrolled after a scheduled session was generated. For
     // an open session, honor the current active enrollment and extend the
     // local expected snapshot before recording attendance.
-    const session = db.getFirstSync<{ id: string; centerId: string; groupId: string; sessionDate: string; status: string }>(
-      "SELECT id, center_id as centerId, group_id as groupId, session_date as sessionDate, status FROM sessions WHERE id = ?",
-      [sessionId],
-    );
-    if (!session || (session.status !== "open" && session.status !== "scheduled")) return false;
     const enrolled = Boolean(db.getFirstSync<any>(
       `SELECT 1 FROM student_group_enrollments
        WHERE center_id = ? AND group_id = ? AND student_id = ?
@@ -256,7 +279,56 @@ export class AttendanceSessionService {
        LIMIT 1`,
       [session.centerId, session.groupId, studentId],
     ));
-    if (!enrolled) return false;
+    if (enrolled) {
+      const now = new Date().toISOString();
+      db.runSync(
+        "INSERT OR IGNORE INTO session_expected_students (id, center_id, session_id, student_id, created_at) VALUES (?, ?, ?, ?, ?)",
+        [`exp-${sessionId}-${studentId}`, session.centerId, sessionId, studentId, now],
+      );
+      return true;
+    }
+
+    // Package students may not have a regular group enrollment. Their
+    // selected package option is still a valid attendance expectation for
+    // the matching subject, teacher, and (when configured) group.
+    const packageEligible = Boolean(
+      session.subjectId &&
+      session.teacherId &&
+      db.getFirstSync<any>(
+      `SELECT 1
+       FROM student_package_subscriptions sps
+       JOIN package_subjects ps
+         ON ps.center_id = sps.center_id AND ps.package_id = sps.package_id
+       LEFT JOIN package_subject_teacher_overrides selected
+         ON selected.center_id = sps.center_id
+        AND selected.subscription_id = sps.id
+        AND selected.subject_id = ps.subject_id
+       WHERE sps.center_id = ? AND sps.student_id = ? AND sps.status = 'active'
+         AND sps.start_date <= ? AND (sps.end_date IS NULL OR sps.end_date >= ?)
+         AND ps.subject_id = ?
+         AND (ps.group_id IS NULL OR ps.group_id = ?)
+         AND COALESCE(selected.teacher_id, ps.default_teacher_id) = ?
+         AND (
+           selected.id IS NOT NULL
+           OR NOT EXISTS (
+             SELECT 1 FROM package_subject_teacher_overrides any_selection
+             WHERE any_selection.center_id = sps.center_id
+               AND any_selection.subscription_id = sps.id
+           )
+         )
+       LIMIT 1`,
+      [
+        session.centerId,
+        studentId,
+        session.sessionDate,
+        session.sessionDate,
+        session.subjectId,
+        session.groupId,
+        session.teacherId,
+      ],
+    ));
+    if (!packageEligible) return false;
+
     const now = new Date().toISOString();
     db.runSync(
       "INSERT OR IGNORE INTO session_expected_students (id, center_id, session_id, student_id, created_at) VALUES (?, ?, ?, ?, ?)",
@@ -267,8 +339,19 @@ export class AttendanceSessionService {
 
   static getSummary(sessionId: string): AttendanceSummary {
     const db = DatabaseService.getDb();
-    const expected = db.getAllSync<any>("SELECT student_id as studentId FROM session_expected_students WHERE session_id = ?", [sessionId]);
-    const attendance = db.getAllSync<any>("SELECT student_id as studentId, status, attendance_type as attendanceType FROM attendance WHERE session_id = ?", [sessionId]);
+    const session = db.getFirstSync<{ centerId: string }>(
+      "SELECT center_id as centerId FROM sessions WHERE id = ?",
+      [sessionId],
+    );
+    if (!session) return { total: 0, present: 0, absent: 0 };
+    const expected = db.getAllSync<any>(
+      "SELECT student_id as studentId FROM session_expected_students WHERE center_id = ? AND session_id = ?",
+      [session.centerId, sessionId],
+    );
+    const attendance = db.getAllSync<any>(
+      "SELECT student_id as studentId, status, attendance_type as attendanceType FROM attendance WHERE center_id = ? AND session_id = ?",
+      [session.centerId, sessionId],
+    );
     const counts = calculateSessionAttendanceCounts(expected.map((row) => row.studentId), attendance);
     return { total: counts.expected, present: counts.present, absent: counts.absent };
   }

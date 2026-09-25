@@ -1,5 +1,6 @@
 import * as BackgroundTask from "expo-background-task";
 import * as TaskManager from "expo-task-manager";
+import Constants, { ExecutionEnvironment } from "expo-constants";
 import { SyncEngine } from "./index";
 import { useAuthStore } from "../../features/auth/useAuthStore";
 
@@ -21,6 +22,12 @@ TaskManager.defineTask(SYNC_BACKGROUND_TASK, async () => {
 });
 
 export async function registerBackgroundSync(): Promise<void> {
+  // Expo Go (the StoreClient runtime) does not ship the native background
+  // task module. Skip registration there so development logs stay clean;
+  // standalone APKs/dev builds continue to register the real WorkManager task.
+  if (Constants.executionEnvironment === ExecutionEnvironment.StoreClient) {
+    return;
+  }
   try {
     await BackgroundTask.registerTaskAsync(SYNC_BACKGROUND_TASK, {
       minimumInterval: 15,

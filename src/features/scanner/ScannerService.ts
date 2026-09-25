@@ -1,6 +1,7 @@
 import { DatabaseService } from "../../core/database";
 import { UnauthorizedError } from "../../core/errors";
 import { Session } from "../../shared/types";
+import { getLocalDateOnly } from "../../shared/utils/date";
 import { useAuthStore } from "../auth/useAuthStore";
 
 export class ScannerService {
@@ -55,7 +56,7 @@ export class ScannerService {
     }
 
     const db = DatabaseService.getDb();
-    const dateStr = targetDate || new Date().toISOString().split("T")[0];
+    const dateStr = targetDate || getLocalDateOnly();
 
     // 1. Base eligibility: session_expected_students snapshot OR active group enrollment / subscription
     const baseSessions = db.getAllSync<Session>(
@@ -65,15 +66,15 @@ export class ScannerService {
               s.start_time as startTime, s.end_time as endTime, s.status,
               g.name as groupName, subj.name as subjectName, t.name as teacherName
        FROM sessions s
-       JOIN groups g ON s.group_id = g.id
+       JOIN groups g ON s.center_id = g.center_id AND s.group_id = g.id
        LEFT JOIN subjects subj ON COALESCE(s.subject_id, g.subject_id) = subj.id
        LEFT JOIN teachers t ON COALESCE(s.teacher_id, g.teacher_id) = t.id
-       LEFT JOIN session_expected_students ses ON s.id = ses.session_id AND ses.student_id = ?
+       LEFT JOIN session_expected_students ses ON s.center_id = ses.center_id AND s.id = ses.session_id AND ses.student_id = ?
        WHERE s.center_id = ? AND s.session_date = ? AND (s.status = 'open' OR s.status = 'scheduled')
           AND (
             ses.student_id IS NOT NULL
             OR (
-              NOT EXISTS (SELECT 1 FROM session_expected_students WHERE session_id = s.id)
+              NOT EXISTS (SELECT 1 FROM session_expected_students WHERE center_id = s.center_id AND session_id = s.id)
               AND (
                 g.id IN (
                   SELECT group_id FROM student_group_enrollments
@@ -124,7 +125,8 @@ export class ScannerService {
         [centerId, dateStr],
       );
       const pkgSubjects = db.getAllSync<any>(
-        `SELECT package_id as packageId, subject_id as subjectId, default_teacher_id as defaultTeacherId
+        `SELECT package_id as packageId, subject_id as subjectId, default_teacher_id as defaultTeacherId,
+                group_id as groupId
          FROM package_subjects WHERE center_id = ?`,
         [centerId],
       );
@@ -140,9 +142,24 @@ export class ScannerService {
           const subjects = pkgSubjects.filter(
             (psub: any) => psub.packageId === ps.packageId,
           );
-          return subjects.some((psub: any) => {
+          const selectedOverrides = pkgOverrides.filter(
+            (override: any) => override.subscriptionId === ps.id,
+          );
+          // New subscriptions persist one override row per selected option.
+          // This prevents an unselected subject in the package from making
+          // every same-subject session look eligible. Legacy subscriptions
+          // without overrides retain the old all-options behavior.
+          const selectedSubjects = selectedOverrides.length
+            ? subjects.filter((subject: any) =>
+                selectedOverrides.some(
+                  (override: any) => override.subjectId === subject.subjectId,
+                ),
+              )
+            : subjects;
+          return selectedSubjects.some((psub: any) => {
             if (psub.subjectId !== s.subjectId) return false;
-            const override = pkgOverrides.find(
+            if (psub.groupId && psub.groupId !== s.groupId) return false;
+            const override = selectedOverrides.find(
               (o: any) =>
                 o.subscriptionId === ps.id && o.subjectId === s.subjectId,
             );
