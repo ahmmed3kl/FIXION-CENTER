@@ -1,7 +1,7 @@
 import { Ionicons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
-import { Alert, ScrollView, StyleSheet, Switch, Text, TouchableOpacity, View } from "react-native";
 import { useMemo } from "react";
+import { Alert, ScrollView, StyleSheet, Switch, Text, TouchableOpacity, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Spacing, Typography, useTheme } from "../../core/theme";
 import { useAuthStore } from "../../features/auth/useAuthStore";
@@ -27,15 +27,23 @@ export default function MoreScreen() {
     { text: "تسجيل الخروج", style: "destructive", onPress: () => logout() },
   ]);
 
-  return <SafeAreaView style={[styles.safe, { backgroundColor: colors.background }]}>
-    <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
-      <View style={styles.header}><View><Text style={[styles.eyebrow, { color: colors.primary }]}>إعدادات وإدارة</Text><Text style={[styles.title, { color: colors.textPrimary }]}>المزيد</Text><Text style={[styles.subtitle, { color: colors.textSecondary }]}>كل أدوات المركز في مكان واحد</Text></View><View style={[styles.headerIcon, { backgroundColor: colors.primaryLight }]}><Ionicons name="grid-outline" size={25} color={colors.primary} /></View></View>
-      <View style={[styles.themeRow, { backgroundColor: colors.cardBackground, borderColor: colors.border }]}><View style={styles.themeCopy}><View style={[styles.themeIcon, { backgroundColor: isDarkMode ? colors.slate100 : colors.accentLight }]}><Ionicons name={isDarkMode ? "moon" : "sunny-outline"} size={18} color={isDarkMode ? colors.primary : colors.warningText} /></View><View><Text style={[styles.themeTitle, { color: colors.textPrimary }]}>الوضع الداكن</Text><Text style={[styles.themeHint, { color: colors.textSecondary }]}>{isDarkMode ? "مفعّل الآن" : "مفعّل عند الحاجة"}</Text></View></View><Switch value={isDarkMode} onValueChange={toggleDarkMode} trackColor={{ false: colors.slate300, true: colors.primary }} thumbColor={colors.white} /> </View>
-      <Text style={[styles.sectionTitle, { color: colors.textPrimary }]}>أدوات المركز</Text>
-      <View style={styles.grid}>{items.map((item) => <TouchableOpacity key={item.route} style={[styles.item, { backgroundColor: colors.cardBackground, borderColor: colors.border }]} onPress={() => router.push(item.route as any)} activeOpacity={0.78}><View style={[styles.itemIcon, { backgroundColor: isDarkMode ? colors.slate100 : item.tint }]}><Ionicons name={item.icon} size={22} color={colors.primary} /></View><View style={styles.itemCopy}><Text style={[styles.label, { color: colors.textPrimary }]}>{item.label}</Text><Text style={[styles.itemCaption, { color: colors.textSecondary }]} numberOfLines={1}>{item.caption}</Text></View><Ionicons name="chevron-back" size={18} color={colors.slate400} /></TouchableOpacity>)}</View>
-      <TouchableOpacity style={[styles.logoutItem, { backgroundColor: isDarkMode ? colors.dangerLight : "#FFF1F2", borderColor: isDarkMode ? colors.danger : "#FECDD3" }]} onPress={confirmLogout} activeOpacity={0.8}><View style={styles.logoutIcon}><Ionicons name="log-out-outline" size={21} color={colors.danger} /></View><Text style={[styles.logoutLabel, { color: colors.danger }]}>تسجيل الخروج</Text><Ionicons name="chevron-back" size={19} color={colors.danger} /></TouchableOpacity>
-    </ScrollView>
-  </SafeAreaView>;
+  return (
+    <SafeAreaView style={[styles.safe, { backgroundColor: colors.background }]}>
+      <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
+        <View style={styles.header}>
+          <View><Text style={[styles.eyebrow, { color: colors.primary }]}>إعدادات وإدارة</Text><Text style={[styles.title, { color: colors.textPrimary }]}>المزيد</Text><Text style={[styles.subtitle, { color: colors.textSecondary }]}>كل أدوات المركز في مكان واحد</Text></View>
+          <View style={[styles.headerIcon, { backgroundColor: colors.primaryLight }]}><Ionicons name="grid-outline" size={25} color={colors.primary} /></View>
+        </View>
+        <View style={[styles.themeRow, { backgroundColor: colors.cardBackground, borderColor: colors.border }]}>
+          <View style={styles.themeCopy}><View style={[styles.themeIcon, { backgroundColor: isDarkMode ? colors.slate100 : colors.accentLight }]}><Ionicons name={isDarkMode ? "moon" : "sunny-outline"} size={18} color={isDarkMode ? colors.primary : colors.warningText} /></View><View><Text style={[styles.themeTitle, { color: colors.textPrimary }]}>الوضع الداكن</Text><Text style={[styles.themeHint, { color: colors.textSecondary }]}>{isDarkMode ? "مفعّل الآن" : "مفعّل عند الحاجة"}</Text></View></View>
+          <Switch value={isDarkMode} onValueChange={toggleDarkMode} trackColor={{ false: colors.slate300, true: colors.primary }} thumbColor={colors.white}/>
+        </View>
+        <Text style={[styles.sectionTitle, { color: colors.textPrimary }]}>أدوات المركز</Text>
+        <View style={styles.grid}>{items.map((item) => <TouchableOpacity key={item.route} style={[styles.item, { backgroundColor: colors.cardBackground, borderColor: colors.border }]} onPress={() => router.push(item.route as any)} activeOpacity={0.78}><View style={[styles.itemIcon, { backgroundColor: isDarkMode ? colors.slate100 : item.tint }]}><Ionicons name={item.icon} size={22} color={colors.primary} /></View><View style={styles.itemCopy}><Text style={[styles.label, { color: colors.textPrimary }]}>{item.label}</Text><Text style={[styles.itemCaption, { color: colors.textSecondary }]} numberOfLines={1}>{item.caption}</Text></View><Ionicons name="chevron-back" size={18} color={colors.slate400} /></TouchableOpacity>)}</View>
+        <TouchableOpacity style={[styles.logoutItem, { backgroundColor: isDarkMode ? colors.dangerLight : "#FFF1F2", borderColor: isDarkMode ? colors.danger : "#FECDD3" }]} onPress={confirmLogout} activeOpacity={0.8}><View style={styles.logoutIcon}><Ionicons name="log-out-outline" size={21} color={colors.danger} /></View><Text style={[styles.logoutLabel, { color: colors.danger }]}>تسجيل الخروج</Text><Ionicons name="chevron-back" size={19} color={colors.danger} /></TouchableOpacity>
+      </ScrollView>
+    </SafeAreaView>
+  );
 }
 
 const createStyles = () => StyleSheet.create({

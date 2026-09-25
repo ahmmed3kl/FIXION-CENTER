@@ -1554,7 +1554,7 @@ export class SyncEngine {
         for (const t of data.notificationTemplates) {
           db.runSync(`INSERT INTO notification_templates (id, center_id, event_type, channel, template_body, is_default, created_by, updated_by, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET template_body=excluded.template_body, updated_by=excluded.updated_by, updated_at=excluded.updated_at`,
+            ON CONFLICT(center_id, event_type, channel, is_default) DO UPDATE SET template_body=excluded.template_body, updated_by=excluded.updated_by, updated_at=excluded.updated_at`,
             [t.id, t.center_id || centerId, t.event_type || t.eventType, t.channel, t.template_body || t.templateBody || "", t.is_default ? 1 : 0, t.created_by || t.createdBy || "system", t.updated_by || t.updatedBy || null, t.created_at || new Date().toISOString(), t.updated_at || t.updatedAt || new Date().toISOString()]);
         }
       }
@@ -2145,7 +2145,7 @@ export class SyncEngine {
           const t = data.template || data;
           db.runSync(`INSERT INTO notification_templates (id, center_id, event_type, channel, template_body, is_default, created_by, updated_by, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET event_type=excluded.event_type, channel=excluded.channel, template_body=excluded.template_body, is_default=excluded.is_default, updated_by=excluded.updated_by, updated_at=excluded.updated_at`,
+            ON CONFLICT(center_id, event_type, channel, is_default) DO UPDATE SET event_type=excluded.event_type, channel=excluded.channel, template_body=excluded.template_body, updated_by=excluded.updated_by, updated_at=excluded.updated_at`,
             [t.id || t.templateId || change.entityId, centerId, t.event_type || t.eventType, t.channel, t.template_body || t.templateBody || "", t.is_default ? 1 : 0, t.created_by || t.createdBy || "system", t.updated_by || t.updatedBy || null, t.created_at || t.createdAt || new Date().toISOString(), t.updated_at || t.updatedAt || new Date().toISOString()]);
         } else if (entityType === "session_closing") {
           const c = data.closing || data;
