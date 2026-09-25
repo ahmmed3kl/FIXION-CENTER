@@ -85,7 +85,7 @@ router.get(
           client.query("SELECT * FROM daily_closing_summaries WHERE center_id = $1", [centerId]),
           client.query("SELECT * FROM grade_exams WHERE center_id = $1", [centerId]),
           client.query("SELECT * FROM grade_scores WHERE center_id = $1", [centerId]),
-          client.query("SELECT reset_generation FROM center_data_state WHERE center_id = $1", [centerId]),
+          client.query("SELECT reset_generation, updated_at FROM center_data_state WHERE center_id = $1", [centerId]),
           client.query("SELECT COALESCE(MAX(server_seq), 0) as max_seq FROM server_sync_operations WHERE center_id = $1", [centerId]),
         ]);
 
@@ -119,6 +119,7 @@ router.get(
         gradeExams: gradeExamsRes.rows,
         gradeScores: gradeScoresRes.rows,
         resetGeneration: Number(resetStateRes.rows[0]?.reset_generation || 0),
+        resetAt: resetStateRes.rows[0]?.updated_at || null,
         latestServerSeq: parseInt(maxSeqRes.rows[0]?.max_seq || 0, 10),
         timestamp: new Date().toISOString(),
         };

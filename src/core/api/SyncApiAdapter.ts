@@ -39,6 +39,8 @@ export interface BootstrapResponse {
   gradeExams?: any[];
   gradeScores?: any[];
   resetGeneration?: number;
+  /** Time at which the server reset generation was advanced. */
+  resetAt?: string;
   latestServerSeq: number;
   timestamp: string;
 }

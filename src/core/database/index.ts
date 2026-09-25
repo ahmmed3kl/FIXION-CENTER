@@ -2300,11 +2300,27 @@ class InMemorySqliteMock implements SqlDatabase {
         return unique as T[];
       }
       if (params.length >= 2) {
-        return list.filter(
-          (r) => r.center_id === params[0] && r.session_id === params[1],
-        ) as T[];
+        return list
+          .filter((r) => r.center_id === params[0] && r.session_id === params[1])
+          .map((r) => ({
+            id: r.id,
+            centerId: r.center_id,
+            sessionId: r.session_id,
+            studentId: r.student_id,
+            center_id: r.center_id,
+            session_id: r.session_id,
+            student_id: r.student_id,
+          })) as T[];
       }
-      return list as T[];
+      return list.map((r) => ({
+        id: r.id,
+        centerId: r.center_id,
+        sessionId: r.session_id,
+        studentId: r.student_id,
+        center_id: r.center_id,
+        session_id: r.session_id,
+        student_id: r.student_id,
+      })) as T[];
     }
 
     if (trimmed.includes("FROM attendance")) {
@@ -3480,8 +3496,9 @@ export class DatabaseService {
   }
 
   static init(): void {
+    const hasNativeSQLite = typeof SQLite?.openDatabaseSync === "function";
     try {
-      if (typeof SQLite?.openDatabaseSync === "function") {
+      if (hasNativeSQLite) {
         const nativeDb = SQLite.openDatabaseSync("fixion_local.db");
         nativeDb.execSync("PRAGMA foreign_keys = ON;");
         nativeDb.execSync("PRAGMA journal_mode = WAL;");
@@ -3494,10 +3511,15 @@ export class DatabaseService {
       this.seedData();
       this.ensureAcademicSchema();
     } catch (e: any) {
-      console.warn(
-        "Database initialization fallback to in-memory:",
-        e?.message,
-      );
+      // Falling back to an in-memory database in a real APK makes all local
+      // sessions, attendance, and payments appear to vanish on the next
+      // render/restart. Tests without expo-sqlite still need the mock, but a
+      // native SQLite failure must remain visible instead of losing data.
+      if (hasNativeSQLite) {
+        console.error("Persistent SQLite initialization failed:", e?.message || e);
+        throw e;
+      }
+      console.warn("Database initialization fallback to in-memory:", e?.message);
       this.db = new InMemorySqliteMock();
       this.runMigrations();
       this.seedData();

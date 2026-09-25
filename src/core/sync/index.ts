@@ -402,6 +402,30 @@ export class SyncRepository {
   }
 
   /**
+   * Returns true when this device has local mutations that were created after
+   * the server's last reset marker and have not been acknowledged yet. Those
+   * rows represent work done in the current term while offline (for example a
+   * newly opened session, attendance, or payment) and must not be erased by a
+   * bootstrap that happens during an app restart.
+   */
+  static hasUnsyncedOperationsSince(centerId: string, since?: string): boolean {
+    const db = DatabaseService.getDb();
+    const statuses = "('pending', 'syncing', 'failed', 'conflict')";
+    const row = since
+      ? db.getFirstSync<{ count: number }>(
+          `SELECT COUNT(*) as count FROM sync_operations
+           WHERE center_id = ? AND status IN ${statuses} AND created_at >= ?`,
+          [centerId, since],
+        )
+      : db.getFirstSync<{ count: number }>(
+          `SELECT COUNT(*) as count FROM sync_operations
+           WHERE center_id = ? AND status IN ${statuses}`,
+          [centerId],
+        );
+    return Number(row?.count || 0) > 0;
+  }
+
+  /**
    * Re-queue conflicts caused by server-side validation/configuration fixes.
    * Older clients used to permanently park these operations as `conflict`,
    * so simply deploying the corrected server would never resend them.
@@ -915,8 +939,7 @@ export class SyncRepository {
   }
 
   /** Clears center operational data after an authoritative server reset. */
-  static resetLocalOperationalData(centerId: string): void {
-    const db = DatabaseService.getDb();
+  static clearLocalOperationalDataInTransaction(db: any, centerId: string): void {
     const tables = [
       "session_closing_records", "daily_closing_summaries",
       "notification_deliveries", "notification_events", "notification_templates",
@@ -928,11 +951,16 @@ export class SyncRepository {
       "subjects", "grade_scores", "grade_exams", "audit_logs", "sync_operations",
       "sync_conflicts",
     ];
-    DatabaseService.runInTransaction(() => {
-      for (const table of tables) {
-        try { db.runSync(`DELETE FROM ${table} WHERE center_id = ?`, [centerId]); } catch {}
-      }
-      this.setServerCursor(centerId, "0");
+    for (const table of tables) {
+      try { db.runSync(`DELETE FROM ${table} WHERE center_id = ?`, [centerId]); } catch {}
+    }
+    this.setServerCursor(centerId, "0");
+  }
+
+  /** Clears center operational data in an all-or-nothing transaction. */
+  static resetLocalOperationalData(centerId: string): void {
+    DatabaseService.runInTransaction((db) => {
+      this.clearLocalOperationalDataInTransaction(db, centerId);
     });
   }
 }
@@ -1187,13 +1215,42 @@ export class SyncEngine {
       const data = await this.adapter.bootstrapCenter(centerId);
       const serverResetGeneration = Number(data.resetGeneration || 0);
       const localResetGeneration = SyncRepository.getResetGeneration(centerId);
+      let shouldResetLocalData = false;
       if (serverResetGeneration > localResetGeneration) {
-        // The server has intentionally started a new term. Drop local
-        // operational rows before applying the fresh authoritative snapshot;
-        // otherwise the recovery logic would upload the old term again.
-        SyncRepository.resetLocalOperationalData(centerId);
+        // A reset is authoritative only for data that was already safely
+        // acknowledged. If the operator created records after the reset while
+        // offline, keep those outbox rows and let the normal push phase upload
+        // them after bootstrap. This prevents an Expo restart from silently
+        // deleting a just-opened session, attendance, or payment.
+        const preserveLocalWork = SyncRepository.hasUnsyncedOperationsSince(
+          centerId,
+          data.resetAt,
+        );
+        if (preserveLocalWork) {
+          Logger.warn("sync", "server_reset_deferred_for_local_work", {
+            centerId,
+            metadata: {
+              localResetGeneration,
+              serverResetGeneration,
+              resetAt: data.resetAt || null,
+            },
+          });
+        } else {
+          // The server has intentionally started a new term. The actual
+          // deletion is performed inside the same transaction as snapshot
+          // application below, so a failed bootstrap cannot leave a half-empty
+          // local database.
+          shouldResetLocalData = true;
+          Logger.info("sync", "server_reset_applied", {
+            centerId,
+            metadata: { localResetGeneration, serverResetGeneration },
+          });
+        }
       }
       DatabaseService.runInTransaction((db) => {
+      if (shouldResetLocalData) {
+        SyncRepository.clearLocalOperationalDataInTransaction(db, centerId);
+      }
 
       if (Array.isArray(data.gradeExams)) {
         for (const exam of data.gradeExams) {
