@@ -1203,9 +1203,8 @@ class SyncProcessor {
           `INSERT INTO notification_templates
              (id, center_id, event_type, channel, template_body, is_default, created_by, updated_by, created_at, updated_at)
            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW(),NOW())
-           ON CONFLICT (id) DO UPDATE SET
-             event_type=EXCLUDED.event_type, channel=EXCLUDED.channel,
-             template_body=EXCLUDED.template_body, is_default=EXCLUDED.is_default,
+           ON CONFLICT (center_id, event_type, channel, is_default) DO UPDATE SET
+             template_body=EXCLUDED.template_body,
              updated_by=EXCLUDED.updated_by, updated_at=NOW()` ,
           [
             templateId,

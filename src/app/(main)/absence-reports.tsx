@@ -1,3 +1,4 @@
+import React from "react";
 import { Ionicons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -32,9 +33,7 @@ function SessionGroupList({
   groups: SessionGroup[];
   onPress: (sessionId: string) => void;
 }) {
-  return (
-    <>
-      {groups.map((group) => (
+  return groups.map((group) => (
         <View key={group.id || group.name} style={styles.groupReport}>
           <Text style={styles.groupReportTitle}>
             {`${group.name} · ${group.items.length} حصة`}
@@ -51,9 +50,7 @@ function SessionGroupList({
             </View>
           ))}
         </View>
-      ))}
-    </>
-  );
+      ));
 }
 
 const MONTH_NAMES = ["يناير", "فبراير", "مارس", "أبريل", "مايو", "يونيو", "يوليو", "أغسطس", "سبتمبر", "أكتوبر", "نوفمبر", "ديسمبر"];
