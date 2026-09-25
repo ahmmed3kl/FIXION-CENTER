@@ -24,6 +24,7 @@ import {
   NotificationEvent,
   NotificationTemplate,
 } from "../../shared/types";
+import { getLocalDateOnly } from "../../shared/utils/date";
 
 export default function NotificationsScreen() {
   const services = useServiceVisibility();
@@ -34,6 +35,11 @@ export default function NotificationsScreen() {
   const [templates, setTemplates] = useState<NotificationTemplate[]>([]);
   const [events, setEvents] = useState<NotificationEvent[]>([]);
   const [deliveries, setDeliveries] = useState<Record<string, NotificationDelivery[]>>({});
+  const currentMonth = getLocalDateOnly().slice(0, 7);
+  const previousMonth = (() => { const [year, month] = currentMonth.split("-").map(Number); const date = new Date(year, month - 2, 1); return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`; })();
+  const [statsMonthA, setStatsMonthA] = useState(currentMonth);
+  const [statsMonthB, setStatsMonthB] = useState(previousMonth);
+  const [messageStats, setMessageStats] = useState<Record<string, { absence: number; grades: number; custom: number; total: number }>>({});
 
   // Editing template modal state
   const [editingTemplate, setEditingTemplate] = useState<NotificationTemplate | null>(null);
@@ -69,6 +75,18 @@ export default function NotificationsScreen() {
         dMap[ev.id] = NotificationService.getDeliveriesForEvent(ev.id);
       }
       setDeliveries(dMap);
+      const stats: Record<string, { absence: number; grades: number; custom: number; total: number }> = {};
+      for (const month of [statsMonthA, statsMonthB]) {
+        const row = db.getFirstSync<any>(`SELECT
+          SUM(CASE WHEN e.event_type = 'absence' THEN 1 ELSE 0 END) as absence,
+          SUM(CASE WHEN e.event_type = 'grades' THEN 1 ELSE 0 END) as grades,
+          SUM(CASE WHEN e.event_type NOT IN ('absence', 'grades', 'attendance') THEN 1 ELSE 0 END) as custom,
+          COUNT(*) as total
+          FROM notification_events e JOIN notification_deliveries d ON d.notification_event_id = e.id
+          WHERE e.center_id = ? AND d.channel = 'sms' AND substr(e.created_at, 1, 7) = ?`, [activeCenterId, month]);
+        stats[month] = { absence: Number(row?.absence || 0), grades: Number(row?.grades || 0), custom: Number(row?.custom || 0), total: Number(row?.total || 0) };
+      }
+      setMessageStats(stats);
     } catch (err: any) {
       console.warn("Failed to load notifications data:", err.message);
     } finally {
@@ -78,7 +96,7 @@ export default function NotificationsScreen() {
 
   useEffect(() => {
     loadData();
-  }, [activeCenterId]);
+  }, [activeCenterId, statsMonthA, statsMonthB]);
 
   const handleSaveTemplate = () => {
     if (!editingTemplate) return;
@@ -112,6 +130,8 @@ export default function NotificationsScreen() {
         <Text style={styles.headerTitle}>مركز الإشعارات</Text>
         <Text style={styles.headerSubtitle}>إدارة القوالب وسجل الإشعارات الفورية و SMS</Text>
       </View>
+
+      <View style={styles.counterPanel}><Text style={styles.counterPanelTitle}>عداد رسائل SMS</Text><View style={styles.counterMonthRow}><TextInput style={styles.counterMonthInput} value={statsMonthA} onChangeText={setStatsMonthA} placeholder="YYYY-MM" /><Text style={styles.counterMonthLabel}>الشهر الأول</Text><TextInput style={styles.counterMonthInput} value={statsMonthB} onChangeText={setStatsMonthB} placeholder="YYYY-MM" /><Text style={styles.counterMonthLabel}>الشهر الثاني</Text></View><View style={styles.counterGrid}>{[statsMonthA, statsMonthB].map((month) => <View key={month} style={styles.counterMonthCard}><Text style={styles.counterMonthTitle}>{month}</Text><Text style={styles.counterValue}>الإجمالي: {messageStats[month]?.total || 0}</Text><Text style={styles.counterDetail}>غياب: {messageStats[month]?.absence || 0} · درجات: {messageStats[month]?.grades || 0} · أخرى: {messageStats[month]?.custom || 0}</Text></View>)}</View></View>
 
       {/* Tabs */}
       <View style={styles.tabBar}>
@@ -156,7 +176,7 @@ export default function NotificationsScreen() {
                 <View style={styles.cardHeader}>
                   <View style={styles.eventTypeTag}>
                     <Text style={styles.eventTypeText}>
-                      {item.eventType === "attendance" ? "إشعار حضور" : item.eventType === "absence" ? "إشعار غياب" : "إرسال درجات"}
+                      {item.eventType === "attendance" ? "إشعار حضور" : item.eventType === "absence" ? "إشعار غياب" : item.eventType === "grades" ? "إرسال درجات" : "SMS مخصصة"}
                     </Text>
                   </View>
                   <Text style={styles.timestampText}>
@@ -198,7 +218,7 @@ export default function NotificationsScreen() {
             <View key={tmpl.id} style={styles.card}>
               <View style={styles.cardHeader}>
                 <Text style={styles.tmplTitle}>
-                  {tmpl.eventType === "attendance" ? "قالب حضور" : tmpl.eventType === "absence" ? "قالب غياب" : "قالب درجات"} (
+                  {tmpl.eventType === "attendance" ? "قالب حضور" : tmpl.eventType === "absence" ? "قالب غياب" : tmpl.eventType === "grades" ? "قالب درجات" : "قالب مخصص"} (
                   {tmpl.channel === "push" ? "تطبيق / Push" : "رسالة نصية / SMS"})
                 </Text>
                 <PermissionGate
@@ -335,6 +355,10 @@ const styles = StyleSheet.create({
   statusBadgeText: { fontSize: 11, fontWeight: "600" },
   centered: { flex: 1, justifyContent: "center", alignItems: "center" },
   loadingText: { marginTop: 10, fontSize: 14, color: Colors.slate500 },
+  counterPanel: { marginHorizontal: 16, marginBottom: 10, padding: 12, borderRadius: 14, backgroundColor: Colors.white, borderWidth: 1, borderColor: Colors.border },
+  counterPanelTitle: { color: Colors.slate900, fontSize: 15, fontWeight: "800", textAlign: "right", marginBottom: 8 },
+  counterMonthRow: { flexDirection: "row", alignItems: "center", gap: 6, marginBottom: 8 }, counterMonthInput: { width: 76, height: 34, borderWidth: 1, borderColor: Colors.border, borderRadius: 8, textAlign: "center", color: Colors.slate900, fontSize: 11 }, counterMonthLabel: { color: Colors.slate500, fontSize: 10 },
+  counterGrid: { flexDirection: "row", gap: 8 }, counterMonthCard: { flex: 1, padding: 9, borderRadius: 10, backgroundColor: Colors.slate50 }, counterMonthTitle: { color: Colors.primary, fontWeight: "800", textAlign: "right" }, counterValue: { color: Colors.slate800, fontSize: 12, fontWeight: "700", textAlign: "right", marginTop: 4 }, counterDetail: { color: Colors.slate600, fontSize: 10, textAlign: "right", marginTop: 3 },
   emptyContainer: { alignItems: "center", justifyContent: "center", paddingVertical: 48 },
   emptyText: { marginTop: 12, fontSize: 14, color: Colors.slate500 },
   sectionHeader: { fontSize: 14, fontWeight: "700", color: Colors.slate700, marginBottom: 12, textAlign: "right" },

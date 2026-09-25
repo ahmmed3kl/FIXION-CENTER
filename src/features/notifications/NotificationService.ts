@@ -73,6 +73,8 @@ export class NotificationService {
     attendanceId?: string;
     eventType: NotificationEventType;
     vars: Record<string, string>;
+    customMessage?: string;
+    channels?: NotificationChannel[];
   }): NotificationEvent {
     const { centerId, user } = this.getActiveContext();
     if (
@@ -183,14 +185,14 @@ export class NotificationService {
     });
 
     // Create delivery records for both channels
-    const channels: NotificationChannel[] = ["push", "sms"];
+    const channels: NotificationChannel[] = params.channels || ["push", "sms"];
     for (const channel of channels) {
       const template = NotificationTemplateRepository.getActiveTemplate(
         params.eventType,
         channel,
       );
       const bodyTemplate =
-        template?.templateBody ??
+        params.customMessage ?? template?.templateBody ??
         `إشعار للطالب ${params.vars.student_name ?? ""}`;
       const rendered = renderTemplate(bodyTemplate, params.vars);
 
@@ -525,5 +527,19 @@ export class NotificationService {
       },
     });
     return event;
+  }
+
+  static notifyCustomSms(params: { studentId: string; message: string; operationId?: string }): NotificationEvent {
+    const message = params.message.trim();
+    if (!message) throw new Error("نص الرسالة مطلوب.");
+    return this.createNotificationEvent({
+      operationId: params.operationId || `op-notif-custom-${params.studentId}-${Date.now()}`,
+      studentId: params.studentId,
+      sessionId: "",
+      eventType: "custom",
+      vars: {},
+      customMessage: message,
+      channels: ["sms"],
+    });
   }
 }

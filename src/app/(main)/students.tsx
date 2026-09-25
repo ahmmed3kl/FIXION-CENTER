@@ -30,6 +30,7 @@ import { DebtAdjustmentRepository } from "../../features/payments/DebtAdjustment
 import { FinancialCalculationService } from "../../features/payments/FinancialCalculationService";
 import { PaymentRepository } from "../../features/payments/PaymentRepository";
 import { GradeBookRepository, GradeExam, GradeScore } from "../../features/grades/GradeBookRepository";
+import { NotificationService } from "../../features/notifications/NotificationService";
 import { StudentCardRepository } from "../../features/students/StudentCardRepository";
 import { StudentRepository } from "../../features/students/StudentRepository";
 import { smartSearch } from "../../shared/utils/smartSearch";
@@ -98,6 +99,8 @@ export default function StudentsScreen() {
   const [isRevModalOpen, setIsRevModalOpen] = useState(false);
   const [isPackageModalOpen, setIsPackageModalOpen] = useState(false);
   const [isStudentEditModalOpen, setIsStudentEditModalOpen] = useState(false);
+  const [isCustomSmsModalOpen, setIsCustomSmsModalOpen] = useState(false);
+  const [customSmsMessage, setCustomSmsMessage] = useState("");
   const [editFullName, setEditFullName] = useState("");
   const [editPhone, setEditPhone] = useState("");
   const [editParentPhone, setEditParentPhone] = useState("");
@@ -250,6 +253,19 @@ export default function StudentsScreen() {
     } catch (error: any) {
       Alert.alert("تعذر الحفظ", error?.message || "راجع الاسم وأرقام الهاتف.");
     }
+  };
+
+  const sendCustomSms = async () => {
+    if (!selectedStudent) return;
+    if (!services.isEnabled("notifications")) return Alert.alert("الإشعارات غير مفعلة", "فعّل خدمة الإشعارات لهذا المركز أولاً.");
+    if (!customSmsMessage.trim()) return Alert.alert("تنبيه", "اكتب نص الرسالة أولاً.");
+    try {
+      const event = NotificationService.notifyCustomSms({ studentId: selectedStudent.id, message: customSmsMessage });
+      await NotificationService.sendPendingDeliveries(event.id);
+      setCustomSmsMessage("");
+      setIsCustomSmsModalOpen(false);
+      Alert.alert("تم تجهيز الرسالة", "تم حفظ الرسالة وإرسالها إلى طابور SMS للمزامنة.");
+    } catch (error: any) { Alert.alert("تعذر إرسال الرسالة", error?.message || "راجع صلاحية الإشعارات ورقم ولي الأمر."); }
   };
 
   const handleCallStudent = () => {
@@ -697,6 +713,7 @@ export default function StudentsScreen() {
               </View>
               <View style={styles.profileActions}>
                 {canUpdateStudent && <TouchableOpacity style={styles.profileAction} onPress={openStudentEdit}><Ionicons name="create-outline" size={18} color={Colors.primary} /><Text style={styles.profileActionText}>تعديل</Text></TouchableOpacity>}
+                {PermissionService.hasPermission(permissions, "notifications.send") && <TouchableOpacity style={styles.profileAction} onPress={() => setIsCustomSmsModalOpen(true)}><Ionicons name="chatbubble-ellipses-outline" size={18} color={Colors.primary} /><Text style={styles.profileActionText}>SMS لولي الأمر</Text></TouchableOpacity>}
                 <TouchableOpacity style={styles.profileAction} onPress={() => setIsCardModalOpen(true)}><Ionicons name="card-outline" size={18} color={Colors.primary} /><Text style={styles.profileActionText}>الكارت</Text></TouchableOpacity>
                 <TouchableOpacity style={styles.profileAction} onPress={handleCallStudent}><Ionicons name="call-outline" size={18} color={Colors.primary} /><Text style={styles.profileActionText}>اتصال</Text></TouchableOpacity>
               </View>
@@ -1200,6 +1217,15 @@ export default function StudentsScreen() {
           <AppInput label="رقم الطالب" value={editPhone} onChangeText={setEditPhone} keyboardType="phone-pad" />
           <AppInput label="رقم ولي الأمر" value={editParentPhone} onChangeText={setEditParentPhone} keyboardType="phone-pad" />
           <View style={{ flexDirection: "row", gap: 8, marginTop: Spacing.md }}><AppButton title="حفظ" onPress={saveStudentEdit} style={{ flex: 1 }} /><AppButton title="إلغاء" variant="outline" onPress={() => setIsStudentEditModalOpen(false)} style={{ flex: 1 }} /></View>
+        </View></View>
+      </Modal>
+
+      <Modal visible={isCustomSmsModalOpen} animationType="slide" transparent>
+        <View style={styles.modalOverlay}><View style={styles.smallModalCard}>
+          <Text style={styles.modalTitle}>رسالة SMS لولي الأمر</Text>
+          <Text style={styles.fieldNote}>سيتم إرسال الرسالة إلى رقم ولي الأمر المسجل: {selectedStudent?.parentPhone || "غير مسجل"}</Text>
+          <AppInput label="نص الرسالة" value={customSmsMessage} onChangeText={setCustomSmsMessage} multiline numberOfLines={6} style={{ minHeight: 120, textAlignVertical: "top" }} maxLength={480} />
+          <View style={{ flexDirection: "row", gap: 8, marginTop: Spacing.md }}><AppButton title="إرسال SMS" onPress={sendCustomSms} style={{ flex: 1 }} /><AppButton title="إلغاء" variant="outline" onPress={() => setIsCustomSmsModalOpen(false)} style={{ flex: 1 }} /></View>
         </View></View>
       </Modal>
 

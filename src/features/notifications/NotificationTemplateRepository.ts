@@ -38,6 +38,10 @@ export const DEFAULT_TEMPLATES: Record<NotificationEventType, Record<Notificatio
     push: "تم تسجيل درجات {{student_name}}: {{grades_summary}}. {{center_name}}",
     sms: "درجات {{student_name}}: {{grades_summary}}. للاستفسار تواصل مع {{center_name}}.",
   },
+  custom: {
+    push: "رسالة من المركز إلى {{student_name}}",
+    sms: "رسالة من المركز إلى {{student_name}}",
+  },
 };
 
 function generateUUID(): string {
