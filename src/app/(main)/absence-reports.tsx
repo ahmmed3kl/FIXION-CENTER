@@ -23,6 +23,39 @@ import { smartSearch } from "../../shared/utils/smartSearch";
 import { Attendance, Student } from "../../shared/types";
 import { formatLocalDate } from "../../shared/utils/date";
 
+type SessionGroup = { id?: string; name: string; items: AbsenceSessionSummary[] };
+
+function SessionGroupList({
+  groups,
+  onPress,
+}: {
+  groups: SessionGroup[];
+  onPress: (sessionId: string) => void;
+}) {
+  return (
+    <>
+      {groups.map((group) => (
+        <View key={group.id || group.name} style={styles.groupReport}>
+          <Text style={styles.groupReportTitle}>
+            {`${group.name} · ${group.items.length} حصة`}
+          </Text>
+          {group.items.map((item) => (
+            <View key={item.session.id}>
+              <Text style={styles.sessionNumber}>
+                {`الحصة رقم ${item.sessionNumber ?? "—"}`}
+              </Text>
+              <SessionCard
+                item={item}
+                onPress={() => onPress(item.session.id)}
+              />
+            </View>
+          ))}
+        </View>
+      ))}
+    </>
+  );
+}
+
 const MONTH_NAMES = ["يناير", "فبراير", "مارس", "أبريل", "مايو", "يونيو", "يوليو", "أغسطس", "سبتمبر", "أكتوبر", "نوفمبر", "ديسمبر"];
 
 function monthKey(date: Date): string {
@@ -62,11 +95,26 @@ export default function AbsenceReportsScreen() {
   const [detailLoading, setDetailLoading] = useState(false);
   const [error, setError] = useState("");
   const groupedSessions = useMemo(() => {
-    const groups = new Map<string, { name: string; items: AbsenceSessionSummary[] }>();
+    const groups = new Map<string, SessionGroup>();
     sessions.forEach((item) => {
-      const key = item.session.groupId;
+      const session = item?.session;
+      if (!session?.id) return;
+      const key = session.groupId || session.groupName || session.id;
+      const safeItem = {
+        ...item,
+        session: {
+          ...session,
+          id: String(session.id),
+          groupId: String(session.groupId || key),
+          groupName: typeof session.groupName === "string" ? session.groupName : "مجموعة",
+          subjectName: typeof session.subjectName === "string" ? session.subjectName : "",
+          teacherName: typeof session.teacherName === "string" ? session.teacherName : "مدرس غير محدد",
+        },
+        sessionNumber: Number.isFinite(item.sessionNumber) ? item.sessionNumber : 0,
+      };
       const current = groups.get(key) || { name: item.session.groupName || "مجموعة", items: [] };
-      current.items.push(item);
+      if (typeof current.name !== "string") current.name = "مجموعة";
+      current.items.push(safeItem);
       groups.set(key, current);
     });
     return Array.from(groups.values());
@@ -147,7 +195,7 @@ export default function AbsenceReportsScreen() {
     </ScrollView></SafeAreaView>;
   }
 
-  return <SafeAreaView style={styles.safe}><ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}><View style={styles.pageHeader}><View><Text style={styles.eyebrow}>الحضور والغياب</Text><Text style={styles.title}>تقارير الغياب</Text><Text style={styles.subtitle}>راجع جلسات المجموعات وحالات الطلاب الفعلية.</Text></View><View style={styles.headerIcon}><Ionicons name="bar-chart-outline" size={23} color={Colors.primary} /></View></View><View style={styles.monthPicker}><TouchableOpacity onPress={() => setMonth((value) => shiftMonth(value, -1))}><Ionicons name="chevron-forward" size={20} color={Colors.slate600} /></TouchableOpacity><View style={styles.monthCenter}><Text style={styles.monthLabel}>{monthLabel(month)}</Text><Text style={styles.monthHint}>الشهر المحدد</Text></View><TouchableOpacity onPress={() => setMonth((value) => shiftMonth(value, 1))}><Ionicons name="chevron-back" size={20} color={Colors.slate600} /></TouchableOpacity></View>{loading ? <View style={styles.loadingBox}><ActivityIndicator color={Colors.primary} /><Text style={styles.muted}>جارٍ تحميل الجلسات...</Text></View> : error ? <View style={styles.errorBox}><Text style={styles.errorText}>{error}</Text><TouchableOpacity onPress={loadSessions}><Text style={styles.retryText}>إعادة المحاولة</Text></TouchableOpacity></View> : groupedSessions.map((group) => <View key={group.name} style={styles.groupReport}><Text style={styles.groupReportTitle}>{group.name} · {group.items.length} حصة</Text>{group.items.map((item) => <View key={item.session.id}><Text style={styles.sessionNumber}>الحصة رقم {item.sessionNumber}</Text><SessionCard item={item} onPress={() => openSession(item.session.id)} /></View>)}</View>)}{!loading && !error && !sessions.length ? <EmptyMessage text="لا توجد جلسات في هذا الشهر." /> : null}</ScrollView></SafeAreaView>;
+  return <SafeAreaView style={styles.safe}><ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}><View style={styles.pageHeader}><View><Text style={styles.eyebrow}>الحضور والغياب</Text><Text style={styles.title}>تقارير الغياب</Text><Text style={styles.subtitle}>راجع جلسات المجموعات وحالات الطلاب الفعلية.</Text></View><View style={styles.headerIcon}><Ionicons name="bar-chart-outline" size={23} color={Colors.primary} /></View></View><View style={styles.monthPicker}><TouchableOpacity onPress={() => setMonth((value) => shiftMonth(value, -1))}><Ionicons name="chevron-forward" size={20} color={Colors.slate600} /></TouchableOpacity><View style={styles.monthCenter}><Text style={styles.monthLabel}>{monthLabel(month)}</Text><Text style={styles.monthHint}>الشهر المحدد</Text></View><TouchableOpacity onPress={() => setMonth((value) => shiftMonth(value, 1))}><Ionicons name="chevron-back" size={20} color={Colors.slate600} /></TouchableOpacity></View>{loading ? <View style={styles.loadingBox}><ActivityIndicator color={Colors.primary} /><Text style={styles.muted}>جارٍ تحميل الجلسات...</Text></View> : error ? <View style={styles.errorBox}><Text style={styles.errorText}>{error}</Text><TouchableOpacity onPress={loadSessions}><Text style={styles.retryText}>إعادة المحاولة</Text></TouchableOpacity></View> : <SessionGroupList groups={groupedSessions} onPress={openSession} />}{!loading && !error && !sessions.length ? <EmptyMessage text="لا توجد جلسات في هذا الشهر." /> : null}</ScrollView></SafeAreaView>;
 }
 
 function Counter({ label, value, tone }: { label: string; value: number; tone: "blue" | "green" | "red" | "purple" }) { return <View style={styles.counter}><Text style={[styles.counterValue, tone === "green" && styles.green, tone === "red" && styles.red, tone === "purple" && styles.purple]}>{value}</Text><Text style={styles.counterLabel}>{label}</Text></View>; }
