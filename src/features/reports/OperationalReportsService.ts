@@ -61,10 +61,17 @@ export class OperationalReportsService {
     const currentTime = new Date().toTimeString().slice(0, 5);
     // A session is not an absence report until it has ended. Future and
     // cancelled sessions remain schedule data, not missed attendance.
+    const attendedSessionIds = new Set(
+      db.getAllSync<any>(
+        `SELECT DISTINCT session_id FROM attendance WHERE center_id = ?`,
+        [centerId],
+      ).map((row: any) => String(row.session_id ?? row.sessionId)),
+    );
     const sessions = loadedSessions.filter(
       (session: any) =>
         dateStr < today ||
-        (dateStr === today && String(session.start_time || "") <= currentTime),
+        (dateStr === today &&
+          (String(session.start_time || "") <= currentTime || attendedSessionIds.has(String(session.id)))),
     );
 
     const sessionReport = sessions.map((s: any) => {
@@ -75,7 +82,11 @@ export class OperationalReportsService {
       const attendanceRows = db.getAllSync<any>(
         `SELECT student_id as studentId, status, attendance_type as attendanceType FROM attendance WHERE center_id = ? AND session_id = ?`,
         [centerId, s.id],
-      );
+      ).map((row: any) => ({
+        ...row,
+        studentId: row.studentId ?? row.student_id,
+        attendanceType: row.attendanceType ?? row.attendance_type,
+      }));
       const coveredInAdvance = db.getAllSync<{ studentId: string }>(
         `SELECT student_id as studentId FROM advance_coverages WHERE center_id = ? AND target_future_session_id = ?`,
         [centerId, s.id],
@@ -93,11 +104,11 @@ export class OperationalReportsService {
         for (const row of attendanceRows) {
           if (row.attendanceType !== "makeup") ids.add(String(row.studentId));
         }
-        expected = Array.from(ids, (student_id) => ({ student_id }));
+        expected = Array.from(ids, (studentId) => ({ studentId }));
       }
 
       const counts = calculateSessionAttendanceCounts(
-        expected.map((row: any) => row.student_id),
+        expected.map((row: any) => row.studentId ?? row.student_id).filter(Boolean),
         attendanceRows,
         coveredInAdvance.map((row) => row.studentId),
       );
@@ -180,17 +191,36 @@ export class OperationalReportsService {
       [centerId, studentId],
     );
 
-    // Get all sessions in range where student was expected
+    // Get all sessions in range where the student was expected. The expected
+    // snapshot is preferred, but legacy sessions may not have one; an actual
+    // attendance row or a valid enrollment on the session date must still
+    // keep the session visible in the report.
     const sessions = db.getAllSync<any>(
-      `SELECT s.id, s.session_date, s.start_time, s.end_time,
+      `SELECT DISTINCT s.id, s.session_date, s.start_time, s.end_time,
               g.name as group_name, subj.name as subject_name
        FROM sessions s
        JOIN groups g ON s.group_id = g.id
        LEFT JOIN subjects subj ON COALESCE(s.subject_id, g.subject_id) = subj.id
-       JOIN session_expected_students ses ON ses.session_id = s.id AND ses.student_id = ?
+       LEFT JOIN session_expected_students ses
+         ON ses.center_id = s.center_id AND ses.session_id = s.id AND ses.student_id = ?
+       LEFT JOIN student_group_enrollments enr
+         ON enr.center_id = s.center_id AND enr.group_id = s.group_id
+        AND enr.student_id = ? AND enr.status = 'active'
+        AND enr.start_date <= s.session_date
+        AND (enr.end_date IS NULL OR enr.end_date >= s.session_date)
        WHERE s.center_id = ? AND s.session_date >= ? AND s.session_date <= ?
+         AND (
+           ses.student_id IS NOT NULL
+           OR enr.id IS NOT NULL
+           OR EXISTS (
+             SELECT 1 FROM attendance attended
+             WHERE attended.center_id = s.center_id
+               AND attended.session_id = s.id
+               AND attended.student_id = ?
+           )
+         )
        ORDER BY s.session_date ASC`,
-      [studentId, centerId, fromDate, toDate],
+      [studentId, studentId, centerId, fromDate, toDate, studentId],
     );
 
     const attendanceMap = new Map<string, any>();

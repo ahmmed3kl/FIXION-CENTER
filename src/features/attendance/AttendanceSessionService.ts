@@ -405,18 +405,45 @@ export class AttendanceSessionService {
       "SELECT student_id as studentId FROM session_expected_students WHERE center_id = ? AND session_id = ?",
       [session.centerId, sessionId],
     );
+    let normalizedExpected = expected
+      .map((row: any) => row.studentId ?? row.student_id)
+      .filter(Boolean)
+      .map(String);
     const attendance = db.getAllSync<any>(
       "SELECT student_id as studentId, status, attendance_type as attendanceType FROM attendance WHERE center_id = ? AND session_id = ?",
       [session.centerId, sessionId],
     );
+    const normalizedAttendance = attendance.map((row: any) => ({
+      ...row,
+      studentId: row.studentId ?? row.student_id,
+      attendanceType: row.attendanceType ?? row.attendance_type,
+    }));
+    // Legacy sessions may have no immutable roster snapshot. Reconstruct the
+    // same historical roster used by the dashboard, then include a regular
+    // attendance row as a last-resort signal so the session counter cannot
+    // show zero while the student's attendance is visibly recorded.
+    if (normalizedExpected.length === 0) {
+      const sessionInfo = db.getFirstSync<any>(
+        "SELECT group_id as groupId, session_date as sessionDate FROM sessions WHERE center_id = ? AND id = ?",
+        [session.centerId, sessionId],
+      );
+      const enrollments = sessionInfo
+        ? EnrollmentRepository.getActiveEnrollmentsForGroup(sessionInfo.groupId, sessionInfo.sessionDate)
+        : [];
+      const ids = new Set<string>(enrollments.map((row: any) => String(row.studentId ?? row.student_id)));
+      for (const row of normalizedAttendance) {
+        if (row.studentId && row.attendanceType !== "makeup") ids.add(String(row.studentId));
+      }
+      normalizedExpected = Array.from(ids);
+    }
     const coveredInAdvance = db.getAllSync<{ studentId: string }>(
       "SELECT student_id as studentId FROM advance_coverages WHERE center_id = ? AND target_future_session_id = ?",
       [session.centerId, sessionId],
     );
     const counts = calculateSessionAttendanceCounts(
-      expected.map((row) => row.studentId),
-      attendance,
-      coveredInAdvance.map((row) => row.studentId),
+      normalizedExpected,
+      normalizedAttendance,
+      coveredInAdvance.map((row: any) => row.studentId ?? row.student_id).filter(Boolean),
     );
     return { total: counts.expected, present: counts.present, absent: counts.absent };
   }

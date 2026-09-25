@@ -84,6 +84,9 @@ export class DashboardService {
         "SELECT student_id as studentId FROM session_expected_students WHERE center_id = ? AND session_id = ?",
         [centerId, sessionId],
       );
+      expected = expected.map((row: any) => ({
+        studentId: row.studentId ?? row.student_id,
+      })).filter((row: any) => row.studentId);
       // Legacy/synced sessions can arrive before their roster snapshot. Keep
       // the dashboard useful by deriving the same-date roster from active
       // enrollments, and include a regular attendance row as a last-resort
@@ -102,9 +105,10 @@ export class DashboardService {
               [centerId, session.groupId, session.sessionDate, session.sessionDate],
             )
           : [];
-        const ids = new Set<string>(enrolled.map((row) => String(row.studentId)));
+        const ids = new Set<string>(enrolled.map((row) => String(row.studentId ?? row.student_id)));
         for (const row of attendance) {
-          if (row.attendanceType !== "makeup") ids.add(String(row.studentId));
+          const studentId = row.studentId ?? row.student_id;
+          if (studentId && row.attendanceType !== "makeup") ids.add(String(studentId));
         }
         expected = Array.from(ids, (studentId) => ({ studentId }));
       }
@@ -126,8 +130,11 @@ export class DashboardService {
 
     // 4. Today's collections
     const paymentRows = db.getAllSync<any>(
-      `SELECT amount FROM payments WHERE center_id = ? AND created_at LIKE ?`,
-      [centerId, `${dateStr}%`],
+      `SELECT amount FROM payments
+       WHERE center_id = ?
+         AND (payment_date = ? OR (payment_date IS NULL AND created_at LIKE ?))
+         AND (is_reversed = 0 OR is_reversed IS NULL)`,
+      [centerId, dateStr, `${dateStr}%`],
     );
     const todayCollections = paymentRows.reduce(
       (sum: number, p: any) => sum + (Number(p.amount) || 0),
