@@ -167,7 +167,7 @@ export default function AbsenceReportsScreen() {
         },
         sessionNumber: Number.isFinite(item.sessionNumber) ? item.sessionNumber : 0,
       };
-      const current = groups.get(key) || { name: item.session.groupName || "مجموعة", items: [] };
+      const current = groups.get(key) || { id: String(key), name: item.session.groupName || "مجموعة", items: [] };
       if (typeof current.name !== "string") current.name = "مجموعة";
       current.items.push(safeItem);
       groups.set(key, current);
