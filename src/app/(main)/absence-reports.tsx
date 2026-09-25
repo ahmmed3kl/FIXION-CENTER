@@ -179,7 +179,7 @@ export default function AbsenceReportsScreen() {
     }
   };
 
-  if (!services.loaded || services.loading) return <View style={styles.centered}><ActivityIndicator color={Colors.primary} /><Text style={styles.muted}>جارٍ تحميل حالة الخدمات...</Text></View>;
+  if (!services.loaded) return <View style={styles.centered}><ActivityIndicator color={Colors.primary} /><Text style={styles.muted}>جارٍ تحميل حالة الخدمات...</Text></View>;
   if (!services.isEnabled("reports")) return <View style={styles.centered}><Ionicons name="lock-closed-outline" size={34} color={Colors.slate400} /><Text style={styles.emptyTitle}>تقارير الغياب غير مفعلة</Text><Text style={styles.muted}>فعّل خدمة التقارير لهذا المركز من إدارة المنصة.</Text></View>;
   if (!canView) return <View style={styles.centered}><Ionicons name="shield-outline" size={34} color={Colors.slate400} /><Text style={styles.emptyTitle}>ليس لديك صلاحية عرض الحضور والغياب</Text></View>;
 

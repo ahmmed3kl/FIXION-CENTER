@@ -32,7 +32,9 @@ export function ServiceVisibilityProvider({ children }: { children: React.ReactN
     const version = ++requestVersion.current;
     setState((current) => ({
       ...current,
-      loading: true,
+      // Policy refresh is best-effort and must never put local screens into a
+      // network loading state after they have already been initialized.
+      loading: false,
       // Keep local workflows usable while this policy request is pending.
       loaded: true,
       centerId: activeCenterId,
