@@ -10,7 +10,7 @@ import { initializeRTL } from "../core/localization";
 import { SyncEngine } from "../core/sync";
 import { registerBackgroundSync } from "../core/sync/backgroundTask";
 import "../core/database/registerAtomicRepositories";
-import { ThemeProvider } from "../core/theme";
+import { ThemeProvider, useTheme } from "../core/theme";
 import { ServiceVisibilityProvider } from "../core/services/ServiceVisibilityContext";
 import { useAuthStore } from "../features/auth/useAuthStore";
 import { LoadingState } from "../shared/components";
@@ -86,20 +86,31 @@ function AuthGuard({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
+function ThemeChrome({ children }: { children: React.ReactNode }) {
+  const { isDarkMode, colors } = useTheme();
+  return (
+    <View style={{ flex: 1, backgroundColor: colors.background }}>
+      <StatusBar style={isDarkMode ? "light" : "dark"} />
+      {children}
+    </View>
+  );
+}
+
 export default function RootLayout() {
   return (
     <SafeAreaProvider>
       <QueryClientProvider client={queryClient}>
         <ThemeProvider>
-          <StatusBar style="dark" />
-          <AuthGuard>
-            <ServiceVisibilityProvider>
-              <Stack screenOptions={{ headerShown: false }}>
-                <Stack.Screen name="(auth)" />
-                <Stack.Screen name="(main)" />
-              </Stack>
-            </ServiceVisibilityProvider>
-          </AuthGuard>
+          <ThemeChrome>
+            <AuthGuard>
+              <ServiceVisibilityProvider>
+                <Stack screenOptions={{ headerShown: false }}>
+                  <Stack.Screen name="(auth)" />
+                  <Stack.Screen name="(main)" />
+                </Stack>
+              </ServiceVisibilityProvider>
+            </AuthGuard>
+          </ThemeChrome>
         </ThemeProvider>
       </QueryClientProvider>
     </SafeAreaProvider>

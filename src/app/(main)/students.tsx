@@ -1,5 +1,5 @@
 import { Ionicons } from "@expo/vector-icons";
-import { useLocalSearchParams, useRouter } from "expo-router";
+import { useLocalSearchParams } from "expo-router";
 import { useEffect, useState } from "react";
 import {
     Alert,
@@ -28,6 +28,7 @@ import { TeacherRepository } from "../../features/teachers/TeacherRepository";
 import { DebtAdjustmentRepository } from "../../features/payments/DebtAdjustmentRepository";
 import { FinancialCalculationService } from "../../features/payments/FinancialCalculationService";
 import { PaymentRepository } from "../../features/payments/PaymentRepository";
+import { GradeBookRepository, GradeExam, GradeScore } from "../../features/grades/GradeBookRepository";
 import { StudentCardRepository } from "../../features/students/StudentCardRepository";
 import { StudentRepository } from "../../features/students/StudentRepository";
 import { smartSearch } from "../../shared/utils/smartSearch";
@@ -47,7 +48,8 @@ import {
     Student,
     StudentCard,
     StudentGroupEnrollment,
-    StudentGroupAttendanceSummary,
+  StudentGroupAttendanceSummary,
+  Attendance,
     Package,
     PackageSubject,
 } from "../../shared/types";
@@ -55,7 +57,6 @@ import { formatDisplayIdentifier } from "../../shared/utils/formatters";
 
 export default function StudentsScreen() {
   const { studentId } = useLocalSearchParams<{ studentId?: string }>();
-  const router = useRouter();
   const services = useServiceVisibility();
   const paymentsEnabled = services.isEnabled("payments");
   const currentUser = useAuthStore((s) => s.currentUser);
@@ -78,10 +79,14 @@ export default function StudentsScreen() {
   const [attendanceSummaries, setAttendanceSummaries] = useState<StudentGroupAttendanceSummary[]>([]);
   const [selectedGroupPanel, setSelectedGroupPanel] = useState<{
     groupId: string;
-    panel: "attendance" | "finance";
+    panel: "attendance" | "finance" | "grades";
   } | null>(null);
   const [groupFinancialStatus, setGroupFinancialStatus] =
     useState<DetailedStudentFinancialStatus | null>(null);
+  const [groupDetailsModalOpen, setGroupDetailsModalOpen] = useState(false);
+  const [groupAttendanceRows, setGroupAttendanceRows] = useState<Attendance[]>([]);
+  const [groupGradeExams, setGroupGradeExams] = useState<GradeExam[]>([]);
+  const [groupGradeScores, setGroupGradeScores] = useState<GradeScore[]>([]);
 
   // Modal States
   const [isAddStudentOpen, setIsAddStudentOpen] = useState(false);
@@ -182,6 +187,10 @@ export default function StudentsScreen() {
     setAttendanceSummaries([]);
     setSelectedGroupPanel(null);
     setGroupFinancialStatus(null);
+    setGroupDetailsModalOpen(false);
+    setGroupAttendanceRows([]);
+    setGroupGradeExams([]);
+    setGroupGradeScores([]);
     if (studentId) {
       const requested = StudentRepository.findById(String(studentId));
       if (requested) openStudentDetails(requested);
@@ -232,8 +241,9 @@ export default function StudentsScreen() {
   };
 
   const openGroupPanel = (groupId: string, panel: "attendance" | "finance") => {
+    if (!selectedStudent) return;
     if (panel === "finance") {
-      if (!selectedStudent || !canViewPayments) {
+      if (!canViewPayments) {
         Alert.alert("غير متاح", "ليس لديك صلاحية عرض الموقف المالي.");
         return;
       }
@@ -251,16 +261,44 @@ export default function StudentsScreen() {
       }
     } else {
       setGroupFinancialStatus(null);
+      try {
+        setGroupAttendanceRows(
+          AttendanceRepository.getStudentAttendance(selectedStudent.id).filter(
+            (row) => row.groupId === groupId,
+          ),
+        );
+      } catch (error: any) {
+        setGroupAttendanceRows([]);
+        Alert.alert("تعذر تحميل الحضور", error?.message || "حاول مرة أخرى.");
+        return;
+      }
     }
-    setSelectedGroupPanel((current) =>
-      current?.groupId === groupId && current.panel === panel
-        ? null
-        : { groupId, panel },
-    );
+    setSelectedGroupPanel({ groupId, panel });
+    setGroupDetailsModalOpen(true);
   };
 
   const openGroupGrades = (groupId: string) => {
-    router.push({ pathname: "/(main)/grades", params: { groupId } } as never);
+    if (!selectedStudent) return;
+    const group = availableGroups.find((item) => item.id === groupId);
+    if (!group) {
+      Alert.alert("تعذر تحميل الدرجات", "بيانات المجموعة غير متاحة.");
+      return;
+    }
+    try {
+      const exams = GradeBookRepository.getExams(group.grade || selectedStudent.grade);
+      const scores = GradeBookRepository.getScores(
+        exams.map((exam) => exam.id),
+        [selectedStudent.id],
+      );
+      setGroupGradeExams(exams);
+      setGroupGradeScores(scores);
+      setGroupAttendanceRows([]);
+      setGroupFinancialStatus(null);
+      setSelectedGroupPanel({ groupId, panel: "grades" });
+      setGroupDetailsModalOpen(true);
+    } catch (error: any) {
+      Alert.alert("تعذر تحميل الدرجات", error?.message || "حاول مرة أخرى.");
+    }
   };
 
   const handleRecordPayment = async () => {
@@ -622,7 +660,7 @@ export default function StudentsScreen() {
                     <View style={styles.profileStatus}><View style={styles.statusDot} /><Text style={styles.profileStatusText}>{selectedStudent.status === "active" ? "نشط" : "غير نشط"} · {selectedStudent.grade}</Text></View>
                   </View>
                 </View>
-                <TouchableOpacity onPress={() => setSelectedStudent(null)}>
+                <TouchableOpacity onPress={() => { setGroupDetailsModalOpen(false); setSelectedStudent(null); }}>
                   <Ionicons name="close" size={24} color={Colors.slate500} />
                 </TouchableOpacity>
               </View>
@@ -1134,6 +1172,74 @@ export default function StudentsScreen() {
           </ScrollView>
           <View style={{ flexDirection: "row", gap: 8, marginTop: Spacing.md }}><AppButton title="تأكيد التحويل" onPress={handleSubscribePackage} style={{ flex: 1 }} /><AppButton title="إلغاء" variant="outline" onPress={() => setIsPackageModalOpen(false)} style={{ flex: 1 }} /></View>
         </View></View>
+      </Modal>
+
+      <Modal visible={groupDetailsModalOpen} animationType="slide" transparent>
+        <View style={styles.modalOverlay}>
+          <View style={styles.groupDetailsModalCard}>
+            <View style={styles.groupDetailsHeader}>
+              <TouchableOpacity onPress={() => setGroupDetailsModalOpen(false)} style={styles.groupDetailsBackButton}>
+                <Ionicons name="arrow-forward" size={22} color={Colors.slate700} />
+              </TouchableOpacity>
+              <View style={{ flex: 1, alignItems: "flex-end" }}>
+                <Text style={styles.modalTitle}>{availableGroups.find((group) => group.id === selectedGroupPanel?.groupId)?.name || "تفاصيل المجموعة"}</Text>
+                <Text style={styles.modalSubtitle}>{selectedStudent?.fullName}</Text>
+              </View>
+            </View>
+
+            {selectedGroupPanel?.panel === "attendance" && (
+              <ScrollView style={styles.groupDetailsScroll}>
+                <Text style={styles.groupDetailsTitle}>تفاصيل الحضور والغياب</Text>
+                {(() => {
+                  const summary = attendanceSummaries.find((item) => item.groupId === selectedGroupPanel.groupId);
+                  return (
+                    <>
+                      <View style={styles.detailMetricGrid}>
+                        <View style={styles.detailMetricCard}><Text style={styles.detailMetricValue}>{summary?.expectedSessions ?? 0}</Text><Text style={styles.detailMetricLabel}>حصص متوقعة</Text></View>
+                        <View style={styles.detailMetricCard}><Text style={[styles.detailMetricValue, { color: Colors.successText }]}>{summary?.presentCount ?? 0}</Text><Text style={styles.detailMetricLabel}>حضور</Text></View>
+                        <View style={styles.detailMetricCard}><Text style={[styles.detailMetricValue, { color: Colors.dangerText }]}>{summary?.absentCount ?? 0}</Text><Text style={styles.detailMetricLabel}>غياب</Text></View>
+                        <View style={styles.detailMetricCard}><Text style={[styles.detailMetricValue, { color: Colors.warningText }]}>{summary?.makeupCount ?? 0}</Text><Text style={styles.detailMetricLabel}>تعويض</Text></View>
+                      </View>
+                      <Text style={styles.groupDetailsSubtitle}>السجل المسجل</Text>
+                      {groupAttendanceRows.length === 0 ? <Text style={styles.emptyText}>لا توجد سجلات حضور لهذه المجموعة.</Text> : groupAttendanceRows.map((row) => (
+                        <View key={row.id} style={styles.detailHistoryRow}>
+                          <View style={{ flex: 1 }}><Text style={styles.detailHistoryTitle}>{row.checkInTime?.slice(0, 16).replace("T", " ") || "بدون تاريخ"}</Text><Text style={styles.detailHistoryMeta}>{row.attendanceType === "makeup" ? "حصة تعويضية" : "الحصة الأساسية"}</Text></View>
+                          <StatusBadge text={row.status === "late" ? "متأخر" : "حاضر"} type={row.status === "late" ? "warning" : "success"} />
+                        </View>
+                      ))}
+                    </>
+                  );
+                })()}
+              </ScrollView>
+            )}
+
+            {selectedGroupPanel?.panel === "finance" && groupFinancialStatus && (
+              <ScrollView style={styles.groupDetailsScroll}>
+                <Text style={styles.groupDetailsTitle}>الموقف المالي للمجموعة</Text>
+                <View style={styles.detailMetricGrid}>
+                  <View style={styles.detailMetricCard}><Text style={styles.detailMetricValue}>{formatCurrency(groupFinancialStatus.monthlyTotalDue)}</Text><Text style={styles.detailMetricLabel}>المستحق</Text></View>
+                  <View style={styles.detailMetricCard}><Text style={[styles.detailMetricValue, { color: Colors.successText }]}>{formatCurrency(groupFinancialStatus.monthlyTotalPaid)}</Text><Text style={styles.detailMetricLabel}>المدفوع</Text></View>
+                  <View style={styles.detailMetricCard}><Text style={[styles.detailMetricValue, { color: Colors.dangerText }]}>{formatCurrency(groupFinancialStatus.monthlyRemainingDebt)}</Text><Text style={styles.detailMetricLabel}>المتبقي</Text></View>
+                </View>
+                {groupFinancialStatus.sessionDebt && <View style={styles.detailSectionCard}><Text style={styles.groupDetailsSubtitle}>تفصيل حصص الشهر</Text><Text style={styles.detailHistoryMeta}>{groupFinancialStatus.sessionDebt.periodStart} - {groupFinancialStatus.sessionDebt.periodEnd}</Text><Text style={styles.detailLine}>حضر ودفع: {groupFinancialStatus.sessionDebt.attendedPaidSessions}</Text><Text style={styles.detailLine}>حضر ولم يدفع: {groupFinancialStatus.sessionDebt.attendedUnpaidSessions}</Text><Text style={styles.detailLine}>الحصص المستقبلية غير المدفوعة: {groupFinancialStatus.sessionDebt.futureUnpaidSessions}</Text><Text style={styles.detailDebtLine}>المديونية الحالية: {formatCurrency(groupFinancialStatus.sessionDebt.currentDebt)}</Text></View>}
+                <Text style={styles.groupDetailsSubtitle}>دورات المديونية</Text>
+                {groupFinancialStatus.cycles.length === 0 ? <Text style={styles.emptyText}>لا توجد دورات مديونية.</Text> : groupFinancialStatus.cycles.map((cycle) => <View key={cycle.id} style={styles.detailSectionCard}><View style={styles.detailHistoryRow}><View><Text style={styles.detailHistoryTitle}>الدورة {cycle.cycleNumber}</Text><Text style={styles.detailHistoryMeta}>{cycle.startDate} - {cycle.endDate}</Text></View><StatusBadge text={cycle.status === "paid" ? "مدفوعة" : cycle.status === "partial" ? "جزئية" : "مفتوحة"} type={cycle.status === "paid" ? "success" : cycle.status === "partial" ? "warning" : "neutral"} /></View><Text style={styles.detailLine}>الرسوم: {formatCurrency(cycle.effectivePrice ?? cycle.cyclePrice)} | المتبقي: {formatCurrency(cycle.remainingDebt ?? 0)}</Text></View>)}
+                <Text style={styles.groupDetailsSubtitle}>المدفوعات</Text>
+                {groupFinancialStatus.payments.length === 0 ? <Text style={styles.emptyText}>لا توجد مدفوعات مسجلة.</Text> : groupFinancialStatus.payments.map((payment) => <View key={payment.id} style={styles.detailHistoryRow}><View><Text style={styles.detailHistoryTitle}>{formatCurrency(payment.amount)}</Text><Text style={styles.detailHistoryMeta}>{payment.paymentDate || payment.createdAt.slice(0, 10)}{payment.isReversed ? " • ملغاة" : ""}</Text></View><Text style={styles.detailHistoryMeta}>{payment.paymentType}</Text></View>)}
+              </ScrollView>
+            )}
+
+            {selectedGroupPanel?.panel === "grades" && (
+              <ScrollView style={styles.groupDetailsScroll}>
+                <Text style={styles.groupDetailsTitle}>درجات الطالب في المجموعة</Text>
+                {groupGradeExams.length === 0 ? <Text style={styles.emptyText}>لا توجد امتحانات أو درجات مسجلة لهذه المجموعة.</Text> : groupGradeExams.map((exam) => {
+                  const score = groupGradeScores.find((item) => item.examId === exam.id && item.studentId === selectedStudent?.id);
+                  return <View key={exam.id} style={styles.detailSectionCard}><Text style={styles.detailHistoryTitle}>{exam.name}</Text><Text style={styles.detailHistoryMeta}>الدرجة النهائية: {exam.maxScore}</Text><Text style={[styles.gradeScoreValue, { color: score?.score === null || !score ? Colors.slate500 : Colors.primary }]}>{score?.score === null || !score ? "لم ترصد بعد" : `${score.score} / ${exam.maxScore}`}</Text></View>;
+                })}
+              </ScrollView>
+            )}
+          </View>
+        </View>
       </Modal>
 
       {/* 3. Issue/Replace Card Modal */}
@@ -1751,6 +1857,7 @@ const styles = StyleSheet.create({
     color: Colors.white,
   },
   groupInlinePanel: {
+    display: "none",
     marginTop: Spacing.sm,
     padding: Spacing.sm,
     borderRadius: 9,
@@ -1773,6 +1880,116 @@ const styles = StyleSheet.create({
     color: Colors.slate700,
     fontSize: 11,
     fontWeight: "700",
+  },
+  groupDetailsModalCard: {
+    width: "100%",
+    maxHeight: "88%",
+    backgroundColor: Colors.white,
+    borderRadius: 18,
+    padding: Spacing.md,
+  },
+  groupDetailsHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: Spacing.sm,
+    marginBottom: Spacing.sm,
+  },
+  groupDetailsBackButton: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: Colors.slate100,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  groupDetailsScroll: {
+    maxHeight: 560,
+  },
+  groupDetailsTitle: {
+    color: Colors.slate900,
+    fontSize: 16,
+    fontWeight: "800",
+    textAlign: "right",
+    marginBottom: Spacing.sm,
+  },
+  groupDetailsSubtitle: {
+    color: Colors.slate700,
+    fontSize: 13,
+    fontWeight: "800",
+    textAlign: "right",
+    marginTop: Spacing.md,
+    marginBottom: Spacing.xs,
+  },
+  detailMetricGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+  },
+  detailMetricCard: {
+    flex: 1,
+    minWidth: "29%",
+    backgroundColor: Colors.slate50,
+    borderRadius: 10,
+    padding: Spacing.sm,
+    alignItems: "center",
+    borderWidth: 1,
+    borderColor: Colors.border,
+  },
+  detailMetricValue: {
+    color: Colors.primary,
+    fontSize: 17,
+    fontWeight: "800",
+  },
+  detailMetricLabel: {
+    color: Colors.slate500,
+    fontSize: 10,
+    marginTop: 3,
+  },
+  detailHistoryRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    backgroundColor: Colors.slate50,
+    borderRadius: 9,
+    padding: Spacing.sm,
+    marginTop: 6,
+  },
+  detailHistoryTitle: {
+    color: Colors.slate800,
+    fontSize: 12,
+    fontWeight: "800",
+    textAlign: "right",
+  },
+  detailHistoryMeta: {
+    color: Colors.slate500,
+    fontSize: 10,
+    marginTop: 2,
+    textAlign: "right",
+  },
+  detailSectionCard: {
+    backgroundColor: Colors.slate50,
+    borderRadius: 10,
+    padding: Spacing.sm,
+    marginTop: 6,
+  },
+  detailLine: {
+    color: Colors.slate600,
+    fontSize: 11,
+    marginTop: 4,
+    textAlign: "right",
+  },
+  detailDebtLine: {
+    color: Colors.dangerText,
+    fontSize: 12,
+    fontWeight: "800",
+    marginTop: 6,
+    textAlign: "right",
+  },
+  gradeScoreValue: {
+    fontSize: 20,
+    fontWeight: "800",
+    marginTop: 8,
+    textAlign: "right",
   },
   inputLabel: {
     fontSize: 12,

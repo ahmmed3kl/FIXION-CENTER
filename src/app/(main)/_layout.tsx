@@ -3,23 +3,24 @@ import { Tabs } from "expo-router";
 import { StyleSheet, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Strings } from "../../core/localization";
-import { Colors } from "../../core/theme";
+import { Colors, useTheme } from "../../core/theme";
 
 export default function MainLayout() {
   const insets = useSafeAreaInsets();
+  const { colors } = useTheme();
   return (
     <Tabs
       backBehavior="history"
       screenOptions={{
         headerShown: false,
-        tabBarActiveTintColor: Colors.primary,
-        tabBarInactiveTintColor: Colors.slate400,
+        tabBarActiveTintColor: colors.primary,
+        tabBarInactiveTintColor: colors.slate400,
         tabBarStyle: {
           height: 64 + insets.bottom,
           paddingBottom: 8 + insets.bottom,
           paddingTop: 8,
-          backgroundColor: Colors.white,
-          borderTopColor: Colors.border,
+          backgroundColor: colors.cardBackground,
+          borderTopColor: colors.border,
         },
         tabBarLabelStyle: {
           fontSize: 12,
@@ -27,16 +28,6 @@ export default function MainLayout() {
         },
       }}
     >
-      <Tabs.Screen
-        name="index"
-        options={{
-          href: null,
-          title: Strings.tabDashboard,
-          tabBarIcon: ({ color, size }) => (
-            <Ionicons name="home-outline" size={size} color={color} />
-          ),
-        }}
-      />
       <Tabs.Screen
         name="students"
         options={{
@@ -47,20 +38,23 @@ export default function MainLayout() {
         }}
       />
       <Tabs.Screen
-        name="scanner"
+        name="index"
         options={{
-          // The scanner is the primary raised action in the center of the bar.
-          title: Strings.tabScanner,
-          tabBarIcon: ({ color, focused }) => (
-            <View
-              style={[
-                styles.scannerTabIcon,
-                focused ? styles.scannerTabIconActive : null,
-              ]}
-            >
-              <Ionicons name="qr-code" size={24} color={Colors.white} />
+          title: Strings.tabDashboard,
+          tabBarIcon: ({ focused }) => (
+            <View style={[styles.homeTabIcon, { backgroundColor: colors.primary }, focused ? [styles.homeTabIconActive, { backgroundColor: colors.primaryDark }] : null]}>
+              <Ionicons name="home" size={24} color={colors.white} />
             </View>
           ),
+        }}
+      />
+      <Tabs.Screen
+        name="scanner"
+        options={{
+          // Scanner remains available from the dashboard/more menu, but is not a primary tab.
+          href: null,
+          title: Strings.tabScanner,
+          tabBarIcon: ({ color, size }) => <Ionicons name="qr-code-outline" size={size} color={color} />,
         }}
       />
       <Tabs.Screen
@@ -122,7 +116,7 @@ export default function MainLayout() {
 }
 
 const styles = StyleSheet.create({
-  scannerTabIcon: {
+  homeTabIcon: {
     width: 48,
     height: 48,
     borderRadius: 24,
@@ -137,7 +131,7 @@ const styles = StyleSheet.create({
     shadowRadius: 6,
     elevation: 4,
   },
-  scannerTabIconActive: {
+  homeTabIconActive: {
     backgroundColor: Colors.primaryDark,
     transform: [{ translateY: -7 }, { scale: 1.05 }],
   },

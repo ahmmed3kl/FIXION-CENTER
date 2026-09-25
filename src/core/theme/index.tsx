@@ -1,5 +1,6 @@
-import React, { createContext, useContext, useMemo } from 'react';
+import React, { createContext, useContext, useEffect, useMemo, useState } from 'react';
 import { StyleSheet } from 'react-native';
+import { SecureStorageService } from '../storage';
 
 export const Colors = {
   primary: '#2563EB',      // Modern Blue
@@ -45,6 +46,49 @@ export const Colors = {
   border: '#E2E8F0',
   textPrimary: '#0F172A',
   textSecondary: '#64748B',
+  textMuted: '#94A3B8',
+};
+
+export type AppColors = typeof Colors;
+
+const LightColors: AppColors = { ...Colors };
+
+const DarkColors: AppColors = {
+  ...Colors,
+  primary: '#60A5FA',
+  primaryDark: '#93C5FD',
+  primaryLight: '#1E3A8A',
+  primaryMuted: '#172554',
+  secondary: '#2DD4BF',
+  secondaryLight: '#134E4A',
+  accent: '#FBBF24',
+  accentLight: '#78350F',
+  success: '#34D399',
+  successLight: '#064E3B',
+  successText: '#A7F3D0',
+  danger: '#F87171',
+  dangerLight: '#7F1D1D',
+  dangerText: '#FECACA',
+  warning: '#FBBF24',
+  warningLight: '#78350F',
+  warningText: '#FDE68A',
+  slate900: '#F8FAFC',
+  slate800: '#E2E8F0',
+  slate700: '#CBD5E1',
+  slate600: '#94A3B8',
+  slate500: '#94A3B8',
+  slate400: '#64748B',
+  slate300: '#475569',
+  slate200: '#334155',
+  slate100: '#1E293B',
+  slate50: '#111827',
+  background: '#0B1220',
+  // Keep cards light in dark mode so legacy screen text remains high contrast
+  // until each feature adopts fully tokenized theme styles.
+  cardBackground: '#FFFFFF',
+  border: '#334155',
+  textPrimary: '#F8FAFC',
+  textSecondary: '#CBD5E1',
   textMuted: '#94A3B8',
 };
 
@@ -149,10 +193,45 @@ export const Theme = {
   shadows: Shadows,
 };
 
-const ThemeContext = createContext<typeof Theme>(Theme);
+type ThemeContextValue = typeof Theme & {
+  isDarkMode: boolean;
+  setDarkMode: (enabled: boolean) => void;
+  toggleDarkMode: () => void;
+};
+
+const ThemeContext = createContext<ThemeContextValue>({
+  ...Theme,
+  isDarkMode: false,
+  setDarkMode: () => undefined,
+  toggleDarkMode: () => undefined,
+});
 
 export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const value = useMemo(() => Theme, []);
+  const [isDarkMode, setIsDarkMode] = useState(false);
+
+  useEffect(() => {
+    SecureStorageService.getItem('theme_mode')
+      .then((mode) => setIsDarkMode(mode === 'dark'))
+      .catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
+    Object.assign(Colors, isDarkMode ? DarkColors : LightColors);
+  }, [isDarkMode]);
+
+  const setDarkMode = (enabled: boolean) => {
+    setIsDarkMode(enabled);
+    SecureStorageService.setItem('theme_mode', enabled ? 'dark' : 'light').catch(() => undefined);
+  };
+
+  const colors = isDarkMode ? DarkColors : LightColors;
+  const value = useMemo(() => ({
+    ...Theme,
+    colors,
+    isDarkMode,
+    setDarkMode,
+    toggleDarkMode: () => setDarkMode(!isDarkMode),
+  }), [isDarkMode]);
   return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>;
 };
 

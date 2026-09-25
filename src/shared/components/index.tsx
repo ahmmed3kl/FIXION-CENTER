@@ -18,6 +18,7 @@ import {
     Shadows,
     Spacing,
     Typography,
+    useTheme,
 } from "../../core/theme";
 import { ConnectivityState } from "../types";
 import { InputKind, sanitizeInput } from "../utils/validation";
@@ -48,28 +49,29 @@ export const AppButton: React.FC<AppButtonProps> = ({
   textStyle,
   icon,
 }) => {
+  const { colors } = useTheme();
   const getBackgroundColor = () => {
-    if (disabled) return Colors.slate200;
+    if (disabled) return colors.slate200;
     switch (variant) {
       case "primary":
-        return Colors.primary;
+        return colors.primary;
       case "secondary":
-        return Colors.secondary;
+        return colors.secondary;
       case "danger":
-        return Colors.danger;
+        return colors.danger;
       case "success":
-        return Colors.success;
+        return colors.success;
       case "outline":
-        return Colors.transparent;
+        return colors.transparent;
       default:
-        return Colors.primary;
+        return colors.primary;
     }
   };
 
   const getTextColor = () => {
-    if (disabled) return Colors.slate400;
-    if (variant === "outline") return Colors.primary;
-    return Colors.white;
+    if (disabled) return colors.slate400;
+    if (variant === "outline") return colors.primary;
+    return colors.white;
   };
 
   const getHeight = () => {
@@ -94,7 +96,7 @@ export const AppButton: React.FC<AppButtonProps> = ({
           backgroundColor: getBackgroundColor(),
           height: getHeight(),
           borderColor:
-            variant === "outline" ? Colors.primary : Colors.transparent,
+            variant === "outline" ? colors.primary : colors.transparent,
           borderWidth: variant === "outline" ? 1.5 : 0,
         },
         variant !== "outline" && !disabled ? Shadows.subtle : null,
@@ -137,6 +139,7 @@ export const AppInput: React.FC<AppInputProps> = ({
   maxLength,
   ...props
 }) => {
+  const { colors, isDarkMode } = useTheme();
   const resolvedInputKind =
     inputKind ?? (props.keyboardType === "phone-pad" ? "phone" : undefined);
   const resolvedMaxLength =
@@ -145,10 +148,10 @@ export const AppInput: React.FC<AppInputProps> = ({
       : maxLength;
   return (
     <View style={[styles.inputContainer, containerStyle]}>
-      {label ? <Text style={styles.inputLabel}>{label}</Text> : null}
+      {label ? <Text style={[styles.inputLabel, { color: isDarkMode ? "#0F172A" : colors.textSecondary }]}>{label}</Text> : null}
       <TextInput
-        style={[styles.textInput, error ? styles.inputError : null, style]}
-        placeholderTextColor={Colors.slate400}
+        style={[styles.textInput, { backgroundColor: colors.cardBackground, borderColor: colors.border, color: isDarkMode ? "#0F172A" : colors.textPrimary }, error ? { borderColor: colors.danger } : null, style]}
+        placeholderTextColor={colors.textMuted}
         textAlign="right"
         maxLength={resolvedMaxLength}
         onChangeText={(value) =>
@@ -156,7 +159,7 @@ export const AppInput: React.FC<AppInputProps> = ({
         }
         {...props}
       />
-      {error ? <Text style={styles.errorText}>{error}</Text> : null}
+      {error ? <Text style={[styles.errorText, { color: colors.dangerText }]}>{error}</Text> : null}
     </View>
   );
 };
@@ -175,18 +178,19 @@ export const AppCard: React.FC<AppCardProps> = ({
   style,
   onPress,
 }) => {
+  const { colors } = useTheme();
   if (onPress) {
     return (
       <TouchableOpacity
         activeOpacity={0.75}
         onPress={onPress}
-        style={[styles.card, Shadows.card, style]}
+        style={[styles.card, { backgroundColor: colors.cardBackground, borderColor: colors.border }, Shadows.card, style]}
       >
         {children}
       </TouchableOpacity>
     );
   }
-  return <View style={[styles.card, Shadows.card, style]}>{children}</View>;
+  return <View style={[styles.card, { backgroundColor: colors.cardBackground, borderColor: colors.border }, Shadows.card, style]}>{children}</View>;
 };
 
 // ==========================================
@@ -203,18 +207,19 @@ export const StatusBadge: React.FC<StatusBadgeProps> = ({
   type = "info",
   style,
 }) => {
+  const { colors } = useTheme();
   const getColors = () => {
     switch (type) {
       case "success":
-        return { bg: Colors.successLight, text: Colors.successText };
+        return { bg: colors.successLight, text: colors.successText };
       case "warning":
-        return { bg: Colors.warningLight, text: Colors.warningText };
+        return { bg: colors.warningLight, text: colors.warningText };
       case "danger":
-        return { bg: Colors.dangerLight, text: Colors.dangerText };
+        return { bg: colors.dangerLight, text: colors.dangerText };
       case "neutral":
-        return { bg: Colors.slate100, text: Colors.slate600 };
+        return { bg: colors.slate100, text: colors.slate600 };
       default:
-        return { bg: Colors.primaryLight, text: Colors.primaryDark };
+        return { bg: colors.primaryLight, text: colors.primaryDark };
     }
   };
 
@@ -241,23 +246,24 @@ export const SyncIndicator: React.FC<SyncIndicatorProps> = ({
   pendingCount,
   onPress,
 }) => {
+  const { colors } = useTheme();
   let label = Strings.statusOnline;
-  let bg = Colors.successLight;
-  let fg = Colors.successText;
+  let bg = colors.successLight;
+  let fg = colors.successText;
 
   if (connectivity === "offline") {
     label =
       pendingCount > 0 ? `${pendingCount} في الانتظار` : Strings.statusOffline;
-    bg = Colors.warningLight;
-    fg = Colors.warningText;
+    bg = colors.warningLight;
+    fg = colors.warningText;
   } else if (connectivity === "syncing") {
     label = Strings.statusSyncing;
-    bg = Colors.primaryLight;
-    fg = Colors.primaryDark;
+    bg = colors.primaryLight;
+    fg = colors.primaryDark;
   } else if (connectivity === "degraded") {
     label = "الخادم غير متاح";
-    bg = Colors.dangerLight;
-    fg = Colors.dangerText;
+    bg = colors.dangerLight;
+    fg = colors.dangerText;
   }
 
   return (
@@ -278,50 +284,36 @@ export const SyncIndicator: React.FC<SyncIndicatorProps> = ({
 // ==========================================
 export const LoadingState: React.FC<{ message?: string }> = ({
   message = Strings.loading,
-}) => (
-  <View style={styles.centerContainer}>
-    <ActivityIndicator size="large" color={Colors.primary} />
-    <Text style={styles.stateMessage}>{message}</Text>
-  </View>
-);
+}) => {
+  const { colors } = useTheme();
+  return <View style={styles.centerContainer}>
+    <ActivityIndicator size="large" color={colors.primary} />
+    <Text style={[styles.stateMessage, { color: colors.textSecondary }]}>{message}</Text>
+  </View>;
+};
 
 export const EmptyState: React.FC<{
   message?: string;
   actionTitle?: string;
   onAction?: () => void;
-}> = ({ message = Strings.emptyData, actionTitle, onAction }) => (
-  <View style={styles.centerContainer}>
-    <Text style={styles.stateMessage}>{message}</Text>
-    {actionTitle && onAction ? (
-      <AppButton
-        title={actionTitle}
-        onPress={onAction}
-        size="sm"
-        style={{ marginTop: Spacing.md }}
-      />
-    ) : null}
-  </View>
-);
+}> = ({ message = Strings.emptyData, actionTitle, onAction }) => {
+  const { colors } = useTheme();
+  return <View style={styles.centerContainer}>
+    <Text style={[styles.stateMessage, { color: colors.textSecondary }]}>{message}</Text>
+    {actionTitle && onAction ? <AppButton title={actionTitle} onPress={onAction} size="sm" style={{ marginTop: Spacing.md }} /> : null}
+  </View>;
+};
 
 export const ErrorState: React.FC<{
   message?: string;
   onRetry?: () => void;
-}> = ({ message = Strings.errorTitle, onRetry }) => (
-  <View style={styles.centerContainer}>
-    <Text style={[styles.stateMessage, { color: Colors.dangerText }]}>
-      {message}
-    </Text>
-    {onRetry ? (
-      <AppButton
-        title={Strings.retryButton}
-        onPress={onRetry}
-        variant="outline"
-        size="sm"
-        style={{ marginTop: Spacing.md }}
-      />
-    ) : null}
-  </View>
-);
+}> = ({ message = Strings.errorTitle, onRetry }) => {
+  const { colors } = useTheme();
+  return <View style={styles.centerContainer}>
+    <Text style={[styles.stateMessage, { color: colors.dangerText }]}>{message}</Text>
+    {onRetry ? <AppButton title={Strings.retryButton} onPress={onRetry} variant="outline" size="sm" style={{ marginTop: Spacing.md }} /> : null}
+  </View>;
+};
 
 const styles = StyleSheet.create({
   buttonBase: {
