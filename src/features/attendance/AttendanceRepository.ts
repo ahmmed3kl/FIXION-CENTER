@@ -9,6 +9,7 @@ import {
 import { PermissionService } from "../../core/permissions";
 import { SyncEngine, SyncRepository } from "../../core/sync";
 import { Attendance, AttendanceType, StudentGroupAttendanceSummary } from "../../shared/types";
+import { getLocalDateOnly } from "../../shared/utils/date";
 import { useAuthStore } from "../auth/useAuthStore";
 import { AttendanceSessionService } from "./AttendanceSessionService";
 
@@ -85,7 +86,13 @@ export class AttendanceRepository {
 
     // Check session status
     const session = db.getFirstSync<any>(
-      `SELECT id, status FROM sessions WHERE center_id = ? AND id = ?`,
+      `SELECT s.id, s.status, s.group_id as groupId,
+              COALESCE(s.subject_id, g.subject_id) as subjectId,
+              COALESCE(s.teacher_id, g.teacher_id) as teacherId,
+              s.session_date as sessionDate, s.start_time as startTime
+       FROM sessions s
+       JOIN groups g ON g.center_id = s.center_id AND g.id = s.group_id
+       WHERE s.center_id = ? AND s.id = ?`,
       [centerId, params.sessionId],
     );
     if (!session) {
@@ -96,6 +103,110 @@ export class AttendanceRepository {
     }
     if (session?.status === "cancelled") {
       throw new ConflictError("لا يمكن تسجيل الحضور في حصة ملغاة.");
+    }
+
+    let canonicalOriginalAbsenceId = params.originalAbsenceId;
+    if (params.attendanceType === "makeup") {
+      if (!params.originalAbsenceId) {
+        throw new ConflictError("يجب تحديد الحصة الأصلية للتعويض.");
+      }
+      const legacyPrefix = "absence-";
+      const legacySuffix = `-${params.studentId}`;
+      if (
+        params.originalAbsenceId.startsWith(legacyPrefix) &&
+        params.originalAbsenceId.endsWith(legacySuffix)
+      ) {
+        canonicalOriginalAbsenceId = params.originalAbsenceId.slice(
+          legacyPrefix.length,
+          -legacySuffix.length,
+        );
+      }
+
+      const source = db.getFirstSync<any>(
+        `SELECT s.id, s.status, s.group_id as groupId,
+                COALESCE(s.subject_id, g.subject_id) as subjectId,
+                COALESCE(s.teacher_id, g.teacher_id) as teacherId,
+                s.session_date as sessionDate, s.start_time as startTime
+         FROM sessions s
+         JOIN groups g ON g.center_id = s.center_id AND g.id = s.group_id
+         WHERE s.center_id = ? AND s.id = ?`,
+        [centerId, canonicalOriginalAbsenceId],
+      );
+      if (!source) {
+        // Keep accepting opaque legacy IDs created by older clients. New
+        // scanner flows always use MakeupService and pass a real source
+        // session, so they receive the strict validation below.
+        canonicalOriginalAbsenceId = params.originalAbsenceId;
+      } else if (source.status === "cancelled") {
+        throw new ConflictError("الحصة الأصلية للتعويض غير موجودة.");
+      } else {
+      const isAfter =
+        session.sessionDate > source.sessionDate ||
+        (session.sessionDate === source.sessionDate &&
+          session.startTime > source.startTime);
+      if (!isAfter || session.subjectId !== source.subjectId || session.teacherId !== source.teacherId) {
+        throw new ConflictError("التعويض يجب أن يكون في الحصة التالية لنفس المادة والمدرس.");
+      }
+
+      const sourceExpected = db.getFirstSync<any>(
+        `SELECT 1 FROM session_expected_students WHERE center_id = ? AND session_id = ? AND student_id = ?`,
+        [centerId, source.id, params.studentId],
+      );
+      const sourceHasSnapshot = db.getFirstSync<any>(
+        `SELECT 1 FROM session_expected_students WHERE center_id = ? AND session_id = ? LIMIT 1`,
+        [centerId, source.id],
+      );
+      const legacyEnrollment = db.getFirstSync<any>(
+        `SELECT 1 FROM student_group_enrollments
+         WHERE center_id = ? AND group_id = ? AND student_id = ? AND status = 'active'
+           AND start_date <= ? AND (end_date IS NULL OR end_date >= ?)
+         LIMIT 1`,
+        [centerId, source.groupId, params.studentId, source.sessionDate, source.sessionDate],
+      );
+      if (!sourceExpected && (sourceHasSnapshot || !legacyEnrollment)) {
+        throw new ConflictError("الطالب غير متوقع في الحصة الأصلية.");
+      }
+      if (db.getFirstSync<any>(
+        `SELECT id FROM attendance WHERE center_id = ? AND session_id = ? AND student_id = ?`,
+        [centerId, source.id, params.studentId],
+      )) {
+        throw new ConflictError("لا يمكن تعويض حصة حضرها الطالب بالفعل.");
+      }
+      if (db.getFirstSync<any>(
+        `SELECT id FROM attendance
+         WHERE center_id = ? AND student_id = ?
+           AND (original_absence_id = ? OR original_absence_id = ?)`,
+        [centerId, params.studentId, canonicalOriginalAbsenceId, params.originalAbsenceId],
+      )) {
+        throw new ConflictError("تم تسجيل تعويض لهذا الغياب مسبقًا.");
+      }
+      const earlierSession = db.getFirstSync<any>(
+        `SELECT s.id
+         FROM sessions s
+         JOIN groups g ON g.center_id = s.center_id AND g.id = s.group_id
+         WHERE s.center_id = ?
+           AND COALESCE(s.subject_id, g.subject_id) = ?
+           AND COALESCE(s.teacher_id, g.teacher_id) = ?
+           AND s.status <> 'cancelled'
+           AND (s.session_date > ? OR (s.session_date = ? AND s.start_time > ?))
+           AND (s.session_date < ? OR (s.session_date = ? AND s.start_time < ?))
+         ORDER BY s.session_date ASC, s.start_time ASC LIMIT 1`,
+        [
+          centerId,
+          source.subjectId,
+          source.teacherId,
+          source.sessionDate,
+          source.sessionDate,
+          source.startTime,
+          session.sessionDate,
+          session.sessionDate,
+          session.startTime,
+        ],
+      );
+      if (earlierSession) {
+        throw new ConflictError("لا يمكن تعويض غير الحصة التالية المؤهلة.");
+      }
+      }
     }
 
     // Do not rely only on the scanner UI for eligibility. Attendance can also
@@ -150,7 +261,7 @@ export class AttendanceRepository {
           params.status,
           isLateInt,
           attendanceType,
-          params.originalAbsenceId || null,
+          canonicalOriginalAbsenceId || null,
           isExternalInt,
           operationId,
         ],
@@ -240,7 +351,7 @@ export class AttendanceRepository {
       status: params.status,
       isLate: params.isLate,
       attendanceType,
-      originalAbsenceId: params.originalAbsenceId,
+      originalAbsenceId: canonicalOriginalAbsenceId,
       isExternal: Boolean(params.isExternal),
       operationId,
     };
@@ -356,6 +467,7 @@ export class AttendanceRepository {
       throw new ForbiddenError("Ù„ÙŠØ³ Ù„Ø¯ÙŠÙƒ ØµÙ„Ø§Ø­ÙŠØ© Ø¹Ø±Ø¶ Ø¨ÙŠØ§Ù†Ø§Øª Ø§Ù„Ø­Ø¶ÙˆØ±.");
     }
     const db = DatabaseService.getDb();
+    const today = getLocalDateOnly();
     const expectedRows = db.getAllSync<any>(
       `SELECT ses.session_id as sessionId, ss.group_id as groupId,
               g.name as groupName, subj.name as subjectName, t.name as teacherName
@@ -364,8 +476,9 @@ export class AttendanceRepository {
        LEFT JOIN groups g ON g.center_id = ss.center_id AND g.id = ss.group_id
        LEFT JOIN subjects subj ON subj.center_id = g.center_id AND subj.id = g.subject_id
        LEFT JOIN teachers t ON t.center_id = g.center_id AND t.id = g.teacher_id
-       WHERE ses.center_id = ? AND ses.student_id = ?`,
-      [centerId, studentId],
+       WHERE ses.center_id = ? AND ses.student_id = ?
+         AND ss.status <> 'cancelled' AND ss.session_date <= ?`,
+      [centerId, studentId, today],
     );
     const attendanceRows = db.getAllSync<any>(
       `SELECT a.id, a.session_id as sessionId, a.status,
@@ -377,8 +490,9 @@ export class AttendanceRepository {
        LEFT JOIN groups g ON g.center_id = ss.center_id AND g.id = ss.group_id
        LEFT JOIN subjects subj ON subj.center_id = g.center_id AND subj.id = g.subject_id
        LEFT JOIN teachers t ON t.center_id = g.center_id AND t.id = g.teacher_id
-       WHERE a.center_id = ? AND a.student_id = ?`,
-      [centerId, studentId],
+       WHERE a.center_id = ? AND a.student_id = ?
+         AND ss.status <> 'cancelled' AND ss.session_date <= ?`,
+      [centerId, studentId, today],
     );
     const attendanceBySession = new Map<string, any>();
     for (const row of attendanceRows) attendanceBySession.set(row.sessionId, row);

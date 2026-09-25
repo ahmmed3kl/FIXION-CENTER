@@ -4,6 +4,7 @@ import { PermissionService } from "../../core/permissions";
 import { Session, Student } from "../../shared/types";
 import { useAuthStore } from "../auth/useAuthStore";
 import { SessionRepository } from "../sessions/SessionRepository";
+import { getLocalDateOnly } from "../../shared/utils/date";
 import { MakeupService } from "./MakeupService";
 
 export class AbsenceService {
@@ -117,7 +118,13 @@ export class AbsenceService {
     for (const row of expectedRows) {
       if (this.isStudentAbsent(row.sessionId, studentId)) {
         const session = SessionRepository.findById(row.sessionId);
-        if (session) {
+        const today = getLocalDateOnly();
+        const nowTime = new Date().toTimeString().slice(0, 5);
+        const sessionHasEnded = session && (
+          session.sessionDate < today ||
+          (session.sessionDate === today && String(session.endTime || "") <= nowTime)
+        );
+        if (session && session.status !== "cancelled" && sessionHasEnded) {
           const nextEligibleSession = MakeupService.getNextEligibleSession(
             studentId,
             row.sessionId,

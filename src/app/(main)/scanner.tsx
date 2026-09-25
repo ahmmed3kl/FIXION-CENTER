@@ -27,6 +27,7 @@ import {
 import { useServiceVisibility } from "../../core/services/ServiceVisibilityContext";
 import { AttendanceRepository } from "../../features/attendance/AttendanceRepository";
 import { AttendanceSessionService, AttendanceSummary } from "../../features/attendance/AttendanceSessionService";
+import { MakeupService } from "../../features/attendance/MakeupService";
 import { GroupScheduleRepository } from "../../features/groups/GroupScheduleRepository";
 import { GroupRepository } from "../../features/groups/GroupRepository";
 import { PaymentRepository } from "../../features/payments/PaymentRepository";
@@ -86,6 +87,8 @@ function ScannerContent() {
   const [showAllGroups, setShowAllGroups] = useState(false);
   const [activeSessionsByGroup, setActiveSessionsByGroup] = useState<Record<string, Session>>({});
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null);
+  const [selectedScheduleId, setSelectedScheduleId] = useState<string | null>(null);
   const [attendanceStarted, setAttendanceStarted] = useState(false);
   const [attendanceSummary, setAttendanceSummary] = useState<AttendanceSummary | null>(null);
   const [makeupNotice, setMakeupNotice] = useState<{ sourceGroupName?: string; teacherName?: string; originalAbsenceId?: string } | null>(null);
@@ -102,17 +105,18 @@ function ScannerContent() {
     try {
       setTodayGroups(AttendanceSessionService.getTodayGroups());
       const sessions = AttendanceSessionService.getTodaySessions();
-      setActiveSessionsByGroup(Object.fromEntries(sessions.filter((session) => session.status === "open").map((session) => [session.groupId, session])));
+      setActiveSessionsByGroup(Object.fromEntries(sessions.filter((session) => session.status === "open" || session.status === "scheduled").map((session) => [`${session.groupId}:${session.scheduleId}`, session])));
       setAllGroups(GroupRepository.getAll());
     } catch (error) { setSearchError(getUserErrorMessage(error)); }
   }, []);
 
   const startAttendance = () => {
-    const selectedGroup = (showAllGroups ? allGroups : todayGroups).find((group) => group.id === activeSessionId);
+    const selectedGroup = (showAllGroups ? allGroups : todayGroups).find((group) => group.id === selectedGroupId);
     if (!selectedGroup) return;
     try {
-      const session = activeSessionsByGroup[selectedGroup.id] || AttendanceSessionService.ensureSessionForGroup(selectedGroup.id);
-      setActiveSessionsByGroup((current) => ({ ...current, [selectedGroup.id]: session }));
+      const sessionKey = `${selectedGroup.id}:${selectedScheduleId || ""}`;
+      const session = activeSessionsByGroup[sessionKey] || AttendanceSessionService.ensureSessionForGroup(selectedGroup.id, undefined, selectedScheduleId || undefined);
+      setActiveSessionsByGroup((current) => ({ ...current, [sessionKey]: session }));
       setActiveSessionId(session.id);
       AttendanceSessionService.activate(session.id);
       setAttendanceStarted(true);
@@ -139,6 +143,8 @@ function ScannerContent() {
   const handleBackToGroups = () => {
     setAttendanceStarted(false);
     setActiveSessionId(null);
+    setSelectedGroupId(null);
+    setSelectedScheduleId(null);
     setAttendanceSummary(null);
     handleReset();
   };
@@ -261,16 +267,30 @@ function ScannerContent() {
     setIsProcessing(true);
 
     try {
-      const lateCalc = ScannerService.calculateLateStatus(session.startTime);
+      // Late status is anchored to the scheduled session start, never to the
+      // moment the operator opened/activated the session.  The grace period
+      // is a snapshot on the session so changing a group's settings later
+      // cannot rewrite historical attendance.
+      const lateCalc = ScannerService.calculateLateStatus(
+        session.startTime,
+        undefined,
+        session.lateAfterMinutes ?? 15,
+      );
 
-      const result = await AttendanceRepository.recordAttendance({
-        studentId: student.id,
-        sessionId: session.id,
-        status: lateCalc.status,
-        isLate: lateCalc.isLate,
-        attendanceType: makeupNotice ? "makeup" : "present",
-        originalAbsenceId: makeupNotice?.originalAbsenceId,
-      });
+      const result = makeupNotice
+        ? await MakeupService.recordMakeupAttendance({
+            studentId: student.id,
+            sessionId: session.id,
+            originalAbsenceId: makeupNotice.originalAbsenceId!,
+            isLate: lateCalc.isLate,
+          })
+        : await AttendanceRepository.recordAttendance({
+            studentId: student.id,
+            sessionId: session.id,
+            status: lateCalc.status,
+            isLate: lateCalc.isLate,
+            attendanceType: "present",
+          });
 
       setAttendanceResult(result);
       setIsAlreadyAttended(true);
@@ -353,18 +373,22 @@ function ScannerContent() {
             <Text style={styles.startSubtitle}>اضغط على المجموعة لبدء أو فتح جلسة الحضور.</Text>
             {(showAllGroups ? allGroups : todayGroups).length === 0 ? (
               <Text style={styles.emptySessionText}>لا توجد جلسات مجدولة اليوم.</Text>
-            ) : (showAllGroups ? allGroups : todayGroups).map((group) => {
-              const activeSession = activeSessionsByGroup[group.id];
-              const schedule = GroupScheduleRepository.getSchedulesForGroup(group.id).find((item) => item.dayOfWeek === new Date().getDay());
-              return <TouchableOpacity key={group.id} onPress={() => activeSession ? (setActiveSessionId(activeSession.id), setAttendanceStarted(true), setAttendanceSummary(AttendanceSessionService.getSummary(activeSession.id))) : setActiveSessionId(group.id)}>
-                <AppCard style={[styles.sessionCard, activeSession ? styles.sessionCardSelected : null]}>
+            ) : (showAllGroups ? allGroups : todayGroups).flatMap((group) => {
+              const schedules = GroupScheduleRepository.getSchedulesForGroup(group.id).filter((item) => item.dayOfWeek === new Date().getDay());
+              return schedules.map((schedule) => {
+              const key = `${group.id}:${schedule.id}`;
+              const activeSession = activeSessionsByGroup[key];
+              const isSelected = selectedGroupId === group.id && selectedScheduleId === schedule.id;
+              return <TouchableOpacity key={key} onPress={() => { setSelectedGroupId(group.id); setSelectedScheduleId(schedule.id); setActiveSessionId(null); }}>
+                <AppCard style={[styles.sessionCard, isSelected ? styles.sessionCardSelected : null]}>
                   <Text style={styles.sessionSubject}>{group.name}</Text>
                   <Text style={styles.sessionTime}>{group.subjectName || ""} • {group.teacherName || ""}{schedule ? ` • ${formatTimeArabic(schedule.startTime)}` : ""}</Text>
                   <Text style={[styles.groupAttendanceState, activeSession && styles.groupAttendanceStateActive]}>{activeSession ? "● نشطة" : "● غير نشطة"}</Text>
                 </AppCard>
               </TouchableOpacity>;
+              });
             })}
-            <AppButton title="بدء جلسة الحضور" onPress={startAttendance} disabled={!activeSessionId} size="lg" />
+            <AppButton title="بدء جلسة الحضور" onPress={startAttendance} disabled={!selectedGroupId} size="lg" />
             {searchError ? <Text style={styles.errorAlertText}>{searchError}</Text> : null}
           </View>
         ) : null}

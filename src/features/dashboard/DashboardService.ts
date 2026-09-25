@@ -84,7 +84,15 @@ export class DashboardService {
         "SELECT student_id as studentId, status, attendance_type as attendanceType FROM attendance WHERE center_id = ? AND session_id = ?",
         [centerId, sessionId],
       );
-      return calculateSessionAttendanceCounts(expected.map((row) => row.studentId), attendance);
+      const coveredInAdvance = db.getAllSync<{ studentId: string }>(
+        "SELECT student_id as studentId FROM advance_coverages WHERE center_id = ? AND target_future_session_id = ?",
+        [centerId, sessionId],
+      );
+      return calculateSessionAttendanceCounts(
+        expected.map((row) => row.studentId),
+        attendance,
+        coveredInAdvance.map((row) => row.studentId),
+      );
     });
     const expectedCount = counts.reduce((sum, item) => sum + item.expected, 0);
     const presentCount = counts.reduce((sum, item) => sum + item.present, 0);

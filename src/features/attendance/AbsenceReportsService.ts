@@ -4,6 +4,7 @@ import { AttendanceRepository } from "./AttendanceRepository";
 import { MakeupService } from "./MakeupService";
 import { SessionRepository } from "../sessions/SessionRepository";
 import { StudentRepository } from "../students/StudentRepository";
+import { getLocalDateOnly } from "../../shared/utils/date";
 export interface AbsenceSessionSummary {
   session: Session;
   sessionNumber?: number;
@@ -60,7 +61,15 @@ export function calculateAbsenceReportCounts(
 export class AbsenceReportsService {
   static getSessionsForMonth(month: string): AbsenceSessionSummary[] {
     const counters = new Map<string, number>();
-    return SessionRepository.getSessionsForMonth(month).slice().sort((a, b) => `${a.groupId}-${a.sessionDate}-${a.startTime}`.localeCompare(`${b.groupId}-${b.sessionDate}-${b.startTime}`)).map((session) => {
+    const today = getLocalDateOnly();
+    const currentTime = new Date().toTimeString().slice(0, 5);
+    return SessionRepository.getSessionsForMonth(month)
+      .filter((session) =>
+        session.status !== "cancelled" &&
+        (session.sessionDate < today ||
+          (session.sessionDate === today && String(session.endTime || "") <= currentTime)),
+      )
+      .slice().sort((a, b) => `${a.groupId}-${a.sessionDate}-${a.startTime}`.localeCompare(`${b.groupId}-${b.sessionDate}-${b.startTime}`)).map((session) => {
       const report = this.getSessionReport(session.id);
       const sessionNumber = (counters.get(session.groupId) || 0) + 1;
       counters.set(session.groupId, sessionNumber);

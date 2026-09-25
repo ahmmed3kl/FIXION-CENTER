@@ -12,6 +12,7 @@ import {
 import { useAuthStore } from "../auth/useAuthStore";
 import { FinancialCalculationService } from "../payments/FinancialCalculationService";
 import { calculateSessionAttendanceCounts } from "../attendance/AttendanceCalculations";
+import { getLocalDateOnly } from "../../shared/utils/date";
 
 export class OperationalReportsService {
   private static getActiveContext() {
@@ -42,16 +43,25 @@ export class OperationalReportsService {
 
     const db = DatabaseService.getDb();
 
-    const sessions = db.getAllSync<any>(
+    const loadedSessions = db.getAllSync<any>(
       `SELECT s.id, s.status, s.start_time, s.end_time,
               g.name as group_name, subj.name as subject_name, t.name as teacher_name
        FROM sessions s
        JOIN groups g ON s.group_id = g.id
        LEFT JOIN subjects subj ON COALESCE(s.subject_id, g.subject_id) = subj.id
        LEFT JOIN teachers t ON COALESCE(s.teacher_id, g.teacher_id) = t.id
-       WHERE s.center_id = ? AND s.session_date = ?
+       WHERE s.center_id = ? AND s.session_date = ? AND s.status <> 'cancelled'
        ORDER BY s.start_time ASC`,
       [centerId, dateStr],
+    );
+    const today = getLocalDateOnly();
+    const currentTime = new Date().toTimeString().slice(0, 5);
+    // A session is not an absence report until it has ended. Future and
+    // cancelled sessions remain schedule data, not missed attendance.
+    const sessions = loadedSessions.filter(
+      (session: any) =>
+        dateStr < today ||
+        (dateStr === today && String(session.end_time || "") <= currentTime),
     );
 
     const sessionReport = sessions.map((s: any) => {
@@ -63,8 +73,16 @@ export class OperationalReportsService {
         `SELECT student_id as studentId, status, attendance_type as attendanceType FROM attendance WHERE center_id = ? AND session_id = ?`,
         [centerId, s.id],
       );
+      const coveredInAdvance = db.getAllSync<{ studentId: string }>(
+        `SELECT student_id as studentId FROM advance_coverages WHERE center_id = ? AND target_future_session_id = ?`,
+        [centerId, s.id],
+      );
 
-      const counts = calculateSessionAttendanceCounts(expected.map((row: any) => row.student_id), attendanceRows);
+      const counts = calculateSessionAttendanceCounts(
+        expected.map((row: any) => row.student_id),
+        attendanceRows,
+        coveredInAdvance.map((row) => row.studentId),
+      );
       const expectedCount = counts.expected;
       const presentCount = counts.present;
       const lateCount = counts.late;

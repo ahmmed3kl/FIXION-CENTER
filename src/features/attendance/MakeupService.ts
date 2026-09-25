@@ -20,6 +20,7 @@ import { useAuthStore } from "../auth/useAuthStore";
 import { SessionRepository } from "../sessions/SessionRepository";
 import { StudentRepository } from "../students/StudentRepository";
 import { AttendanceRepository } from "./AttendanceRepository";
+import { AttendanceSessionService } from "./AttendanceSessionService";
 
 function generateUUID(): string {
   return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
@@ -108,6 +109,9 @@ export class MakeupService {
     if (targetFutureSession.status === "cancelled") {
       throw new ConflictError("لا يمكن تغطية حصة ملغاة.");
     }
+    if (targetFutureSession.status === "closed") {
+      throw new ConflictError("لا يمكن تغطية حصة مقفلة.");
+    }
 
     // Validation: Same subject and effective teacher
     if (
@@ -153,6 +157,34 @@ export class MakeupService {
       throw new ConflictError(
         "تم استخدام حضور هذه الحصة لتغطية حصة أخرى بالفعل.",
       );
+    }
+
+    // Coverage is only valid when the student is expected in the target
+    // session. Matching teacher/subject alone is not enough. Legacy sessions
+    // without a snapshot fall back to enrollment validity on that date.
+    const targetExpected = AttendanceSessionService.isExpected(
+      targetFutureSessionId,
+      studentId,
+    );
+    const targetHasSnapshot = db.getFirstSync<any>(
+      `SELECT 1 FROM session_expected_students WHERE center_id = ? AND session_id = ? LIMIT 1`,
+      [centerId, targetFutureSessionId],
+    );
+    const targetEnrollment = db.getFirstSync<any>(
+      `SELECT 1 FROM student_group_enrollments
+       WHERE center_id = ? AND group_id = ? AND student_id = ? AND status = 'active'
+         AND start_date <= ? AND (end_date IS NULL OR end_date >= ?)
+       LIMIT 1`,
+      [
+        centerId,
+        targetFutureSession.groupId,
+        studentId,
+        targetFutureSession.sessionDate,
+        targetFutureSession.sessionDate,
+      ],
+    );
+    if (!targetExpected && (targetHasSnapshot || !targetEnrollment)) {
+      throw new ValidationError("الطالب غير متوقع في الحصة المستقبلية.");
     }
 
     const id = `adv-cov-${generateUUID()}`;
@@ -239,17 +271,18 @@ export class MakeupService {
     const db = DatabaseService.getDb();
     // Get all candidate sessions for same subject & teacher chronologically after originalSession
     const allSessions = db.getAllSync<Session>(
-      `SELECT id, center_id as centerId, group_id as groupId, schedule_id as scheduleId,
-              subject_id as subjectId, teacher_id as teacherId, session_price as sessionPrice,
+      `SELECT s.id, s.center_id as centerId, s.group_id as groupId, s.schedule_id as scheduleId,
+              COALESCE(s.subject_id, g.subject_id) as subjectId,
+              COALESCE(s.teacher_id, g.teacher_id) as teacherId, s.session_price as sessionPrice,
               late_after_minutes as lateAfterMinutes, session_date as sessionDate,
               start_time as startTime, end_time as endTime, status
-       FROM sessions
-       WHERE center_id = ? AND subject_id = ? AND teacher_id = ? AND id != ?
+       FROM sessions s
+       JOIN groups g ON g.center_id = s.center_id AND g.id = s.group_id
+       WHERE s.center_id = ? AND s.id != ?
+         AND s.status NOT IN ('cancelled', 'closed')
        ORDER BY session_date ASC, start_time ASC`,
       [
         centerId,
-        originalSession.subjectId,
-        originalSession.teacherId,
         originalAbsenceSessionId,
       ],
     );
@@ -282,8 +315,23 @@ export class MakeupService {
       [centerId, firstCandidate.id, studentId],
     );
 
-    if (attended) {
+    if (attended || firstCandidate.status === "cancelled") {
       // Already attended or used
+      return null;
+    }
+
+    const firstCandidateExpected = AttendanceSessionService.isExpected(
+      firstCandidate.id,
+      studentId,
+    );
+    const firstCandidateHasSnapshot = db.getFirstSync<any>(
+      `SELECT 1 FROM session_expected_students WHERE center_id = ? AND session_id = ? LIMIT 1`,
+      [centerId, firstCandidate.id],
+    );
+    if (
+      !firstCandidateExpected &&
+      firstCandidateHasSnapshot
+    ) {
       return null;
     }
 
@@ -326,8 +374,10 @@ export class MakeupService {
 
       // Check if already made up in another session
       const alreadyMadeUp = db.getFirstSync<any>(
-        `SELECT id FROM attendance WHERE center_id = ? AND student_id = ? AND original_absence_id = ?`,
-        [centerId, studentId, sessionId],
+        `SELECT id FROM attendance
+         WHERE center_id = ? AND student_id = ?
+           AND (original_absence_id = ? OR original_absence_id = ('absence-' || ? || '-' || ?))`,
+        [centerId, studentId, sessionId, sessionId, studentId],
       );
       if (alreadyMadeUp) continue;
 

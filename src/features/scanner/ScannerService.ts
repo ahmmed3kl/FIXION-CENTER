@@ -187,19 +187,38 @@ export class ScannerService {
     graceMinutes = 15,
   ): { isLate: boolean; status: "present" | "late" } {
     const now = new Date();
-    const checkIn =
-      checkInTimeStr ||
-      `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+    const checkIn = checkInTimeStr || now.toISOString();
 
-    const [startH, startM] = sessionStartTime
-      .split(":")
-      .map((v) => parseInt(v, 10));
-    const [checkH, checkM] = checkIn.split(":").map((v) => parseInt(v, 10));
+    // Accept both HH:mm[:ss] and a full ISO timestamp.  The comparison is
+    // intentionally made against the scheduled clock time, not against when
+    // the attendance session was opened by the operator.
+    const parseMinutes = (value: string): number | null => {
+      // ISO timestamps are stored in UTC but attendance schedules are local
+      // clock values. Convert ISO input back to the device's local time before
+      // comparing; otherwise Cairo check-ins would be shifted by two hours.
+      if (value.includes("T")) {
+        const parsed = new Date(value);
+        if (Number.isNaN(parsed.getTime())) return null;
+        return parsed.getHours() * 60 + parsed.getMinutes();
+      }
+      const match = value.match(/^(\d{1,2}):(\d{2})/);
+      if (!match) return null;
+      const hours = Number(match[1]);
+      const minutes = Number(match[2]);
+      if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59) return null;
+      return hours * 60 + minutes;
+    };
 
-    const startTotalMinutes = startH * 60 + startM;
-    const checkTotalMinutes = checkH * 60 + checkM;
+    const startTotalMinutes = parseMinutes(sessionStartTime);
+    const checkTotalMinutes = parseMinutes(checkIn);
+    if (startTotalMinutes === null || checkTotalMinutes === null) {
+      return { isLate: false, status: "present" };
+    }
 
-    const isLate = checkTotalMinutes > startTotalMinutes + graceMinutes;
+    const grace = Number.isFinite(Number(graceMinutes))
+      ? Math.max(0, Number(graceMinutes))
+      : 15;
+    const isLate = checkTotalMinutes > startTotalMinutes + grace;
     return {
       isLate,
       status: isLate ? "late" : "present",
