@@ -1,9 +1,10 @@
 import { Ionicons } from "@expo/vector-icons";
-import { useLocalSearchParams } from "expo-router";
+import { useLocalSearchParams, useRouter } from "expo-router";
 import { useEffect, useState } from "react";
 import {
     Alert,
     FlatList,
+    Linking,
     Modal,
     ScrollView,
     StyleSheet,
@@ -54,6 +55,7 @@ import { formatDisplayIdentifier } from "../../shared/utils/formatters";
 
 export default function StudentsScreen() {
   const { studentId } = useLocalSearchParams<{ studentId?: string }>();
+  const router = useRouter();
   const services = useServiceVisibility();
   const paymentsEnabled = services.isEnabled("payments");
   const currentUser = useAuthStore((s) => s.currentUser);
@@ -74,6 +76,12 @@ export default function StudentsScreen() {
   const [financialStatus, setFinancialStatus] =
     useState<DetailedStudentFinancialStatus | null>(null);
   const [attendanceSummaries, setAttendanceSummaries] = useState<StudentGroupAttendanceSummary[]>([]);
+  const [selectedGroupPanel, setSelectedGroupPanel] = useState<{
+    groupId: string;
+    panel: "attendance" | "finance";
+  } | null>(null);
+  const [groupFinancialStatus, setGroupFinancialStatus] =
+    useState<DetailedStudentFinancialStatus | null>(null);
 
   // Modal States
   const [isAddStudentOpen, setIsAddStudentOpen] = useState(false);
@@ -117,6 +125,7 @@ export default function StudentsScreen() {
     new Date().toISOString().split("T")[0],
   );
   const [enrollSpecialPrice, setEnrollSpecialPrice] = useState("");
+  const [enrollGroupSearch, setEnrollGroupSearch] = useState("");
 
   const loadData = () => {
     try {
@@ -171,6 +180,8 @@ export default function StudentsScreen() {
     setStudentEnrollments([]);
     setFinancialStatus(null);
     setAttendanceSummaries([]);
+    setSelectedGroupPanel(null);
+    setGroupFinancialStatus(null);
     if (studentId) {
       const requested = StudentRepository.findById(String(studentId));
       if (requested) openStudentDetails(requested);
@@ -200,6 +211,56 @@ export default function StudentsScreen() {
     } catch (e) {
       console.error(e);
     }
+  };
+
+  const handleCallStudent = () => {
+    if (!selectedStudent) return;
+    const call = (label: string, phone?: string) => {
+      if (!phone?.trim()) {
+        Alert.alert("لا يوجد رقم", `لا يوجد ${label} مسجل لهذا الطالب.`);
+        return;
+      }
+      Linking.openURL(`tel:${phone.trim()}`).catch(() =>
+        Alert.alert("تعذر الاتصال", "لا يمكن فتح تطبيق الاتصال على هذا الجهاز."),
+      );
+    };
+    Alert.alert("اتصال", "اختر الرقم المطلوب الاتصال به", [
+      { text: "رقم الطالب", onPress: () => call("رقم الطالب", selectedStudent.phone) },
+      { text: "رقم ولي الأمر", onPress: () => call("رقم ولي الأمر", selectedStudent.parentPhone) },
+      { text: "إلغاء", style: "cancel" },
+    ]);
+  };
+
+  const openGroupPanel = (groupId: string, panel: "attendance" | "finance") => {
+    if (panel === "finance") {
+      if (!selectedStudent || !canViewPayments) {
+        Alert.alert("غير متاح", "ليس لديك صلاحية عرض الموقف المالي.");
+        return;
+      }
+      try {
+        setGroupFinancialStatus(
+          FinancialCalculationService.getStudentFinancialStatusForGroup(
+            selectedStudent.id,
+            groupId,
+          ),
+        );
+      } catch (error: any) {
+        setGroupFinancialStatus(null);
+        Alert.alert("تعذر تحميل الموقف المالي", error?.message || "حاول مرة أخرى.");
+        return;
+      }
+    } else {
+      setGroupFinancialStatus(null);
+    }
+    setSelectedGroupPanel((current) =>
+      current?.groupId === groupId && current.panel === panel
+        ? null
+        : { groupId, panel },
+    );
+  };
+
+  const openGroupGrades = (groupId: string) => {
+    router.push({ pathname: "/(main)/grades", params: { groupId } } as never);
   };
 
   const handleRecordPayment = async () => {
@@ -418,6 +479,19 @@ export default function StudentsScreen() {
     permissions,
     "enrollments.create",
   );
+  const eligibleEnrollmentGroups = availableGroups
+    .filter(
+      (group) =>
+        group.status === "active" &&
+        (!selectedStudent?.grade || group.grade === selectedStudent.grade),
+    )
+    .filter((group) => {
+      const query = enrollGroupSearch.trim().toLocaleLowerCase();
+      if (!query) return true;
+      return [group.name, group.teacherName, group.subjectName, group.grade]
+        .filter(Boolean)
+        .some((value) => String(value).toLocaleLowerCase().includes(query));
+    });
   const canDeactivate = PermissionService.hasPermission(
     permissions,
     "students.deactivate",
@@ -438,6 +512,14 @@ export default function StudentsScreen() {
     permissions,
     "payments.adjust",
   );
+
+  const openEnrollModal = () => {
+    setEnrollGroupId("");
+    setEnrollGroupSearch("");
+    setEnrollStartDate(new Date().toISOString().split("T")[0]);
+    setEnrollSpecialPrice("");
+    setIsEnrollModalOpen(true);
+  };
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -546,8 +628,7 @@ export default function StudentsScreen() {
               </View>
               <View style={styles.profileActions}>
                 <TouchableOpacity style={styles.profileAction} onPress={() => setIsCardModalOpen(true)}><Ionicons name="card-outline" size={18} color={Colors.primary} /><Text style={styles.profileActionText}>الكارت</Text></TouchableOpacity>
-                <TouchableOpacity style={styles.profileAction}><Ionicons name="chatbubble-ellipses-outline" size={18} color={Colors.primary} /><Text style={styles.profileActionText}>رسالة</Text></TouchableOpacity>
-                <TouchableOpacity style={styles.profileAction}><Ionicons name="call-outline" size={18} color={Colors.primary} /><Text style={styles.profileActionText}>اتصال</Text></TouchableOpacity>
+                <TouchableOpacity style={styles.profileAction} onPress={handleCallStudent}><Ionicons name="call-outline" size={18} color={Colors.primary} /><Text style={styles.profileActionText}>اتصال</Text></TouchableOpacity>
               </View>
 
               <ScrollView style={{ maxHeight: 500 }}>
@@ -638,13 +719,11 @@ export default function StudentsScreen() {
                 {/* Group Enrollments */}
                 <View style={styles.sectionBox}>
                   <View style={styles.sectionHeaderRow}>
-                    <Text style={styles.sectionTitle}>
-                      الاشتراك في المجموعات
-                    </Text>
+                    <Text style={styles.sectionTitle}>المجموعات</Text>
                     {canEnroll && (
                       <TouchableOpacity
                         style={styles.smallActionBtn}
-                        onPress={() => setIsEnrollModalOpen(true)}
+                        onPress={openEnrollModal}
                       >
                         <Ionicons
                           name="add-circle"
@@ -669,36 +748,73 @@ export default function StudentsScreen() {
                       الطالب غير مسجل في أي مجموعة حالياً.
                     </Text>
                   ) : (
-                    studentEnrollments.map((enr) => (
-                      <View key={enr.id} style={styles.enrollItemRow}>
-                        <View style={{ flex: 1 }}>
-                          <Text style={styles.enrollGroupName}>
-                            {enr.groupName}
-                          </Text>
-                          <Text style={styles.enrollMeta}>
-                            بدء: {enr.startDate}
-                          </Text>
-                          {enr.specialMonthlyPrice && (
-                            <Text style={styles.enrollMeta}>
-                              سعر شهري خاص: {enr.specialMonthlyPrice} ج.م
-                            </Text>
+                    studentEnrollments.map((enr) => {
+                      const group = availableGroups.find((item) => item.id === enr.groupId);
+                      const attendance = attendanceSummaries.find(
+                        (summary) => summary.groupId === enr.groupId,
+                      );
+                      const panel = selectedGroupPanel?.groupId === enr.groupId
+                        ? selectedGroupPanel.panel
+                        : null;
+                      const groupFinancial = panel === "finance" ? groupFinancialStatus : null;
+                      return (
+                        <View key={enr.id} style={styles.groupCard}>
+                          <View style={styles.groupCardHeader}>
+                            <View style={{ flex: 1 }}>
+                              <Text style={styles.groupCardName}>{enr.groupName || group?.name || "المجموعة"}</Text>
+                              <Text style={styles.groupCardMeta}>
+                                {[group?.subjectName, group?.teacherName, group?.grade].filter(Boolean).join(" • ")}{group ? " • " : ""}بدء: {enr.startDate}{enr.specialMonthlyPrice ? ` • ${enr.specialMonthlyPrice} ج.م` : ""}
+                              </Text>
+                            </View>
+                            {canEnroll && enr.status === "active" && (
+                              <TouchableOpacity onPress={() => handleEndEnrollment(enr.id)} style={styles.endEnrollBtn}>
+                                <Text style={styles.endEnrollBtnText}>إنهاء</Text>
+                              </TouchableOpacity>
+                            )}
+                          </View>
+                          <View style={styles.groupActionRow}>
+                            <TouchableOpacity style={[styles.groupActionButton, panel === "attendance" && styles.groupActionButtonActive]} onPress={() => openGroupPanel(enr.groupId, "attendance")}>
+                              <Ionicons name="calendar-outline" size={16} color={panel === "attendance" ? Colors.white : Colors.primary} />
+                              <Text style={[styles.groupActionText, panel === "attendance" && styles.groupActionTextActive]}>الحضور</Text>
+                            </TouchableOpacity>
+                            <TouchableOpacity style={[styles.groupActionButton, panel === "finance" && styles.groupActionButtonActive]} onPress={() => openGroupPanel(enr.groupId, "finance")}>
+                              <Ionicons name="wallet-outline" size={16} color={panel === "finance" ? Colors.white : Colors.primary} />
+                              <Text style={[styles.groupActionText, panel === "finance" && styles.groupActionTextActive]}>المالي</Text>
+                            </TouchableOpacity>
+                            <TouchableOpacity style={styles.groupActionButton} onPress={() => openGroupGrades(enr.groupId)}>
+                              <Ionicons name="school-outline" size={16} color={Colors.primary} />
+                              <Text style={styles.groupActionText}>الدرجات</Text>
+                            </TouchableOpacity>
+                          </View>
+                          {panel === "attendance" && (
+                            <View style={styles.groupInlinePanel}>
+                              <Text style={styles.groupInlinePanelTitle}>حالة الحضور</Text>
+                              <View style={styles.groupInlineMetricRow}>
+                                <Text style={styles.groupInlineMetric}>متوقع: {attendance?.expectedSessions ?? 0}</Text>
+                                <Text style={[styles.groupInlineMetric, { color: Colors.successText }]}>حضور: {attendance?.presentCount ?? 0}</Text>
+                                <Text style={[styles.groupInlineMetric, { color: Colors.dangerText }]}>غياب: {attendance?.absentCount ?? 0}</Text>
+                                <Text style={[styles.groupInlineMetric, { color: Colors.warningText }]}>تعويض: {attendance?.makeupCount ?? 0}</Text>
+                              </View>
+                            </View>
+                          )}
+                          {panel === "finance" && groupFinancial && (
+                            <View style={styles.groupInlinePanel}>
+                              <Text style={styles.groupInlinePanelTitle}>الموقف المالي للمجموعة</Text>
+                              <View style={styles.groupInlineMetricRow}>
+                                <Text style={styles.groupInlineMetric}>المستحق: {formatCurrency(groupFinancial.monthlyTotalDue)}</Text>
+                                <Text style={[styles.groupInlineMetric, { color: Colors.successText }]}>المدفوع: {formatCurrency(groupFinancial.monthlyTotalPaid)}</Text>
+                                <Text style={[styles.groupInlineMetric, { color: Colors.dangerText }]}>المتبقي: {formatCurrency(groupFinancial.monthlyRemainingDebt)}</Text>
+                              </View>
+                            </View>
                           )}
                         </View>
-                        {canEnroll && enr.status === "active" && (
-                          <TouchableOpacity
-                            onPress={() => handleEndEnrollment(enr.id)}
-                            style={styles.endEnrollBtn}
-                          >
-                            <Text style={styles.endEnrollBtnText}>إنهاء</Text>
-                          </TouchableOpacity>
-                        )}
-                      </View>
-                    ))
+                      );
+                    })
                   )}
                 </View>
 
                 {/* Attendance profile: totals are grouped by the session's group. */}
-                <View style={styles.sectionBox}>
+                <View style={[styles.sectionBox, { display: "none" }]}>
                   <View style={styles.sectionHeaderRow}>
                     <Text style={styles.sectionTitle}>سجل الحضور والغياب حسب المجموعة</Text>
                     <Ionicons name="calendar-outline" size={18} color={Colors.primary} />
@@ -738,7 +854,7 @@ export default function StudentsScreen() {
 
                 {/* Financial Core: Debt Cycles & Cash Payments */}
                 {canViewPayments && financialStatus && (
-                  <View style={styles.sectionBox}>
+                  <View style={[styles.sectionBox, { display: "none" }]}>
                     <View style={styles.sectionHeaderRow}>
                       <Text style={styles.sectionTitle}>
                         {Strings.financialStatusTitle}
@@ -1060,8 +1176,17 @@ export default function StudentsScreen() {
             <Text style={styles.modalTitle}>تسجيل الطالب في مجموعة</Text>
 
             <Text style={styles.inputLabel}>اختر المجموعة:</Text>
-            <ScrollView style={{ maxHeight: 150, marginVertical: Spacing.sm }}>
-              {availableGroups.map((g) => (
+            <AppInput
+              placeholder="ابحث باسم المجموعة أو المدرس أو المادة"
+              value={enrollGroupSearch}
+              onChangeText={setEnrollGroupSearch}
+              containerStyle={{ marginBottom: Spacing.xs }}
+            />
+            <Text style={styles.groupPickHeader}>
+              مجموعات {selectedStudent?.grade ? `مرحلة ${selectedStudent.grade}` : "المرحلة الحالية"} ({eligibleEnrollmentGroups.length})
+            </Text>
+            <ScrollView style={{ maxHeight: 220, marginVertical: Spacing.sm }}>
+              {eligibleEnrollmentGroups.map((g) => (
                 <TouchableOpacity
                   key={g.id}
                   style={[
@@ -1070,16 +1195,11 @@ export default function StudentsScreen() {
                   ]}
                   onPress={() => setEnrollGroupId(g.id)}
                 >
-                  <Text
-                    style={[
-                      styles.groupPickText,
-                      enrollGroupId === g.id && styles.groupPickTextActive,
-                    ]}
-                  >
-                    {g.name} ({g.teacherName})
-                  </Text>
+                  <Text style={[styles.groupPickText, enrollGroupId === g.id && styles.groupPickTextActive]}>{g.name}</Text>
+                  <Text style={styles.groupPickMeta}>{[g.subjectName, g.teacherName, g.grade].filter(Boolean).join(" • ")}</Text>
                 </TouchableOpacity>
               ))}
+              {eligibleEnrollmentGroups.length === 0 && <Text style={styles.groupPickEmpty}>لا توجد مجموعات نشطة لهذه المرحلة.</Text>}
             </ScrollView>
 
             <AppInput
@@ -1576,6 +1696,84 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: "600",
   },
+  groupCard: {
+    backgroundColor: Colors.white,
+    borderRadius: 12,
+    padding: Spacing.sm,
+    marginTop: Spacing.sm,
+    borderWidth: 1,
+    borderColor: Colors.border,
+  },
+  groupCardHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  groupCardName: {
+    fontSize: 14,
+    fontWeight: "800",
+    color: Colors.slate900,
+    textAlign: "right",
+  },
+  groupCardMeta: {
+    fontSize: 11,
+    color: Colors.slate500,
+    marginTop: 3,
+    textAlign: "right",
+  },
+  groupActionRow: {
+    flexDirection: "row",
+    gap: 6,
+    marginTop: Spacing.sm,
+  },
+  groupActionButton: {
+    flex: 1,
+    minHeight: 38,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 4,
+    borderRadius: 9,
+    backgroundColor: Colors.primaryLight + "22",
+    borderWidth: 1,
+    borderColor: Colors.primaryLight,
+  },
+  groupActionButtonActive: {
+    backgroundColor: Colors.primary,
+    borderColor: Colors.primary,
+  },
+  groupActionText: {
+    color: Colors.primaryDark,
+    fontSize: 11,
+    fontWeight: "800",
+  },
+  groupActionTextActive: {
+    color: Colors.white,
+  },
+  groupInlinePanel: {
+    marginTop: Spacing.sm,
+    padding: Spacing.sm,
+    borderRadius: 9,
+    backgroundColor: Colors.slate50,
+  },
+  groupInlinePanelTitle: {
+    color: Colors.slate700,
+    fontSize: 11,
+    fontWeight: "800",
+    textAlign: "right",
+    marginBottom: 6,
+  },
+  groupInlineMetricRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    flexWrap: "wrap",
+    gap: 5,
+  },
+  groupInlineMetric: {
+    color: Colors.slate700,
+    fontSize: 11,
+    fontWeight: "700",
+  },
   inputLabel: {
     fontSize: 12,
     fontWeight: "600",
@@ -1601,6 +1799,24 @@ const styles = StyleSheet.create({
   groupPickTextActive: {
     fontWeight: "700",
     color: Colors.primary,
+  },
+  groupPickHeader: {
+    color: Colors.slate600,
+    fontSize: 11,
+    fontWeight: "700",
+    textAlign: "right",
+  },
+  groupPickMeta: {
+    color: Colors.slate500,
+    fontSize: 10,
+    marginTop: 3,
+    textAlign: "right",
+  },
+  groupPickEmpty: {
+    color: Colors.slate500,
+    fontSize: 12,
+    textAlign: "center",
+    paddingVertical: Spacing.md,
   },
   finSummaryRow: {
     flexDirection: "row",

@@ -30,6 +30,7 @@ export default function MainLayout() {
       <Tabs.Screen
         name="index"
         options={{
+          href: null,
           title: Strings.tabDashboard,
           tabBarIcon: ({ color, size }) => (
             <Ionicons name="home-outline" size={size} color={color} />
@@ -37,12 +38,18 @@ export default function MainLayout() {
         }}
       />
       <Tabs.Screen
+        name="students"
+        options={{
+          title: Strings.tabStudents,
+          tabBarIcon: ({ color, size }) => (
+            <Ionicons name="people-outline" size={size} color={color} />
+          ),
+        }}
+      />
+      <Tabs.Screen
         name="scanner"
         options={{
-          // Attendance scanning is opened from the dashboard/more menu. Keep
-          // it out of the persistent bottom bar so navigation back follows the
-          // actual previous screen instead of landing on the dashboard tab.
-          href: null,
+          // The scanner is the primary raised action in the center of the bar.
           title: Strings.tabScanner,
           tabBarIcon: ({ color, focused }) => (
             <View
@@ -57,12 +64,10 @@ export default function MainLayout() {
         }}
       />
       <Tabs.Screen
-        name="students"
+        name="more"
         options={{
-          title: Strings.tabStudents,
-          tabBarIcon: ({ color, size }) => (
-            <Ionicons name="people-outline" size={size} color={color} />
-          ),
+          title: "المزيد",
+          tabBarIcon: ({ color, size }) => <Ionicons name="menu-outline" size={size} color={color} />,
         }}
       />
       <Tabs.Screen
@@ -112,13 +117,6 @@ export default function MainLayout() {
       <Tabs.Screen name="grades" options={{ href: null }} />
       <Tabs.Screen name="center-switch" options={{ href: null }} />
       <Tabs.Screen name="sync-debug" options={{ href: null }} />
-      <Tabs.Screen
-        name="more"
-        options={{
-          title: "المزيد",
-          tabBarIcon: ({ color, size }) => <Ionicons name="menu-outline" size={size} color={color} />,
-        }}
-      />
     </Tabs>
   );
 }
@@ -131,7 +129,8 @@ const styles = StyleSheet.create({
     backgroundColor: Colors.primary,
     alignItems: "center",
     justifyContent: "center",
-    marginBottom: 8,
+    marginBottom: 16,
+    transform: [{ translateY: -7 }],
     shadowColor: Colors.primary,
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.3,
@@ -140,6 +139,6 @@ const styles = StyleSheet.create({
   },
   scannerTabIconActive: {
     backgroundColor: Colors.primaryDark,
-    transform: [{ scale: 1.05 }],
+    transform: [{ translateY: -7 }, { scale: 1.05 }],
   },
 });
