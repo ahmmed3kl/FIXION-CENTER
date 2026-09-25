@@ -1,5 +1,5 @@
 import { useRouter } from "expo-router";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Alert, ScrollView, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { PackageRepository } from "../../features/packages/PackageRepository";
@@ -8,7 +8,7 @@ import { TeacherSubjectRepository } from "../../features/teachers/TeacherSubject
 import { Group, Package, Subject, Teacher } from "../../shared/types";
 import { GroupRepository } from "../../features/groups/GroupRepository";
 import { PermissionService, resolveUserPermissions } from "../../core/permissions";
-import { Colors, Spacing, Typography } from "../../core/theme";
+import { Colors, Spacing, Typography, useTheme } from "../../core/theme";
 import { AppButton, AppCard, AppInput, EmptyState, StatusBadge } from "../../shared/components";
 import { useAuthStore } from "../../features/auth/useAuthStore";
 
@@ -16,6 +16,8 @@ type OptionDraft = { teacherId: string; subjectId: string; groupId: string };
 
 export default function PackagesScreen() {
   const router = useRouter();
+  const { colors } = useTheme();
+  const styles = useMemo(() => createStyles(), [colors]);
   const currentUser = useAuthStore((s) => s.currentUser);
   const permissions = resolveUserPermissions(currentUser);
   const [packages, setPackages] = useState<Package[]>([]);
@@ -79,4 +81,4 @@ export default function PackagesScreen() {
   </ScrollView></SafeAreaView>;
 }
 
-const styles = StyleSheet.create({ safe: { flex: 1, backgroundColor: Colors.background }, content: { padding: Spacing.lg, gap: Spacing.md, paddingBottom: Spacing.xxxl }, center: { flex: 1, alignItems: "center", justifyContent: "center" }, denied: { color: Colors.danger, fontSize: 18, textAlign: "center" }, header: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", paddingVertical: 4 }, title: { ...Typography.h1, color: Colors.slate900 }, back: { color: Colors.primary, fontWeight: "800", padding: 8 }, form: { gap: Spacing.sm, borderRadius: 20 }, section: { ...Typography.h3, color: Colors.slate900 }, label: { color: Colors.slate700, fontWeight: "800", marginTop: Spacing.sm, textAlign: "right" }, hint: { color: Colors.slate500, fontSize: 12, lineHeight: 18, textAlign: "right" }, optionContainer: { gap: 6, padding: 10, borderRadius: 14, backgroundColor: Colors.slate50 }, groupPickerRow: { gap: 7, padding: 10, borderRadius: 14, backgroundColor: Colors.primaryMuted }, option: { flexDirection: "row", alignItems: "center", gap: 6 }, select: { flex: 1, borderWidth: 1, borderColor: Colors.border, borderRadius: 11, padding: 12, backgroundColor: Colors.white, minHeight: 46 }, subjectDisplay: { flex: 1, borderWidth: 1, borderColor: Colors.border, borderRadius: 11, padding: 12, backgroundColor: Colors.slate50, minHeight: 46 }, teacherDropdown: { borderWidth: 1, borderColor: Colors.border, borderRadius: 11, backgroundColor: Colors.white, overflow: "hidden" }, teacherDropdownItem: { padding: 13, borderBottomWidth: 1, borderBottomColor: Colors.border }, teacherDropdownText: { color: Colors.slate800, textAlign: "right", fontWeight: "700" }, remove: { color: Colors.danger, fontWeight: "800", paddingHorizontal: 4 }, actions: { flexDirection: "row", gap: 8, marginTop: Spacing.sm }, card: { gap: Spacing.sm, borderRadius: 20 }, row: { flexDirection: "row", alignItems: "center", gap: 8 }, name: { ...Typography.h3, color: Colors.slate900 }, meta: { color: Colors.slate600, marginTop: 5, lineHeight: 19, textAlign: "right" } });
+const createStyles = () => StyleSheet.create({ safe: { flex: 1, backgroundColor: Colors.background }, content: { padding: Spacing.lg, gap: Spacing.md, paddingBottom: Spacing.xxxl }, center: { flex: 1, alignItems: "center", justifyContent: "center" }, denied: { color: Colors.danger, fontSize: 18, textAlign: "center" }, header: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", paddingVertical: 4 }, title: { ...Typography.h1, color: Colors.slate900 }, back: { color: Colors.primary, fontWeight: "800", padding: 8 }, form: { gap: Spacing.sm, borderRadius: 20 }, section: { ...Typography.h3, color: Colors.slate900 }, label: { color: Colors.slate700, fontWeight: "800", marginTop: Spacing.sm, textAlign: "right" }, hint: { color: Colors.slate500, fontSize: 12, lineHeight: 18, textAlign: "right" }, optionContainer: { gap: 6, padding: 10, borderRadius: 14, backgroundColor: Colors.slate50 }, groupPickerRow: { gap: 7, padding: 10, borderRadius: 14, backgroundColor: Colors.primaryMuted }, option: { flexDirection: "row", alignItems: "center", gap: 6 }, select: { flex: 1, borderWidth: 1, borderColor: Colors.border, borderRadius: 11, padding: 12, backgroundColor: Colors.white, minHeight: 46 }, subjectDisplay: { flex: 1, borderWidth: 1, borderColor: Colors.border, borderRadius: 11, padding: 12, backgroundColor: Colors.slate50, minHeight: 46 }, teacherDropdown: { borderWidth: 1, borderColor: Colors.border, borderRadius: 11, backgroundColor: Colors.white, overflow: "hidden" }, teacherDropdownItem: { padding: 13, borderBottomWidth: 1, borderBottomColor: Colors.border }, teacherDropdownText: { color: Colors.slate800, textAlign: "right", fontWeight: "700" }, remove: { color: Colors.danger, fontWeight: "800", paddingHorizontal: 4 }, actions: { flexDirection: "row", gap: 8, marginTop: Spacing.sm }, card: { gap: Spacing.sm, borderRadius: 20 }, row: { flexDirection: "row", alignItems: "center", gap: 8 }, name: { ...Typography.h3, color: Colors.slate900 }, meta: { color: Colors.slate600, marginTop: 5, lineHeight: 19, textAlign: "right" } });

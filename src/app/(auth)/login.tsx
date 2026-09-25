@@ -1,5 +1,5 @@
 import { Ionicons } from "@expo/vector-icons";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Image,
   KeyboardAvoidingView,
@@ -13,11 +13,13 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Strings } from "../../core/localization";
-import { BorderRadius, Colors, Shadows, Spacing, Typography } from "../../core/theme";
+import { BorderRadius, Colors, Shadows, Spacing, Typography, useTheme } from "../../core/theme";
 import { SecureStorageService } from "../../core/storage";
 import { useAuthStore } from "../../features/auth/useAuthStore";
 
 export default function LoginScreen() {
+  const { colors } = useTheme();
+  const styles = useMemo(() => createStyles(), [colors]);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [rememberMe, setRememberMe] = useState(false);
@@ -137,7 +139,7 @@ export default function LoginScreen() {
   );
 }
 
-const styles = StyleSheet.create({
+const createStyles = () => StyleSheet.create({
   safeArea: { flex: 1, backgroundColor: "#F8FBFF" },
   keyboard: { flex: 1 },
   backgroundShapes: { ...StyleSheet.absoluteFill, overflow: "hidden" },

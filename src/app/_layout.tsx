@@ -89,7 +89,7 @@ function AuthGuard({ children }: { children: React.ReactNode }) {
 function ThemeChrome({ children }: { children: React.ReactNode }) {
   const { isDarkMode, colors } = useTheme();
   return (
-    <View style={{ flex: 1, backgroundColor: colors.background }}>
+    <View style={{ flex: 1, backgroundColor: colors.background, direction: "rtl" }}>
       <StatusBar style={isDarkMode ? "light" : "dark"} />
       {children}
     </View>

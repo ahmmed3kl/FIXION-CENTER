@@ -1,6 +1,7 @@
 import { Ionicons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import { Alert, ScrollView, StyleSheet, Switch, Text, TouchableOpacity, View } from "react-native";
+import { useMemo } from "react";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Spacing, Typography, useTheme } from "../../core/theme";
 import { useAuthStore } from "../../features/auth/useAuthStore";
@@ -19,6 +20,7 @@ const items = [
 export default function MoreScreen() {
   const router = useRouter();
   const { colors, isDarkMode, toggleDarkMode } = useTheme();
+  const styles = useMemo(() => createStyles(), [colors]);
   const logout = useAuthStore((state) => state.logout);
   const confirmLogout = () => Alert.alert("تسجيل الخروج", "هل تريد تسجيل الخروج من هذا الجهاز؟", [
     { text: "إلغاء", style: "cancel" },
@@ -36,6 +38,6 @@ export default function MoreScreen() {
   </SafeAreaView>;
 }
 
-const styles = StyleSheet.create({
+const createStyles = () => StyleSheet.create({
   safe: { flex: 1 }, content: { padding: Spacing.lg, gap: Spacing.md, paddingBottom: 40 }, header: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }, headerIcon: { width: 52, height: 52, borderRadius: 17, alignItems: "center", justifyContent: "center" }, eyebrow: { fontSize: 12, fontWeight: "800", textAlign: "right" }, title: { ...Typography.h1, textAlign: "right", marginTop: 2 }, subtitle: { fontSize: 12, textAlign: "right", marginTop: 3 }, themeRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", borderWidth: 1, borderRadius: 18, padding: 13 }, themeCopy: { flexDirection: "row", alignItems: "center", gap: 10 }, themeIcon: { width: 38, height: 38, borderRadius: 12, alignItems: "center", justifyContent: "center" }, themeTitle: { fontSize: 15, fontWeight: "900", textAlign: "right" }, themeHint: { fontSize: 11, textAlign: "right", marginTop: 2 }, sectionTitle: { fontSize: 15, fontWeight: "900", textAlign: "right", marginTop: 5 }, grid: { flexDirection: "row", flexWrap: "wrap", gap: 10 }, item: { width: "48.5%", minHeight: 118, borderWidth: 1, borderRadius: 17, padding: 12, justifyContent: "space-between" }, itemIcon: { width: 38, height: 38, borderRadius: 12, alignItems: "center", justifyContent: "center" }, itemCopy: { marginTop: 8 }, label: { fontSize: 14, fontWeight: "900", textAlign: "right" }, itemCaption: { fontSize: 10, textAlign: "right", marginTop: 3 }, logoutItem: { flexDirection: "row", alignItems: "center", gap: 10, borderWidth: 1, borderRadius: 16, padding: 13, marginTop: 4 }, logoutIcon: { width: 36, height: 36, borderRadius: 11, alignItems: "center", justifyContent: "center", backgroundColor: "rgba(239,68,68,0.12)" }, logoutLabel: { flex: 1, fontSize: 15, fontWeight: "900", textAlign: "right" },
 });

@@ -1,6 +1,6 @@
 import { Ionicons } from "@expo/vector-icons";
 import { useLocalSearchParams } from "expo-router";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
     Alert,
     FlatList,
@@ -16,7 +16,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { formatCurrency, Strings } from "../../core/localization";
 import { getLocalDateOnly } from "../../shared/utils/date";
 import { PermissionService } from "../../core/permissions";
-import { Colors, Spacing, Typography } from "../../core/theme";
+import { Colors, Spacing, Typography, useTheme } from "../../core/theme";
 import { useServiceVisibility } from "../../core/services/ServiceVisibilityContext";
 import { useAuthStore } from "../../features/auth/useAuthStore";
 import { EnrollmentRepository } from "../../features/enrollments/EnrollmentRepository";
@@ -58,6 +58,8 @@ import {
 import { formatDisplayIdentifier } from "../../shared/utils/formatters";
 
 export default function StudentsScreen() {
+  const { colors } = useTheme();
+  const styles = useMemo(() => createStyles(), [colors]);
   const { studentId } = useLocalSearchParams<{ studentId?: string }>();
   const services = useServiceVisibility();
   const paymentsEnabled = services.isEnabled("payments");
@@ -1563,7 +1565,7 @@ export default function StudentsScreen() {
   );
 }
 
-const styles = StyleSheet.create({
+const createStyles = () => StyleSheet.create({
   safeArea: {
     flex: 1,
     backgroundColor: Colors.background,

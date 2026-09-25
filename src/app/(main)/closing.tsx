@@ -1,5 +1,5 @@
 import { Ionicons } from "@expo/vector-icons";
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -13,7 +13,7 @@ import {
   View,
 } from "react-native";
 import { PermissionGate } from "../../core/permissions";
-import { Colors } from "../../core/theme";
+import { Colors, useTheme } from "../../core/theme";
 import { useAuthStore } from "../../features/auth/useAuthStore";
 import { DailyClosingService } from "../../features/reports/DailyClosingService";
 import { SessionClosingService } from "../../features/sessions/SessionClosingService";
@@ -22,6 +22,8 @@ import { DailyClosingSummary, Session } from "../../shared/types";
 import { getLocalDateOnly } from "../../shared/utils/date";
 
 export default function ClosingScreen() {
+  const { colors } = useTheme();
+  const styles = useMemo(() => createStyles(), [colors]);
   const { currentUser, activeCenterId } = useAuthStore();
   const [activeTab, setActiveTab] = useState<"daily" | "sessions">("daily");
 
@@ -445,7 +447,7 @@ export default function ClosingScreen() {
   );
 }
 
-const styles = StyleSheet.create({
+const createStyles = () => StyleSheet.create({
   container: { flex: 1, backgroundColor: Colors.slate50 },
   header: {
     padding: 22,

@@ -1,13 +1,15 @@
 import { useRouter } from "expo-router";
 import { Alert, ScrollView, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { Colors, Spacing, Typography } from "../../core/theme";
+import { Colors, Spacing, Typography, useTheme } from "../../core/theme";
 import { useAuthStore } from "../../features/auth/useAuthStore";
 import { AppCard } from "../../shared/components";
 
 export default function CenterSwitchScreen() {
   const router = useRouter();
   const { activeCenterId, availableCenters, selectCenter } = useAuthStore();
+  const { colors } = useTheme();
+  const styles = createStyles();
 
   const handleSelect = async (centerId: string) => {
     if (centerId === activeCenterId) return;
@@ -25,7 +27,7 @@ export default function CenterSwitchScreen() {
   </ScrollView></SafeAreaView>;
 }
 
-const styles = StyleSheet.create({
+const createStyles = () => StyleSheet.create({
   safe: { flex: 1, backgroundColor: Colors.background },
   content: { padding: Spacing.lg, gap: Spacing.md },
   header: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },

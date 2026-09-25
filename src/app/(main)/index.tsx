@@ -1,6 +1,6 @@
 import { Ionicons } from "@expo/vector-icons";
 import { useFocusEffect, useRouter } from "expo-router";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
     RefreshControl,
     ScrollView,
@@ -19,6 +19,7 @@ import {
     Shadows,
     Spacing,
     Typography,
+    useTheme,
 } from "../../core/theme";
 import { useAuthStore } from "../../features/auth/useAuthStore";
 import {
@@ -29,6 +30,8 @@ import { AppCard } from "../../shared/components";
 import { ConnectivityState } from "../../shared/types";
 
 export default function DashboardScreen() {
+  const { colors } = useTheme();
+  const styles = useMemo(() => createStyles(), [colors]);
   const router = useRouter();
   const { currentUser, activeCenter, availableCenters } =
     useAuthStore();
@@ -278,7 +281,7 @@ export default function DashboardScreen() {
   );
 }
 
-const styles = StyleSheet.create({
+const createStyles = () => StyleSheet.create({
   safeArea: {
     flex: 1,
     backgroundColor: Colors.background,

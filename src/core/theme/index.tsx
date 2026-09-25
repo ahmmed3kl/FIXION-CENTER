@@ -209,7 +209,11 @@ export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   useEffect(() => {
     SecureStorageService.getItem('theme_mode')
-      .then((mode) => setIsDarkMode(mode === 'dark'))
+      .then((mode) => {
+        const enabled = mode === 'dark';
+        Object.assign(Colors, enabled ? DarkColors : LightColors);
+        setIsDarkMode(enabled);
+      })
       .catch(() => undefined);
   }, []);
 
@@ -218,6 +222,9 @@ export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   }, [isDarkMode]);
 
   const setDarkMode = (enabled: boolean) => {
+    // Update the shared palette before React renders children. This matters
+    // for legacy screens that build their StyleSheet during render.
+    Object.assign(Colors, enabled ? DarkColors : LightColors);
     setIsDarkMode(enabled);
     SecureStorageService.setItem('theme_mode', enabled ? 'dark' : 'light').catch(() => undefined);
   };

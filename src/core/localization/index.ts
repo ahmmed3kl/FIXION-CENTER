@@ -2,10 +2,12 @@ import { I18nManager } from "react-native";
 
 // Force RTL layout for Arabic
 export function initializeRTL() {
-  if (!I18nManager.isRTL) {
-    I18nManager.allowRTL(true);
-    I18nManager.forceRTL(true);
-  }
+  // iOS does not always pick up forceRTL when it is called conditionally
+  // during a warm reload. Apply all RTL flags on every cold start; the root
+  // view also receives direction: rtl so the current render is correct.
+  I18nManager.allowRTL(true);
+  I18nManager.forceRTL(true);
+  I18nManager.swapLeftAndRightInRTL(true);
 }
 
 export const Strings = {

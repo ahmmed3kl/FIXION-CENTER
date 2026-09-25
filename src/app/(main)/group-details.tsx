@@ -3,7 +3,7 @@ import { useLocalSearchParams, useRouter } from "expo-router";
 import { useEffect, useMemo, useState } from "react";
 import { FlatList, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { Colors, Spacing, Typography } from "../../core/theme";
+import { Colors, Spacing, Typography, useTheme } from "../../core/theme";
 import { EnrollmentRepository } from "../../features/enrollments/EnrollmentRepository";
 import { GroupRepository } from "../../features/groups/GroupRepository";
 import { GroupScheduleRepository } from "../../features/groups/GroupScheduleRepository";
@@ -16,6 +16,8 @@ const DAYS = ["الأحد", "الإثنين", "الثلاثاء", "الأربع�
 
 export default function GroupDetailsScreen() {
   const router = useRouter();
+  const { colors } = useTheme();
+  const styles = useMemo(() => createStyles(), [colors]);
   const { groupId } = useLocalSearchParams<{ groupId?: string }>();
   const [group, setGroup] = useState<Group | null>(null);
   const [students, setStudents] = useState<Student[]>([]);
@@ -76,7 +78,7 @@ export default function GroupDetailsScreen() {
   );
 }
 
-const styles = StyleSheet.create({
+const createStyles = () => StyleSheet.create({
   safe: { flex: 1, backgroundColor: Colors.background },
   header: { flexDirection: "row", alignItems: "center", padding: Spacing.lg, backgroundColor: Colors.cardBackground, borderBottomWidth: 1, borderBottomColor: Colors.border, shadowColor: Colors.slate900, shadowOpacity: 0.05, shadowRadius: 8, shadowOffset: { width: 0, height: 3 }, elevation: 2 },
   back: { padding: 6, marginRight: Spacing.sm },

@@ -3,12 +3,14 @@ import { useFocusEffect } from "expo-router";
 import { useCallback, useMemo, useRef, useState } from "react";
 import { Alert, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { Colors, Spacing, Typography } from "../../core/theme";
+import { Colors, Spacing, Typography, useTheme } from "../../core/theme";
 import { GradeBookRepository, GradeExam, GradeScore } from "../../features/grades/GradeBookRepository";
 import { NotificationService } from "../../features/notifications/NotificationService";
 import { Group, Student } from "../../shared/types";
 
 export default function GradesScreen() {
+  const { colors } = useTheme();
+  const styles = useMemo(() => createStyles(), [colors]);
   const [groups, setGroups] = useState<Group[]>([]);
   const [selectedGroup, setSelectedGroup] = useState<Group | null>(null);
   const selectedGroupRef = useRef<Group | null>(null);
@@ -88,7 +90,7 @@ export default function GradesScreen() {
   </ScrollView></SafeAreaView>;
 }
 
-const styles = StyleSheet.create({
+const createStyles = () => StyleSheet.create({
   safe: { flex: 1, backgroundColor: Colors.background }, content: { padding: Spacing.lg, gap: Spacing.md, paddingBottom: 48 },
   hero: { flexDirection: "row", alignItems: "center", gap: 14, backgroundColor: Colors.primaryMuted, borderRadius: 22, padding: 18, borderWidth: 1, borderColor: Colors.primaryLight }, heroCopy: { flex: 1 }, heroIcon: { width: 58, height: 58, borderRadius: 18, alignItems: "center", justifyContent: "center", backgroundColor: Colors.white }, kicker: { color: Colors.primary, fontSize: 12, fontWeight: "800", textAlign: "right" }, title: { ...Typography.h1, color: Colors.slate900, textAlign: "right", marginTop: 2 }, subtitle: { color: Colors.slate600, fontSize: 12, textAlign: "right", marginTop: 4 },
   sectionHeading: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginTop: 4 }, sectionTitle: { ...Typography.h3, color: Colors.slate900, textAlign: "right" }, sectionHint: { color: Colors.slate500, fontSize: 11, textAlign: "right", marginTop: 2 }, groupRow: { gap: 10, paddingVertical: 2 }, groupCard: { width: 156, minHeight: 132, padding: 12, borderRadius: 16, backgroundColor: Colors.white, borderWidth: 1, borderColor: Colors.border }, groupCardActive: { backgroundColor: Colors.primary, borderColor: Colors.primary }, groupBadge: { width: 30, height: 30, borderRadius: 10, backgroundColor: Colors.slate100, alignItems: "center", justifyContent: "center", marginBottom: 9 }, groupBadgeActive: { backgroundColor: Colors.white }, groupChipText: { color: Colors.slate800, fontWeight: "800", textAlign: "right" }, groupGrade: { color: Colors.primary, fontSize: 11, fontWeight: "700", marginTop: 5, textAlign: "right" }, groupMeta: { color: Colors.slate500, fontSize: 10, marginTop: 3, textAlign: "right" }, groupChipTextActive: { color: Colors.white },

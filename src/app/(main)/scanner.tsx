@@ -1,6 +1,6 @@
 import { Ionicons } from "@expo/vector-icons";
 import { CameraView, useCameraPermissions } from "expo-camera";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
     Alert,
     Modal,
@@ -23,6 +23,7 @@ import {
     Shadows,
     Spacing,
     Typography,
+    useTheme,
 } from "../../core/theme";
 import { useServiceVisibility } from "../../core/services/ServiceVisibilityContext";
 import { AttendanceRepository } from "../../features/attendance/AttendanceRepository";
@@ -50,6 +51,8 @@ import {
 } from "../../shared/types";
 
 export default function ScannerScreen() {
+  const { colors } = useTheme();
+  const styles = useMemo(() => createStyles(), [colors]);
   const services = useServiceVisibility();
   if (!services.loaded) return <View style={styles.centered}><Text style={styles.loadingText}>جار تحميل حالة الخدمات...</Text></View>;
   if (!services.isEnabled("attendance")) return <View style={styles.centered}><Text style={styles.loadingText}>خدمة الحضور غير مفعلة لهذا المركز.</Text></View>;
@@ -57,6 +60,8 @@ export default function ScannerScreen() {
 }
 
 function ScannerContent() {
+  const { colors } = useTheme();
+  const styles = useMemo(() => createStyles(), [colors]);
   const services = useServiceVisibility();
   const paymentsEnabled = services.isEnabled("payments");
   const [permission, requestPermission] = useCameraPermissions();
@@ -797,7 +802,7 @@ function ScannerContent() {
   );
 }
 
-const styles = StyleSheet.create({
+const createStyles = () => StyleSheet.create({
   startAttendancePanel: { backgroundColor: Colors.white, borderRadius: BorderRadius.xl, padding: Spacing.lg, marginBottom: Spacing.lg, ...Shadows.card },
   startTitle: { ...Typography.h2, color: Colors.slate900, marginBottom: 4 },
   startSubtitle: { ...Typography.caption, color: Colors.slate500, textAlign: "right", marginBottom: Spacing.md },

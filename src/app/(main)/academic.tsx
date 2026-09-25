@@ -1,7 +1,7 @@
 import { Ionicons } from "@expo/vector-icons";
 import DateTimePicker from "@expo/ui/community/datetime-picker";
 import { useRouter } from "expo-router";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
     Alert,
     FlatList,
@@ -21,7 +21,7 @@ import {
     resolveUserPermissions
 } from "../../core/permissions";
 import { SyncEngine } from "../../core/sync";
-import { Colors, Spacing, Typography } from "../../core/theme";
+import { Colors, Spacing, Typography, useTheme } from "../../core/theme";
 import { useAuthStore } from "../../features/auth/useAuthStore";
 import { GroupRepository } from "../../features/groups/GroupRepository";
 import { GroupScheduleRepository } from "../../features/groups/GroupScheduleRepository";
@@ -59,6 +59,8 @@ const DAYS_OF_WEEK = [
 ];
 
 export default function AcademicScreen() {
+  const { colors } = useTheme();
+  const styles = useMemo(() => createStyles(), [colors]);
   const router = useRouter();
   const currentUser = useAuthStore((s) => s.currentUser);
   const activeCenterId = useAuthStore((s) => s.activeCenterId);
@@ -1298,7 +1300,7 @@ export default function AcademicScreen() {
   );
 }
 
-const styles = StyleSheet.create({
+const createStyles = () => StyleSheet.create({
   safeArea: {
     flex: 1,
     backgroundColor: Colors.background,

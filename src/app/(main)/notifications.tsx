@@ -1,5 +1,5 @@
 import { Ionicons } from "@expo/vector-icons";
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -14,7 +14,7 @@ import {
 } from "react-native";
 import { DatabaseService } from "../../core/database";
 import { PermissionGate } from "../../core/permissions";
-import { Colors } from "../../core/theme";
+import { Colors, useTheme } from "../../core/theme";
 import { useServiceVisibility } from "../../core/services/ServiceVisibilityContext";
 import { useAuthStore } from "../../features/auth/useAuthStore";
 import { NotificationService } from "../../features/notifications/NotificationService";
@@ -27,6 +27,8 @@ import {
 import { getLocalDateOnly } from "../../shared/utils/date";
 
 export default function NotificationsScreen() {
+  const { colors } = useTheme();
+  const styles = useMemo(() => createStyles(), [colors]);
   const services = useServiceVisibility();
   const { currentUser, activeCenterId } = useAuthStore();
   const [activeTab, setActiveTab] = useState<"history" | "templates">("history");
@@ -289,7 +291,7 @@ export default function NotificationsScreen() {
   );
 }
 
-const styles = StyleSheet.create({
+const createStyles = () => StyleSheet.create({
   container: { flex: 1, backgroundColor: Colors.slate50 },
   header: {
     padding: 22,

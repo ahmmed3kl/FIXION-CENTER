@@ -6,12 +6,14 @@ import {
   View
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { Colors, Spacing, Typography } from "../../core/theme";
+import { Colors, Spacing, Typography, useTheme } from "../../core/theme";
 import { useAuthStore } from "../../features/auth/useAuthStore";
 
 export default function SelectCenterScreen() {
   const router = useRouter();
   const { isAuthenticated } = useAuthStore();
+  const { colors } = useTheme();
+  const styles = createStyles();
 
   useEffect(() => {
     if (isAuthenticated) {
@@ -30,7 +32,7 @@ export default function SelectCenterScreen() {
   );
 }
 
-const styles = StyleSheet.create({
+const createStyles = () => StyleSheet.create({
   safeArea: {
     flex: 1,
     backgroundColor: Colors.background,

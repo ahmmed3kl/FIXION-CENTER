@@ -1,6 +1,6 @@
 import { Ionicons } from "@expo/vector-icons";
 import { useFocusEffect } from "expo-router";
-import { useCallback, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   RefreshControl,
@@ -12,7 +12,7 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { ConnectivityService } from "../../core/connectivity";
-import { Colors, Spacing, Typography } from "../../core/theme";
+import { Colors, Spacing, Typography, useTheme } from "../../core/theme";
 import { SyncEngine, SyncRepository } from "../../core/sync";
 import { useAuthStore } from "../../features/auth/useAuthStore";
 import type { SyncOperation } from "../../shared/types";
@@ -43,6 +43,8 @@ function formatDate(value?: string) {
 }
 
 export default function SyncDebugScreen() {
+  const { colors } = useTheme();
+  const styles = useMemo(() => createStyles(), [colors]);
   const activeCenter = useAuthStore((state) => state.activeCenter);
   const [stats, setStats] = useState({ pending: 0, syncing: 0, synced: 0, failed: 0, conflict: 0, total: 0 });
   const [operations, setOperations] = useState<SyncOperation[]>([]);
@@ -170,7 +172,7 @@ export default function SyncDebugScreen() {
   );
 }
 
-const styles = StyleSheet.create({
+const createStyles = () => StyleSheet.create({
   safe: { flex: 1, backgroundColor: Colors.background },
   content: { padding: Spacing.lg, gap: Spacing.md, paddingBottom: Spacing.xxxl },
   titleRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },

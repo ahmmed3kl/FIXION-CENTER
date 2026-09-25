@@ -1,5 +1,5 @@
 import { Ionicons } from "@expo/vector-icons";
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   ScrollView,
@@ -9,7 +9,7 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
-import { Colors } from "../../core/theme";
+import { Colors, useTheme } from "../../core/theme";
 import { useServiceVisibility } from "../../core/services/ServiceVisibilityContext";
 import { useAuthStore } from "../../features/auth/useAuthStore";
 import { OperationalReportsService } from "../../features/reports/OperationalReportsService";
@@ -24,6 +24,8 @@ import {
 import { getLocalDateOnly } from "../../shared/utils/date";
 
 export default function ReportsScreen() {
+  const { colors } = useTheme();
+  const styles = useMemo(() => createStyles(), [colors]);
   const services = useServiceVisibility();
   if (!services.loaded) return <View style={styles.centered}><ActivityIndicator size="large" color={Colors.primary} /><Text style={styles.loadingText}>جار تحميل حالة الخدمات...</Text></View>;
   if (!services.isEnabled("reports")) return <View style={styles.centered}><Text style={styles.loadingText}>خدمة التقارير غير مفعلة لهذا المركز.</Text></View>;
@@ -31,6 +33,8 @@ export default function ReportsScreen() {
 }
 
 function ReportsContent() {
+  const { colors } = useTheme();
+  const styles = useMemo(() => createStyles(), [colors]);
   const services = useServiceVisibility();
   const { activeCenterId } = useAuthStore();
   const [activeReport, setActiveReport] = useState<"dailyAtt" | "studentAtt" | "dailyCash" | "studentFin" | "teacherSettlement">("dailyAtt");
@@ -411,7 +415,7 @@ function ReportsContent() {
   );
 }
 
-const styles = StyleSheet.create({
+const createStyles = () => StyleSheet.create({
   container: { flex: 1, backgroundColor: Colors.slate50 },
   header: {
     padding: 22,
