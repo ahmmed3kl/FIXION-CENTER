@@ -3,6 +3,7 @@ import { DatabaseService } from "../../core/database";
 import { DeviceService } from "../../core/device";
 import { ForbiddenError, NotFoundError, UnauthorizedError, ValidationError } from "../../core/errors";
 import { PermissionService } from "../../core/permissions";
+import { SyncRepository } from "../../core/sync";
 import { NotificationChannel, NotificationEventType, NotificationTemplate } from "../../shared/types";
 import { useAuthStore } from "../auth/useAuthStore";
 
@@ -17,6 +18,10 @@ const SUPPORTED_VARIABLES = [
   "{{session_date}}",
   "{{session_time}}",
   "{{attendance_status}}",
+  "{{exam_name}}",
+  "{{score}}",
+  "{{max_score}}",
+  "{{grades_summary}}",
 ];
 
 // Default Arabic templates
@@ -28,6 +33,10 @@ export const DEFAULT_TEMPLATES: Record<NotificationEventType, Record<Notificatio
   absence: {
     push: "تغيب {{student_name}} عن حصة {{subject_name}} مع {{teacher_name}} بتاريخ {{session_date}}. يرجى التواصل مع المركز.",
     sms: "غاب {{student_name}} عن حصة {{subject_name}} بتاريخ {{session_date}}. للاستفسار تواصل مع {{center_name}}.",
+  },
+  grades: {
+    push: "تم تسجيل درجات {{student_name}}: {{grades_summary}}. {{center_name}}",
+    sms: "درجات {{student_name}}: {{grades_summary}}. للاستفسار تواصل مع {{center_name}}.",
   },
 };
 
@@ -81,6 +90,16 @@ export class NotificationTemplateRepository {
              VALUES (?, ?, ?, ?, ?, 1, ?, ?)`,
             [id, centerId, eventType, channel, body, user.id, now],
           );
+          SyncRepository.enqueueOperation({
+            operationId: `op-notif-template-${id}`,
+            centerId,
+            userId: user.id,
+            deviceId: DeviceService.getDeviceIdSync(),
+            operationType: "CREATE",
+            entityType: "notification_template",
+            entityId: id,
+            payload: { id, centerId, eventType, channel, templateBody: body, isDefault: true, createdBy: user.id, createdAt: now },
+          });
         }
       }
     }
@@ -170,6 +189,16 @@ export class NotificationTemplateRepository {
       entityId: templateId,
       action: "template_updated",
       payload: { templateId, newBody: newBody.trim() },
+    });
+    SyncRepository.enqueueOperation({
+      operationId: `op-ntmpl-${templateId.slice(-24)}-${Date.now().toString(36)}`,
+      centerId,
+      userId: user.id,
+      deviceId,
+      operationType: "UPDATE",
+      entityType: "notification_template",
+      entityId: templateId,
+      payload: { id: templateId, eventType: rows[0].event_type, channel: rows[0].channel, templateBody: newBody.trim(), updatedBy: user.id, updatedAt: now },
     });
 
     return this.getActiveTemplate(rows[0].event_type, rows[0].channel)!;

@@ -10,7 +10,7 @@ import { GroupRepository } from "../groups/GroupRepository";
 import { SessionRepository } from "../sessions/SessionRepository";
 import { GroupScheduleRepository } from "../groups/GroupScheduleRepository";
 import { AuditService } from "../../core/audit";
-import { calculateSessionAttendanceCounts } from "./AbsenceReportsService";
+import { calculateSessionAttendanceCounts } from "./AttendanceCalculations";
 
 export interface AttendanceSummary {
   total: number;

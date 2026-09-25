@@ -13,6 +13,7 @@ import { Colors } from "../../core/theme";
 import { useServiceVisibility } from "../../core/services/ServiceVisibilityContext";
 import { useAuthStore } from "../../features/auth/useAuthStore";
 import { OperationalReportsService } from "../../features/reports/OperationalReportsService";
+import { TeacherSettlement, TeacherSettlementService } from "../../features/reports/TeacherSettlementService";
 import { StudentRepository } from "../../features/students/StudentRepository";
 import {
   DailyAttendanceReport,
@@ -32,10 +33,11 @@ export default function ReportsScreen() {
 function ReportsContent() {
   const services = useServiceVisibility();
   const { activeCenterId } = useAuthStore();
-  const [activeReport, setActiveReport] = useState<"dailyAtt" | "studentAtt" | "dailyCash" | "studentFin">("dailyAtt");
+  const [activeReport, setActiveReport] = useState<"dailyAtt" | "studentAtt" | "dailyCash" | "studentFin" | "teacherSettlement">("dailyAtt");
 
   const [loading, setLoading] = useState(false);
   const [selectedDate, setSelectedDate] = useState(() => getLocalDateOnly());
+  const [settlementPeriod, setSettlementPeriod] = useState<"day" | "month">("day");
 
   // Report A: Daily Attendance
   const [dailyAttReport, setDailyAttReport] = useState<DailyAttendanceReport | null>(null);
@@ -48,6 +50,11 @@ function ReportsContent() {
 
   // Report C: Daily Cash
   const [dailyCashReport, setDailyCashReport] = useState<any>(null);
+  const [teachers, setTeachers] = useState<{ id: string; name: string }[]>([]);
+  const [settlementTeacherId, setSettlementTeacherId] = useState("");
+  const [settlementGroupId, setSettlementGroupId] = useState("");
+  const [settlementGroups, setSettlementGroups] = useState<{ id: string; name: string }[]>([]);
+  const [teacherSettlement, setTeacherSettlement] = useState<TeacherSettlement | null>(null);
 
   useEffect(() => {
     if (!activeCenterId) return;
@@ -58,7 +65,10 @@ function ReportsContent() {
         setSelectedStudentId(stdList[0].id);
       }
     } catch (e) {}
+    try { const list = TeacherSettlementService.getTeachers(); setTeachers(list); if (list.length && !settlementTeacherId) setSettlementTeacherId(list[0].id); } catch (e) {}
   }, [activeCenterId]);
+
+  useEffect(() => { if (!settlementTeacherId) return; try { setSettlementGroups(TeacherSettlementService.getGroups(settlementTeacherId)); } catch { setSettlementGroups([]); } setSettlementGroupId(""); }, [settlementTeacherId]);
 
   const loadReport = () => {
     if (!activeCenterId) return;
@@ -78,6 +88,10 @@ function ReportsContent() {
       } else if (activeReport === "studentFin" && selectedStudentId) {
         const rep = OperationalReportsService.getStudentFinancialSummary(selectedStudentId);
         setStudentFinReport(rep);
+      } else if (activeReport === "teacherSettlement" && settlementTeacherId) {
+        const fromDate = settlementPeriod === "month" ? `${selectedDate.slice(0, 7)}-01` : selectedDate;
+        const toDate = settlementPeriod === "month" ? getLocalDateOnly(new Date(Number(selectedDate.slice(0, 4)), Number(selectedDate.slice(5, 7)), 0)) : selectedDate;
+        setTeacherSettlement(TeacherSettlementService.getSettlement({ teacherId: settlementTeacherId, fromDate, toDate, groupId: settlementGroupId || undefined }));
       }
     } catch (err: any) {
       console.warn("Report load error:", err.message);
@@ -88,7 +102,7 @@ function ReportsContent() {
 
   useEffect(() => {
     loadReport();
-  }, [activeReport, selectedDate, selectedStudentId, activeCenterId]);
+  }, [activeReport, selectedDate, selectedStudentId, settlementTeacherId, settlementGroupId, settlementPeriod, activeCenterId]);
 
   return (
     <View style={styles.container}>
@@ -108,6 +122,7 @@ function ReportsContent() {
             حضور اليوم
           </Text>
         </TouchableOpacity>
+        <TouchableOpacity style={[styles.pill, activeReport === "teacherSettlement" && styles.pillActive]} onPress={() => setActiveReport("teacherSettlement")}><Text style={[styles.pillText, activeReport === "teacherSettlement" && styles.pillTextActive]}>دخل المدرسين</Text></TouchableOpacity>
         <TouchableOpacity
           style={[styles.pill, activeReport === "studentAtt" && styles.pillActive]}
           onPress={() => setActiveReport("studentAtt")}
@@ -172,6 +187,7 @@ function ReportsContent() {
             </ScrollView>
           </View>
         )}
+        {activeReport === "teacherSettlement" && <View style={[styles.filterItem, { flex: 1.5 }]}><View style={styles.periodSwitch}><TouchableOpacity style={[styles.periodPill, settlementPeriod === "day" && styles.periodPillActive]} onPress={() => setSettlementPeriod("day")}><Text style={styles.periodText}>يوم</Text></TouchableOpacity><TouchableOpacity style={[styles.periodPill, settlementPeriod === "month" && styles.periodPillActive]} onPress={() => setSettlementPeriod("month")}><Text style={styles.periodText}>شهر</Text></TouchableOpacity></View><Text style={styles.filterLabel}>المدرس:</Text><ScrollView horizontal showsHorizontalScrollIndicator={false}>{teachers.map((teacher) => <TouchableOpacity key={teacher.id} style={[styles.studentMiniPill, settlementTeacherId === teacher.id && styles.studentMiniPillActive]} onPress={() => setSettlementTeacherId(teacher.id)}><Text style={[styles.studentMiniPillText, settlementTeacherId === teacher.id && styles.studentMiniPillTextActive]}>{teacher.name}</Text></TouchableOpacity>)}</ScrollView><Text style={styles.filterLabel}>المجموعة:</Text><ScrollView horizontal showsHorizontalScrollIndicator={false}>{settlementGroups.map((group) => <TouchableOpacity key={group.id} style={[styles.studentMiniPill, settlementGroupId === group.id && styles.studentMiniPillActive]} onPress={() => setSettlementGroupId(group.id)}><Text style={[styles.studentMiniPillText, settlementGroupId === group.id && styles.studentMiniPillTextActive]}>{group.name}</Text></TouchableOpacity>)}</ScrollView></View>}
       </View>
 
       {loading ? (
@@ -387,6 +403,8 @@ function ReportsContent() {
               ))}
             </View>
           )}
+
+          {activeReport === "teacherSettlement" && teacherSettlement && <View><View style={styles.totalBox}><Text style={styles.totalLabel}>دخل {teacherSettlement.teacherName} في {selectedDate}</Text><Text style={styles.totalValue}>{teacherSettlement.totalAmount} ج.م</Text><Text style={styles.totalSub}>عدد الدفعات المرتبطة بالحصص: {teacherSettlement.paymentCount}</Text></View><Text style={styles.sectionHeader}>تفصيل الحصص والمجموعات</Text>{teacherSettlement.rows.map((row) => <View key={row.sessionId} style={styles.card}><View style={styles.cardHeader}><Text style={styles.sessGroup}>{row.groupName}</Text><Text style={styles.sessDate}>{row.sessionDate} · {row.startTime}</Text></View><Text style={styles.sessMeta}>المتحصل: {row.amount} ج.م · دفعات: {row.paymentCount}</Text></View>)}{!teacherSettlement.rows.length && <Text style={styles.loadingText}>لا توجد دفعات مرتبطة بحصص هذا المدرس في التاريخ المحدد.</Text>}</View>}
         </ScrollView>
       )}
     </View>
@@ -501,5 +519,6 @@ const styles = StyleSheet.create({
   gridLabel: { fontSize: 11, color: Colors.slate500, textAlign: "right" },
   gridVal: { fontSize: 14, fontWeight: "700", color: Colors.slate800, textAlign: "right", marginTop: 2 },
   centered: { flex: 1, justifyContent: "center", alignItems: "center" },
+  periodSwitch: { flexDirection: "row", gap: 6, marginBottom: 4 }, periodPill: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 10, backgroundColor: Colors.slate100 }, periodPillActive: { backgroundColor: Colors.primary }, periodText: { color: Colors.slate700, fontSize: 11, fontWeight: "700" },
   loadingText: { marginTop: 10, fontSize: 14, color: Colors.slate500 },
 });

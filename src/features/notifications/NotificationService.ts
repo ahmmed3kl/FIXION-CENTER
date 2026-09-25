@@ -494,4 +494,36 @@ export class NotificationService {
 
     return events;
   }
+
+  /** Sends the student's grade summary to the guardian using the SMS template. */
+  static notifyGrades(params: {
+    studentId: string;
+    summary: string;
+    examName?: string;
+    score?: number | null;
+    maxScore?: number | null;
+    operationId?: string;
+  }): NotificationEvent {
+    const { centerId } = this.getActiveContext();
+    NotificationTemplateRepository.ensureDefaultTemplates();
+    const db = DatabaseService.getDb();
+    const student = db.getFirstSync<any>("SELECT full_name FROM students WHERE center_id = ? AND id = ?", [centerId, params.studentId]);
+    const center = db.getFirstSync<any>("SELECT name FROM centers WHERE id = ?", [centerId]);
+    const event = this.createNotificationEvent({
+      operationId: params.operationId || `op-notif-grades-${params.studentId}-${Date.now()}`,
+      studentId: params.studentId,
+      sessionId: "",
+      eventType: "grades",
+      vars: {
+        student_name: student?.full_name || "",
+        parent_name: "ولي الأمر",
+        center_name: center?.name || "",
+        exam_name: params.examName || "",
+        score: params.score == null ? "" : String(params.score),
+        max_score: params.maxScore == null ? "" : String(params.maxScore),
+        grades_summary: params.summary,
+      },
+    });
+    return event;
+  }
 }

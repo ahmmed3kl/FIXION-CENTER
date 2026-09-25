@@ -97,6 +97,10 @@ export default function StudentsScreen() {
   const [isAdjModalOpen, setIsAdjModalOpen] = useState(false);
   const [isRevModalOpen, setIsRevModalOpen] = useState(false);
   const [isPackageModalOpen, setIsPackageModalOpen] = useState(false);
+  const [isStudentEditModalOpen, setIsStudentEditModalOpen] = useState(false);
+  const [editFullName, setEditFullName] = useState("");
+  const [editPhone, setEditPhone] = useState("");
+  const [editParentPhone, setEditParentPhone] = useState("");
   const [availablePackages, setAvailablePackages] = useState<Package[]>([]);
   const [packageOptions, setPackageOptions] = useState<PackageSubject[]>([]);
   const [packageId, setPackageId] = useState("");
@@ -220,6 +224,31 @@ export default function StudentsScreen() {
       }
     } catch (e) {
       console.error(e);
+    }
+  };
+
+  const openStudentEdit = () => {
+    if (!selectedStudent) return;
+    setEditFullName(selectedStudent.fullName);
+    setEditPhone(selectedStudent.phone);
+    setEditParentPhone(selectedStudent.parentPhone);
+    setIsStudentEditModalOpen(true);
+  };
+
+  const saveStudentEdit = () => {
+    if (!selectedStudent) return;
+    try {
+      const updated = StudentRepository.updateStudent(selectedStudent.id, {
+        fullName: editFullName,
+        phone: editPhone,
+        parentPhone: editParentPhone,
+      });
+      setSelectedStudent(updated);
+      setIsStudentEditModalOpen(false);
+      loadData();
+      Alert.alert("تم بنجاح", "تم تحديث بيانات الطالب.");
+    } catch (error: any) {
+      Alert.alert("تعذر الحفظ", error?.message || "راجع الاسم وأرقام الهاتف.");
     }
   };
 
@@ -518,6 +547,7 @@ export default function StudentsScreen() {
     permissions,
     "enrollments.create",
   );
+  const canUpdateStudent = PermissionService.hasPermission(permissions, "students.update");
   const eligibleEnrollmentGroups = availableGroups
     .filter(
       (group) =>
@@ -666,6 +696,7 @@ export default function StudentsScreen() {
                 </TouchableOpacity>
               </View>
               <View style={styles.profileActions}>
+                {canUpdateStudent && <TouchableOpacity style={styles.profileAction} onPress={openStudentEdit}><Ionicons name="create-outline" size={18} color={Colors.primary} /><Text style={styles.profileActionText}>تعديل</Text></TouchableOpacity>}
                 <TouchableOpacity style={styles.profileAction} onPress={() => setIsCardModalOpen(true)}><Ionicons name="card-outline" size={18} color={Colors.primary} /><Text style={styles.profileActionText}>الكارت</Text></TouchableOpacity>
                 <TouchableOpacity style={styles.profileAction} onPress={handleCallStudent}><Ionicons name="call-outline" size={18} color={Colors.primary} /><Text style={styles.profileActionText}>اتصال</Text></TouchableOpacity>
               </View>
@@ -1161,6 +1192,16 @@ export default function StudentsScreen() {
           </View>
         </Modal>
       )}
+
+      <Modal visible={isStudentEditModalOpen} animationType="slide" transparent>
+        <View style={styles.modalOverlay}><View style={styles.smallModalCard}>
+          <Text style={styles.modalTitle}>تعديل بيانات الطالب</Text>
+          <AppInput label="اسم الطالب" value={editFullName} onChangeText={setEditFullName} />
+          <AppInput label="رقم الطالب" value={editPhone} onChangeText={setEditPhone} keyboardType="phone-pad" />
+          <AppInput label="رقم ولي الأمر" value={editParentPhone} onChangeText={setEditParentPhone} keyboardType="phone-pad" />
+          <View style={{ flexDirection: "row", gap: 8, marginTop: Spacing.md }}><AppButton title="حفظ" onPress={saveStudentEdit} style={{ flex: 1 }} /><AppButton title="إلغاء" variant="outline" onPress={() => setIsStudentEditModalOpen(false)} style={{ flex: 1 }} /></View>
+        </View></View>
+      </Modal>
 
       <Modal visible={isPackageModalOpen} animationType="slide" transparent>
         <View style={styles.modalOverlay}><View style={styles.packageModalCard}>

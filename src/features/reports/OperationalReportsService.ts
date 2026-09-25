@@ -11,7 +11,7 @@ import {
 } from "../../shared/types";
 import { useAuthStore } from "../auth/useAuthStore";
 import { FinancialCalculationService } from "../payments/FinancialCalculationService";
-import { calculateSessionAttendanceCounts } from "../attendance/AbsenceReportsService";
+import { calculateSessionAttendanceCounts } from "../attendance/AttendanceCalculations";
 
 export class OperationalReportsService {
   private static getActiveContext() {

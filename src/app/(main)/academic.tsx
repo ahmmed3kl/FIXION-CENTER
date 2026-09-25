@@ -77,6 +77,8 @@ export default function AcademicScreen() {
   const [teacherSearch, setTeacherSearch] = useState("");
   const [todaySessions, setTodaySessions] = useState<Session[]>([]);
   const [academicStages, setAcademicStages] = useState<AcademicStage[]>(() => DEFAULT_ACADEMIC_STAGES.map((stage) => ({ ...stage, grades: [...stage.grades] })));
+  const [customStageLabel, setCustomStageLabel] = useState("");
+  const [customGradeByStage, setCustomGradeByStage] = useState<Record<string, string>>({});
 
   // Selection & Modals
   const [isAddTeacherOpen, setIsAddTeacherOpen] = useState(false);
@@ -744,7 +746,15 @@ export default function AcademicScreen() {
               {academicStages.map((stage) => <TouchableOpacity key={stage.id} style={[styles.stageSelectCard, stage.grades.length > 0 && styles.stageSelectCardActive]} onPress={() => setAcademicStages((current) => current.map((item) => item.id === stage.id ? { ...item, grades: item.grades.length > 0 ? [] : [...(DEFAULT_ACADEMIC_STAGES.find((defaultStage) => defaultStage.id === stage.id)?.grades || [])] } : item))}>
                 <Text style={styles.stageCardName}>{stage.grades.length > 0 ? "✓ " : "□ "}{stage.label}</Text>
                 <Text style={styles.stageCardGrades}>{stage.grades.length > 0 ? stage.grades.join(" • ") : "غير مفعلة"}</Text>
+                <View style={{ flexDirection: "row", gap: 8, alignItems: "center", marginTop: 8 }}>
+                  <AppInput value={customGradeByStage[stage.id] || ""} onChangeText={(value) => setCustomGradeByStage((current) => ({ ...current, [stage.id]: value }))} placeholder="إضافة صف يدوي" containerStyle={{ flex: 1, marginBottom: 0 }} />
+                  <TouchableOpacity onPress={(event) => { event.stopPropagation(); try { const next = CenterAcademicStageRepository.addGrade(stage.id, customGradeByStage[stage.id] || ""); setAcademicStages(next); setCustomGradeByStage((current) => ({ ...current, [stage.id]: "" })); } catch (error: any) { Alert.alert("خطأ", error?.message || "تعذر إضافة الصف."); } }} style={styles.stageAddButton}><Ionicons name="add" size={18} color={Colors.white} /></TouchableOpacity>
+                </View>
               </TouchableOpacity>)}
+              <View style={{ flexDirection: "row", gap: 8, alignItems: "flex-end", marginTop: Spacing.sm }}>
+                <AppInput label="مرحلة جديدة" value={customStageLabel} onChangeText={setCustomStageLabel} placeholder="مثال: لغات" containerStyle={{ flex: 1 }} />
+                <AppButton title="إضافة مرحلة" onPress={() => { try { setAcademicStages(CenterAcademicStageRepository.addStage(customStageLabel)); setCustomStageLabel(""); } catch (error: any) { Alert.alert("خطأ", error?.message || "تعذر إضافة المرحلة."); } }} />
+              </View>
               <AppButton title="حفظ مراحل السنتر" onPress={() => { try { CenterAcademicStageRepository.saveStages(academicStages); Alert.alert("تم بنجاح", "تم حفظ المراحل الدراسية للسنتر."); } catch (error: any) { Alert.alert("خطأ", error?.message || "تعذر حفظ المراحل."); } }} />
             </AppCard>
           </ScrollView>
@@ -1460,6 +1470,7 @@ const styles = StyleSheet.create({
     borderColor: Colors.primary,
     backgroundColor: Colors.primaryLight + "18",
   },
+  stageAddButton: { width: 38, height: 38, borderRadius: 10, backgroundColor: Colors.primary, alignItems: "center", justifyContent: "center" },
   stageCardName: {
     fontSize: 15,
     fontWeight: "700",

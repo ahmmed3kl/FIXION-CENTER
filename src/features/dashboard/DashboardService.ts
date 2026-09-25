@@ -1,7 +1,7 @@
 import { DatabaseService } from "../../core/database";
 import { UnauthorizedError } from "../../core/errors";
 import { useAuthStore } from "../auth/useAuthStore";
-import { calculateSessionAttendanceCounts } from "../attendance/AbsenceReportsService";
+import { calculateSessionAttendanceCounts } from "../attendance/AttendanceCalculations";
 import { getLocalDateOnly } from "../../shared/utils/date";
 
 export interface DashboardSummary {

@@ -4,9 +4,9 @@ import { AttendanceRepository } from "./AttendanceRepository";
 import { MakeupService } from "./MakeupService";
 import { SessionRepository } from "../sessions/SessionRepository";
 import { StudentRepository } from "../students/StudentRepository";
-
 export interface AbsenceSessionSummary {
   session: Session;
+  sessionNumber?: number;
   total: number;
   present: number;
   absent: number;
@@ -30,42 +30,8 @@ export interface AbsenceSessionReport {
   attendance: Attendance[];
 }
 
-export interface SessionAttendanceCounts {
-  expected: number;
-  present: number;
-  absent: number;
-  late: number;
-  makeup: number;
-}
-
-/**
- * Canonical session aggregation. The expected snapshot is authoritative;
- * attendance rows can never add students to the regular roster. Makeup rows
- * are counted in their own dimension and are deliberately excluded from
- * regular present/absent calculations.
- */
-export function calculateSessionAttendanceCounts(
-  expectedStudentIds: string[],
-  attendance: Pick<Attendance, "studentId" | "status" | "attendanceType">[],
-  coveredInAdvanceIds: string[] = [],
-): SessionAttendanceCounts {
-  const expectedIds = new Set(expectedStudentIds);
-  const regularRows = attendance.filter((item) => item.attendanceType !== "makeup");
-  const presentIds = new Set(
-    regularRows
-      .filter((item) => (item.status === "present" || item.status === "late") && expectedIds.has(item.studentId))
-      .map((item) => item.studentId),
-  );
-  const advancedIds = new Set(coveredInAdvanceIds.filter((id) => expectedIds.has(id)));
-  const absent = expectedStudentIds.filter((id) => !presentIds.has(id) && !advancedIds.has(id)).length;
-  const makeup = new Set(attendance.filter((item) => item.attendanceType === "makeup").map((item) => item.studentId)).size;
-  const late = new Set(
-    regularRows
-      .filter((item) => item.status === "late" && expectedIds.has(item.studentId))
-      .map((item) => item.studentId),
-  ).size;
-  return { expected: expectedStudentIds.length, present: presentIds.size, absent, late, makeup };
-}
+export { calculateSessionAttendanceCounts } from "./AttendanceCalculations";
+export type { SessionAttendanceCounts } from "./AttendanceCalculations";
 
 /** Counts final student states once, never raw attendance rows. */
 export function calculateAbsenceReportCounts(
@@ -93,9 +59,12 @@ export function calculateAbsenceReportCounts(
 /** Read-only composition of the existing session, attendance, absence and makeup services. */
 export class AbsenceReportsService {
   static getSessionsForMonth(month: string): AbsenceSessionSummary[] {
-    return SessionRepository.getSessionsForMonth(month).map((session) => {
+    const counters = new Map<string, number>();
+    return SessionRepository.getSessionsForMonth(month).slice().sort((a, b) => `${a.groupId}-${a.sessionDate}-${a.startTime}`.localeCompare(`${b.groupId}-${b.sessionDate}-${b.startTime}`)).map((session) => {
       const report = this.getSessionReport(session.id);
-      return { session, total: report.expected.length, present: report.present.length, absent: report.absent.length, compensated: report.compensated };
+      const sessionNumber = (counters.get(session.groupId) || 0) + 1;
+      counters.set(session.groupId, sessionNumber);
+      return { session, sessionNumber, total: report.expected.length, present: report.present.length, absent: report.absent.length, compensated: report.compensated };
     });
   }
 

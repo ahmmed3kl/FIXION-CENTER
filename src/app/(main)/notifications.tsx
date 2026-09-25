@@ -156,7 +156,7 @@ export default function NotificationsScreen() {
                 <View style={styles.cardHeader}>
                   <View style={styles.eventTypeTag}>
                     <Text style={styles.eventTypeText}>
-                      {item.eventType === "attendance" ? "إشعار حضور" : "إشعار غياب"}
+                      {item.eventType === "attendance" ? "إشعار حضور" : item.eventType === "absence" ? "إشعار غياب" : "إرسال درجات"}
                     </Text>
                   </View>
                   <Text style={styles.timestampText}>
@@ -198,7 +198,7 @@ export default function NotificationsScreen() {
             <View key={tmpl.id} style={styles.card}>
               <View style={styles.cardHeader}>
                 <Text style={styles.tmplTitle}>
-                  {tmpl.eventType === "attendance" ? "قالب حضور" : "قالب غياب"} (
+                  {tmpl.eventType === "attendance" ? "قالب حضور" : tmpl.eventType === "absence" ? "قالب غياب" : "قالب درجات"} (
                   {tmpl.channel === "push" ? "تطبيق / Push" : "رسالة نصية / SMS"})
                 </Text>
                 <PermissionGate

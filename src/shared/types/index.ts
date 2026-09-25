@@ -523,7 +523,7 @@ export type NotificationDeliveryStatus =
   | "sending"
   | "sent"
   | "failed";
-export type NotificationEventType = "attendance" | "absence";
+export type NotificationEventType = "attendance" | "absence" | "grades";
 
 export interface NotificationEvent {
   id: string;
