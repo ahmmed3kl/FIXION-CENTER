@@ -481,7 +481,7 @@ export class SyncRepository {
       `SELECT operation_id as operationId FROM sync_operations
        WHERE center_id = ? AND status = 'conflict' AND retry_count < 10
          AND LENGTH(operation_id) > 64
-         AND entity_type IN ('student', 'student_card', 'teacher', 'subject', 'group', 'group_schedule', 'session', 'enrollment', 'student_group_enrollment', 'attendance', 'payment', 'payment_reversal', 'debt_adjustment', 'debt_cycle', 'package', 'package_subject', 'package_subscription', 'package_teacher_override')`,
+         AND entity_type IN ('student', 'student_card', 'teacher', 'subject', 'group', 'group_schedule', 'session', 'enrollment', 'student_group_enrollment', 'attendance', 'payment', 'payment_reversal', 'debt_adjustment', 'debt_cycle', 'package', 'package_subject', 'package_subscription', 'package_teacher_override', 'notification_template')`,
       [centerId],
     );
     for (const row of longIds) {
@@ -501,7 +501,7 @@ export class SyncRepository {
        WHERE center_id = ?
          AND status = 'conflict'
          AND retry_count < 10
-         AND entity_type IN ('student', 'student_card', 'package', 'package_subject', 'package_subscription', 'package_teacher_override', 'session', 'attendance', 'makeup', 'debt_cycle', 'payment', 'debt_adjustment', 'grade_exam', 'grade_score')
+         AND entity_type IN ('student', 'student_card', 'package', 'package_subject', 'package_subscription', 'package_teacher_override', 'notification_template', 'session', 'attendance', 'makeup', 'debt_cycle', 'payment', 'debt_adjustment', 'grade_exam', 'grade_score')
          AND (
            last_error LIKE '%CARD_OUTSIDE_ALLOWED_RANGE%'
            OR last_error LIKE '%CARD_ALREADY_ASSIGNED%'
@@ -525,6 +525,8 @@ export class SyncRepository {
            OR last_error LIKE '%invalid input syntax for type timestamp%'
            OR last_error LIKE '%debt_cycles_%'
            OR last_error LIKE '%payments_debt_cycle_id_fkey%'
+           OR last_error LIKE '%uq_notification_template%'
+           OR last_error LIKE '%notification_templates%'
            OR last_error LIKE '%violates check constraint%'
            OR (
              entity_type IN ('attendance', 'makeup')

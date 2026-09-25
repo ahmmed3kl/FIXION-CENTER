@@ -1,6 +1,6 @@
 import { DatabaseService } from "../../core/database";
 import { ForbiddenError, UnauthorizedError } from "../../core/errors";
-import { PermissionService } from "../../core/permissions";
+import { PermissionService, resolveUserPermissions } from "../../core/permissions";
 import { useAuthStore } from "../auth/useAuthStore";
 
 export interface TeacherSettlementFilters { teacherId: string; fromDate: string; toDate: string; groupId?: string; }
@@ -11,12 +11,33 @@ export class TeacherSettlementService {
   private static context() {
     const { activeCenterId, currentUser } = useAuthStore.getState();
     if (!activeCenterId || !currentUser) throw new UnauthorizedError("يجب تسجيل الدخول وتحديد المركز.");
-    if (!PermissionService.hasAnyPermission(currentUser.permissions, ["reports.financial.view", "reports.view", "daily_closing.view"])) throw new ForbiddenError("ليس لديك صلاحية عرض تسوية دخل المدرسين.");
+    const permissions = resolveUserPermissions(currentUser);
+    if (!PermissionService.hasAnyPermission(permissions, ["reports.financial.view", "reports.view", "daily_closing.view"])) throw new ForbiddenError("ليس لديك صلاحية عرض تسوية دخل المدرسين.");
     return { centerId: activeCenterId };
   }
 
-  static getTeachers() { const { centerId } = this.context(); return DatabaseService.getDb().getAllSync<{ id: string; name: string }>("SELECT id, name FROM teachers WHERE center_id = ? AND status = 'active' ORDER BY name", [centerId]); }
-  static getGroups(teacherId: string) { const { centerId } = this.context(); return DatabaseService.getDb().getAllSync<{ id: string; name: string }>("SELECT id, name FROM groups WHERE center_id = ? AND teacher_id = ? AND status = 'active' ORDER BY name", [centerId, teacherId]); }
+  static getTeachers() {
+    const { centerId } = this.context();
+    return DatabaseService.getDb().getAllSync<{ id: string; name: string }>(
+      "SELECT id, name FROM teachers WHERE center_id = ? AND COALESCE(NULLIF(status, ''), 'active') <> 'inactive' ORDER BY name",
+      [centerId],
+    );
+  }
+
+  static getGroups(teacherId: string) {
+    const { centerId } = this.context();
+    return DatabaseService.getDb().getAllSync<{ id: string; name: string }>(
+      `SELECT DISTINCT g.id, g.name
+       FROM groups g
+       LEFT JOIN sessions s
+         ON s.center_id = g.center_id AND s.group_id = g.id AND s.teacher_id = ?
+       WHERE g.center_id = ?
+         AND COALESCE(NULLIF(g.status, ''), 'active') <> 'inactive'
+         AND (g.teacher_id = ? OR s.id IS NOT NULL)
+       ORDER BY g.name`,
+      [teacherId, centerId, teacherId],
+    );
+  }
 
   static getSettlement(filters: TeacherSettlementFilters): TeacherSettlement {
     const { centerId } = this.context();

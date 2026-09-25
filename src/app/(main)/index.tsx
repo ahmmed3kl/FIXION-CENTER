@@ -33,7 +33,7 @@ export default function DashboardScreen() {
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(), [colors]);
   const router = useRouter();
-  const { currentUser, activeCenter, availableCenters } =
+  const { currentUser, activeCenter, activeCenterId, availableCenters } =
     useAuthStore();
 
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
@@ -43,18 +43,21 @@ export default function DashboardScreen() {
   const [refreshing, setRefreshing] = useState(false);
 
   const loadData = useCallback(() => {
-    if (!activeCenter) return;
+    // The persisted center id is restored before the display object is
+    // hydrated. Use the id as the readiness signal so the dashboard does not
+    // render a false all-zero snapshot during app startup.
+    if (!activeCenterId) return;
     try {
       const s = DashboardService.getTodaySummary();
       setSummary(s);
 
-      const stats = SyncRepository.getStats(activeCenter.id);
+      const stats = SyncRepository.getStats(activeCenterId);
       setSyncStats(stats);
       setConnectivity(ConnectivityService.getState());
     } catch (e) {
       console.error("Error loading dashboard data:", e);
     }
-  }, [activeCenter]);
+  }, [activeCenterId]);
 
   useFocusEffect(
     useCallback(() => {
@@ -73,18 +76,18 @@ export default function DashboardScreen() {
 
   const onRefresh = async () => {
     setRefreshing(true);
-    if (activeCenter) {
-      await SyncEngine.syncCenterNow(activeCenter.id).catch(console.error);
+    if (activeCenterId) {
+      await SyncEngine.syncCenterNow(activeCenterId).catch(console.error);
     }
     loadData();
     setRefreshing(false);
   };
 
   const handleSyncNow = async () => {
-    if (!activeCenter) return;
+    if (!activeCenterId) return;
     ConnectivityService.setState("syncing");
     setConnectivity("syncing");
-    const result = await SyncEngine.syncCenterNow(activeCenter.id);
+    const result = await SyncEngine.syncCenterNow(activeCenterId);
     const nextState = result.state === "error" ? "offline" : result.state;
     ConnectivityService.setState(nextState);
     setConnectivity(nextState);

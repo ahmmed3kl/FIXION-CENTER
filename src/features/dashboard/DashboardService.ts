@@ -76,14 +76,38 @@ export class DashboardService {
     // roster authority; makeup rows are never allowed to become regular
     // present rows or to reduce the regular absent count.
     const counts = sessionIds.map((sessionId) => {
-      const expected = db.getAllSync<any>(
-        "SELECT student_id as studentId FROM session_expected_students WHERE center_id = ? AND session_id = ?",
-        [centerId, sessionId],
-      );
       const attendance = db.getAllSync<any>(
         "SELECT student_id as studentId, status, attendance_type as attendanceType FROM attendance WHERE center_id = ? AND session_id = ?",
         [centerId, sessionId],
       );
+      let expected = db.getAllSync<any>(
+        "SELECT student_id as studentId FROM session_expected_students WHERE center_id = ? AND session_id = ?",
+        [centerId, sessionId],
+      );
+      // Legacy/synced sessions can arrive before their roster snapshot. Keep
+      // the dashboard useful by deriving the same-date roster from active
+      // enrollments, and include a regular attendance row as a last-resort
+      // signal so a completed scan is never displayed as zero.
+      if (expected.length === 0) {
+        const session = db.getFirstSync<any>(
+          "SELECT group_id as groupId, session_date as sessionDate FROM sessions WHERE center_id = ? AND id = ?",
+          [centerId, sessionId],
+        );
+        const enrolled = session
+          ? db.getAllSync<any>(
+              `SELECT student_id as studentId
+               FROM student_group_enrollments
+               WHERE center_id = ? AND group_id = ? AND status = 'active'
+                 AND start_date <= ? AND (end_date IS NULL OR end_date >= ?)`,
+              [centerId, session.groupId, session.sessionDate, session.sessionDate],
+            )
+          : [];
+        const ids = new Set<string>(enrolled.map((row) => String(row.studentId)));
+        for (const row of attendance) {
+          if (row.attendanceType !== "makeup") ids.add(String(row.studentId));
+        }
+        expected = Array.from(ids, (studentId) => ({ studentId }));
+      }
       const coveredInAdvance = db.getAllSync<{ studentId: string }>(
         "SELECT student_id as studentId FROM advance_coverages WHERE center_id = ? AND target_future_session_id = ?",
         [centerId, sessionId],

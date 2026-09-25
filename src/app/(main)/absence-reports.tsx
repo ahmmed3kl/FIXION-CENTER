@@ -33,24 +33,80 @@ function SessionGroupList({
   groups: SessionGroup[];
   onPress: (sessionId: string) => void;
 }) {
-  return groups.map((group) => (
-        <View key={group.id || group.name} style={styles.groupReport}>
-          <Text style={styles.groupReportTitle}>
-            {`${group.name} · ${group.items.length} حصة`}
-          </Text>
-          {group.items.map((item) => (
-            <View key={item.session.id}>
-              <Text style={styles.sessionNumber}>
-                {`الحصة رقم ${item.sessionNumber ?? "—"}`}
-              </Text>
-              <SessionCard
-                item={item}
-                onPress={() => onPress(item.session.id)}
-              />
-            </View>
-          ))}
-        </View>
-      ));
+  // Create one native subtree explicitly. This avoids any whitespace text
+  // nodes being emitted by JSX between View children on older RN runtimes.
+  return React.createElement(
+    View,
+    null,
+    ...groups.map((group) =>
+      React.createElement(
+        View,
+        { key: group.id || group.name, style: styles.groupReport },
+        React.createElement(
+          Text,
+          { style: styles.groupReportTitle },
+          `${String(group.name)} · ${String(group.items.length)} حصة`,
+        ),
+        ...group.items.map((item) =>
+          React.createElement(
+            View,
+            { key: item.session.id },
+            React.createElement(
+              Text,
+              { style: styles.sessionNumber },
+              `الحصة رقم ${String(item.sessionNumber ?? "—")}`,
+            ),
+            React.createElement(NativeSessionCard, {
+              item,
+              onPress: () => onPress(item.session.id),
+            }),
+          ),
+        ),
+      ),
+    ),
+  );
+}
+
+function NativeCounter({ label, value, tone }: { label: string; value: number; tone: "blue" | "green" | "red" | "purple" }) {
+  const valueStyle = tone === "green" ? styles.green : tone === "red" ? styles.red : tone === "purple" ? styles.purple : undefined;
+  return React.createElement(
+    View,
+    { style: styles.counter },
+    React.createElement(Text, { style: [styles.counterValue, valueStyle] }, String(value)),
+    React.createElement(Text, { style: styles.counterLabel }, String(label)),
+  );
+}
+
+function NativeSessionCard({ item, onPress }: { item: AbsenceSessionSummary; onPress: () => void }) {
+  const session = item.session;
+  return React.createElement(
+    TouchableOpacity,
+    { activeOpacity: 0.8, onPress, style: styles.sessionCard },
+    React.createElement(
+      View,
+      { style: styles.sessionCardTop },
+      React.createElement(
+        View,
+        { style: styles.chevron },
+        React.createElement(Ionicons, { name: "chevron-back", size: 19, color: Colors.slate400 }),
+      ),
+      React.createElement(
+        View,
+        { style: styles.sessionCopy },
+        React.createElement(Text, { numberOfLines: 1, style: styles.sessionName }, String(session.groupName || "مجموعة")),
+        React.createElement(Text, { numberOfLines: 1, style: styles.sessionMeta }, `${String(session.subjectName || "")} · ${String(session.teacherName || "مدرس غير محدد")}`),
+        React.createElement(Text, { style: styles.sessionDate }, `${String(formatDate(session.sessionDate))} · ${String(formatTimeArabic(session.startTime))}`),
+      ),
+    ),
+    React.createElement(
+      View,
+      { style: styles.cardCounters },
+      React.createElement(NativeCounter, { label: "الكل", value: item.total, tone: "blue" }),
+      React.createElement(NativeCounter, { label: "حاضر", value: item.present, tone: "green" }),
+      React.createElement(NativeCounter, { label: "غائب", value: item.absent, tone: "red" }),
+      React.createElement(NativeCounter, { label: "تعويض", value: item.compensated, tone: "purple" }),
+    ),
+  );
 }
 
 const MONTH_NAMES = ["يناير", "فبراير", "مارس", "أبريل", "مايو", "يونيو", "يوليو", "أغسطس", "سبتمبر", "أكتوبر", "نوفمبر", "ديسمبر"];

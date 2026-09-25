@@ -4,7 +4,7 @@ import {
     UnauthorizedError,
     ValidationError,
 } from "../../core/errors";
-import { PermissionService } from "../../core/permissions";
+import { PermissionService, resolveUserPermissions } from "../../core/permissions";
 import {
     DailyAttendanceReport,
     StudentAttendanceReport,
@@ -20,7 +20,10 @@ export class OperationalReportsService {
     if (!activeCenterId || !currentUser) {
       throw new UnauthorizedError("يجب تسجيل الدخول وتحديد المركز.");
     }
-    return { centerId: activeCenterId, user: currentUser };
+    return {
+      centerId: activeCenterId,
+      user: { ...currentUser, permissions: resolveUserPermissions(currentUser) },
+    };
   }
 
   /**
@@ -44,7 +47,7 @@ export class OperationalReportsService {
     const db = DatabaseService.getDb();
 
     const loadedSessions = db.getAllSync<any>(
-      `SELECT s.id, s.status, s.start_time, s.end_time,
+      `SELECT s.id, s.group_id, s.session_date, s.status, s.start_time, s.end_time,
               g.name as group_name, subj.name as subject_name, t.name as teacher_name
        FROM sessions s
        JOIN groups g ON s.group_id = g.id
@@ -61,11 +64,11 @@ export class OperationalReportsService {
     const sessions = loadedSessions.filter(
       (session: any) =>
         dateStr < today ||
-        (dateStr === today && String(session.end_time || "") <= currentTime),
+        (dateStr === today && String(session.start_time || "") <= currentTime),
     );
 
     const sessionReport = sessions.map((s: any) => {
-      const expected = db.getAllSync<any>(
+      let expected = db.getAllSync<any>(
         `SELECT student_id FROM session_expected_students WHERE center_id = ? AND session_id = ?`,
         [centerId, s.id],
       );
@@ -77,6 +80,21 @@ export class OperationalReportsService {
         `SELECT student_id as studentId FROM advance_coverages WHERE center_id = ? AND target_future_session_id = ?`,
         [centerId, s.id],
       );
+
+      if (expected.length === 0) {
+        const enrolled = db.getAllSync<any>(
+          `SELECT student_id
+           FROM student_group_enrollments
+           WHERE center_id = ? AND group_id = ? AND status = 'active'
+             AND start_date <= ? AND (end_date IS NULL OR end_date >= ?)`,
+          [centerId, s.group_id, s.session_date || dateStr, s.session_date || dateStr],
+        );
+        const ids = new Set<string>(enrolled.map((row) => String(row.student_id)));
+        for (const row of attendanceRows) {
+          if (row.attendanceType !== "makeup") ids.add(String(row.studentId));
+        }
+        expected = Array.from(ids, (student_id) => ({ student_id }));
+      }
 
       const counts = calculateSessionAttendanceCounts(
         expected.map((row: any) => row.student_id),

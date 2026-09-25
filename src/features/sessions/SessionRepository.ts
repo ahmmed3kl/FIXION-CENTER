@@ -98,7 +98,7 @@ export class SessionRepository {
       throw new ForbiddenError("Ù„ÙŠØ³ Ù„Ø¯ÙŠÙƒ ØµÙ„Ø§Ø­ÙŠØ© Ø¹Ø±Ø¶ Ø¨ÙŠØ§Ù†Ø§Øª Ø§Ù„Ø­Ø¶ÙˆØ± ÙˆØ§Ù„ØºÙŠØ§Ø¨.");
     }
     const db = DatabaseService.getDb();
-    return db.getAllSync<Student>(
+    const rows = db.getAllSync<Student>(
       `SELECT s.id, s.center_id as centerId, s.student_code as studentCode,
               s.full_name as fullName, s.card_code as cardCode, s.phone,
               s.parent_phone as parentPhone, s.grade, s.status,
@@ -108,6 +108,31 @@ export class SessionRepository {
        JOIN students s ON s.id = expected.student_id AND s.center_id = expected.center_id
        WHERE expected.center_id = ? AND expected.session_id = ?
        ORDER BY s.full_name COLLATE NOCASE ASC`,
+      [centerId, sessionId],
+    );
+
+    if (rows.length > 0) return rows;
+
+    // Older sessions may have been created before roster snapshots were
+    // introduced. Reconstruct their expected roster from the enrollment that
+    // was active on the session date so reports do not incorrectly show zero.
+    return db.getAllSync<Student>(
+      `SELECT st.id, st.center_id as centerId, st.student_code as studentCode,
+              st.full_name as fullName, st.card_code as cardCode, st.phone,
+              st.parent_phone as parentPhone, st.grade, st.status,
+              st.student_type as studentType, st.notes,
+              st.created_at as createdAt, st.updated_at as updatedAt
+       FROM sessions session
+       JOIN student_group_enrollments enrollment
+         ON enrollment.center_id = session.center_id
+        AND enrollment.group_id = session.group_id
+        AND enrollment.status = 'active'
+        AND enrollment.start_date <= session.session_date
+        AND (enrollment.end_date IS NULL OR enrollment.end_date >= session.session_date)
+       JOIN students st
+         ON st.center_id = enrollment.center_id AND st.id = enrollment.student_id
+       WHERE session.center_id = ? AND session.id = ?
+       ORDER BY st.full_name COLLATE NOCASE ASC`,
       [centerId, sessionId],
     );
   }
