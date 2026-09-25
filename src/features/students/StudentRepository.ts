@@ -241,7 +241,7 @@ export class StudentRepository {
 
     // Enforce uniqueness of cardCode within center if cardCode is present
     if (cardCode) {
-      const existingCard = StudentCardRepository.findByCardCode(cardCode);
+      const existingCard = StudentCardRepository.findByCardCodeAnywhere(cardCode);
       if (existingCard) {
         throw new ConflictError(
           `كود الكارت (${cardCode}) مستخدم بالفعل لطالب آخر في هذا المركز.`,

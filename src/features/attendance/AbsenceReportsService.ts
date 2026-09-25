@@ -65,9 +65,10 @@ export class AbsenceReportsService {
     const currentTime = new Date().toTimeString().slice(0, 5);
     return SessionRepository.getSessionsForMonth(month)
       .filter((session) =>
-        session.status !== "cancelled" &&
-        (session.sessionDate < today ||
-          (session.sessionDate === today && String(session.endTime || "") <= currentTime)),
+        session.status === "open" ||
+        (session.status !== "cancelled" &&
+          (session.sessionDate < today ||
+            (session.sessionDate === today && String(session.endTime || "") <= currentTime))),
       )
       .slice().sort((a, b) => `${a.groupId}-${a.sessionDate}-${a.startTime}`.localeCompare(`${b.groupId}-${b.sessionDate}-${b.startTime}`)).map((session) => {
       const report = this.getSessionReport(session.id);

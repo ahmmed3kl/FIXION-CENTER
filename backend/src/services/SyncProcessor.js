@@ -404,12 +404,12 @@ class SyncProcessor {
         let cardConflictWithAnotherStudent = false;
         if (cardCode) {
           const cardOwner = await client.query(
-            `SELECT student_id AS owner_id FROM student_cards
-             WHERE center_id = $1 AND card_code = $2
+            `SELECT student_id AS owner_id, center_id FROM student_cards
+             WHERE card_code = $1
              UNION
-             SELECT id AS owner_id FROM students
-             WHERE center_id = $1 AND card_code = $2`,
-            [centerId, cardCode],
+             SELECT id AS owner_id, center_id FROM students
+             WHERE card_code = $1`,
+            [cardCode],
           );
           const otherOwner = cardOwner.rows.find((row) => row.owner_id !== studentId);
           if (otherOwner) {
@@ -417,7 +417,7 @@ class SyncProcessor {
               cardConflictWithAnotherStudent = true;
             } else {
               throw new Error(
-                `Card code '${cardCode}' is already assigned to another student in this center.`,
+                `Card code '${cardCode}' is already assigned in another center.`,
               );
             }
           }

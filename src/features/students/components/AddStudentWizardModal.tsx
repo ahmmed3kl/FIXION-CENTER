@@ -1,4 +1,4 @@
-import { Ionicons } from "@expo/vector-icons";
+import { Ionicons as BaseIonicons } from "@expo/vector-icons";
 import { CameraView, useCameraPermissions } from "expo-camera";
 import React, { useEffect, useMemo, useState } from "react";
 import {
@@ -27,6 +27,15 @@ import { PackageSubscriptionRepository } from "../../packages/PackageSubscriptio
 import { TeacherRepository } from "../../teachers/TeacherRepository";
 import { StudentCardRepository } from "../StudentCardRepository";
 import { StudentRepository } from "../StudentRepository";
+
+// Use the flashlight glyph for the torch control. Older code used the
+// lightning glyph names, which rendered as the wrong symbol on Android/iOS.
+const Ionicons = ({ name, ...props }: React.ComponentProps<typeof BaseIonicons>) => (
+  <BaseIonicons
+    {...props}
+    name={name === "flash" ? "flashlight" : name === "flash-outline" ? "flashlight-outline" : name}
+  />
+);
 
 const DAYS = ["الأحد", "الإثنين", "الثلاثاء", "الأربعاء", "الخميس", "الجمعة", "السبت"];
 

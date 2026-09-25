@@ -37,6 +37,20 @@ export class StudentCardRepository {
     return row || null;
   }
 
+  /** Physical card identifiers are unique across all centers. */
+  static findByCardCodeAnywhere(cardCode: string): StudentCard | null {
+    const db = DatabaseService.getDb();
+    const row = db.getFirstSync<any>(
+      `SELECT id, center_id as centerId, student_id as studentId, card_code as cardCode,
+              status, issued_at as issuedAt, deactivated_at as deactivatedAt, created_at as createdAt
+       FROM student_cards
+       WHERE card_code = ?
+       LIMIT 1`,
+      [cardCode.trim()],
+    );
+    return row || null;
+  }
+
   static getActiveCardByStudentId(studentId: string): StudentCard | null {
     const { centerId } = this.getActiveContext();
     const db = DatabaseService.getDb();
@@ -85,7 +99,7 @@ export class StudentCardRepository {
     const db = DatabaseService.getDb();
 
     // Check if card code is already active in center
-    const existing = this.findByCardCode(trimmedCard);
+    const existing = this.findByCardCodeAnywhere(trimmedCard);
     if (existing) {
       throw new ConflictError(
         `البطاقة رقم (${trimmedCard}) مخصصة لطالب آخر بالفعل ومفعلة.`,
