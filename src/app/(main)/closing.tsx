@@ -448,10 +448,15 @@ export default function ClosingScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: Colors.slate50 },
   header: {
-    padding: 20,
-    backgroundColor: Colors.white,
+    padding: 22,
+    backgroundColor: Colors.cardBackground,
     borderBottomWidth: 1,
     borderBottomColor: Colors.border,
+    shadowColor: Colors.slate900,
+    shadowOpacity: 0.05,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 3 },
+    elevation: 2,
   },
   headerTitle: { fontSize: 20, fontWeight: "700", color: Colors.slate900, textAlign: "right" },
   headerSubtitle: { fontSize: 13, color: Colors.slate500, textAlign: "right", marginTop: 4 },
@@ -475,8 +480,8 @@ const styles = StyleSheet.create({
   content: { padding: 16 },
   card: {
     backgroundColor: Colors.white,
-    borderRadius: 12,
-    padding: 16,
+    borderRadius: 18,
+    padding: 17,
     marginBottom: 12,
     borderWidth: 1,
     borderColor: Colors.border,

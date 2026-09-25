@@ -818,10 +818,15 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     alignItems: "center",
     paddingHorizontal: Spacing.lg,
-    paddingVertical: Spacing.md,
-    backgroundColor: Colors.white,
+    paddingVertical: Spacing.lg,
+    backgroundColor: Colors.cardBackground,
     borderBottomWidth: 1,
     borderBottomColor: Colors.border,
+    shadowColor: Colors.slate900,
+    shadowOpacity: 0.05,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 3 },
+    elevation: 2,
   },
   headerTitle: {
     ...Typography.h3,
@@ -964,7 +969,7 @@ const styles = StyleSheet.create({
   },
   groupProfileCard: {
     backgroundColor: Colors.slate50,
-    borderRadius: BorderRadius.md,
+    borderRadius: BorderRadius.xl,
     padding: Spacing.sm,
     marginTop: Spacing.md,
     borderWidth: 1,
@@ -1064,8 +1069,9 @@ const styles = StyleSheet.create({
     marginTop: Spacing.xs,
   },
   sessionCard: {
-    padding: Spacing.md,
+    padding: Spacing.lg,
     marginBottom: Spacing.sm,
+    borderRadius: BorderRadius.xl,
   },
   sessionCardSelected: {
     borderColor: Colors.primary,

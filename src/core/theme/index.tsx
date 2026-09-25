@@ -83,9 +83,7 @@ const DarkColors: AppColors = {
   slate100: '#1E293B',
   slate50: '#111827',
   background: '#0B1220',
-  // Keep cards light in dark mode so legacy screen text remains high contrast
-  // until each feature adopts fully tokenized theme styles.
-  cardBackground: '#FFFFFF',
+  cardBackground: '#111827',
   border: '#334155',
   textPrimary: '#F8FAFC',
   textSecondary: '#CBD5E1',
@@ -104,10 +102,10 @@ export const Spacing = {
 };
 
 export const BorderRadius = {
-  sm: 6,
-  md: 10,
-  lg: 14,
-  xl: 18,
+  sm: 8,
+  md: 12,
+  lg: 16,
+  xl: 22,
   full: 9999,
 };
 
@@ -165,22 +163,22 @@ export const Shadows = StyleSheet.create({
   subtle: {
     shadowColor: '#0F172A',
     shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.05,
-    shadowRadius: 3,
+    shadowOpacity: 0.06,
+    shadowRadius: 4,
     elevation: 2,
   },
   card: {
     shadowColor: '#0F172A',
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.08,
-    shadowRadius: 6,
+    shadowRadius: 8,
     elevation: 3,
   },
   elevated: {
     shadowColor: '#0F172A',
     shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.12,
-    shadowRadius: 10,
+    shadowOpacity: 0.14,
+    shadowRadius: 14,
     elevation: 5,
   },
 });

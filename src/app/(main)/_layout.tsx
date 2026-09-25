@@ -21,11 +21,20 @@ export default function MainLayout() {
           paddingTop: 8,
           backgroundColor: colors.cardBackground,
           borderTopColor: colors.border,
+          borderTopWidth: 1,
+          elevation: 10,
+          shadowColor: colors.slate900,
+          shadowOpacity: 0.08,
+          shadowRadius: 12,
+          shadowOffset: { width: 0, height: -4 },
         },
         tabBarLabelStyle: {
           fontSize: 12,
-          fontWeight: "600",
+          fontWeight: "700",
+          marginTop: 1,
         },
+        tabBarItemStyle: { minHeight: 48 },
+        tabBarHideOnKeyboard: true,
       }}
     >
       <Tabs.Screen

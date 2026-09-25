@@ -90,6 +90,8 @@ export const AppButton: React.FC<AppButtonProps> = ({
       activeOpacity={0.7}
       onPress={onPress}
       disabled={disabled || loading}
+      accessibilityRole="button"
+      accessibilityState={{ disabled: disabled || loading }}
       style={[
         styles.buttonBase,
         {
@@ -139,7 +141,7 @@ export const AppInput: React.FC<AppInputProps> = ({
   maxLength,
   ...props
 }) => {
-  const { colors, isDarkMode } = useTheme();
+  const { colors } = useTheme();
   const resolvedInputKind =
     inputKind ?? (props.keyboardType === "phone-pad" ? "phone" : undefined);
   const resolvedMaxLength =
@@ -148,9 +150,10 @@ export const AppInput: React.FC<AppInputProps> = ({
       : maxLength;
   return (
     <View style={[styles.inputContainer, containerStyle]}>
-      {label ? <Text style={[styles.inputLabel, { color: isDarkMode ? "#0F172A" : colors.textSecondary }]}>{label}</Text> : null}
+      {label ? <Text style={[styles.inputLabel, { color: colors.textSecondary }]}>{label}</Text> : null}
       <TextInput
-        style={[styles.textInput, { backgroundColor: colors.cardBackground, borderColor: colors.border, color: isDarkMode ? "#0F172A" : colors.textPrimary }, error ? { borderColor: colors.danger } : null, style]}
+        accessibilityLabel={label}
+        style={[styles.textInput, { backgroundColor: colors.cardBackground, borderColor: colors.border, color: colors.textPrimary }, error ? { borderColor: colors.danger } : null, style]}
         placeholderTextColor={colors.textMuted}
         textAlign="right"
         maxLength={resolvedMaxLength}
@@ -317,10 +320,11 @@ export const ErrorState: React.FC<{
 
 const styles = StyleSheet.create({
   buttonBase: {
-    borderRadius: BorderRadius.md,
+    borderRadius: BorderRadius.lg,
     alignItems: "center",
     justifyContent: "center",
     paddingHorizontal: Spacing.lg,
+    minWidth: 44,
   },
   buttonContent: {
     flexDirection: "row",
@@ -346,7 +350,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: Colors.border,
     borderRadius: BorderRadius.md,
-    height: 48,
+    height: 50,
     paddingHorizontal: Spacing.md,
     fontSize: 15,
     color: Colors.textPrimary,
@@ -361,7 +365,7 @@ const styles = StyleSheet.create({
   },
   card: {
     backgroundColor: Colors.cardBackground,
-    borderRadius: BorderRadius.lg,
+    borderRadius: BorderRadius.xl,
     padding: Spacing.lg,
     borderWidth: 1,
     borderColor: Colors.border,
