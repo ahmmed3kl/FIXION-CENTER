@@ -445,8 +445,17 @@ export class SyncRepository {
           payload.isLate = true;
           payload.is_late = true;
           db.runSync(
-            `UPDATE sync_operations SET payload = ? WHERE operation_id = ?`,
+            `UPDATE sync_operations
+             SET payload = ?, status = 'pending', retry_count = 0,
+                 next_retry_at = NULL, last_error = NULL
+             WHERE operation_id = ?`,
             [JSON.stringify(payload), row.operationId],
+          );
+          db.runSync(
+            `UPDATE sync_conflicts
+             SET resolved_at = COALESCE(resolved_at, ?)
+             WHERE center_id = ? AND operation_id = ? AND resolved_at IS NULL`,
+            [new Date().toISOString(), centerId, row.operationId],
           );
         }
       } catch {

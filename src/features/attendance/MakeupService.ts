@@ -274,13 +274,13 @@ export class MakeupService {
       `SELECT s.id, s.center_id as centerId, s.group_id as groupId, s.schedule_id as scheduleId,
               COALESCE(s.subject_id, g.subject_id) as subjectId,
               COALESCE(s.teacher_id, g.teacher_id) as teacherId, s.session_price as sessionPrice,
-              late_after_minutes as lateAfterMinutes, session_date as sessionDate,
-              start_time as startTime, end_time as endTime, status
+              s.late_after_minutes as lateAfterMinutes, s.session_date as sessionDate,
+              s.start_time as startTime, s.end_time as endTime, s.status
        FROM sessions s
        JOIN groups g ON g.center_id = s.center_id AND g.id = s.group_id
        WHERE s.center_id = ? AND s.id != ?
          AND s.status NOT IN ('cancelled', 'closed')
-       ORDER BY session_date ASC, start_time ASC`,
+       ORDER BY s.session_date ASC, s.start_time ASC`,
       [
         centerId,
         originalAbsenceSessionId,
