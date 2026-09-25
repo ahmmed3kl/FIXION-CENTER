@@ -116,6 +116,13 @@ function firstValue(source: any, ...keys: string[]): any {
   return undefined;
 }
 
+function normalizeAdjustmentAmount(adjustment: any): number {
+  const raw = Number(adjustment?.adjustment_amount ?? adjustment?.adjustmentAmount ?? adjustment?.amount ?? 0);
+  if (adjustment?.adjustment_amount !== undefined || adjustment?.adjustmentAmount !== undefined) return raw;
+  const type = String(adjustment?.adjustment_type || adjustment?.adjustmentType || "").toLowerCase();
+  return ["discount", "waiver"].includes(type) ? -Math.abs(raw) : raw;
+}
+
 /**
  * SQLite has a natural unique key for debt cycles in addition to the primary
  * id. A server bootstrap can legitimately contain the same cycle under a
@@ -1501,10 +1508,10 @@ export class SyncEngine {
       }
       if (Array.isArray(data.payments)) {
         for (const p of data.payments) {
-          db.runSync(`INSERT INTO payments (id, operation_id, center_id, student_id, amount, payment_type, payment_method, debt_cycle_id, session_id, subscription_id, created_at, user_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET amount=excluded.amount, payment_type=excluded.payment_type, payment_method=excluded.payment_method, debt_cycle_id=excluded.debt_cycle_id, session_id=excluded.session_id, subscription_id=excluded.subscription_id, updated_at=excluded.created_at`,
-            [p.id, p.operation_id || p.operationId || `bootstrap-payment-${p.id}`, p.center_id || centerId, p.student_id || p.studentId, Number(p.amount || 0), p.payment_type || p.paymentType || "session", p.payment_method || p.paymentMethod || "cash", p.debt_cycle_id || p.debtCycleId || null, p.session_id || p.sessionId || null, p.subscription_id || p.subscriptionId || null, p.created_at || new Date().toISOString(), p.user_id || p.userId || "system"]);
+          db.runSync(`INSERT INTO payments (id, operation_id, center_id, student_id, amount, payment_type, payment_method, payment_date, notes, debt_cycle_id, session_id, subscription_id, is_reversed, created_at, user_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET amount=excluded.amount, payment_type=excluded.payment_type, payment_method=excluded.payment_method, payment_date=excluded.payment_date, notes=excluded.notes, debt_cycle_id=excluded.debt_cycle_id, session_id=excluded.session_id, subscription_id=excluded.subscription_id, is_reversed=excluded.is_reversed, updated_at=excluded.created_at`,
+            [p.id, p.operation_id || p.operationId || `bootstrap-payment-${p.id}`, p.center_id || centerId, p.student_id || p.studentId, Number(p.amount || 0), p.payment_type || p.paymentType || "session", p.payment_method || p.paymentMethod || "cash", p.payment_date || p.paymentDate || (p.created_at || p.createdAt || new Date().toISOString()).slice(0, 10), p.notes || null, p.debt_cycle_id || p.debtCycleId || null, p.session_id || p.sessionId || null, p.subscription_id || p.subscriptionId || null, p.is_reversed ? 1 : 0, p.created_at || p.createdAt || new Date().toISOString(), p.user_id || p.userId || "system"]);
         }
       }
       if (Array.isArray(data.paymentReversals)) {
@@ -1523,7 +1530,7 @@ export class SyncEngine {
           db.runSync(`INSERT INTO debt_adjustments (id, operation_id, center_id, student_id, enrollment_id, debt_cycle_id, amount_before, adjustment_amount, amount_after, reason, created_by, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(operation_id) DO NOTHING`,
-            [a.id, a.operation_id || a.operationId || `bootstrap-adjustment-${a.id}`, a.center_id || centerId, a.student_id || a.studentId || "", a.enrollment_id || a.enrollmentId || null, a.debt_cycle_id || a.debtCycleId, Number(a.amount_before || a.amountBefore || 0), Number(a.adjustment_amount || a.adjustmentAmount || a.amount || 0), Number(a.amount_after || a.amountAfter || a.amount || 0), a.reason || "", a.created_by || a.createdBy || a.user_id || "system", a.created_at || new Date().toISOString()]);
+            [a.id, a.operation_id || a.operationId || `bootstrap-adjustment-${a.id}`, a.center_id || centerId, a.student_id || a.studentId || "", a.enrollment_id || a.enrollmentId || null, a.debt_cycle_id || a.debtCycleId, Number(a.amount_before || a.amountBefore || 0), normalizeAdjustmentAmount(a), Number(a.amount_after || a.amountAfter || (Number(a.amount_before || a.amountBefore || 0) + normalizeAdjustmentAmount(a))), a.reason || "", a.created_by || a.createdBy || a.user_id || "system", a.created_at || new Date().toISOString()]);
         }
       }
       if (Array.isArray(data.advanceCoverages)) {
@@ -2034,9 +2041,9 @@ export class SyncEngine {
           const pay = data;
           const payId = pay.id || change.entityId;
           db.runSync(
-            `INSERT INTO payments (id, operation_id, center_id, student_id, amount, payment_type, created_at, user_id)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT(id) DO UPDATE SET amount=excluded.amount, payment_type=excluded.payment_type`,
+            `INSERT INTO payments (id, operation_id, center_id, student_id, amount, payment_type, payment_method, payment_date, notes, debt_cycle_id, session_id, subscription_id, is_reversed, created_at, user_id)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET amount=excluded.amount, payment_type=excluded.payment_type, payment_method=excluded.payment_method, payment_date=excluded.payment_date, notes=excluded.notes, debt_cycle_id=excluded.debt_cycle_id, session_id=excluded.session_id, subscription_id=excluded.subscription_id, is_reversed=excluded.is_reversed`,
             [
               payId,
               change.operationId || pay.operation_id || pay.operationId || `srv-pay-${payId}`,
@@ -2044,6 +2051,13 @@ export class SyncEngine {
               pay.student_id || pay.studentId,
               parseFloat(pay.amount || 0),
               pay.payment_type || pay.paymentType || "session",
+              pay.payment_method || pay.paymentMethod || "cash",
+              pay.payment_date || pay.paymentDate || (pay.created_at || pay.createdAt || new Date().toISOString()).slice(0, 10),
+              pay.notes || null,
+              pay.debt_cycle_id || pay.debtCycleId || null,
+              pay.session_id || pay.sessionId || null,
+              pay.subscription_id || pay.subscriptionId || null,
+              pay.is_reversed ? 1 : 0,
               pay.created_at || new Date().toISOString(),
               pay.user_id || "system",
             ],
@@ -2061,7 +2075,7 @@ export class SyncEngine {
           db.runSync(`INSERT INTO debt_adjustments (id, operation_id, center_id, student_id, enrollment_id, debt_cycle_id, amount_before, adjustment_amount, amount_after, reason, created_by, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(operation_id) DO NOTHING`,
-            [a.id || change.entityId, change.operationId || `srv-adjustment-${a.id || change.entityId}`, centerId, a.student_id || a.studentId || "", a.enrollment_id || a.enrollmentId || null, a.debt_cycle_id || a.debtCycleId || "", Number(a.amount_before ?? a.amountBefore ?? 0), Number(a.adjustment_amount ?? a.adjustmentAmount ?? a.amount ?? 0), Number(a.amount_after ?? a.amountAfter ?? 0), a.reason || "", a.created_by || a.createdBy || "system", a.created_at || new Date().toISOString()]);
+            [a.id || change.entityId, change.operationId || `srv-adjustment-${a.id || change.entityId}`, centerId, a.student_id || a.studentId || "", a.enrollment_id || a.enrollmentId || null, a.debt_cycle_id || a.debtCycleId || "", Number(a.amount_before ?? a.amountBefore ?? 0), normalizeAdjustmentAmount(a), Number(a.amount_after ?? a.amountAfter ?? (Number(a.amount_before ?? a.amountBefore ?? 0) + normalizeAdjustmentAmount(a))), a.reason || "", a.created_by || a.createdBy || "system", a.created_at || new Date().toISOString()]);
         } else if (entityType === "package") {
           const p = data.package || data;
           db.runSync(`INSERT INTO packages (id, center_id, name, price, max_selections, description, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)

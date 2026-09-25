@@ -140,10 +140,21 @@ export class FinancialCalculationService {
       (p) => !p.isReversed && (p.paymentType === "session" || !!p.sessionId),
     );
 
-    // Track unassigned payments (payments without debtCycleId)
+    // Track unassigned payments (payments without debtCycleId), and direct
+    // payments by cycle.  A payment can be larger than the cycle it was
+    // auto-linked to; any excess must carry forward to the next oldest cycle
+    // instead of disappearing as an unrepresented credit.
     let unassignedPool = activeMonthlyPayments
       .filter((p) => !p.debtCycleId)
       .reduce((sum, p) => sum + p.amount, 0);
+    const directPaymentsByCycle = new Map<string, number>();
+    for (const payment of activeMonthlyPayments) {
+      if (!payment.debtCycleId) continue;
+      directPaymentsByCycle.set(
+        payment.debtCycleId,
+        (directPaymentsByCycle.get(payment.debtCycleId) || 0) + payment.amount,
+      );
+    }
 
     const enrichedCycles: DebtCycle[] = rawCycles.map((cycle) => {
       const cycleAdjs = adjustments.filter((a) => a.debtCycleId === cycle.id);
@@ -153,19 +164,14 @@ export class FinancialCalculationService {
       );
       const effectivePrice = Math.max(0, Number(cycle.cyclePrice) + sumAdjs);
 
-      // Direct payments to this cycle
-      const directPaid = activeMonthlyPayments
-        .filter((p) => p.debtCycleId === cycle.id)
-        .reduce((sum, p) => sum + p.amount, 0);
+      const directPaid = directPaymentsByCycle.get(cycle.id) || 0;
 
-      // Allocate from unassigned pool if needed
-      let paidAmount = directPaid;
-      if (unassignedPool > 0 && paidAmount < effectivePrice) {
-        const needed = effectivePrice - paidAmount;
-        const alloc = Math.min(needed, unassignedPool);
-        paidAmount += alloc;
-        unassignedPool -= alloc;
-      }
+      // Allocate the oldest available money to this cycle.  This preserves
+      // explicit cycle targeting, while carrying both unassigned money and
+      // overpayments to later cycles.
+      const available = directPaid + unassignedPool;
+      const paidAmount = Math.min(effectivePrice, available);
+      unassignedPool = Math.max(0, available - paidAmount);
 
       const remainingDebt = Math.max(0, effectivePrice - paidAmount);
 
@@ -336,8 +342,12 @@ export class FinancialCalculationService {
       (sum, cycle) => sum + Number(cycle.effectivePrice ?? cycle.cyclePrice ?? 0),
       0,
     );
-    const monthlyTotalPaid = monthlyPayments.reduce(
-      (sum, payment) => sum + Number(payment.amount || 0),
+    // Use the cycle allocation rather than only directly-linked payment rows.
+    // An unassigned payment may have been allocated to this group's oldest
+    // cycle by the full calculation, so summing `monthlyPayments` alone can
+    // incorrectly show zero paid in the group profile.
+    const monthlyTotalPaid = cycles.reduce(
+      (sum, cycle) => sum + Number(cycle.paidAmount ?? 0),
       0,
     );
     const monthlyAdjustments = adjustments.reduce(

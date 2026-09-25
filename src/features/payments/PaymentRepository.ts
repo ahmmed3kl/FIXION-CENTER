@@ -15,6 +15,7 @@ import {
     PaymentEvent,
     PaymentReversal,
 } from "../../shared/types";
+import { isValidIsoDate } from "../../shared/utils/validation";
 import { useAuthStore } from "../auth/useAuthStore";
 import { FinancialCalculationService } from "./FinancialCalculationService";
 
@@ -160,6 +161,9 @@ export class PaymentRepository {
     const deviceId = DeviceService.getDeviceIdSync();
     const createdAt = new Date().toISOString();
     const paymentDate = params.paymentDate || createdAt.slice(0, 10);
+    if (!isValidIsoDate(paymentDate)) {
+      throw new ValidationError("تاريخ الدفع غير صحيح.");
+    }
     const paymentMethod = params.paymentMethod || "cash";
 
     // Normalize payment type: 'full' in legacy calls maps to 'monthly'
@@ -179,11 +183,41 @@ export class PaymentRepository {
     let assignedCycleId = params.debtCycleId || null;
     if (!assignedCycleId && normType !== "session") {
       const openCycles = db.getAllSync<any>(
-        `SELECT id FROM debt_cycles WHERE center_id = ? AND student_id = ? AND status != 'paid' ORDER BY start_date ASC`,
-        [centerId, params.studentId],
+        params.subscriptionId
+          ? `SELECT id FROM debt_cycles
+             WHERE center_id = ? AND student_id = ?
+               AND package_subscription_id = ? AND status != 'paid'
+             ORDER BY start_date ASC`
+          : `SELECT id FROM debt_cycles
+             WHERE center_id = ? AND student_id = ? AND status != 'paid'
+             ORDER BY start_date ASC`,
+        params.subscriptionId
+          ? [centerId, params.studentId, params.subscriptionId]
+          : [centerId, params.studentId],
       );
       if (openCycles.length > 0) {
         assignedCycleId = openCycles[0].id;
+      }
+    }
+
+    if (assignedCycleId) {
+      const cycle = db.getFirstSync<{ id: string; studentId: string }>(
+        `SELECT id, student_id as studentId FROM debt_cycles
+         WHERE center_id = ? AND id = ?`,
+        [centerId, assignedCycleId],
+      );
+      if (!cycle || cycle.studentId !== params.studentId) {
+        throw new ValidationError("دورة المديونية لا تخص هذا الطالب.");
+      }
+    }
+
+    if (params.sessionId) {
+      const session = db.getFirstSync<{ id: string }>(
+        `SELECT id FROM sessions WHERE center_id = ? AND id = ?`,
+        [centerId, params.sessionId],
+      );
+      if (!session) {
+        throw new ValidationError("جلسة الحضور غير موجودة في هذا السنتر.");
       }
     }
 

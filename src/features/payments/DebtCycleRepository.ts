@@ -19,8 +19,15 @@ function generateUUID(): string {
   });
 }
 
-/** The billing period is four weeks, independent of calendar month length. */
-export const BILLING_CYCLE_DAYS = 28;
+/**
+ * Billing is monthly, not every 28 days.
+ *
+ * A fixed 28-day period drifts two or three days earlier every calendar
+ * month (for example: 1 Sep -> 29 Sep -> 27 Oct).  That makes a student
+ * appear due in the middle of the month after a few cycles.  We therefore
+ * keep the original billing day as an anchor and advance by calendar months.
+ */
+export const BILLING_CYCLE_MONTHS = 1;
 
 /**
  * Normalizes both SQLite DATE values and ISO timestamps to YYYY-MM-DD.
@@ -57,12 +64,48 @@ function addDays(dateOnly: string, days: number): string {
   return Number.isFinite(date.getTime()) ? date.toISOString().slice(0, 10) : normalized;
 }
 
-export function getNextCycleStartDate(currentStartDate: string): string {
-  return addDays(currentStartDate, BILLING_CYCLE_DAYS);
+function daysInMonth(year: number, month: number): number {
+  return new Date(Date.UTC(year, month, 0)).getUTCDate();
+}
+
+/** Advance by calendar months while preserving the original billing day. */
+function addCalendarMonths(
+  dateOnly: string,
+  months: number,
+  anchorDay?: number,
+): string {
+  const normalized = normalizeDateOnly(dateOnly);
+  if (!normalized || !Number.isFinite(months)) return normalized || "";
+
+  const [year, month, day] = normalized.split("-").map(Number);
+  const anchor = Math.max(1, Math.min(31, anchorDay ?? day));
+  const monthIndex = year * 12 + (month - 1) + months;
+  const targetYear = Math.floor(monthIndex / 12);
+  const targetMonth = ((monthIndex % 12) + 12) % 12 + 1;
+  const targetDay = Math.min(anchor, daysInMonth(targetYear, targetMonth));
+  return `${String(targetYear).padStart(4, "0")}-${String(targetMonth).padStart(2, "0")}-${String(targetDay).padStart(2, "0")}`;
+}
+
+/**
+ * Public helper retained for callers/tests.  For dates such as Jan 31 the
+ * caller that needs a stable Jan-31 anchor should pass anchorDay=31.
+ */
+export function getNextCycleStartDate(
+  currentStartDate: string,
+  anchorDay?: number,
+): string {
+  return addCalendarMonths(currentStartDate, BILLING_CYCLE_MONTHS, anchorDay);
 }
 
 export function getCycleEndDate(nextCycleStartDate: string): string {
   return addDays(nextCycleStartDate, -1);
+}
+
+function getCycleStartForNumber(firstStartDate: string, cycleNumber: number): string {
+  const first = normalizeDateOnly(firstStartDate);
+  if (!first || !Number.isFinite(cycleNumber) || cycleNumber < 1) return "";
+  const anchorDay = Number(first.slice(8, 10));
+  return addCalendarMonths(first, cycleNumber - 1, anchorDay);
 }
 
 export class DebtCycleRepository {
@@ -86,6 +129,76 @@ export class DebtCycleRepository {
       }
     }
     return normalizedStartDate;
+  }
+
+  /**
+   * Package subscriptions are financially effective from the first real
+   * class the student can attend, not from the day the package was entered.
+   * A package may contain several groups, so use the earliest scheduled class
+   * among the selected package options.  Older package rows may not have a
+   * group attached; in that case the subscription start date remains the
+   * safe backwards-compatible fallback.
+   */
+  private static getFirstPackageScheduledDate(
+    subscriptionId: string,
+    packageId: string,
+    startDate: string,
+  ): string {
+    const normalizedStartDate = normalizeDateOnly(startDate);
+    if (!normalizedStartDate) return "";
+
+    const { activeCenterId } = useAuthStore.getState();
+    const db = DatabaseService.getDb();
+    const packageSubjects = db.getAllSync<{
+      subjectId: string;
+      groupId?: string | null;
+    }>(
+      `SELECT subject_id as subjectId, group_id as groupId
+       FROM package_subjects
+       WHERE center_id = ? AND package_id = ?`,
+      [activeCenterId, packageId],
+    );
+
+    // Overrides are created for the options selected on this subscription.
+    // Restricting to them prevents an unselected package group from moving
+    // the billing start date earlier than the student's actual first class.
+    const selectedSubjects = new Set(
+      db
+        .getAllSync<{ subjectId: string }>(
+          `SELECT DISTINCT subject_id as subjectId
+           FROM package_subject_teacher_overrides
+           WHERE center_id = ? AND subscription_id = ?`,
+          [activeCenterId, subscriptionId],
+        )
+        .map((row) => row.subjectId),
+    );
+    const selectedPackageSubjects = selectedSubjects.size
+      ? packageSubjects.filter((row) => selectedSubjects.has(row.subjectId))
+      : packageSubjects;
+    const groupIds = Array.from(
+      new Set(
+        selectedPackageSubjects
+          .map((row) => row.groupId)
+          .filter((groupId): groupId is string => Boolean(groupId)),
+      ),
+    );
+
+    const candidates: string[] = [];
+    for (const groupId of groupIds) {
+      // A group without an active schedule has no "actual class" to anchor
+      // to, so ignore it when another package group has a real schedule.
+      const hasSchedule = db.getFirstSync<{ id: string }>(
+        `SELECT id FROM group_schedules
+         WHERE center_id = ? AND group_id = ? AND status = 'active'
+         LIMIT 1`,
+        [activeCenterId, groupId],
+      );
+      if (hasSchedule) {
+        candidates.push(this.getFirstScheduledDate(groupId, normalizedStartDate));
+      }
+    }
+
+    return candidates.sort()[0] || normalizedStartDate;
   }
   private static getActiveContext() {
     const { activeCenterId, currentUser } = useAuthStore.getState();
@@ -211,8 +324,8 @@ export class DebtCycleRepository {
    * Generates debt cycles for an enrollment up to targetDate.
    * - The first period starts on the first scheduled group class on/after
    *   enrollment.startDate, so booking early does not start the debt clock.
-   * - Every period is exactly 28 days (four weeks), regardless of whether the
-   *   group meets once, twice, or more times per week.
+   * - Every period is one calendar month anchored to the first billing day.
+   *   This prevents the due date from drifting earlier by 2-3 days each month.
    * - Strict enrollment end date bounding: never generates cycles starting after enrollment.endDate.
    * - Inactive / ended enrollments cannot generate new cycles.
    * - Snapshots cycle_price at creation time; changing group prices later only affects future cycles.
@@ -263,24 +376,32 @@ export class DebtCycleRepository {
 
     let nextStart: string;
     let nextCycleNum: number;
+    let firstCycleStart: string;
 
     if (existingCycles.length === 0) {
       // A new enrollment starts financially on the first actual scheduled
       // class on/after the enrollment date, never before the student can attend.
       nextStart = this.getFirstScheduledDate(enrollment.groupId, enrollmentStartDate);
       nextCycleNum = 1;
+      firstCycleStart = nextStart;
     } else {
       const lastCycle = existingCycles[existingCycles.length - 1];
-      // Continue immediately after the stored period. This also migrates
-      // legacy calendar-month cycles without overlapping the new 28-day
-      // periods.
+      firstCycleStart = normalizeDateOnly(existingCycles[0].startDate) || "";
+      if (!firstCycleStart) return existingCycles;
       const lastEndDate = normalizeDateOnly(lastCycle.endDate);
       const lastStartDate = normalizeDateOnly(lastCycle.startDate);
       if (!lastEndDate && !lastStartDate) return existingCycles;
-      nextStart = lastEndDate
-        ? addDays(lastEndDate, 1)
-        : getNextCycleStartDate(lastStartDate!);
       nextCycleNum = lastCycle.cycleNumber + 1;
+      // Use the anchored calendar date for the next cycle.  If older data
+      // used 28-day periods, skip forward until the new cycle is strictly
+      // after the last stored period so historical rows are never changed or
+      // overlapped.
+      nextStart = getCycleStartForNumber(firstCycleStart, nextCycleNum);
+      const lastStoredBoundary = lastEndDate || lastStartDate || "";
+      while (lastStoredBoundary && nextStart <= lastStoredBoundary) {
+        nextCycleNum += 1;
+        nextStart = getCycleStartForNumber(firstCycleStart, nextCycleNum);
+      }
     }
 
     // Generate cycles while nextStart <= cutoffDate and within enrollment validity
@@ -302,7 +423,7 @@ export class DebtCycleRepository {
         cyclePrice = Number(group?.monthlyPrice ?? group?.defaultFee ?? 0);
       }
 
-      const nextCycleStart = getNextCycleStartDate(nextStart);
+      const nextCycleStart = getCycleStartForNumber(firstCycleStart, nextCycleNum + 1);
       const cycleEndDate = enrollmentEndDate && enrollmentEndDate < getCycleEndDate(nextCycleStart)
         ? enrollmentEndDate
         : getCycleEndDate(nextCycleStart);
@@ -379,7 +500,7 @@ export class DebtCycleRepository {
 
   /**
    * Generates debt cycles for a package subscription up to targetDate.
-   * - Exactly ONE debt cycle per 28-day cycle (NOT one per subject).
+   * - Exactly ONE debt cycle per calendar month (NOT one per subject).
    * - Strict subscription end date bounding: never generates cycles starting after subscription.endDate.
    * - Inactive / ended / cancelled subscriptions cannot generate new cycles past their boundary.
    * - Snapshots cycle_price at creation time from packages.price.
@@ -429,19 +550,33 @@ export class DebtCycleRepository {
 
     let nextStart: string;
     let nextCycleNum: number;
+    let firstCycleStart: string;
 
     if (existingCycles.length === 0) {
-      nextStart = subscriptionStartDate;
+      // Billing starts at the first actual class in the earliest scheduled
+      // group selected for this package, while preserving the old start-date
+      // fallback for legacy packages without group/schedule metadata.
+      nextStart = this.getFirstPackageScheduledDate(
+        subscription.id,
+        subscription.packageId,
+        subscriptionStartDate,
+      );
       nextCycleNum = 1;
+      firstCycleStart = nextStart;
     } else {
       const lastCycle = existingCycles[existingCycles.length - 1];
+      firstCycleStart = normalizeDateOnly(existingCycles[0].startDate) || "";
+      if (!firstCycleStart) return existingCycles;
       const lastEndDate = normalizeDateOnly(lastCycle.endDate);
       const lastStartDate = normalizeDateOnly(lastCycle.startDate);
       if (!lastEndDate && !lastStartDate) return existingCycles;
-      nextStart = lastEndDate
-        ? addDays(lastEndDate, 1)
-        : getNextCycleStartDate(lastStartDate!);
       nextCycleNum = lastCycle.cycleNumber + 1;
+      nextStart = getCycleStartForNumber(firstCycleStart, nextCycleNum);
+      const lastStoredBoundary = lastEndDate || lastStartDate || "";
+      while (lastStoredBoundary && nextStart <= lastStoredBoundary) {
+        nextCycleNum += 1;
+        nextStart = getCycleStartForNumber(firstCycleStart, nextCycleNum);
+      }
     }
 
     // Fetch snapshotted package price
@@ -458,7 +593,7 @@ export class DebtCycleRepository {
         break;
       }
 
-      const nextCycleStart = getNextCycleStartDate(nextStart);
+      const nextCycleStart = getCycleStartForNumber(firstCycleStart, nextCycleNum + 1);
       const cycleEndDate = subscriptionEndDate && subscriptionEndDate < getCycleEndDate(nextCycleStart)
         ? subscriptionEndDate
         : getCycleEndDate(nextCycleStart);

@@ -71,6 +71,13 @@ function normalizeDebtCycleStatus(value) {
   return aliases[raw] || "pending";
 }
 
+function normalizePaymentType(value) {
+  const raw = String(value || "session").trim().toLowerCase();
+  if (raw === "full") return "monthly";
+  if (raw === "monthly" || raw === "partial" || raw === "session") return raw;
+  return "session";
+}
+
 // The mobile app historically used `late` as an attendance status, while the
 // PostgreSQL schema stores lateness in `is_late` and only accepts `present`,
 // `absent`, `excused`, or `attended_elsewhere` in status. Normalize at the API
@@ -575,11 +582,13 @@ class SyncProcessor {
         // visible in the ledger and can be linked later by reconciliation.
         const debtCycleId = debtCycleExists.rows.length ? requestedDebtCycleId : null;
         const sessionId = sessionExists.rows.length ? requestedSessionId : null;
+        const paymentType = normalizePaymentType(pay.payment_type || pay.paymentType);
+        const paymentDate = normalizeDateOnly(pay.payment_date || pay.paymentDate) || new Date().toISOString().slice(0, 10);
         // Append-only ledger insert
         await client.query(
           `INSERT INTO payments 
-           (id, operation_id, center_id, student_id, debt_cycle_id, session_id, subscription_id, amount, payment_method, is_reversed, created_at, user_id)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, false, NOW(), $10)
+           (id, operation_id, center_id, student_id, debt_cycle_id, session_id, subscription_id, amount, payment_method, payment_type, payment_date, notes, is_reversed, created_at, user_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, false, NOW(), $13)
            ON CONFLICT (operation_id) DO NOTHING;`,
           [
             pay.id,
@@ -591,6 +600,9 @@ class SyncProcessor {
             pay.subscription_id || pay.subscriptionId || null,
             parseFloat(pay.amount),
             pay.payment_method || pay.paymentMethod || "cash",
+            paymentType,
+            paymentDate,
+            pay.notes || null,
             userId,
           ],
         );
@@ -625,6 +637,14 @@ class SyncProcessor {
 
       case "debt_adjustment": {
         const adj = payload;
+        const rawAmount = Number(adj.adjustment_amount ?? adj.adjustmentAmount ?? adj.amount ?? 0);
+        if (!Number.isFinite(rawAmount) || rawAmount === 0) {
+          throw new Error("Debt adjustment requires a non-zero amount.");
+        }
+        const adjustmentType = adj.adjustment_type || adj.adjustmentType || (rawAmount < 0 ? "discount" : "penalty");
+        const normalizedType = ["discount", "waiver", "penalty", "correction"].includes(adjustmentType)
+          ? adjustmentType
+          : (rawAmount < 0 ? "discount" : "penalty");
         await client.query(
           `INSERT INTO debt_adjustments
            (id, operation_id, center_id, debt_cycle_id, adjustment_type, amount, reason, created_at, user_id)
@@ -635,8 +655,8 @@ class SyncProcessor {
             operationId,
             centerId,
             adj.debt_cycle_id || adj.debtCycleId,
-            adj.adjustment_type || adj.adjustmentType || "discount",
-            parseFloat(adj.amount),
+            normalizedType,
+            Math.abs(rawAmount),
             adj.reason || "تسوية/خصم معتمد",
             userId,
           ],
@@ -1106,23 +1126,27 @@ class SyncProcessor {
           );
           if (enrollmentExists.rows.length === 0) enrollmentId = null;
         }
-        // The deployed PostgreSQL schema does not have a cycle_number column.
-        // Idempotency is provided by the operation/entity id (ON CONFLICT id),
-        // while enrollment/period remain ordinary debt-cycle attributes.
+        // Idempotency is provided by the operation/entity id (ON CONFLICT id).
+        // The cycle identity fields are persisted so bootstrap can reconstruct
+        // group-scoped and multi-cycle balances accurately.
         const targetId = id;
+        const groupId = cycle.group_id || cycle.groupId || null;
+        const packageId = cycle.package_id || cycle.packageId || null;
+        const cycleNumber = Number(cycle.cycle_number ?? cycle.cycleNumber ?? 1);
         const packageSubscriptionId = cycle.package_subscription_id || cycle.packageSubscriptionId || null;
         const cycleType = normalizeDebtCycleType(
           cycle.cycle_type || cycle.cycleType,
           Boolean(packageSubscriptionId),
         );
         await client.query(`INSERT INTO debt_cycles
-          (id, center_id, student_id, enrollment_id, package_subscription_id, cycle_type, period_start, period_end, amount_due, status, notes, created_at, updated_at)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW(),NOW())
+          (id, center_id, student_id, enrollment_id, group_id, package_subscription_id, package_id, cycle_number, cycle_type, period_start, period_end, amount_due, status, notes, created_at, updated_at)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,NOW(),NOW())
           ON CONFLICT (id) DO UPDATE SET student_id=EXCLUDED.student_id, enrollment_id=EXCLUDED.enrollment_id,
-            package_subscription_id=EXCLUDED.package_subscription_id, cycle_type=EXCLUDED.cycle_type,
+            group_id=EXCLUDED.group_id, package_subscription_id=EXCLUDED.package_subscription_id,
+            package_id=EXCLUDED.package_id, cycle_number=EXCLUDED.cycle_number, cycle_type=EXCLUDED.cycle_type,
             period_start=EXCLUDED.period_start, period_end=EXCLUDED.period_end, amount_due=EXCLUDED.amount_due,
             status=EXCLUDED.status, notes=EXCLUDED.notes, updated_at=NOW()`,
-          [targetId, centerId, studentId, enrollmentId, packageSubscriptionId, cycleType, cycle.start_date || cycle.startDate || cycle.period_start, cycle.end_date || cycle.endDate || cycle.period_end, Number(cycle.cycle_price ?? cycle.cyclePrice ?? cycle.amount_due ?? cycle.amountDue ?? 0), normalizeDebtCycleStatus(cycle.status), cycle.notes || null]);
+          [targetId, centerId, studentId, enrollmentId, groupId, packageSubscriptionId, packageId, cycleNumber, cycleType, cycle.start_date || cycle.startDate || cycle.period_start, cycle.end_date || cycle.endDate || cycle.period_end, Number(cycle.cycle_price ?? cycle.cyclePrice ?? cycle.amount_due ?? cycle.amountDue ?? 0), normalizeDebtCycleStatus(cycle.status), cycle.notes || null]);
         break;
       }
 

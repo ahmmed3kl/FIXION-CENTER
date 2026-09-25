@@ -159,6 +159,43 @@ async function ensureSchemaCompatibility() {
     ALTER TABLE notification_deliveries
       ADD COLUMN IF NOT EXISTS provider_message_id VARCHAR(128);
   `);
+
+  // Payment rows are also rebuilt during bootstrap.  Older Neon databases
+  // did not persist the mobile-only payment type/date fields, which caused a
+  // monthly payment to come back to a fresh device as a session payment and
+  // stop reducing monthly debt.  Keep these fields server-side as part of the
+  // canonical cash ledger.
+  await pool.query(`
+    ALTER TABLE payments
+      ADD COLUMN IF NOT EXISTS payment_type VARCHAR(32) NOT NULL DEFAULT 'session',
+      ADD COLUMN IF NOT EXISTS payment_date DATE,
+      ADD COLUMN IF NOT EXISTS notes TEXT;
+    UPDATE payments
+      SET payment_date = COALESCE(payment_date, created_at::date)
+      WHERE payment_date IS NULL;
+  `);
+
+  // Preserve debt-cycle identity when a server snapshot is pulled back to a
+  // device. Without these fields a pulled cycle loses its group/package
+  // relation and every cycle defaults to number 1 locally.
+  await pool.query(`
+    ALTER TABLE debt_cycles
+      ADD COLUMN IF NOT EXISTS group_id VARCHAR(64),
+      ADD COLUMN IF NOT EXISTS package_id VARCHAR(64),
+      ADD COLUMN IF NOT EXISTS cycle_number INTEGER;
+    WITH ranked AS (
+      SELECT id,
+             ROW_NUMBER() OVER (
+               PARTITION BY center_id, COALESCE(enrollment_id, package_subscription_id, id)
+               ORDER BY period_start, id
+             ) AS number
+      FROM debt_cycles
+    )
+    UPDATE debt_cycles c
+       SET cycle_number = ranked.number
+      FROM ranked
+     WHERE c.id = ranked.id AND c.cycle_number IS NULL;
+  `);
 }
 
 module.exports = {

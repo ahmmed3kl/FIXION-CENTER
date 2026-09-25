@@ -238,7 +238,7 @@ describe("Sprint 4 - FIXION Packages, Makeups & Unified Attendance/Financial Int
       expect(cycles[0].cyclePrice).toBe(1500);
       expect(cycles[0].cycleType).toBe("package");
       expect(cycles[0].startDate).toBe("2026-10-01");
-      expect(cycles[0].endDate).toBe("2026-10-28");
+      expect(cycles[0].endDate).toBe("2026-10-31");
     });
 
     it("rejects duplicate active subscription for same student and package", async () => {
@@ -440,7 +440,7 @@ describe("Sprint 4 - FIXION Packages, Makeups & Unified Attendance/Financial Int
     });
 
     it("STRICT PAID BOUNDARY: cancels paid package subscription with effective end date extended through the end of the paid cycle", async () => {
-      // Cancellation date is 2026-10-10, but cycle is paid through 2026-10-28
+      // Cancellation date is 2026-10-10, but cycle is paid through 2026-10-31
       const cancelled = await PackageSubscriptionRepository.cancelSubscription(
         subPaid.id,
         "2026-10-10",
@@ -449,7 +449,7 @@ describe("Sprint 4 - FIXION Packages, Makeups & Unified Attendance/Financial Int
       expect(cancelled.status).toBe("cancelled");
       expect(cancelled.cancellationDate).toBe("2026-10-10");
       // Effective eligibility boundary is extended to cycle end date
-      expect(cancelled.endDate).toBe("2026-10-28");
+      expect(cancelled.endDate).toBe("2026-10-31");
     });
 
     it("prevents generating future debt cycles after cancellation boundary", () => {
@@ -459,7 +459,7 @@ describe("Sprint 4 - FIXION Packages, Makeups & Unified Attendance/Financial Int
         "2026-12-01",
       );
 
-      // Must NOT generate any cycle starting after 2026-10-28
+      // Must NOT generate any cycle starting after 2026-10-31
       expect(cycles.length).toBe(1);
       expect(cycles[0].cycleNumber).toBe(1);
     });

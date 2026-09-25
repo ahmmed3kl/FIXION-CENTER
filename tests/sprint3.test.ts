@@ -9,7 +9,11 @@ import { useAuthStore } from "../src/features/auth/useAuthStore";
 import { EnrollmentRepository } from "../src/features/enrollments/EnrollmentRepository";
 import { GroupRepository } from "../src/features/groups/GroupRepository";
 import { DebtAdjustmentRepository } from "../src/features/payments/DebtAdjustmentRepository";
-import { DebtCycleRepository } from "../src/features/payments/DebtCycleRepository";
+import {
+    DebtCycleRepository,
+    getCycleEndDate,
+    getNextCycleStartDate,
+} from "../src/features/payments/DebtCycleRepository";
 import { FinancialCalculationService } from "../src/features/payments/FinancialCalculationService";
 import { PaymentRepository } from "../src/features/payments/PaymentRepository";
 import { StudentRepository } from "../src/features/students/StudentRepository";
@@ -28,6 +32,18 @@ describe("Sprint 3 - FIXION Financial Core & Cash Payments", () => {
     let studentA: any;
     let groupA: any;
     let enrollmentA: any;
+
+    it("keeps the billing anchor stable instead of drifting every 28 days", () => {
+      expect(getNextCycleStartDate("2026-09-01")).toBe("2026-10-01");
+      expect(getNextCycleStartDate("2026-10-01")).toBe("2026-11-01");
+      expect(getNextCycleStartDate("2026-11-01")).toBe("2026-12-01");
+      expect(getCycleEndDate("2026-10-01")).toBe("2026-09-30");
+
+      // Month-end anchors clamp only for short months, then recover the
+      // original anchor on the following month.
+      expect(getNextCycleStartDate("2026-01-31", 31)).toBe("2026-02-28");
+      expect(getNextCycleStartDate("2026-02-28", 31)).toBe("2026-03-31");
+    });
 
     beforeAll(() => {
       // Create student for cycle tests
@@ -57,7 +73,7 @@ describe("Sprint 3 - FIXION Financial Core & Cash Payments", () => {
       });
     });
 
-    it("generates debt cycle starting on enrollment start_date and lasting exactly 28 days", async () => {
+    it("generates a calendar-month debt cycle anchored to the enrollment start date", async () => {
       const cycles = await DebtCycleRepository.generateCyclesForEnrollment(
         enrollmentA.id,
         "2026-09-20",
@@ -67,12 +83,12 @@ describe("Sprint 3 - FIXION Financial Core & Cash Payments", () => {
       const cycle1 = cycles[0];
       expect(cycle1.cycleNumber).toBe(1);
       expect(cycle1.startDate).toBe("2026-09-15");
-      expect(cycle1.endDate).toBe("2026-10-12");
+      expect(cycle1.endDate).toBe("2026-10-14");
       expect(cycle1.cyclePrice).toBe(600);
       expect(cycle1.status).toBe("open");
     });
 
-    it("generates subsequent cycles in fixed 28-day periods", async () => {
+    it("generates subsequent cycles on the same calendar billing day", async () => {
       const cycles = await DebtCycleRepository.generateCyclesForEnrollment(
         enrollmentA.id,
         "2026-10-25",
@@ -81,8 +97,8 @@ describe("Sprint 3 - FIXION Financial Core & Cash Payments", () => {
       expect(cycles.length).toBe(2);
       const cycle2 = cycles[1];
       expect(cycle2.cycleNumber).toBe(2);
-      expect(cycle2.startDate).toBe("2026-10-13");
-      expect(cycle2.endDate).toBe("2026-11-09");
+      expect(cycle2.startDate).toBe("2026-10-15");
+      expect(cycle2.endDate).toBe("2026-11-14");
       expect(cycle2.cyclePrice).toBe(600);
     });
 
@@ -107,9 +123,28 @@ describe("Sprint 3 - FIXION Financial Core & Cash Payments", () => {
 
       // New cycle 3 snapshots the new group price of 750
       expect(cycles[2].cycleNumber).toBe(3);
-      expect(cycles[2].startDate).toBe("2026-11-10");
-      expect(cycles[2].endDate).toBe("2026-12-07");
+      expect(cycles[2].startDate).toBe("2026-11-15");
+      expect(cycles[2].endDate).toBe("2026-12-14");
       expect(cycles[2].cyclePrice).toBe(750);
+    });
+
+    it("carries a monthly overpayment into the next debt cycles", async () => {
+      // Cycle 1 and 2 are 600 each. The payment is auto-linked to cycle 1,
+      // but the excess must also settle cycle 2.
+      await PaymentRepository.recordPayment({
+        studentId: studentA.id,
+        amount: 1200,
+        paymentType: "monthly",
+      });
+
+      const status = FinancialCalculationService.getStudentFinancialStatus(
+        studentA.id,
+        "2026-11-20",
+      );
+      expect(status.cycles[0].remainingDebt).toBe(0);
+      expect(status.cycles[1].remainingDebt).toBe(0);
+      expect(status.cycles[2].remainingDebt).toBe(750);
+      expect(status.monthlyRemainingDebt).toBe(750);
     });
 
     it("strict enrollment end date bounding: NEVER generates cycles starting after enrollment.endDate", async () => {
@@ -137,11 +172,11 @@ describe("Sprint 3 - FIXION Financial Core & Cash Payments", () => {
       );
 
       // Cycle 1: 2026-09-15 (starts <= 2026-11-20) -> Valid
-      // Cycle 2: 2026-10-13 (starts <= 2026-11-20) -> Valid
-      // Cycle 3: 2026-11-10 (starts <= 2026-11-20) -> Valid
+      // Cycle 2: 2026-10-15 (starts <= 2026-11-20) -> Valid
+      // Cycle 3: 2026-11-15 (starts <= 2026-11-20) -> Valid
       // Next cycle would start 2026-12-08 (> 2026-11-20) -> MUST NOT BE GENERATED!
       expect(cycles.length).toBe(3);
-      expect(cycles[2].startDate).toBe("2026-11-10");
+      expect(cycles[2].startDate).toBe("2026-11-15");
 
       // Verify no cycle starts after 2026-11-20
       const afterEndDate = cycles.filter((c) => c.startDate > "2026-11-20");
