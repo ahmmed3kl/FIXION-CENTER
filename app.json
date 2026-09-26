@@ -38,10 +38,11 @@
     ],
     "extra": {
       "supportsRTL": true,
+      "router": {},
       "eas": {
-        "projectId": "4ba5c4e1-945d-42f3-80b5-c6dfd9f8e7ee"
-      },
-      "router": {}
-    }
+        "projectId": "c322c5dd-f70f-4942-92af-e50464f8b91b"
+      }
+    },
+    "owner": "abdo-m7"
   }
 }
