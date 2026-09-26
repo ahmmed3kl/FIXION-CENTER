@@ -1,6 +1,7 @@
 import { Ionicons } from "@expo/vector-icons";
 import { CameraView, useCameraPermissions } from "expo-camera";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useFocusEffect } from "expo-router";
+import { useCallback, useMemo, useRef, useState } from "react";
 import {
     Alert,
     Modal,
@@ -35,6 +36,7 @@ import { PaymentRepository } from "../../features/payments/PaymentRepository";
 import { SessionRepository } from "../../features/sessions/SessionRepository";
 import { ScannerService } from "../../features/scanner/ScannerService";
 import { StudentRepository } from "../../features/students/StudentRepository";
+import { getLocalDateOnly } from "../../shared/utils/date";
 import {
     AppButton,
     AppCard,
@@ -49,6 +51,16 @@ import {
     Student,
     StudentGroupAttendanceSummary,
 } from "../../shared/types";
+
+const DAYS_OF_WEEK = [
+  "الأحد",
+  "الإثنين",
+  "الثلاثاء",
+  "الأربعاء",
+  "الخميس",
+  "الجمعة",
+  "السبت",
+];
 
 export default function ScannerScreen() {
   const { colors } = useTheme();
@@ -106,7 +118,7 @@ function ScannerContent() {
   const isScanningBlockedRef = useRef(false);
   const lastScannedRef = useRef<{ code: string; at: number } | null>(null);
 
-  useEffect(() => {
+  const refreshTodayData = useCallback(() => {
     try {
       setTodayGroups(AttendanceSessionService.getTodayGroups());
       const sessions = AttendanceSessionService.getTodaySessions();
@@ -114,6 +126,15 @@ function ScannerContent() {
       setAllGroups(GroupRepository.getAll());
     } catch (error) { setSearchError(getUserErrorMessage(error)); }
   }, []);
+
+  // Refresh when the screen becomes active. The old one-time mount load kept
+  // Friday's groups visible after midnight, while Saturday's schedules were
+  // never loaded until the app was fully restarted.
+  useFocusEffect(useCallback(() => {
+    refreshTodayData();
+    const timer = setInterval(refreshTodayData, 60_000);
+    return () => clearInterval(timer);
+  }, [refreshTodayData]));
 
   const startAttendance = () => {
     const selectedGroup = (showAllGroups ? allGroups : todayGroups).find((group) => group.id === selectedGroupId);
@@ -379,7 +400,9 @@ function ScannerContent() {
             {(showAllGroups ? allGroups : todayGroups).length === 0 ? (
               <Text style={styles.emptySessionText}>لا توجد جلسات مجدولة اليوم.</Text>
             ) : (showAllGroups ? allGroups : todayGroups).flatMap((group) => {
-              const schedules = GroupScheduleRepository.getSchedulesForGroup(group.id).filter((item) => item.dayOfWeek === new Date().getDay());
+              const today = getLocalDateOnly();
+              const todayDayOfWeek = new Date(`${today}T12:00:00`).getDay();
+              const schedules = GroupScheduleRepository.getSchedulesForGroup(group.id).filter((item) => item.dayOfWeek === todayDayOfWeek);
               return schedules.map((schedule) => {
               const key = `${group.id}:${schedule.id}`;
               const activeSession = activeSessionsByGroup[key];
@@ -387,7 +410,10 @@ function ScannerContent() {
               return <TouchableOpacity key={key} onPress={() => { setSelectedGroupId(group.id); setSelectedScheduleId(schedule.id); setActiveSessionId(null); }}>
                 <AppCard style={[styles.sessionCard, isSelected ? styles.sessionCardSelected : null]}>
                   <Text style={styles.sessionSubject}>{group.name}</Text>
-                  <Text style={styles.sessionTime}>{group.subjectName || ""} • {group.teacherName || ""}{schedule ? ` • ${formatTimeArabic(schedule.startTime)}` : ""}</Text>
+                  <Text style={styles.sessionTime}>{group.subjectName || ""} • {group.teacherName || ""}</Text>
+                  <Text style={styles.sessionSchedule}>
+                    {DAYS_OF_WEEK[schedule.dayOfWeek] || "اليوم"} • {formatTimeArabic(schedule.startTime)} - {formatTimeArabic(schedule.endTime)}
+                  </Text>
                   <Text style={[styles.groupAttendanceState, activeSession && styles.groupAttendanceStateActive]}>{activeSession ? "● نشطة" : "● غير نشطة"}</Text>
                 </AppCard>
               </TouchableOpacity>;
@@ -1095,6 +1121,11 @@ const createStyles = () => StyleSheet.create({
   sessionTime: {
     ...Typography.captionBold,
     color: Colors.primary,
+  },
+  sessionSchedule: {
+    ...Typography.caption,
+    color: Colors.slate600,
+    marginTop: 3,
   },
   groupAttendanceState: { fontSize: 12, fontWeight: "800", color: Colors.slate500, marginTop: Spacing.sm },
   groupAttendanceStateActive: { color: Colors.successText },

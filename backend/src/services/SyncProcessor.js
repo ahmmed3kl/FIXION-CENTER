@@ -679,26 +679,34 @@ class SyncProcessor {
         const startTime = sess.start_time || sess.startTime || existingSession?.start_time;
         const endTime = sess.end_time || sess.endTime || existingSession?.end_time;
         const action = String(sess.action || context.operationType || "").toLowerCase();
+        const isReconcile = action === "session.reconcile";
         const status = action === "close" ? "closed" : action === "reopen" ? "open" : (sess.status || existingSession?.status || "open");
         if (!sessionId || !groupId || !sessionDate || !startTime || !endTime) {
           throw new Error("Session requires group, date, start time, and end time.");
         }
-        await client.query(
-          `INSERT INTO sessions (id, center_id, group_id, session_date, start_time, end_time, status, created_at, updated_at)
-           VALUES ($1::varchar, $2::varchar, $3::varchar, $4::date, $5::varchar, $6::varchar, $7::varchar, NOW(), NOW())
-           ON CONFLICT (id) DO UPDATE SET
-             status = EXCLUDED.status,
-             updated_at = NOW();`,
-          [
-            sessionId,
-            centerId,
-            groupId,
-            sessionDate,
-            startTime,
-            endTime,
-            status,
-          ],
-        );
+        // Reconciliation is used to repair a local session after an offline
+        // start. If the server already has that session, keep the server's
+        // authoritative status/version instead of turning the repair into a
+        // stale UPDATE (or accidentally reopening a closed session). Create
+        // it only when it is genuinely missing.
+        if (!isReconcile || !existingSession) {
+          await client.query(
+            `INSERT INTO sessions (id, center_id, group_id, session_date, start_time, end_time, status, created_at, updated_at)
+             VALUES ($1::varchar, $2::varchar, $3::varchar, $4::date, $5::varchar, $6::varchar, $7::varchar, NOW(), NOW())
+             ON CONFLICT (id) DO UPDATE SET
+               status = EXCLUDED.status,
+               updated_at = NOW();`,
+            [
+              sessionId,
+              centerId,
+              groupId,
+              sessionDate,
+              startTime,
+              endTime,
+              status,
+            ],
+          );
+        }
         // Expected students are a historical manifest snapshot. Only create
         // it when supplied by a session-generation operation; updates/cancels
         // leave the existing manifest untouched.

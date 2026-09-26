@@ -469,16 +469,26 @@ export class AttendanceRepository {
     const db = DatabaseService.getDb();
     const today = getLocalDateOnly();
     const expectedRows = db.getAllSync<any>(
-      `SELECT ses.session_id as sessionId, ss.group_id as groupId,
+      `SELECT DISTINCT ss.id as sessionId, ss.group_id as groupId,
               g.name as groupName, subj.name as subjectName, t.name as teacherName
-       FROM session_expected_students ses
-       JOIN sessions ss ON ss.center_id = ses.center_id AND ss.id = ses.session_id
-       LEFT JOIN groups g ON g.center_id = ss.center_id AND g.id = ss.group_id
+       FROM sessions ss
+       LEFT JOIN session_expected_students ses
+         ON ses.center_id = ss.center_id AND ses.session_id = ss.id AND ses.student_id = ?
+       LEFT JOIN student_group_enrollments enr
+         ON enr.center_id = ss.center_id AND enr.group_id = ss.group_id
+        AND enr.student_id = ? AND enr.status = 'active'
+        AND enr.start_date <= ss.session_date
+        AND (enr.end_date IS NULL OR enr.end_date >= ss.session_date)
+       LEFT JOIN attendance actual
+         ON actual.center_id = ss.center_id AND actual.session_id = ss.id
+        AND actual.student_id = ?
+       JOIN groups g ON g.center_id = ss.center_id AND g.id = ss.group_id
        LEFT JOIN subjects subj ON subj.center_id = g.center_id AND subj.id = g.subject_id
        LEFT JOIN teachers t ON t.center_id = g.center_id AND t.id = g.teacher_id
-       WHERE ses.center_id = ? AND ses.student_id = ?
-         AND ss.status <> 'cancelled' AND ss.session_date <= ?`,
-      [centerId, studentId, today],
+       WHERE ss.center_id = ?
+         AND ss.status <> 'cancelled' AND ss.session_date <= ?
+         AND (ses.student_id IS NOT NULL OR enr.id IS NOT NULL OR actual.id IS NOT NULL)`,
+      [studentId, studentId, studentId, centerId, today],
     );
     const attendanceRows = db.getAllSync<any>(
       `SELECT a.id, a.session_id as sessionId, a.status,

@@ -1,7 +1,7 @@
 import { Ionicons } from "@expo/vector-icons";
 import DateTimePicker from "@expo/ui/community/datetime-picker";
-import { useRouter } from "expo-router";
-import { useEffect, useMemo, useState } from "react";
+import { useFocusEffect, useRouter } from "expo-router";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
     Alert,
     FlatList,
@@ -200,11 +200,13 @@ export default function AcademicScreen() {
 
   const loadData = () => {
     try {
+      const currentDate = getLocalDateOnly();
       setTeachers(TeacherRepository.getAll());
       setSubjects(SubjectRepository.getAll());
       setGroups(GroupRepository.getAll(true));
-      setTodayGroupIds(GroupRepository.getGroupsForDay(new Date().getDay()).map((group) => group.id));
-      setTodaySessions(SessionGenerationService.getSessionsForDate(todayStr));
+      const todayDayOfWeek = new Date(`${currentDate}T12:00:00`).getDay();
+      setTodayGroupIds(GroupRepository.getGroupsForDay(todayDayOfWeek).map((group) => group.id));
+      setTodaySessions(SessionGenerationService.getSessionsForDate(currentDate));
       setAcademicStages(CenterAcademicStageRepository.getStages());
     } catch (e: any) {
       console.error("Academic loadData error:", e);
@@ -235,6 +237,12 @@ export default function AcademicScreen() {
         .catch(() => {});
     }
   }, [activeCenterId]);
+
+  // The weekday changes while the app can remain open overnight. Refresh the
+  // "today's groups" filter whenever this screen becomes visible again.
+  useFocusEffect(useCallback(() => {
+    loadData();
+  }, [activeCenterId]));
 
   // 1. Teachers Actions
   const handleCreateTeacher = () => {

@@ -57,17 +57,39 @@ export class StudentRepository {
   }
 
   static findByCardCode(normalizedCardCode: string): Student | null {
-    // Canonical source of truth: student_cards table strictly
+    // Prefer the canonical card table. Older local databases (and devices
+    // restored after a server reset) can contain a valid student row whose
+    // student_cards row was not bootstrapped because that card operation was
+    // conflicted. Do not make attendance unusable in that case: fall back to
+    // the student's center-scoped card_code while the card row is repaired by
+    // the normal bootstrap/sync flow.
     const card = StudentCardRepository.findByCardCode(normalizedCardCode);
-    if (!card) return null;
+    if (card) {
+      const student = this.findByIdInternal(card.studentId);
+      if (!student) return null;
 
-    const student = this.findByIdInternal(card.studentId);
-    if (!student) return null;
+      return {
+        ...student,
+        cardCode: card.cardCode,
+      };
+    }
 
-    return {
-      ...student,
-      cardCode: card.cardCode,
-    };
+    const { centerId } = this.getActiveContext();
+    const db = DatabaseService.getDb();
+    const legacyStudent = db.getFirstSync<any>(
+      `SELECT s.id
+       FROM students s
+       LEFT JOIN student_cards linked_card
+         ON linked_card.student_id = s.id AND linked_card.card_code = ?
+       WHERE s.center_id = ? AND s.status = 'active'
+         AND (s.card_code = ? OR linked_card.id IS NOT NULL)
+       LIMIT 1`,
+      [normalizedCardCode, centerId, normalizedCardCode],
+    );
+    if (!legacyStudent) return null;
+
+    const student = this.findByIdInternal(legacyStudent.id);
+    return student ? { ...student, cardCode: normalizedCardCode } : null;
   }
 
   static findByStudentCode(studentCode: string): Student | null {

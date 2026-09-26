@@ -248,6 +248,9 @@ export class AttendanceSessionService {
       }
     }
     const deviceId = DeviceService.getDeviceIdSync();
+    const reconciliationUpdatedAt = sessionWasActivated
+      ? new Date().toISOString()
+      : undefined;
     const expectedStudentIds = db.getAllSync<{ studentId: string }>(
       "SELECT student_id as studentId FROM session_expected_students WHERE center_id = ? AND session_id = ?",
       [session.centerId, session.id],
@@ -274,7 +277,7 @@ export class AttendanceSessionService {
         endTime: session.endTime,
         expectedStudentIds,
         status: "open",
-        updatedAt: new Date().toISOString(),
+        ...(reconciliationUpdatedAt ? { updatedAt: reconciliationUpdatedAt } : {}),
       },
     });
     // This is intentionally outside the activation branch: a locally open
