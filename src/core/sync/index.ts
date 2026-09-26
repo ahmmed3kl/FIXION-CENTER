@@ -169,6 +169,16 @@ function upsertLocalDebtCycle(db: any, cycle: any, centerId: string): void {
         start_date, end_date, cycle_price, status, created_at, updated_at,
         package_subscription_id, cycle_type)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(center_id, enrollment_id, cycle_number) DO UPDATE SET
+       student_id = excluded.student_id,
+       group_id = excluded.group_id,
+       start_date = excluded.start_date,
+       end_date = excluded.end_date,
+       cycle_price = excluded.cycle_price,
+       status = excluded.status,
+       updated_at = excluded.updated_at,
+       package_subscription_id = excluded.package_subscription_id,
+       cycle_type = excluded.cycle_type
      ON CONFLICT(id) DO UPDATE SET
        student_id = excluded.student_id,
        enrollment_id = excluded.enrollment_id,
@@ -1031,6 +1041,10 @@ export class SyncEngine {
       teacher_subject: new Set((snapshot.teacherSubjects || []).map((row: any) => String(row.id))),
       group: new Set((snapshot.groups || []).map((row: any) => String(row.id))),
       group_schedule: new Set((snapshot.schedules || []).map((row: any) => String(row.id))),
+      session: new Set((snapshot.sessions || []).map((row: any) => String(row.id))),
+      expected_student: new Set((snapshot.expectedStudents || []).map((row: any) => String(row.id))),
+      attendance: new Set((snapshot.attendance || []).map((row: any) => String(row.id))),
+      payment: new Set((snapshot.payments || []).map((row: any) => String(row.id))),
       student: new Set((snapshot.students || []).map((row: any) => String(row.id))),
       enrollment: new Set((snapshot.enrollments || []).map((row: any) => String(row.id))),
       debt_cycle: new Set((snapshot.debtCycles || []).map((row: any) => String(row.id))),
@@ -1129,6 +1143,50 @@ export class SyncEngine {
       [centerId],
     );
     for (const schedule of schedules) queue("group_schedule", schedule.id, schedule);
+
+    // Sessions, attendance, and payments are operational records too. If a
+    // server reset or a previously failed push removed them from the remote
+    // snapshot, retain the durable local history and repair it on the next
+    // sync instead of making dashboards appear empty after app restart.
+    const sessions = db.getAllSync<any>(
+      `SELECT id, group_id as groupId, schedule_id as scheduleId,
+              subject_id as subjectId, teacher_id as teacherId,
+              session_price as sessionPrice, late_after_minutes as lateAfterMinutes,
+              session_date as sessionDate, start_time as startTime, end_time as endTime,
+              status, created_at as createdAt, updated_at as updatedAt
+       FROM sessions WHERE center_id = ?`,
+      [centerId],
+    );
+    for (const session of sessions) {
+      const expectedStudentIds = db.getAllSync<any>(
+        `SELECT student_id as studentId FROM session_expected_students
+         WHERE center_id = ? AND session_id = ?`,
+        [centerId, session.id],
+      ).map((row: any) => row.studentId);
+      queue("session", session.id, { ...session, expectedStudentIds });
+    }
+
+    const attendance = db.getAllSync<any>(
+      `SELECT id, student_id as studentId, session_id as sessionId,
+              check_in_time as checkInTime, status, is_late as isLate,
+              attendance_type as attendanceType,
+              original_absence_id as originalAbsenceId,
+              operation_id as operationId
+       FROM attendance WHERE center_id = ?`,
+      [centerId],
+    );
+    for (const row of attendance) queue("attendance", row.id, row);
+
+    const payments = db.getAllSync<any>(
+      `SELECT id, student_id as studentId, amount, payment_type as paymentType,
+              payment_method as paymentMethod, payment_date as paymentDate,
+              notes, debt_cycle_id as debtCycleId, session_id as sessionId,
+              subscription_id as subscriptionId, is_reversed as isReversed,
+              created_at as createdAt, user_id as userId
+       FROM payments WHERE center_id = ?`,
+      [centerId],
+    );
+    for (const payment of payments) queue("payment", payment.id, payment);
 
     const students = db.getAllSync<any>(
       `SELECT id, student_code as studentCode, full_name as fullName,
@@ -1523,7 +1581,20 @@ export class SyncEngine {
                teacher_id = excluded.teacher_id,
                session_price = excluded.session_price,
                late_after_minutes = excluded.late_after_minutes,
-               updated_at = excluded.updated_at`,
+               updated_at = excluded.updated_at
+             ON CONFLICT(group_id, schedule_id, session_date) DO UPDATE SET
+               group_id = excluded.group_id,
+               session_date = excluded.session_date,
+               start_time = excluded.start_time,
+               end_time = excluded.end_time,
+               status = excluded.status,
+               schedule_id = excluded.schedule_id,
+               subject_id = excluded.subject_id,
+               teacher_id = excluded.teacher_id,
+               session_price = excluded.session_price,
+               late_after_minutes = excluded.late_after_minutes,
+               updated_at = excluded.updated_at
+             `,
             [
               sess.id,
               sess.center_id || centerId,
@@ -1547,7 +1618,8 @@ export class SyncEngine {
         for (const expected of data.expectedStudents) {
           db.runSync(`INSERT INTO session_expected_students (id, center_id, session_id, student_id, created_at)
             VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET session_id=excluded.session_id, student_id=excluded.student_id`,
+            ON CONFLICT(id) DO UPDATE SET session_id=excluded.session_id, student_id=excluded.student_id
+            ON CONFLICT(session_id, student_id) DO UPDATE SET created_at=excluded.created_at`,
             [expected.id, expected.center_id || centerId, expected.session_id || expected.sessionId, expected.student_id || expected.studentId, expected.created_at || new Date().toISOString()]);
         }
       }
@@ -1589,7 +1661,8 @@ export class SyncEngine {
         for (const a of data.attendance) {
           db.runSync(`INSERT INTO attendance (id, center_id, student_id, session_id, check_in_time, status, is_late, attendance_type, original_absence_id, operation_id)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET status=excluded.status, check_in_time=excluded.check_in_time, is_late=excluded.is_late, attendance_type=excluded.attendance_type, original_absence_id=excluded.original_absence_id`,
+            ON CONFLICT(id) DO UPDATE SET status=excluded.status, check_in_time=excluded.check_in_time, is_late=excluded.is_late, attendance_type=excluded.attendance_type, original_absence_id=excluded.original_absence_id
+            ON CONFLICT(session_id, student_id) DO UPDATE SET status=excluded.status, check_in_time=excluded.check_in_time, is_late=excluded.is_late, attendance_type=excluded.attendance_type, original_absence_id=excluded.original_absence_id`,
             [a.id, a.center_id || centerId, a.student_id || a.studentId, a.session_id || a.sessionId, a.check_in_time || a.checkInTime || a.created_at || new Date().toISOString(), (a.is_late || a.isLate) ? "late" : (a.status || "present"), a.is_late || a.isLate ? 1 : 0, a.attendance_type || a.attendanceType || "present", a.original_absence_id || a.originalAbsenceId || null, a.operation_id || a.operationId || `bootstrap-attendance-${a.id}`]);
         }
       }
@@ -1597,7 +1670,8 @@ export class SyncEngine {
         for (const p of data.payments) {
           db.runSync(`INSERT INTO payments (id, operation_id, center_id, student_id, amount, payment_type, payment_method, payment_date, notes, debt_cycle_id, session_id, subscription_id, is_reversed, created_at, user_id)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET amount=excluded.amount, payment_type=excluded.payment_type, payment_method=excluded.payment_method, payment_date=excluded.payment_date, notes=excluded.notes, debt_cycle_id=excluded.debt_cycle_id, session_id=excluded.session_id, subscription_id=excluded.subscription_id, is_reversed=excluded.is_reversed, updated_at=excluded.created_at`,
+            ON CONFLICT(id) DO UPDATE SET amount=excluded.amount, payment_type=excluded.payment_type, payment_method=excluded.payment_method, payment_date=excluded.payment_date, notes=excluded.notes, debt_cycle_id=excluded.debt_cycle_id, session_id=excluded.session_id, subscription_id=excluded.subscription_id, is_reversed=excluded.is_reversed, updated_at=excluded.created_at
+            ON CONFLICT(operation_id) DO UPDATE SET amount=excluded.amount, payment_type=excluded.payment_type, payment_method=excluded.payment_method, payment_date=excluded.payment_date, notes=excluded.notes, debt_cycle_id=excluded.debt_cycle_id, session_id=excluded.session_id, subscription_id=excluded.subscription_id, is_reversed=excluded.is_reversed, updated_at=excluded.created_at`,
             [p.id, p.operation_id || p.operationId || `bootstrap-payment-${p.id}`, p.center_id || centerId, p.student_id || p.studentId, Number(p.amount || 0), p.payment_type || p.paymentType || "session", p.payment_method || p.paymentMethod || "cash", p.payment_date || p.paymentDate || (p.created_at || p.createdAt || new Date().toISOString()).slice(0, 10), p.notes || null, p.debt_cycle_id || p.debtCycleId || null, p.session_id || p.sessionId || null, p.subscription_id || p.subscriptionId || null, p.is_reversed ? 1 : 0, p.created_at || p.createdAt || new Date().toISOString(), p.user_id || p.userId || "system"]);
         }
       }
@@ -1962,6 +2036,15 @@ export class SyncEngine {
                teacher_id = excluded.teacher_id,
                session_price = excluded.session_price,
                late_after_minutes = excluded.late_after_minutes,
+               updated_at = excluded.updated_at
+             ON CONFLICT(group_id, schedule_id, session_date) DO UPDATE SET
+               start_time = excluded.start_time,
+               end_time = excluded.end_time,
+               status = excluded.status,
+               subject_id = excluded.subject_id,
+               teacher_id = excluded.teacher_id,
+               session_price = excluded.session_price,
+               late_after_minutes = excluded.late_after_minutes,
                updated_at = excluded.updated_at`,
             [
               sessionId,
@@ -2110,7 +2193,8 @@ export class SyncEngine {
           db.runSync(
             `INSERT INTO attendance (id, center_id, student_id, session_id, check_in_time, status, is_late, attendance_type, original_absence_id, operation_id)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT(id) DO UPDATE SET status=excluded.status, check_in_time=excluded.check_in_time, is_late=excluded.is_late, attendance_type=excluded.attendance_type, original_absence_id=excluded.original_absence_id`,
+             ON CONFLICT(id) DO UPDATE SET status=excluded.status, check_in_time=excluded.check_in_time, is_late=excluded.is_late, attendance_type=excluded.attendance_type, original_absence_id=excluded.original_absence_id
+             ON CONFLICT(session_id, student_id) DO UPDATE SET status=excluded.status, check_in_time=excluded.check_in_time, is_late=excluded.is_late, attendance_type=excluded.attendance_type, original_absence_id=excluded.original_absence_id`,
             [
               attId,
               centerId,
@@ -2130,7 +2214,8 @@ export class SyncEngine {
           db.runSync(
             `INSERT INTO payments (id, operation_id, center_id, student_id, amount, payment_type, payment_method, payment_date, notes, debt_cycle_id, session_id, subscription_id, is_reversed, created_at, user_id)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT(id) DO UPDATE SET amount=excluded.amount, payment_type=excluded.payment_type, payment_method=excluded.payment_method, payment_date=excluded.payment_date, notes=excluded.notes, debt_cycle_id=excluded.debt_cycle_id, session_id=excluded.session_id, subscription_id=excluded.subscription_id, is_reversed=excluded.is_reversed`,
+             ON CONFLICT(id) DO UPDATE SET amount=excluded.amount, payment_type=excluded.payment_type, payment_method=excluded.payment_method, payment_date=excluded.payment_date, notes=excluded.notes, debt_cycle_id=excluded.debt_cycle_id, session_id=excluded.session_id, subscription_id=excluded.subscription_id, is_reversed=excluded.is_reversed
+             ON CONFLICT(operation_id) DO UPDATE SET amount=excluded.amount, payment_type=excluded.payment_type, payment_method=excluded.payment_method, payment_date=excluded.payment_date, notes=excluded.notes, debt_cycle_id=excluded.debt_cycle_id, session_id=excluded.session_id, subscription_id=excluded.subscription_id, is_reversed=excluded.is_reversed`,
             [
               payId,
               change.operationId || pay.operation_id || pay.operationId || `srv-pay-${payId}`,

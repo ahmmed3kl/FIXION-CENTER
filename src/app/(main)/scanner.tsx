@@ -469,12 +469,11 @@ function ScannerContent() {
                 )}
                 <View style={styles.cameraControls}>
                   <AppButton
-                    title={isTorchOn ? "Ø¥ØºÙ„Ø§Ù‚ Ø§Ù„ÙÙ„Ø§Ø´" : "ØªØ´ØºÙŠÙ„ Ø§Ù„ÙÙ„Ø§Ø´"}
+                    title={isTorchOn ? "إغلاق الفلاش" : "تشغيل الفلاش"}
                     variant="outline"
                     size="sm"
                     onPress={() => setIsTorchOn((current) => !current)}
                     icon={<Ionicons name="flashlight-outline" size={18} color={Colors.primary} />}
-                    textStyle={{ fontSize: 0 }}
                     style={{ flex: 1 }}
                   />
                 <AppButton
