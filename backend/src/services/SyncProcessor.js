@@ -577,9 +577,16 @@ class SyncProcessor {
               [centerId, requestedSessionId],
             )
           : { rows: [] };
-        // Relations can be absent when an old offline payment is retried
-        // after a server reset. Keep the cash event uploadable; it remains
-        // visible in the ledger and can be linked later by reconciliation.
+        // Never accept a payment while silently dropping its relation. That
+        // makes the receipt look synced but prevents it from reducing the
+        // student's debt (and breaks session financial reports). Let the
+        // client retry after the parent record has been uploaded.
+        if (requestedDebtCycleId && !debtCycleExists.rows.length) {
+          throw new Error("PAYMENT_DEBT_CYCLE_NOT_FOUND");
+        }
+        if (requestedSessionId && !sessionExists.rows.length) {
+          throw new Error("PAYMENT_SESSION_NOT_FOUND");
+        }
         const debtCycleId = debtCycleExists.rows.length ? requestedDebtCycleId : null;
         const sessionId = sessionExists.rows.length ? requestedSessionId : null;
         const paymentType = normalizePaymentType(pay.payment_type || pay.paymentType);
@@ -1227,10 +1234,10 @@ class SyncProcessor {
         const exam = payload.exam || payload;
         const id = exam.id || context.entityId;
         if (!id || !exam.name || !exam.grade) throw new Error("Grade exam requires name and grade.");
-        await client.query(`INSERT INTO grade_exams (id, center_id, name, grade, max_score, status, created_at, updated_at)
-          VALUES ($1,$2,$3,$4,$5,$6,COALESCE($7,NOW()),NOW())
-          ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name, grade=EXCLUDED.grade, max_score=EXCLUDED.max_score, status=EXCLUDED.status, updated_at=NOW()`,
-          [id, centerId, exam.name, exam.grade, Number(exam.max_score ?? exam.maxScore ?? 100), exam.status || "active", exam.created_at || exam.createdAt || null]);
+          await client.query(`INSERT INTO grade_exams (id, center_id, name, grade, group_id, max_score, status, created_at, updated_at)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,COALESCE($8,NOW()),NOW())
+          ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name, grade=EXCLUDED.grade, group_id=EXCLUDED.group_id, max_score=EXCLUDED.max_score, status=EXCLUDED.status, updated_at=NOW()`,
+          [id, centerId, exam.name, exam.grade, exam.group_id || exam.groupId || null, Number(exam.max_score ?? exam.maxScore ?? 100), exam.status || "active", exam.created_at || exam.createdAt || null]);
         break;
       }
 

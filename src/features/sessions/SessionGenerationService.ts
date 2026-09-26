@@ -94,11 +94,14 @@ export class SessionGenerationService {
         const group = groupsMap.get(sched.groupId);
         if (!group) continue;
 
-        // Check if session already exists for (group_id, schedule_id, session_date)
+        // There is one attendance session per group/day. A schedule is shown
+        // as metadata, but must not cause a second session for the same date.
         const existingSession = db.getFirstSync<Session>(
           `SELECT id FROM sessions
-           WHERE center_id = ? AND group_id = ? AND schedule_id = ? AND session_date = ?`,
-          [centerId, sched.groupId, sched.id, dateStr],
+           WHERE center_id = ? AND group_id = ? AND session_date = ?
+             AND status <> 'cancelled'
+           ORDER BY created_at ASC LIMIT 1`,
+          [centerId, sched.groupId, dateStr],
         );
 
         if (existingSession) {

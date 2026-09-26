@@ -25,7 +25,7 @@ export default function GradesScreen() {
 
   const loadGroup = useCallback((group: Group) => {
     const nextStudents = GradeBookRepository.getStudentsForGroup(group.id);
-    const nextExams = GradeBookRepository.getExams(group.grade);
+    const nextExams = GradeBookRepository.getExams(group.id, group.grade);
     const nextScores = GradeBookRepository.getScores(nextExams.map((e) => e.id), nextStudents.map((s) => s.id));
     const values: Record<string, string> = {};
     nextScores.forEach((row: GradeScore) => { values[`${row.examId}:${row.studentId}`] = row.score === null ? "" : String(row.score); });
@@ -49,7 +49,7 @@ export default function GradesScreen() {
   const selectGroup = (group: Group) => { selectedGroupRef.current = group; setSelectedGroup(group); loadGroup(group); };
   const createExam = () => {
     if (!selectedGroup) return;
-    try { GradeBookRepository.createExam(examName, selectedGroup.grade, Number(maxScore)); setExamName(""); setMaxScore("100"); setShowExamForm(false); loadGroup(selectedGroup); }
+    try { GradeBookRepository.createExam(examName, selectedGroup.id, selectedGroup.grade, Number(maxScore)); setExamName(""); setMaxScore("100"); setShowExamForm(false); loadGroup(selectedGroup); }
     catch (error: any) { Alert.alert("بيانات غير صحيحة", error?.message || "تعذر إضافة الامتحان."); }
   };
   const saveScore = (exam: GradeExam, student: Student, value: string) => {

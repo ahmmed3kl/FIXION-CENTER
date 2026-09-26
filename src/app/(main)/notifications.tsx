@@ -244,6 +244,7 @@ export default function NotificationsScreen() {
           ))}
 
           <View style={styles.variablesInfo}>
+            <Text style={styles.varItem}>{"{{student_first_name}}"} : الاسم الأول للطالب</Text>
             <Text style={styles.varTitle}>المتغيرات المتاحة في القوالب:</Text>
             <Text style={styles.varItem}>• {"{{student_name}}"} : اسم الطالب</Text>
             <Text style={styles.varItem}>• {"{{parent_name}}"} : اسم ولي الأمر</Text>

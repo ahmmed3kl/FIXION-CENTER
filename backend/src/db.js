@@ -86,6 +86,7 @@ async function ensureSchemaCompatibility() {
       center_id TEXT NOT NULL,
       name TEXT NOT NULL,
       grade VARCHAR(128) NOT NULL,
+      group_id VARCHAR(64),
       max_score NUMERIC(10, 2) NOT NULL DEFAULT 100,
       status VARCHAR(32) NOT NULL DEFAULT 'active',
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -102,6 +103,8 @@ async function ensureSchemaCompatibility() {
       CONSTRAINT uq_grade_score UNIQUE (center_id, exam_id, student_id)
     );
     CREATE INDEX IF NOT EXISTS idx_grade_exams_grade ON grade_exams(center_id, grade, status);
+    ALTER TABLE grade_exams ADD COLUMN IF NOT EXISTS group_id VARCHAR(64);
+    CREATE INDEX IF NOT EXISTS idx_grade_exams_group ON grade_exams(center_id, group_id, grade, status);
     CREATE INDEX IF NOT EXISTS idx_grade_scores_exam ON grade_scores(center_id, exam_id);
   `);
   await pool.query(`

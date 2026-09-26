@@ -106,9 +106,11 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({ vi
   const [schedules, setSchedules] = useState<Record<string, GroupSchedule[]>>({});
   const [teachers, setTeachers] = useState<Teacher[]>([]);
   const [levelFilter, setLevelFilter] = useState("all");
+  const [subjectFilter, setSubjectFilter] = useState("all");
   const [teacherFilter, setTeacherFilter] = useState("all");
   const [teacherSearch, setTeacherSearch] = useState("");
   const [showLevels, setShowLevels] = useState(false);
+  const [showSubjects, setShowSubjects] = useState(false);
   const [showTeachers, setShowTeachers] = useState(false);
   const [selectedGroupIds, setSelectedGroupIds] = useState<string[]>([]);
   const [availablePackages, setAvailablePackages] = useState<Package[]>([]);
@@ -143,6 +145,7 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({ vi
   const selectGrade = (value: string) => {
     setGrade(value);
     setLevelFilter(value);
+    setSubjectFilter("all");
     setTeacherFilter("all");
     setSelectedGroupIds([]);
     setErrors((old) => ({ ...old, grade: undefined }));
@@ -151,7 +154,7 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({ vi
     () => {
       const gradeTeacherIds = new Set(
         groups
-          .filter((group) => group.status === "active" && (!grade || group.grade === grade))
+          .filter((group) => group.status === "active" && (!grade || group.grade === grade) && (subjectFilter === "all" || group.subjectId === subjectFilter))
           .map((group) => group.teacherId),
       );
       return smartSearch(
@@ -160,13 +163,18 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({ vi
         [{ get: (teacher) => teacher.name }],
       );
     },
-    [teacherSearch, teachers, groups, grade],
+    [teacherSearch, teachers, groups, grade, subjectFilter],
   );
+  const visibleSubjects = useMemo(() => {
+    const ids = new Set(groups.filter((group) => group.status === "active" && (!grade || group.grade === grade)).map((group) => group.subjectId).filter(Boolean));
+    return Array.from(ids).map((id) => ({ id, name: groups.find((group) => group.subjectId === id)?.subjectName || "المادة" }));
+  }, [groups, grade]);
   const visibleGroups = useMemo(() => groups.filter((group) => {
     if (group.status !== "active") return false;
     if (levelFilter !== "all" && group.grade !== levelFilter) return false;
+    if (subjectFilter !== "all" && group.subjectId !== subjectFilter) return false;
     return teacherFilter === "all" || group.teacherId === teacherFilter;
-  }), [groups, levelFilter, teacherFilter]);
+  }), [groups, levelFilter, subjectFilter, teacherFilter]);
   const selectedGroups = useMemo(() => groups.filter((group) => selectedGroupIds.includes(group.id)), [groups, selectedGroupIds]);
   const selectedPackage = availablePackages.find((item) => item.id === packageId);
   const currentPackageOptions = packageId ? packageOptions[packageId] || [] : [];
@@ -176,7 +184,7 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({ vi
     setCameraActive(false); setTorchEnabled(false); setCardCode(""); setScanError(null);
     setFullName(""); setPhone(""); setParentPhone(""); setGrade(""); setNotes(""); setErrors({});
     setPhoneDuplicateWarning(false); setParentPhoneDuplicateWarning(false);
-    setLevelFilter("all"); setTeacherFilter("all"); setTeacherSearch(""); setShowLevels(false); setShowTeachers(false); setSelectedGroupIds([]);
+    setLevelFilter("all"); setSubjectFilter("all"); setTeacherFilter("all"); setTeacherSearch(""); setShowLevels(false); setShowSubjects(false); setShowTeachers(false); setSelectedGroupIds([]);
     setPackageId(""); setPackageOptionIds([]); setPackageTeacherIds({}); setPackageTeacherSearch(""); setSubmitting(false);
   };
 
@@ -236,7 +244,12 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({ vi
     setErrors((old) => old[key] ? ({ ...old, [key]: undefined }) : old);
   };
 
-  const toggleGroup = (groupId: string) => setSelectedGroupIds((old) => old.includes(groupId) ? old.filter((id) => id !== groupId) : [...old, groupId]);
+  const toggleGroup = (groupId: string) => {
+    if (packageId) {
+      setPackageId(""); setPackageOptionIds([]); setPackageTeacherIds({});
+    }
+    setSelectedGroupIds((old) => old.includes(groupId) ? old.filter((id) => id !== groupId) : [...old, groupId]);
+  };
   const groupTeacherName = (group: Group) => teachers.find((teacher) => teacher.id === group.teacherId)?.name || group.teacherName || "مدرس غير محدد";
   const scheduleText = (groupId: string) => (schedules[groupId] || []).slice(0, 2).map((item) => `${DAYS[item.dayOfWeek]} ${formatTimeArabic(item.startTime)}`).join("  •  ") || "لم يتم تحديد الموعد";
 
@@ -244,6 +257,7 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({ vi
     if (!nextPackageId) { setPackageId(""); setPackageOptionIds([]); setPackageTeacherIds({}); return; }
     const options = packageOptions[nextPackageId] || [];
     const defaults = Object.fromEntries(options.map((option) => [option.id, option.defaultTeacherId]));
+    setSelectedGroupIds([]);
     setPackageId(nextPackageId); setPackageOptionIds(options.map((option) => option.id)); setPackageTeacherIds(defaults);
   };
 
@@ -257,6 +271,8 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({ vi
 
   const validateForm = () => {
     const next: FieldErrors = {};
+    if (packageId && selectedGroupIds.length) next.package = "Choose either a package or groups, not both.";
+    if (!packageId && selectedGroupIds.length === 0) next.package = "Choose at least one package or group.";
     const code = cardCode.trim();
     if (!code || !isNumericCode(code)) next.cardCode = !code ? "كود الطالب مطلوب." : ValidationMessages.code;
     if (!isValidName(fullName)) next.fullName = ValidationMessages.name;
@@ -318,6 +334,8 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({ vi
             </Section>
 
             <Section icon="people-outline" title="معلومات المجموعة" hint="اختر المجموعات التي سينضم إليها الطالب" badge={selectedGroupIds.length ? String(selectedGroupIds.length) : undefined}>
+              <TouchableOpacity style={styles.subjectFilterButton} onPress={() => { setShowSubjects((value) => !value); setShowLevels(false); setShowTeachers(false); }}><Text style={styles.filterLabel}>المادة</Text><Text numberOfLines={1} style={styles.filterValue}>{subjectFilter === "all" ? "الكل" : visibleSubjects.find((item) => item.id === subjectFilter)?.name || "الكل"}</Text><Ionicons name="chevron-down" size={16} color="#64748B" /></TouchableOpacity>
+              {showSubjects ? <View style={styles.optionPanel}><TouchableOpacity style={[styles.optionChip, subjectFilter === "all" && styles.optionChipActive]} onPress={() => { setSubjectFilter("all"); setTeacherFilter("all"); setShowSubjects(false); }}><Text style={[styles.optionChipText, subjectFilter === "all" && styles.optionChipTextActive]}>الكل</Text></TouchableOpacity>{visibleSubjects.map((item) => <TouchableOpacity key={item.id} style={[styles.optionChip, subjectFilter === item.id && styles.optionChipActive]} onPress={() => { setSubjectFilter(item.id); setTeacherFilter("all"); setShowSubjects(false); }}><Text style={[styles.optionChipText, subjectFilter === item.id && styles.optionChipTextActive]}>{item.name}</Text></TouchableOpacity>)}</View> : null}
               <View style={styles.filtersRow}>
                 <TouchableOpacity style={styles.filterControl} onPress={() => { setShowLevels((value) => !value); setShowTeachers(false); }}><Ionicons name="chevron-down" size={16} color="#64748B" /><View style={styles.filterCopy}><Text style={styles.filterLabel}>المستوى</Text><Text numberOfLines={1} style={styles.filterValue}>{levelFilter === "all" ? "الكل" : levelFilter}</Text></View></TouchableOpacity>
                 <TouchableOpacity style={styles.filterControl} onPress={() => { setShowTeachers((value) => !value); setShowLevels(false); }}><Ionicons name="chevron-down" size={16} color="#64748B" /><View style={styles.filterCopy}><Text style={styles.filterLabel}>المدرس</Text><Text numberOfLines={1} style={styles.filterValue}>{teacherFilter === "all" ? "الكل" : teachers.find((teacher) => teacher.id === teacherFilter)?.name || "الكل"}</Text></View></TouchableOpacity>
@@ -346,6 +364,7 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({ vi
 };
 
 const createStyles = (colors: typeof Colors) => StyleSheet.create({
+  subjectFilterButton: { minHeight: 49, borderRadius: 11, borderWidth: 1, borderColor: "#D8E1EF", backgroundColor: "#FFF", flexDirection: "row-reverse", paddingHorizontal: 10, alignItems: "center", justifyContent: "space-between", gap: 7, marginBottom: 8 },
   overlay: { flex: 1, backgroundColor: "rgba(10, 20, 42, 0.4)", justifyContent: "flex-end" },
   sheet: { maxHeight: "96%", backgroundColor: colors.cardBackground, borderTopLeftRadius: 25, borderTopRightRadius: 25, overflow: "hidden" },
   header: { backgroundColor: "#121C35", minHeight: 91, paddingHorizontal: 16, paddingVertical: 13, flexDirection: "row", alignItems: "center", justifyContent: "space-between" },

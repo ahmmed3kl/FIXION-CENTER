@@ -423,8 +423,10 @@ export class NotificationService {
       [centerId, sessionId],
     );
 
+    const fullName = String(student?.full_name || "").trim();
     return {
-      student_name: student?.full_name || "",
+      student_name: fullName,
+      student_first_name: fullName.split(/\s+/)[0] || "",
       parent_name: "ولي الأمر",
       center_name: center?.name || "",
       subject_name: session?.subject_name || "",
@@ -518,6 +520,7 @@ export class NotificationService {
       eventType: "grades",
       vars: {
         student_name: student?.full_name || "",
+        student_first_name: String(student?.full_name || "").trim().split(/\s+/)[0] || "",
         parent_name: "ولي الأمر",
         center_name: center?.name || "",
         exam_name: params.examName || "",

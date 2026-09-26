@@ -63,7 +63,15 @@ export class AbsenceReportsService {
     const counters = new Map<string, number>();
     const today = getLocalDateOnly();
     const currentTime = new Date().toTimeString().slice(0, 5);
-    return SessionRepository.getSessionsForMonth(month)
+    const dailySessions = new Map<string, Session>();
+    for (const session of SessionRepository.getSessionsForMonth(month)) {
+      if (session.status === "cancelled") continue;
+      const key = `${session.groupId}:${session.sessionDate}`;
+      // Keep the first canonical session for a group/day. This also prevents
+      // old duplicate rows from producing duplicate absence/SMS reports.
+      if (!dailySessions.has(key)) dailySessions.set(key, session);
+    }
+    return Array.from(dailySessions.values())
       .filter((session) =>
         session.status === "open" ||
         (session.status !== "cancelled" &&

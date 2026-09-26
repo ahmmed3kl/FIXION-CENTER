@@ -653,12 +653,15 @@ CREATE TABLE IF NOT EXISTS grade_exams (
   id TEXT PRIMARY KEY,
   center_id TEXT NOT NULL,
   name TEXT NOT NULL,
-  grade VARCHAR(128) NOT NULL,
+    grade VARCHAR(128) NOT NULL,
+    group_id VARCHAR(64),
   max_score NUMERIC(10,2) NOT NULL DEFAULT 100,
   status VARCHAR(32) NOT NULL DEFAULT 'active',
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ
 );
+ALTER TABLE grade_exams ADD COLUMN IF NOT EXISTS group_id VARCHAR(64);
+CREATE INDEX IF NOT EXISTS idx_grade_exams_group ON grade_exams(center_id, group_id, grade, status);
 CREATE TABLE IF NOT EXISTS grade_scores (
   id TEXT PRIMARY KEY,
   center_id TEXT NOT NULL,

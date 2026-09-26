@@ -871,6 +871,14 @@ export const MIGRATIONS: Migration[] = [
       } catch {}
     },
   },
+  {
+    version: 14,
+    name: "group_scoped_grade_exams",
+    up: (db: SqlDatabase) => {
+      try { db.execSync("ALTER TABLE grade_exams ADD COLUMN group_id TEXT;"); } catch {}
+      try { db.execSync("CREATE INDEX IF NOT EXISTS idx_grade_exams_group ON grade_exams(center_id, group_id, grade, status);"); } catch {}
+    },
+  },
 ];
 
 // In-Memory SQLite Mock for Jest / Test environments

@@ -43,9 +43,24 @@ export class DashboardService {
     const dateStr = targetDate || getLocalDateOnly();
 
     // 1. Sessions for today
-    const sessions = db.getAllSync<any>(
-      "SELECT id, status FROM sessions WHERE center_id = ? AND session_date = ?",
+    const rawSessions = db.getAllSync<any>(
+      "SELECT id, group_id as groupId, status, created_at as createdAt FROM sessions WHERE center_id = ? AND session_date = ?",
       [centerId, dateStr],
+    );
+    // Older app versions could create two records when a closed session was
+    // started again. Treat those records as one business session in summary
+    // metrics, choosing the record that contains the most attendance rows.
+    const sessions = Array.from(
+      rawSessions.reduce((map: Map<string, any>, session: any) => {
+        // Keep legacy/test rows without a group snapshot independent.
+        const key = session.groupId ? `${session.groupId}:${dateStr}` : String(session.id);
+        const current = map.get(key);
+        if (!current) { map.set(key, session); return map; }
+        const currentCount = Number(db.getFirstSync<any>("SELECT COUNT(*) as count FROM attendance WHERE center_id = ? AND session_id = ?", [centerId, current.id])?.count || 0);
+        const nextCount = Number(db.getFirstSync<any>("SELECT COUNT(*) as count FROM attendance WHERE center_id = ? AND session_id = ?", [centerId, session.id])?.count || 0);
+        if (nextCount > currentCount || (nextCount === currentCount && String(session.createdAt || "") < String(current.createdAt || ""))) map.set(key, session);
+        return map;
+      }, new Map<string, any>()).values(),
     );
 
     const totalSessions = sessions.length;

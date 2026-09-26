@@ -12,6 +12,8 @@ export interface GradeExam {
   centerId: string;
   name: string;
   grade: string;
+  /** Group scope for new exams. Null keeps legacy grade-wide exams readable. */
+  groupId?: string | null;
   maxScore: number;
   status: "active" | "inactive";
   createdAt: string;
@@ -63,14 +65,15 @@ export class GradeBookRepository {
     );
   }
 
-  static getExams(grade: string): GradeExam[] {
+  static getExams(groupId: string, grade: string): GradeExam[] {
     const { centerId } = this.context();
     return DatabaseService.getDb().getAllSync<GradeExam>(
-      `SELECT id, center_id as centerId, name, grade, max_score as maxScore,
+      `SELECT id, center_id as centerId, name, grade, group_id as groupId, max_score as maxScore,
               status, created_at as createdAt, updated_at as updatedAt
        FROM grade_exams WHERE center_id = ? AND grade = ? AND status = 'active'
+         AND (group_id = ? OR group_id IS NULL)
        ORDER BY created_at ASC`,
-      [centerId, grade],
+      [centerId, grade, groupId],
     );
   }
 
@@ -87,7 +90,7 @@ export class GradeBookRepository {
     );
   }
 
-  static createExam(name: string, grade: string, maxScore: number): GradeExam {
+  static createExam(name: string, groupId: string, grade: string, maxScore: number): GradeExam {
     const { centerId, user } = this.context("manage");
     const cleanName = name.trim();
     const cleanGrade = grade.trim();
@@ -97,11 +100,11 @@ export class GradeBookRepository {
     const now = new Date().toISOString();
     const id = `exam-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const operationId = `op-grade-exam-${id}`;
-    const exam: GradeExam = { id, centerId, name: cleanName, grade: cleanGrade, maxScore, status: "active", createdAt: now, updatedAt: now };
+    const exam: GradeExam = { id, centerId, name: cleanName, grade: cleanGrade, groupId, maxScore, status: "active", createdAt: now, updatedAt: now };
     const db = DatabaseService.getDb();
     DatabaseService.runInTransaction(() => {
-      db.runSync(`INSERT INTO grade_exams (id, center_id, name, grade, max_score, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'active', ?, ?)`, [id, centerId, cleanName, cleanGrade, maxScore, now, now]);
-      SyncRepository.enqueueOperation({ operationId, centerId, userId: user.id, deviceId: DeviceService.getDeviceIdSync(), operationType: "CREATE", entityType: "grade_exam", entityId: id, payload: { ...exam, maxScore, createdAt: now, updatedAt: now } });
+      db.runSync(`INSERT INTO grade_exams (id, center_id, name, grade, group_id, max_score, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?)`, [id, centerId, cleanName, cleanGrade, groupId, maxScore, now, now]);
+      SyncRepository.enqueueOperation({ operationId, centerId, userId: user.id, deviceId: DeviceService.getDeviceIdSync(), operationType: "CREATE", entityType: "grade_exam", entityId: id, payload: { ...exam, maxScore, groupId, createdAt: now, updatedAt: now } });
     });
     SyncEngine.syncCenterNow(centerId).catch(() => undefined);
     return exam;

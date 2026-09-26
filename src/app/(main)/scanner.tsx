@@ -473,6 +473,8 @@ function ScannerContent() {
                     variant="outline"
                     size="sm"
                     onPress={() => setIsTorchOn((current) => !current)}
+                    icon={<Ionicons name="flashlight-outline" size={18} color={Colors.primary} />}
+                    textStyle={{ fontSize: 0 }}
                     style={{ flex: 1 }}
                   />
                 <AppButton

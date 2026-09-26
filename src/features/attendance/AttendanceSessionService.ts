@@ -184,11 +184,11 @@ export class AttendanceSessionService {
     const { activeCenterId, currentUser } = useAuthStore.getState();
     if (!activeCenterId || !currentUser) throw new ForbiddenError("يجب تسجيل الدخول أولاً.");
     const db = DatabaseService.getDb();
-    const existing = SessionRepository.getSessionsForDate(date).find(
-      (session) =>
-        session.groupId === groupId &&
-        (!scheduleId || session.scheduleId === scheduleId),
-    );
+    // A group has one attendance session per calendar day. Reuse the same
+    // record so reopening the scanner cannot duplicate attendance or payments.
+    const existing = SessionRepository.getSessionsForDate(date)
+      .filter((session) => session.groupId === groupId && session.status !== "cancelled")
+      .sort((a, b) => String(a.createdAt || a.id).localeCompare(String(b.createdAt || b.id)))[0];
     if (existing) {
       // A session can have been generated before enrollments were synced (or
       // by an older build), leaving its expected-student snapshot empty. Do
@@ -269,11 +269,17 @@ export class AttendanceSessionService {
       throw new ForbiddenError("ليس لديك صلاحية بدء جلسة الحضور.");
     }
     const session = SessionRepository.findById(sessionId);
+    // Reopen the canonical daily session in place; never create a replacement.
+    const wasClosed = session?.status === "closed";
+    if (wasClosed && session) session.status = "open";
     if (!session) throw new ConflictError("جلسة الحضور غير موجودة.");
     if (session.status === "closed" || session.status === "cancelled") throw new ConflictError("لا يمكن بدء جلسة مغلقة أو ملغاة.");
 
     const db = DatabaseService.getDb();
-    let sessionWasActivated = false;
+    if (wasClosed && session) {
+      db.runSync("UPDATE sessions SET status = 'open', updated_at = ? WHERE center_id = ? AND id = ?", [new Date().toISOString(), session.centerId, session.id]);
+    }
+    let sessionWasActivated = Boolean(wasClosed);
     if (session.status === "scheduled") {
       db.runSync("UPDATE sessions SET status = 'open', updated_at = ? WHERE center_id = ? AND id = ?", [new Date().toISOString(), session.centerId, session.id]);
       sessionWasActivated = true;

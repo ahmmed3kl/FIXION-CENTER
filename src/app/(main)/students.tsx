@@ -1,4 +1,5 @@
 import { Ionicons } from "@expo/vector-icons";
+import { CameraView, useCameraPermissions } from "expo-camera";
 import { useLocalSearchParams } from "expo-router";
 import { useEffect, useMemo, useState } from "react";
 import {
@@ -71,6 +72,8 @@ export default function StudentsScreen() {
 
   const [students, setStudents] = useState<Student[]>([]);
   const [searchQuery, setSearchQuery] = useState("");
+  const [cardScannerOpen, setCardScannerOpen] = useState(false);
+  const [cardCameraPermission, requestCardCameraPermission] = useCameraPermissions();
   const [selectedStudent, setSelectedStudent] = useState<Student | null>(null);
   const [studentCards, setStudentCards] = useState<StudentCard[]>([]);
   const [studentEnrollments, setStudentEnrollments] = useState<
@@ -141,6 +144,23 @@ export default function StudentsScreen() {
   );
   const [enrollSpecialPrice, setEnrollSpecialPrice] = useState("");
   const [enrollGroupSearch, setEnrollGroupSearch] = useState("");
+
+  const openCardScanner = async () => {
+    if (!cardCameraPermission?.granted) {
+      const result = await requestCardCameraPermission();
+      if (!result.granted) return Alert.alert("إذن الكاميرا", "فعّل إذن الكاميرا لمسح كود الكارت.");
+    }
+    setCardScannerOpen(true);
+  };
+  const handleStudentCardScan = ({ data }: { data: string }) => {
+    const code = String(data || "").trim();
+    if (!code) return;
+    setCardScannerOpen(false);
+    setSearchQuery(code);
+    const found = StudentRepository.findByCardCode(code);
+    if (found) openStudentDetails(found);
+    else Alert.alert("لم يتم العثور", "لا يوجد طالب مرتبط بهذا الكارت في المركز الحالي.");
+  };
 
   const loadData = () => {
     try {
@@ -333,7 +353,7 @@ export default function StudentsScreen() {
       return;
     }
     try {
-      const exams = GradeBookRepository.getExams(group.grade || selectedStudent.grade);
+      const exams = GradeBookRepository.getExams(group.id, group.grade || selectedStudent.grade);
       const scores = GradeBookRepository.getScores(
         exams.map((exam) => exam.id),
         [selectedStudent.id],
@@ -631,6 +651,11 @@ export default function StudentsScreen() {
           containerStyle={{ marginBottom: Spacing.md }}
         />
 
+        <TouchableOpacity style={styles.cardSearchButton} onPress={openCardScanner} activeOpacity={0.8}>
+          <Ionicons name="scan-outline" size={20} color={Colors.primary} />
+          <Text style={styles.cardSearchButtonText}>مسح كارت للبحث</Text>
+        </TouchableOpacity>
+
         <FlatList
           data={filteredStudents}
           keyExtractor={(item) => item.id}
@@ -690,6 +715,16 @@ export default function StudentsScreen() {
         onClose={() => setIsAddStudentOpen(false)}
         onStudentCreated={loadData}
       />
+
+      <Modal visible={cardScannerOpen} animationType="slide" transparent onRequestClose={() => setCardScannerOpen(false)}>
+        <View style={styles.cardScannerOverlay}>
+          <View style={styles.cardScannerSheet}>
+            <Text style={styles.cardScannerTitle}>امسح كارت الطالب</Text>
+            <CameraView style={styles.cardScannerCamera} facing="back" autofocus="on" onBarcodeScanned={handleStudentCardScan} barcodeScannerSettings={{ barcodeTypes: ["qr", "code128", "code39", "ean13", "ean8"] }} />
+            <TouchableOpacity style={styles.cardScannerClose} onPress={() => setCardScannerOpen(false)}><Text style={styles.cardScannerCloseText}>إلغاء</Text></TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
 
       {/* 2. Student Details Modal */}
       {selectedStudent && (
@@ -1605,6 +1640,14 @@ const createStyles = () => StyleSheet.create({
     fontSize: 13,
     fontWeight: "600",
   },
+  cardSearchButton: { minHeight: 44, borderRadius: 12, borderWidth: 1, borderColor: Colors.primary, backgroundColor: Colors.primaryLight, flexDirection: "row-reverse", alignItems: "center", justifyContent: "center", gap: 8, marginBottom: Spacing.md },
+  cardSearchButtonText: { color: Colors.primaryDark, fontSize: 13, fontWeight: "800" },
+  cardScannerOverlay: { flex: 1, backgroundColor: "rgba(15,23,42,0.72)", justifyContent: "center", padding: 20 },
+  cardScannerSheet: { backgroundColor: Colors.cardBackground, borderRadius: 20, padding: 14, overflow: "hidden" },
+  cardScannerTitle: { color: Colors.slate900, fontSize: 18, fontWeight: "900", textAlign: "right", marginBottom: 10 },
+  cardScannerCamera: { height: 330, borderRadius: 14, overflow: "hidden", backgroundColor: Colors.slate900 },
+  cardScannerClose: { minHeight: 46, borderRadius: 12, backgroundColor: Colors.slate100, alignItems: "center", justifyContent: "center", marginTop: 12 },
+  cardScannerCloseText: { color: Colors.slate800, fontSize: 14, fontWeight: "800" },
   content: {
     flex: 1,
     paddingHorizontal: Spacing.lg,

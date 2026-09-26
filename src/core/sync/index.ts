@@ -225,6 +225,8 @@ function orderOperationsByDependencies(rows: SyncOperation[]): SyncOperation[] {
     const refs: Array<[string, any]> = [];
     if (entity === "session") {
       refs.push(["group", value("groupId", "group_id")]);
+      refs.push(["teacher", value("teacherId", "teacher_id")]);
+      refs.push(["subject", value("subjectId", "subject_id")]);
       // The server builds session_expected_students with a foreign-key
       // lookup. Ensure every student in the manifest is uploaded before the
       // session, otherwise the server silently drops the roster and reports
@@ -234,6 +236,11 @@ function orderOperationsByDependencies(rows: SyncOperation[]): SyncOperation[] {
         for (const studentId of expectedStudentIds) refs.push(["student", studentId]);
       }
     }
+    if (entity === "group") {
+      refs.push(["teacher", value("teacherId", "teacher_id")]);
+      refs.push(["subject", value("subjectId", "subject_id")]);
+    }
+    if (entity === "group_schedule") refs.push(["group", value("groupId", "group_id")]);
     if (entity === "attendance" || entity === "makeup") {
       refs.push(["session", value("sessionId", "session_id")]);
       refs.push(["student", value("studentId", "student_id")]);
@@ -535,7 +542,7 @@ export class SyncRepository {
        WHERE center_id = ?
          AND status = 'conflict'
          AND retry_count < 10
-         AND entity_type IN ('student', 'student_card', 'package', 'package_subject', 'package_subscription', 'package_teacher_override', 'notification_template', 'session', 'attendance', 'makeup', 'debt_cycle', 'payment', 'debt_adjustment', 'grade_exam', 'grade_score')
+         AND entity_type IN ('teacher', 'subject', 'teacher_subject', 'group', 'group_schedule', 'enrollment', 'student_group_enrollment', 'student', 'student_card', 'package', 'package_subject', 'package_subscription', 'package_teacher_override', 'notification_template', 'session', 'attendance', 'makeup', 'debt_cycle', 'payment', 'debt_adjustment', 'grade_exam', 'grade_score')
          AND (
            last_error LIKE '%CARD_OUTSIDE_ALLOWED_RANGE%'
            OR last_error LIKE '%CARD_ALREADY_ASSIGNED%'
@@ -559,6 +566,8 @@ export class SyncRepository {
            OR last_error LIKE '%invalid input syntax for type timestamp%'
            OR last_error LIKE '%debt_cycles_%'
            OR last_error LIKE '%payments_debt_cycle_id_fkey%'
+           OR last_error LIKE '%PAYMENT_DEBT_CYCLE_NOT_FOUND%'
+           OR last_error LIKE '%PAYMENT_SESSION_NOT_FOUND%'
            OR last_error LIKE '%uq_notification_template%'
            OR last_error LIKE '%notification_templates%'
            OR last_error LIKE '%violates check constraint%'
@@ -1264,10 +1273,10 @@ export class SyncEngine {
 
       if (Array.isArray(data.gradeExams)) {
         for (const exam of data.gradeExams) {
-          db.runSync(`INSERT INTO grade_exams (id, center_id, name, grade, max_score, status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET name=excluded.name, grade=excluded.grade, max_score=excluded.max_score, status=excluded.status, updated_at=excluded.updated_at`,
-            [exam.id, exam.center_id || centerId, exam.name, exam.grade, Number(exam.max_score ?? exam.maxScore ?? 100), exam.status || "active", exam.created_at || new Date().toISOString(), exam.updated_at || new Date().toISOString()]);
+          db.runSync(`INSERT INTO grade_exams (id, center_id, name, grade, group_id, max_score, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET name=excluded.name, grade=excluded.grade, group_id=excluded.group_id, max_score=excluded.max_score, status=excluded.status, updated_at=excluded.updated_at`,
+            [exam.id, exam.center_id || centerId, exam.name, exam.grade, exam.group_id || exam.groupId || null, Number(exam.max_score ?? exam.maxScore ?? 100), exam.status || "active", exam.created_at || new Date().toISOString(), exam.updated_at || new Date().toISOString()]);
         }
       }
       if (Array.isArray(data.gradeScores)) {
@@ -2194,6 +2203,7 @@ export class SyncEngine {
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET name=excluded.name, grade=excluded.grade, max_score=excluded.max_score, status=excluded.status, updated_at=excluded.updated_at`,
             [exam.id || change.entityId, centerId, exam.name || "امتحان", exam.grade || "", Number(exam.max_score ?? exam.maxScore ?? 100), exam.status || "active", exam.created_at || exam.createdAt || new Date().toISOString(), exam.updated_at || exam.updatedAt || new Date().toISOString()]);
+          db.runSync("UPDATE grade_exams SET group_id = ? WHERE center_id = ? AND id = ?", [exam.group_id || exam.groupId || null, centerId, exam.id || change.entityId]);
         } else if (entityType === "grade_score") {
           const score = data.scoreRecord || data;
           db.runSync(`INSERT INTO grade_scores (id, center_id, exam_id, student_id, score, created_at, updated_at)

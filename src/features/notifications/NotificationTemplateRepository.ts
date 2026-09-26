@@ -10,6 +10,7 @@ import { useAuthStore } from "../auth/useAuthStore";
 // Supported template variables
 const SUPPORTED_VARIABLES = [
   "{{student_name}}",
+  "{{student_first_name}}",
   "{{parent_name}}",
   "{{center_name}}",
   "{{subject_name}}",
