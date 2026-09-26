@@ -69,6 +69,10 @@ export class OperationalReportsService {
     );
     const sessions = loadedSessions.filter(
       (session: any) =>
+        // Opening a session is an explicit operational action. It must be
+        // visible immediately, even before the scheduled clock time, so an
+        // empty session is still present in the absence/attendance reports.
+        session.status === "open" ||
         dateStr < today ||
         (dateStr === today &&
           (String(session.start_time || "") <= currentTime || attendedSessionIds.has(String(session.id)))),

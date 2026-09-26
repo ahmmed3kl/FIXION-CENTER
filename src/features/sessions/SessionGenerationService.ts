@@ -11,10 +11,10 @@ import { PermissionService } from "../../core/permissions";
 import { SyncRepository } from "../../core/sync";
 import { Session, Student } from "../../shared/types";
 import { useAuthStore } from "../auth/useAuthStore";
-import { EnrollmentRepository } from "../enrollments/EnrollmentRepository";
 import { GroupRepository } from "../groups/GroupRepository";
 import { GroupScheduleRepository } from "../groups/GroupScheduleRepository";
 import { StudentRepository } from "../students/StudentRepository";
+import { AttendanceSessionService } from "../attendance/AttendanceSessionService";
 
 /** Parse a DATE at local noon so weekday calculations cannot cross a timezone boundary. */
 function parseLocalDateOnly(dateValue: string): Date {
@@ -130,14 +130,12 @@ export class SessionGenerationService {
         );
 
         // 2. Capture immutable snapshot of expected students based on active enrollment on this date
-        const validEnrollments =
-          EnrollmentRepository.getActiveEnrollmentsForGroup(group.id, dateStr);
-        for (const enr of validEnrollments) {
-          const expectedId = `exp-${sessionId}-${enr.studentId}`;
+        const expectedStudentIds = AttendanceSessionService.getExpectedStudentIdsForGroup(group, group.id, dateStr);
+        for (const studentId of expectedStudentIds) {
           db.runSync(
             `INSERT INTO session_expected_students (id, center_id, session_id, student_id, created_at)
              VALUES (?, ?, ?, ?, ?)`,
-            [expectedId, centerId, sessionId, enr.studentId, now],
+            [`exp-${sessionId}-${studentId}`, centerId, sessionId, studentId, now],
           );
         }
 
@@ -154,7 +152,7 @@ export class SessionGenerationService {
             groupId: group.id,
             scheduleId: sched.id,
             sessionDate: dateStr,
-            expectedCount: validEnrollments.length,
+            expectedCount: expectedStudentIds.length,
           },
         });
 
@@ -176,7 +174,7 @@ export class SessionGenerationService {
             sessionDate: dateStr,
             startTime: sched.startTime,
             endTime: sched.endTime,
-            expectedStudentIds: validEnrollments.map((e) => e.studentId),
+            expectedStudentIds,
             status: "open",
             createdAt: now,
           },

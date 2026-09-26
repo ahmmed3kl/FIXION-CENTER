@@ -1985,6 +1985,17 @@ class InMemorySqliteMock implements SqlDatabase {
           (r) => r.centerId === centerId && r.cardCode === cardCode,
         ) as T[];
       }
+      // findByCardCodeAnywhere intentionally has no center predicate. The
+      // mock used to return the first card in the table for this one-parameter
+      // query, making every student creation look like a duplicate card.
+      if (params.length === 1 && trimmed.includes("card_code = ?")) {
+        const cardCode = params[0];
+        const result = mapped.filter((r) => r.cardCode === cardCode);
+        if (trimmed.includes("status = 'active'")) {
+          return result.filter((r) => r.status === "active") as T[];
+        }
+        return result as T[];
+      }
       if (params.length >= 2 && trimmed.includes("student_id = ?")) {
         if (trimmed.includes("status = 'active'")) {
           return mapped.filter(

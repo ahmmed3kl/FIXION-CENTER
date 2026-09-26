@@ -121,6 +121,61 @@ export class AttendanceSessionService {
     return GroupRepository.getGroupsForDay(new Date(`${date}T12:00:00`).getDay());
   }
 
+  /**
+   * Package subscribers are expected from the first scheduled class too.
+   * They do not have a regular group-enrollment row, so the session roster
+   * must include them before anyone scans; otherwise absences and dashboard
+   * totals incorrectly start at zero.
+   */
+  private static getPackageExpectedStudentIds(
+    groupId: string,
+    subjectId: string | null | undefined,
+    teacherId: string | null | undefined,
+    sessionDate: string,
+  ): string[] {
+    if (!subjectId || !teacherId) return [];
+    const { activeCenterId } = useAuthStore.getState();
+    if (!activeCenterId) return [];
+    const db = DatabaseService.getDb();
+    const rows = db.getAllSync<{ studentId?: string; student_id?: string }>(
+      `SELECT DISTINCT sps.student_id as studentId
+       FROM student_package_subscriptions sps
+       JOIN package_subjects ps
+         ON ps.center_id = sps.center_id AND ps.package_id = sps.package_id
+       LEFT JOIN package_subject_teacher_overrides selected
+         ON selected.center_id = sps.center_id
+        AND selected.subscription_id = sps.id
+        AND selected.subject_id = ps.subject_id
+       WHERE sps.center_id = ? AND sps.status = 'active'
+         AND sps.start_date <= ? AND (sps.end_date IS NULL OR sps.end_date >= ?)
+         AND ps.subject_id = ?
+         AND (ps.group_id IS NULL OR ps.group_id = ?)
+         AND COALESCE(selected.teacher_id, ps.default_teacher_id) = ?
+         AND (
+           selected.id IS NOT NULL
+           OR NOT EXISTS (
+             SELECT 1 FROM package_subject_teacher_overrides any_selection
+             WHERE any_selection.center_id = sps.center_id
+               AND any_selection.subscription_id = sps.id
+           )
+         )`,
+      [activeCenterId, sessionDate, sessionDate, subjectId, groupId, teacherId],
+    );
+    return rows.map((row) => String(row.studentId ?? row.student_id ?? "")).filter(Boolean);
+  }
+
+  /** Build the immutable roster for a session date, including package-only
+   * subscribers selected for this exact subject/teacher/group. */
+  static getExpectedStudentIdsForGroup(
+    group: Group,
+    groupId: string,
+    sessionDate: string,
+  ): string[] {
+    const regular = EnrollmentRepository.getActiveEnrollmentsForGroup(groupId, sessionDate).map((item) => item.studentId);
+    const packageStudents = this.getPackageExpectedStudentIds(groupId, group.subjectId, group.teacherId, sessionDate);
+    return Array.from(new Set([...regular, ...packageStudents]));
+  }
+
   static ensureSessionForGroup(
     groupId: string,
     date = AttendanceSessionService.localDate(),
@@ -148,18 +203,19 @@ export class AttendanceSessionService {
           "SELECT id FROM session_expected_students WHERE center_id = ? AND session_id = ? LIMIT 1",
           [existing.centerId, existing.id],
         );
-        const enrollments = hasExpected
+        const expectedStudentIds = hasExpected
           ? []
-          : EnrollmentRepository.getActiveEnrollmentsForGroup(
+          : this.getExpectedStudentIdsForGroup(
+              { id: groupId, subjectId: existing.subjectId, teacherId: existing.teacherId } as Group,
               groupId,
               existing.sessionDate,
             );
         const now = new Date().toISOString();
         DatabaseService.runInTransaction(() => {
-          for (const enrollment of enrollments) {
+          for (const studentId of expectedStudentIds) {
             db.runSync(
               "INSERT OR IGNORE INTO session_expected_students (id, center_id, session_id, student_id, created_at) VALUES (?, ?, ?, ?, ?)",
-              [`exp-${existing.id}-${enrollment.studentId}`, existing.centerId, existing.id, enrollment.studentId, now],
+              [`exp-${existing.id}-${studentId}`, existing.centerId, existing.id, studentId, now],
             );
           }
         });
@@ -176,16 +232,15 @@ export class AttendanceSessionService {
     if (!schedule) throw new ConflictError("لا يوجد موعد للمجموعة اليوم.");
     const now = new Date().toISOString();
     const sessionId = `sess-att-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
-    db.runSync(`INSERT INTO sessions (id, center_id, group_id, schedule_id, subject_id, teacher_id, session_price, late_after_minutes, session_date, start_time, end_time, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)`, [sessionId, activeCenterId, group.id, schedule.id, group.subjectId, group.teacherId, group.sessionPrice, group.lateAfterMinutes, date, schedule.startTime, schedule.endTime, now]);
-    const enrollments = EnrollmentRepository.getActiveEnrollmentsForGroup(
-      group.id,
-      date,
-    );
-    for (const enrollment of enrollments) db.runSync("INSERT OR IGNORE INTO session_expected_students (id, center_id, session_id, student_id, created_at) VALUES (?, ?, ?, ?, ?)", [`exp-${sessionId}-${enrollment.studentId}`, activeCenterId, sessionId, enrollment.studentId, now]);
+    const expectedStudentIds = this.getExpectedStudentIdsForGroup(group, group.id, date);
     const deviceId = DeviceService.getDeviceIdSync();
     const operationId = `op-session-att-${sessionId}`;
-    AuditService.recordEvent({ operationId, centerId: activeCenterId, userId: currentUser.id, deviceId, entityType: "session", entityId: sessionId, action: "session.attendance_start", payload: { groupId: group.id, scheduleId: schedule.id, sessionDate: date } });
-    SyncRepository.enqueueOperation({ operationId, centerId: activeCenterId, userId: currentUser.id, deviceId, operationType: "CREATE", entityType: "session", entityId: sessionId, payload: { groupId: group.id, scheduleId: schedule.id, subjectId: group.subjectId, teacherId: group.teacherId, sessionPrice: group.sessionPrice, lateAfterMinutes: group.lateAfterMinutes, sessionDate: date, startTime: schedule.startTime, endTime: schedule.endTime, expectedStudentIds: enrollments.map((item) => item.studentId), status: "open", createdAt: now } });
+    DatabaseService.runInTransaction(() => {
+      db.runSync(`INSERT INTO sessions (id, center_id, group_id, schedule_id, subject_id, teacher_id, session_price, late_after_minutes, session_date, start_time, end_time, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)`, [sessionId, activeCenterId, group.id, schedule.id, group.subjectId, group.teacherId, group.sessionPrice, group.lateAfterMinutes, date, schedule.startTime, schedule.endTime, now]);
+      for (const studentId of expectedStudentIds) db.runSync("INSERT OR IGNORE INTO session_expected_students (id, center_id, session_id, student_id, created_at) VALUES (?, ?, ?, ?, ?)", [`exp-${sessionId}-${studentId}`, activeCenterId, sessionId, studentId, now]);
+      AuditService.recordEvent({ operationId, centerId: activeCenterId, userId: currentUser.id, deviceId, entityType: "session", entityId: sessionId, action: "session.attendance_start", payload: { groupId: group.id, scheduleId: schedule.id, sessionDate: date } });
+      SyncRepository.enqueueOperation({ operationId, centerId: activeCenterId, userId: currentUser.id, deviceId, operationType: "CREATE", entityType: "session", entityId: sessionId, payload: { groupId: group.id, scheduleId: schedule.id, subjectId: group.subjectId, teacherId: group.teacherId, sessionPrice: group.sessionPrice, lateAfterMinutes: group.lateAfterMinutes, sessionDate: date, startTime: schedule.startTime, endTime: schedule.endTime, expectedStudentIds, status: "open", createdAt: now } });
+    });
     // A session is a dependency for every attendance record. Queue its sync
     // immediately when attendance starts instead of waiting for the global
     // foreground interval, while preserving offline-first local operation.
@@ -233,17 +288,18 @@ export class AttendanceSessionService {
         "SELECT id FROM session_expected_students WHERE center_id = ? AND session_id = ? LIMIT 1",
         [session.centerId, sessionId],
       );
-      const enrollments = existingExpected
+      const expectedStudentIds = existingExpected
         ? []
-        : EnrollmentRepository.getActiveEnrollmentsForGroup(
+        : this.getExpectedStudentIdsForGroup(
+            { id: session.groupId, subjectId: session.subjectId, teacherId: session.teacherId } as Group,
             session.groupId,
             session.sessionDate,
           );
       const now = new Date().toISOString();
-      for (const enrollment of enrollments) {
+      for (const studentId of expectedStudentIds) {
         db.runSync(
           "INSERT OR IGNORE INTO session_expected_students (id, center_id, session_id, student_id, created_at) VALUES (?, ?, ?, ?, ?)",
-          [`exp-${sessionId}-${enrollment.studentId}`, session.centerId, sessionId, enrollment.studentId, now],
+          [`exp-${sessionId}-${studentId}`, session.centerId, sessionId, studentId, now],
         );
       }
     }

@@ -113,6 +113,7 @@ export class PackageSubscriptionRepository {
     startDate: string;
     endDate?: string;
     selectedOptionIds?: string[];
+    selectedTeacherIds?: Record<string, string>;
   }): Promise<StudentPackageSubscription> {
     const { centerId, user } = this.getActiveContext();
     if (
@@ -153,31 +154,36 @@ export class PackageSubscriptionRepository {
     const id = `sps-${generateUUID()}`;
     const now = new Date().toISOString();
 
-    db.runSync(
-      `INSERT INTO student_package_subscriptions (id, center_id, student_id, package_id, start_date, end_date, cancellation_date, status, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, NULL, 'active', ?, ?)`,
-      [
-        id,
-        centerId,
-        params.studentId,
-        params.packageId,
-        params.startDate,
-        params.endDate || null,
-        now,
-        now,
-      ],
-    );
+    const selectedOverrides: PackageTeacherOverride[] = [];
     // Keep the student's selected package options in the existing audited
-    // override table. The default teacher is stored deliberately so the
-    // selection remains available offline and survives a mid-month switch.
-    for (const optionId of selectedOptionIds) {
-      const option = packageOptions.find((o) => o.id === optionId)!;
+    // override table. A row is written for every selected option (including
+    // the default teacher) so a subset selection remains authoritative after
+    // a server round-trip. The insert and subscription are one local commit.
+    DatabaseService.runInTransaction(() => {
       db.runSync(
-        `INSERT OR IGNORE INTO package_subject_teacher_overrides (id, center_id, subscription_id, subject_id, teacher_id, created_at)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-        [`sel-${generateUUID()}`, centerId, id, option.subjectId, option.defaultTeacherId, now],
+        `INSERT INTO student_package_subscriptions (id, center_id, student_id, package_id, start_date, end_date, cancellation_date, status, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, NULL, 'active', ?, ?)`,
+        [id, centerId, params.studentId, params.packageId, params.startDate, params.endDate || null, now, now],
       );
-    }
+
+      for (const optionId of selectedOptionIds) {
+        const option = packageOptions.find((o) => o.id === optionId)!;
+        const teacherId = params.selectedTeacherIds?.[optionId] || option.defaultTeacherId;
+        if (teacherId !== option.defaultTeacherId && !PermissionService.hasPermission(user.permissions, "packages.manage")) {
+          throw new ForbiddenError("لا تملك صلاحية تغيير مدرس مادة الباقة.");
+        }
+        if (!TeacherSubjectRepository.isTeacherAssignedToSubject(teacherId, option.subjectId)) {
+          throw new ValidationError("المدرس المختار غير مسند للمادة داخل هذا المركز.");
+        }
+        const overrideId = `sel-${generateUUID()}`;
+        db.runSync(
+          `INSERT INTO package_subject_teacher_overrides (id, center_id, subscription_id, subject_id, teacher_id, created_at)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+          [overrideId, centerId, id, option.subjectId, teacherId, now],
+        );
+        selectedOverrides.push({ id: overrideId, centerId, subscriptionId: id, subjectId: option.subjectId, teacherId, createdAt: now });
+      }
+    });
 
     const subscription: StudentPackageSubscription = {
       id,
@@ -212,6 +218,22 @@ export class PackageSubscriptionRepository {
       entityId: id,
       payload: subscription,
     });
+
+    // The subscription row does not carry the selected subject set. Upload
+    // the authoritative option rows as dependent operations so a fresh
+    // device reconstructs the same package eligibility.
+    for (const override of selectedOverrides) {
+      SyncRepository.enqueueOperation({
+        operationId: `op-ovr-select-${override.id}`,
+        centerId,
+        userId: user.id,
+        deviceId,
+        operationType: "packages.set_override",
+        entityType: "package_teacher_override",
+        entityId: override.id,
+        payload: override,
+      });
+    }
 
     AuditService.recordEvent({
       operationId,

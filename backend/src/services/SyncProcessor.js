@@ -427,9 +427,9 @@ class SyncProcessor {
           : cardCode;
 
         const rawStudentType = student.student_type || student.studentType || existingStudent?.student_type || "registered";
-        // PostgreSQL's legacy enum uses registered for external/guest-style
-        // students; normalize the mobile value before writing it.
-        const studentType = rawStudentType === "external" ? "registered" : rawStudentType;
+        const studentType = ["registered", "external", "guest", "scholarship"].includes(String(rawStudentType).toLowerCase())
+          ? String(rawStudentType).toLowerCase()
+          : "registered";
 
         // 1. Insert Student with exact leading zeros preserved
         await client.query(
@@ -669,12 +669,18 @@ class SyncProcessor {
         const sess = payload;
         const sessionId = sess.id || context.entityId;
         const existingSessionRes = await client.query(
-          `SELECT group_id, session_date, start_time, end_time, status
+          `SELECT group_id, schedule_id, subject_id, teacher_id, session_price,
+                  late_after_minutes, session_date, start_time, end_time, status
            FROM sessions WHERE center_id = $1::varchar AND id = $2::varchar`,
           [centerId, sessionId],
         );
         const existingSession = existingSessionRes.rows[0];
         const groupId = sess.group_id || sess.groupId || existingSession?.group_id;
+        const scheduleId = sess.schedule_id || sess.scheduleId || existingSession?.schedule_id || null;
+        const subjectId = sess.subject_id || sess.subjectId || existingSession?.subject_id || null;
+        const teacherId = sess.teacher_id || sess.teacherId || existingSession?.teacher_id || null;
+        const sessionPrice = Number(sess.session_price ?? sess.sessionPrice ?? existingSession?.session_price ?? 0);
+        const lateAfterMinutes = Number(sess.late_after_minutes ?? sess.lateAfterMinutes ?? existingSession?.late_after_minutes ?? 15);
         const sessionDate = normalizeDateOnly(sess.session_date || sess.sessionDate || existingSession?.session_date);
         const startTime = sess.start_time || sess.startTime || existingSession?.start_time;
         const endTime = sess.end_time || sess.endTime || existingSession?.end_time;
@@ -691,20 +697,55 @@ class SyncProcessor {
         // it only when it is genuinely missing.
         if (!isReconcile || !existingSession) {
           await client.query(
-            `INSERT INTO sessions (id, center_id, group_id, session_date, start_time, end_time, status, created_at, updated_at)
-             VALUES ($1::varchar, $2::varchar, $3::varchar, $4::date, $5::varchar, $6::varchar, $7::varchar, NOW(), NOW())
+            `INSERT INTO sessions
+             (id, center_id, group_id, schedule_id, subject_id, teacher_id, session_price,
+              late_after_minutes, session_date, start_time, end_time, status, created_at, updated_at)
+             VALUES ($1::varchar, $2::varchar, $3::varchar, $4::varchar, $5::varchar, $6::varchar,
+                     $7::numeric, $8::integer, $9::date, $10::varchar, $11::varchar, $12::varchar, NOW(), NOW())
              ON CONFLICT (id) DO UPDATE SET
+               group_id = EXCLUDED.group_id,
+               schedule_id = EXCLUDED.schedule_id,
+               subject_id = EXCLUDED.subject_id,
+               teacher_id = EXCLUDED.teacher_id,
+               session_price = EXCLUDED.session_price,
+               late_after_minutes = EXCLUDED.late_after_minutes,
+               session_date = EXCLUDED.session_date,
+               start_time = EXCLUDED.start_time,
+               end_time = EXCLUDED.end_time,
                status = EXCLUDED.status,
                updated_at = NOW();`,
             [
               sessionId,
               centerId,
               groupId,
+              scheduleId,
+              subjectId,
+              teacherId,
+              sessionPrice,
+              lateAfterMinutes,
               sessionDate,
               startTime,
               endTime,
               status,
             ],
+          );
+        } else if (existingSession) {
+          // Reconciliation preserves the server status but repairs the
+          // historical metadata used by local dashboards and reports.
+          await client.query(
+            `UPDATE sessions
+                SET group_id = $3::varchar,
+                    schedule_id = COALESCE($4::varchar, schedule_id),
+                    subject_id = COALESCE($5::varchar, subject_id),
+                    teacher_id = COALESCE($6::varchar, teacher_id),
+                    session_price = $7::numeric,
+                    late_after_minutes = $8::integer,
+                    session_date = $9::date,
+                    start_time = $10::varchar,
+                    end_time = $11::varchar,
+                    updated_at = NOW()
+              WHERE center_id = $2::varchar AND id = $1::varchar`,
+            [sessionId, centerId, groupId, scheduleId, subjectId, teacherId, sessionPrice, lateAfterMinutes, sessionDate, startTime, endTime],
           );
         }
         // Expected students are a historical manifest snapshot. Only create
@@ -964,15 +1005,33 @@ class SyncProcessor {
         const grp = payload.group || payload;
         const groupId = grp.id || grp.groupId || context.entityId;
         const groupStatus = (grp.status || "active") === "inactive" ? "archived" : (grp.status || "active");
+        const existingGroup = await client.query(
+          `SELECT name, teacher_id, subject_id, grade, default_fee, session_price,
+                  monthly_price, session_duration_minutes, late_after_minutes, status
+             FROM groups WHERE center_id = $1 AND id = $2`,
+          [centerId, groupId],
+        );
+        const previous = existingGroup.rows[0] || {};
+        const defaultFee = Number(grp.default_fee ?? grp.defaultFee ?? grp.session_price ?? grp.sessionPrice ?? previous.default_fee ?? 0);
+        const sessionPrice = Number(grp.session_price ?? grp.sessionPrice ?? previous.session_price ?? defaultFee);
+        const monthlyPrice = Number(grp.monthly_price ?? grp.monthlyPrice ?? previous.monthly_price ?? defaultFee * 4);
+        const duration = Number(grp.session_duration_minutes ?? grp.sessionDurationMinutes ?? previous.session_duration_minutes ?? 120);
+        const lateAfter = Number(grp.late_after_minutes ?? grp.lateAfterMinutes ?? previous.late_after_minutes ?? 15);
         await client.query(
-          `INSERT INTO groups (id, center_id, name, teacher_id, subject_id, grade, default_fee, status, created_at, updated_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())
+          `INSERT INTO groups
+             (id, center_id, name, teacher_id, subject_id, grade, default_fee, session_price,
+              monthly_price, session_duration_minutes, late_after_minutes, status, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW(), NOW())
            ON CONFLICT (id) DO UPDATE SET
              name = EXCLUDED.name,
              teacher_id = EXCLUDED.teacher_id,
              subject_id = EXCLUDED.subject_id,
              grade = EXCLUDED.grade,
              default_fee = EXCLUDED.default_fee,
+             session_price = EXCLUDED.session_price,
+             monthly_price = EXCLUDED.monthly_price,
+             session_duration_minutes = EXCLUDED.session_duration_minutes,
+             late_after_minutes = EXCLUDED.late_after_minutes,
              status = EXCLUDED.status,
              updated_at = NOW();`,
           [
@@ -982,13 +1041,11 @@ class SyncProcessor {
             grp.teacher_id || grp.teacherId,
             grp.subject_id || grp.subjectId,
             grp.grade || "الصف الثالث الثانوي",
-            parseFloat(
-              grp.default_fee ||
-                grp.defaultFee ||
-                grp.session_price ||
-                grp.sessionPrice ||
-                0,
-            ),
+            defaultFee,
+            sessionPrice,
+            monthlyPrice,
+            duration,
+            lateAfter,
             groupStatus,
           ],
         );

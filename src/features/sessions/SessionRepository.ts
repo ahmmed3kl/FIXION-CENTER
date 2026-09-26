@@ -132,7 +132,44 @@ export class SessionRepository {
        JOIN students st
          ON st.center_id = enrollment.center_id AND st.id = enrollment.student_id
        WHERE session.center_id = ? AND session.id = ?
-       ORDER BY st.full_name COLLATE NOCASE ASC`,
+       UNION
+       SELECT packageStudent.id, packageStudent.center_id as centerId,
+              packageStudent.student_code as studentCode,
+              packageStudent.full_name as fullName, packageStudent.card_code as cardCode,
+              packageStudent.phone, packageStudent.parent_phone as parentPhone,
+              packageStudent.grade, packageStudent.status,
+              packageStudent.student_type as studentType, packageStudent.notes,
+              packageStudent.created_at as createdAt, packageStudent.updated_at as updatedAt
+       FROM sessions packageSession
+       JOIN student_package_subscriptions packageSubscription
+         ON packageSubscription.center_id = packageSession.center_id
+        AND packageSubscription.status = 'active'
+        AND packageSubscription.start_date <= packageSession.session_date
+        AND (packageSubscription.end_date IS NULL OR packageSubscription.end_date >= packageSession.session_date)
+       JOIN package_subjects packageSubject
+         ON packageSubject.center_id = packageSubscription.center_id
+        AND packageSubject.package_id = packageSubscription.package_id
+        AND packageSubject.subject_id = COALESCE(packageSession.subject_id, (SELECT subject_id FROM groups WHERE center_id = packageSession.center_id AND id = packageSession.group_id))
+        AND (packageSubject.group_id IS NULL OR packageSubject.group_id = packageSession.group_id)
+       LEFT JOIN package_subject_teacher_overrides selectedPackageTeacher
+         ON selectedPackageTeacher.center_id = packageSubscription.center_id
+        AND selectedPackageTeacher.subscription_id = packageSubscription.id
+        AND selectedPackageTeacher.subject_id = packageSubject.subject_id
+       JOIN students packageStudent
+         ON packageStudent.center_id = packageSubscription.center_id
+        AND packageStudent.id = packageSubscription.student_id
+       WHERE packageSession.center_id = ? AND packageSession.id = ?
+         AND COALESCE(selectedPackageTeacher.teacher_id, packageSubject.default_teacher_id) =
+             COALESCE(packageSession.teacher_id, (SELECT teacher_id FROM groups WHERE center_id = packageSession.center_id AND id = packageSession.group_id))
+         AND (
+           selectedPackageTeacher.id IS NOT NULL
+           OR NOT EXISTS (
+             SELECT 1 FROM package_subject_teacher_overrides anyPackageSelection
+             WHERE anyPackageSelection.center_id = packageSubscription.center_id
+               AND anyPackageSelection.subscription_id = packageSubscription.id
+           )
+         )
+       ORDER BY fullName COLLATE NOCASE ASC`,
       [centerId, sessionId],
     );
   }

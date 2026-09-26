@@ -175,7 +175,7 @@ export default function StudentsScreen() {
     const selectedOptions = packageOptions.filter((option) => packageOptionIds.includes(option.id));
     if (selectedOptions.some((option) => !packageTeacherIds[option.id])) return Alert.alert("تنبيه", "اختار مدرس للمادة دي.");
     try {
-      const subscription = await PackageSubscriptionRepository.subscribeStudent({ studentId: selectedStudent.id, packageId, startDate: getLocalDateOnly(), selectedOptionIds: packageOptionIds });
+      const subscription = await PackageSubscriptionRepository.subscribeStudent({ studentId: selectedStudent.id, packageId, startDate: getLocalDateOnly(), selectedOptionIds: packageOptionIds, selectedTeacherIds: packageTeacherIds });
       if (PermissionService.hasPermission(permissions, "packages.manage")) {
         for (const option of selectedOptions) {
           const teacherId = packageTeacherIds[option.id] || option.defaultTeacherId;

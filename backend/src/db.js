@@ -115,6 +115,53 @@ async function ensureSchemaCompatibility() {
       ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
   `);
 
+  // Keep the server's historical snapshots in lockstep with the mobile
+  // database.  Older Neon databases only had the original group/session
+  // columns, so a bootstrap silently dropped the teacher, subject, pricing,
+  // schedule and lateness metadata that the reports depend on.
+  await pool.query(`
+    ALTER TABLE groups
+      ADD COLUMN IF NOT EXISTS session_price NUMERIC(12, 2) NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS monthly_price NUMERIC(12, 2) NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS session_duration_minutes INTEGER NOT NULL DEFAULT 120,
+      ADD COLUMN IF NOT EXISTS late_after_minutes INTEGER NOT NULL DEFAULT 15;
+    UPDATE groups
+       SET session_price = CASE WHEN session_price = 0 THEN COALESCE(default_fee, 0) ELSE session_price END,
+           monthly_price = CASE WHEN monthly_price = 0 THEN COALESCE(default_fee, 0) * 4 ELSE monthly_price END
+     WHERE session_price = 0 OR monthly_price = 0;
+  `);
+
+  await pool.query(`
+    ALTER TABLE sessions
+      ADD COLUMN IF NOT EXISTS schedule_id VARCHAR(64),
+      ADD COLUMN IF NOT EXISTS subject_id VARCHAR(64),
+      ADD COLUMN IF NOT EXISTS teacher_id VARCHAR(64),
+      ADD COLUMN IF NOT EXISTS session_price NUMERIC(12, 2) NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS late_after_minutes INTEGER NOT NULL DEFAULT 15;
+    UPDATE sessions s
+       SET subject_id = COALESCE(s.subject_id, g.subject_id),
+           teacher_id = COALESCE(s.teacher_id, g.teacher_id),
+           session_price = CASE WHEN s.session_price = 0 THEN COALESCE(g.session_price, g.default_fee, 0) ELSE s.session_price END,
+           late_after_minutes = COALESCE(s.late_after_minutes, g.late_after_minutes, 15)
+      FROM groups g
+     WHERE g.center_id = s.center_id AND g.id = s.group_id;
+  `);
+
+  // The mobile app supports external students. Older Neon databases used a
+  // check constraint that rejected that valid value, leaving those students
+  // permanently stuck in the sync conflict queue. Normalize only unknown
+  // legacy values, then widen the constraint safely for existing databases.
+  await pool.query(`
+    UPDATE students
+       SET student_type = 'registered'
+     WHERE student_type IS NULL
+        OR student_type NOT IN ('registered', 'external', 'guest', 'scholarship');
+    ALTER TABLE students DROP CONSTRAINT IF EXISTS students_student_type_check;
+    ALTER TABLE students
+      ADD CONSTRAINT students_student_type_check
+      CHECK (student_type IN ('registered', 'external', 'guest', 'scholarship'));
+  `);
+
   // Package subjects are unique by teacher, not by subject alone. This lets a
   // package include the same subject with different teachers while preventing
   // the same teacher from being added twice.

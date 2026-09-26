@@ -93,8 +93,11 @@ export class DashboardService {
       // signal so a completed scan is never displayed as zero.
       if (expected.length === 0) {
         const session = db.getFirstSync<any>(
-          "SELECT group_id as groupId, session_date as sessionDate FROM sessions WHERE center_id = ? AND id = ?",
-          [centerId, sessionId],
+          `SELECT group_id as groupId, session_date as sessionDate,
+                  COALESCE(subject_id, (SELECT subject_id FROM groups WHERE center_id = ? AND id = group_id)) as subjectId,
+                  COALESCE(teacher_id, (SELECT teacher_id FROM groups WHERE center_id = ? AND id = group_id)) as teacherId
+             FROM sessions WHERE center_id = ? AND id = ?`,
+          [centerId, centerId, centerId, sessionId],
         );
         const enrolled = session
           ? db.getAllSync<any>(
@@ -106,6 +109,36 @@ export class DashboardService {
             )
           : [];
         const ids = new Set<string>(enrolled.map((row) => String(row.studentId ?? row.student_id)));
+        if (session) {
+          const packageRows = db.getAllSync<any>(
+            `SELECT DISTINCT sps.student_id as studentId
+               FROM student_package_subscriptions sps
+               JOIN package_subjects ps
+                 ON ps.center_id = sps.center_id AND ps.package_id = sps.package_id
+               LEFT JOIN package_subject_teacher_overrides selected
+                 ON selected.center_id = sps.center_id
+                AND selected.subscription_id = sps.id
+                AND selected.subject_id = ps.subject_id
+              WHERE sps.center_id = ? AND sps.status = 'active'
+                AND sps.start_date <= ? AND (sps.end_date IS NULL OR sps.end_date >= ?)
+                AND ps.subject_id = ?
+                AND (ps.group_id IS NULL OR ps.group_id = ?)
+                AND COALESCE(selected.teacher_id, ps.default_teacher_id) = ?
+                AND (
+                  selected.id IS NOT NULL
+                  OR NOT EXISTS (
+                    SELECT 1 FROM package_subject_teacher_overrides any_selection
+                    WHERE any_selection.center_id = sps.center_id
+                      AND any_selection.subscription_id = sps.id
+                  )
+                )`,
+            [centerId, session.sessionDate, session.sessionDate, session.subjectId, session.groupId, session.teacherId],
+          );
+          for (const row of packageRows) {
+            const studentId = row.studentId ?? row.student_id;
+            if (studentId) ids.add(String(studentId));
+          }
+        }
         for (const row of attendance) {
           const studentId = row.studentId ?? row.student_id;
           if (studentId && row.attendanceType !== "makeup") ids.add(String(studentId));

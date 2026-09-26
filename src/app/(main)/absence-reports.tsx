@@ -38,19 +38,24 @@ function SessionGroupList({
   return React.createElement(
     View,
     null,
-    ...groups.map((group) =>
+    ...groups.map((group, groupIndex) =>
       React.createElement(
         View,
-        { key: group.id || group.name, style: styles.groupReport },
+        {
+          // Group names are not unique; keep sibling keys unique even when
+          // server-reset data briefly contains duplicate ids.
+          key: `${group.id || group.name || "group"}-${groupIndex}`,
+          style: styles.groupReport,
+        },
         React.createElement(
           Text,
           { style: styles.groupReportTitle },
           `${String(group.name)} · ${String(group.items.length)} حصة`,
         ),
-        ...group.items.map((item) =>
+        ...group.items.map((item, itemIndex) =>
           React.createElement(
             View,
-            { key: item.session.id },
+            { key: `${item.session.id || "session"}-${itemIndex}` },
             React.createElement(
               Text,
               { style: styles.sessionNumber },

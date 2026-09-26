@@ -344,6 +344,10 @@ function ScannerContent() {
     try {
       await PaymentRepository.recordPayment({
         studentId: student.id,
+        // Keep quick payments tied to the attendance session. Without this
+        // link they appear in daily cash but cannot be attributed to a
+        // teacher/group settlement.
+        sessionId: activeSessionId || selectedSessionId || undefined,
         amount,
         paymentType: "partial",
         debtCycleId: financialStatus?.cycles.find((cycle) => (cycle.remainingDebt ?? 0) > 0)?.id,

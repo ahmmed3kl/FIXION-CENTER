@@ -223,7 +223,17 @@ function orderOperationsByDependencies(rows: SyncOperation[]): SyncOperation[] {
     const entity = canonicalEntityType(operation.entityType);
     const value = (...keys: string[]) => firstValue(payload, ...keys);
     const refs: Array<[string, any]> = [];
-    if (entity === "session") refs.push(["group", value("groupId", "group_id")]);
+    if (entity === "session") {
+      refs.push(["group", value("groupId", "group_id")]);
+      // The server builds session_expected_students with a foreign-key
+      // lookup. Ensure every student in the manifest is uploaded before the
+      // session, otherwise the server silently drops the roster and reports
+      // show expected=0 after the next bootstrap.
+      const expectedStudentIds = payload.expectedStudentIds || payload.expected_student_ids || [];
+      if (Array.isArray(expectedStudentIds)) {
+        for (const studentId of expectedStudentIds) refs.push(["student", studentId]);
+      }
+    }
     if (entity === "attendance" || entity === "makeup") {
       refs.push(["session", value("sessionId", "session_id")]);
       refs.push(["student", value("studentId", "student_id")]);
