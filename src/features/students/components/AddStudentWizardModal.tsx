@@ -251,7 +251,10 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({ vi
     setSelectedGroupIds((old) => old.includes(groupId) ? old.filter((id) => id !== groupId) : [...old, groupId]);
   };
   const groupTeacherName = (group: Group) => teachers.find((teacher) => teacher.id === group.teacherId)?.name || group.teacherName || "مدرس غير محدد";
-  const scheduleText = (groupId: string) => (schedules[groupId] || []).slice(0, 2).map((item) => `${DAYS[item.dayOfWeek]} ${formatTimeArabic(item.startTime)}`).join("  •  ") || "لم يتم تحديد الموعد";
+  const scheduleText = (groupId: string) => {
+    const groupSchedules = schedules[groupId] || GroupScheduleRepository.getSchedulesForGroup(groupId);
+    return groupSchedules.slice(0, 2).map((item) => `${DAYS[item.dayOfWeek] || "اليوم"} ${formatTimeArabic(item.startTime)}`).join("  •  ") || "لم يتم تحديد الموعد";
+  };
 
   const selectPackage = (nextPackageId: string) => {
     if (!nextPackageId) { setPackageId(""); setPackageOptionIds([]); setPackageTeacherIds({}); return; }

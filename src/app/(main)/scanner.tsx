@@ -34,6 +34,7 @@ import { GroupScheduleRepository } from "../../features/groups/GroupScheduleRepo
 import { GroupRepository } from "../../features/groups/GroupRepository";
 import { PaymentRepository } from "../../features/payments/PaymentRepository";
 import { SessionRepository } from "../../features/sessions/SessionRepository";
+import { SessionClosingService } from "../../features/sessions/SessionClosingService";
 import { ScannerService } from "../../features/scanner/ScannerService";
 import { StudentRepository } from "../../features/students/StudentRepository";
 import { getLocalDateOnly } from "../../shared/utils/date";
@@ -109,6 +110,7 @@ function ScannerContent() {
   const [attendanceStarted, setAttendanceStarted] = useState(false);
   const [attendanceSummary, setAttendanceSummary] = useState<AttendanceSummary | null>(null);
   const [makeupNotice, setMakeupNotice] = useState<{ sourceGroupName?: string; teacherName?: string; originalAbsenceId?: string } | null>(null);
+  const [isClosingSession, setIsClosingSession] = useState(false);
 
   // Quick Payment Modal
   const [showPaymentModal, setShowPaymentModal] = useState(false);
@@ -173,6 +175,29 @@ function ScannerContent() {
     setSelectedScheduleId(null);
     setAttendanceSummary(null);
     handleReset();
+  };
+
+  const closeCurrentSession = () => {
+    if (!activeSessionId || isClosingSession) return;
+    Alert.alert("إغلاق الجلسة", "هل تريد إغلاق جلسة هذه المجموعة؟ لن يتم تسجيل حضور جديد حتى تعيد فتحها.", [
+      { text: "إلغاء", style: "cancel" },
+      {
+        text: "إغلاق الجلسة",
+        style: "destructive",
+        onPress: () => {
+          try {
+            setIsClosingSession(true);
+            SessionClosingService.closeSession(activeSessionId);
+            refreshTodayData();
+            handleBackToGroups();
+          } catch (error) {
+            Alert.alert(Strings.errorTitle, getUserErrorMessage(error));
+          } finally {
+            setIsClosingSession(false);
+          }
+        },
+      },
+    ]);
   };
 
   const lookupCard = (rawCode: string) => {
@@ -430,6 +455,7 @@ function ScannerContent() {
         {attendanceStarted && attendanceSummary ? (
           <View style={styles.attendanceCounterBar}>
             <Text style={styles.counterTitle}>حضور الجلسة</Text>
+            <AppButton title={isClosingSession ? "جاري الإغلاق..." : "إغلاق الجلسة"} onPress={closeCurrentSession} disabled={isClosingSession} size="sm" variant="outline" />
             <Text style={styles.counterItem}>الكل: {attendanceSummary.total}</Text>
             <Text style={[styles.counterItem, { color: Colors.successText }]}>حاضر: {attendanceSummary.present}</Text>
             <Text style={[styles.counterItem, { color: Colors.dangerText }]}>غائب: {attendanceSummary.absent}</Text>

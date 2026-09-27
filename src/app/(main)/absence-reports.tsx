@@ -29,11 +29,13 @@ type SessionGroup = { id?: string; name: string; items: AbsenceSessionSummary[] 
 function SessionGroupList({
   groups,
   onPress,
+  onGroupPress,
 }: {
   groups: SessionGroup[];
   onPress: (sessionId: string) => void;
+  onGroupPress?: (group: SessionGroup) => void;
 }) {
-  return <CollapsibleSessionGroupList groups={groups} onPress={onPress} />;
+  return <CollapsibleSessionGroupList groups={groups} onPress={onPress} onGroupPress={onGroupPress} />;
   /* legacy renderer retained below for compatibility with older bundles
   const [expandedGroupId, setExpandedGroupId] = useState<string | null>(null);
   // Create one native subtree explicitly. This avoids any whitespace text
@@ -78,11 +80,13 @@ function SessionGroupList({
 function CollapsibleSessionGroupList({
   groups,
   onPress,
+  onGroupPress,
 }: {
   groups: SessionGroup[];
   onPress: (sessionId: string) => void;
+  onGroupPress?: (group: SessionGroup) => void;
 }) {
-  const [expanded, setExpanded] = useState<string | null>(null);
+  const router = useRouter();
   const ordered = groups.map((group) => ({
     ...group,
     items: [...group.items].sort((a, b) => `${b.session.sessionDate}T${b.session.startTime || ""}`.localeCompare(`${a.session.sessionDate}T${a.session.startTime || ""}`)),
@@ -91,11 +95,11 @@ function CollapsibleSessionGroupList({
     <View>
       {ordered.map((group, index) => {
         const key = `${group.id || group.name}-${index}`;
-        const isOpen = expanded === key;
+        const isOpen = false;
         return (
           <View key={key} style={styles.groupReport}>
-            <TouchableOpacity style={styles.groupReportHeader} activeOpacity={0.8} onPress={() => setExpanded(isOpen ? null : key)}>
-              <Ionicons name={isOpen ? "chevron-down" : "chevron-back"} size={19} color={Colors.primary} />
+            <TouchableOpacity style={styles.groupReportHeader} activeOpacity={0.8} onPress={() => onGroupPress ? onGroupPress(group) : router.push({ pathname: "/(main)/absence-group", params: { groupId: group.id, groupName: group.name, month: monthKey(new Date()) } } as any)}>
+              <Ionicons name="chevron-back" size={19} color={Colors.primary} />
               <View style={styles.groupReportHeaderCopy}>
                 <Text style={styles.groupReportTitle}>{group.name}</Text>
                 <Text style={styles.groupReportHint}>{group.items.length} حصة · اضغط لعرض التفاصيل</Text>

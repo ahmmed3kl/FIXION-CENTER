@@ -11,7 +11,6 @@ const items = [
   { label: "الإدارة الأكاديمية", caption: "المراحل والمدرسون والمجموعات", route: "/(main)/academic", icon: "school-outline" as const, tint: "#ECFDF5" },
   { label: "رصد الدرجات", caption: "الامتحانات ودرجات الطلاب", route: "/(main)/grades", icon: "reader-outline" as const, tint: "#EFF6FF" },
   { label: "الباقات", caption: "الاشتراكات والمواد", route: "/(main)/packages", icon: "pricetags-outline" as const, tint: "#FFF7ED" },
-  { label: "الإغلاق اليومي", caption: "مراجعة الحسابات اليومية", route: "/(main)/closing", icon: "lock-closed-outline" as const, tint: "#F5F3FF" },
   { label: "الإشعارات", caption: "القوالب ورسائل SMS", route: "/(main)/notifications", icon: "notifications-outline" as const, tint: "#FFF1F2" },
   { label: "تقارير الغياب", caption: "تحليل حضور المجموعات", route: "/(main)/absence-reports", icon: "document-text-outline" as const, tint: "#ECFEFF" },
   { label: "التقارير", caption: "ملخصات الأداء والماليات", route: "/(main)/reports", icon: "bar-chart-outline" as const, tint: "#F0FDFA" },
