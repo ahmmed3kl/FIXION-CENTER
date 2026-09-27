@@ -86,6 +86,7 @@ function CollapsibleSessionGroupList({
   onPress: (sessionId: string) => void;
   onGroupPress?: (group: SessionGroup) => void;
 }) {
+  const [expandedGroupId, setExpandedGroupId] = useState<string | null>(null);
   const router = useRouter();
   const ordered = groups.map((group) => ({
     ...group,
@@ -95,11 +96,14 @@ function CollapsibleSessionGroupList({
     <View>
       {ordered.map((group, index) => {
         const key = `${group.id || group.name}-${index}`;
-        const isOpen = false;
+        const isOpen = expandedGroupId === (group.id || group.name);
         return (
           <View key={key} style={styles.groupReport}>
-            <TouchableOpacity style={styles.groupReportHeader} activeOpacity={0.8} onPress={() => onGroupPress ? onGroupPress(group) : router.push({ pathname: "/(main)/absence-group", params: { groupId: group.id, groupName: group.name, month: monthKey(new Date()) } } as any)}>
-              <Ionicons name="chevron-back" size={19} color={Colors.primary} />
+            <TouchableOpacity style={styles.groupReportHeader} activeOpacity={0.8} onPress={() => {
+              if (onGroupPress) onGroupPress(group);
+              else setExpandedGroupId(isOpen ? null : (group.id || group.name));
+            }}>
+              <Ionicons name={isOpen ? "chevron-down" : "chevron-back"} size={19} color={Colors.primary} />
               <View style={styles.groupReportHeaderCopy}>
                 <Text style={styles.groupReportTitle}>{group.name}</Text>
                 <Text style={styles.groupReportHint}>{group.items.length} حصة · اضغط لعرض التفاصيل</Text>
