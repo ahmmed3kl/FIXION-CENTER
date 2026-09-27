@@ -269,17 +269,12 @@ export class AttendanceSessionService {
       throw new ForbiddenError("ليس لديك صلاحية بدء جلسة الحضور.");
     }
     const session = SessionRepository.findById(sessionId);
-    // Reopen the canonical daily session in place; never create a replacement.
-    const wasClosed = session?.status === "closed";
-    if (wasClosed && session) session.status = "open";
+    // A closed session is reopened only through the explicit reopen action.
     if (!session) throw new ConflictError("جلسة الحضور غير موجودة.");
     if (session.status === "closed" || session.status === "cancelled") throw new ConflictError("لا يمكن بدء جلسة مغلقة أو ملغاة.");
 
     const db = DatabaseService.getDb();
-    if (wasClosed && session) {
-      db.runSync("UPDATE sessions SET status = 'open', updated_at = ? WHERE center_id = ? AND id = ?", [new Date().toISOString(), session.centerId, session.id]);
-    }
-    let sessionWasActivated = Boolean(wasClosed);
+    let sessionWasActivated = false;
     if (session.status === "scheduled") {
       db.runSync("UPDATE sessions SET status = 'open', updated_at = ? WHERE center_id = ? AND id = ?", [new Date().toISOString(), session.centerId, session.id]);
       sessionWasActivated = true;

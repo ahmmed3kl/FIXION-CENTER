@@ -178,7 +178,7 @@ export class SessionGenerationService {
             startTime: sched.startTime,
             endTime: sched.endTime,
             expectedStudentIds,
-            status: "open",
+            status: "scheduled",
             createdAt: now,
           },
         });
@@ -195,7 +195,7 @@ export class SessionGenerationService {
           sessionDate: dateStr,
           startTime: sched.startTime,
           endTime: sched.endTime,
-          status: "open",
+          status: "scheduled",
           createdAt: now,
           groupName: group.name,
           teacherName: group.teacherName,

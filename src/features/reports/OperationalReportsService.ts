@@ -12,7 +12,6 @@ import {
 import { useAuthStore } from "../auth/useAuthStore";
 import { FinancialCalculationService } from "../payments/FinancialCalculationService";
 import { calculateSessionAttendanceCounts } from "../attendance/AttendanceCalculations";
-import { getLocalDateOnly } from "../../shared/utils/date";
 
 export class OperationalReportsService {
   private static getActiveContext() {
@@ -57,25 +56,12 @@ export class OperationalReportsService {
        ORDER BY s.start_time ASC`,
       [centerId, dateStr],
     );
-    const today = getLocalDateOnly();
-    const currentTime = new Date().toTimeString().slice(0, 5);
-    // A session is not an absence report until it has ended. Future and
-    // cancelled sessions remain schedule data, not missed attendance.
-    const attendedSessionIds = new Set(
-      db.getAllSync<any>(
-        `SELECT DISTINCT session_id FROM attendance WHERE center_id = ?`,
-        [centerId],
-      ).map((row: any) => String(row.session_id ?? row.sessionId)),
-    );
+    // A scheduled row is only timetable data. Operational attendance starts
+    // when the operator opens the session and remains reportable after the
+    // operator manually closes it.
     const sessions = loadedSessions.filter(
       (session: any) =>
-        // Opening a session is an explicit operational action. It must be
-        // visible immediately, even before the scheduled clock time, so an
-        // empty session is still present in the absence/attendance reports.
-        session.status === "open" ||
-        dateStr < today ||
-        (dateStr === today &&
-          (String(session.start_time || "") <= currentTime || attendedSessionIds.has(String(session.id)))),
+        session.status === "open" || session.status === "closed",
     );
 
     const sessionReport = sessions.map((s: any) => {
