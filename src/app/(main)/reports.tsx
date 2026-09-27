@@ -82,7 +82,9 @@ function ReportsContent() {
         const rep = OperationalReportsService.getDailyAttendanceReport(selectedDate);
         setDailyAttReport(rep);
       } else if (activeReport === "studentAtt" && selectedStudentId) {
-        const fromDate = "2026-09-01";
+        // Keep the student report scoped to the month currently selected in
+        // the date control instead of using a stale deployment date.
+        const fromDate = `${selectedDate.slice(0, 7)}-01`;
         const toDate = selectedDate;
         const rep = OperationalReportsService.getStudentAttendanceReport(selectedStudentId, fromDate, toDate);
         setStudentAttReport(rep);

@@ -231,6 +231,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+CREATE UNIQUE INDEX IF NOT EXISTS uq_sessions_group_sched_date
+    ON sessions(center_id, group_id, COALESCE(schedule_id, ''), session_date);
 
 -- Session Expected Students (Manifest snapshot)
 CREATE TABLE IF NOT EXISTS session_expected_students (
@@ -280,6 +282,9 @@ CREATE TABLE IF NOT EXISTS debt_cycles (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+CREATE UNIQUE INDEX IF NOT EXISTS uq_debt_cycles_natural
+    ON debt_cycles(center_id, COALESCE(enrollment_id, package_subscription_id), cycle_number)
+    WHERE cycle_number IS NOT NULL;
 
 -- Payments (Immutable cash-flow events)
 CREATE TABLE IF NOT EXISTS payments (

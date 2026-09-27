@@ -1,4 +1,4 @@
-export type UserRole = "admin" | "manager" | "secretary" | "accountant";
+export type UserRole = "owner" | "admin" | "manager" | "secretary" | "accountant" | "assistant";
 
 export type Permission =
   | "dashboard.view"

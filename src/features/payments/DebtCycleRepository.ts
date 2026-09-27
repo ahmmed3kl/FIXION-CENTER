@@ -432,22 +432,37 @@ export class DebtCycleRepository {
       const operationId = `op-dc-${generateUUID()}`;
       const now = new Date().toISOString();
 
-      db.runSync(
-        `INSERT INTO debt_cycles (id, center_id, student_id, enrollment_id, group_id, cycle_number, start_date, end_date, cycle_price, status, cycle_type, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', 'monthly', ?)`,
-        [
-          cycleId,
-          centerId,
-          enrollment.studentId,
-          enrollment.id,
-          enrollment.groupId,
-          nextCycleNum,
-          nextStart,
-          cycleEndDate,
-          cyclePrice,
-          now,
-        ],
-      );
+      let insertedCycle = { changes: 1 };
+      try {
+        insertedCycle = db.runSync(
+          `INSERT INTO debt_cycles (id, center_id, student_id, enrollment_id, group_id, cycle_number, start_date, end_date, cycle_price, status, cycle_type, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', 'monthly', ?)`,
+          [
+            cycleId,
+            centerId,
+            enrollment.studentId,
+            enrollment.id,
+            enrollment.groupId,
+            nextCycleNum,
+            nextStart,
+            cycleEndDate,
+            cyclePrice,
+            now,
+          ],
+        );
+      } catch (error) {
+        if (!String((error as any)?.message || error).toLowerCase().includes("unique")) throw error;
+        insertedCycle = { changes: 0 };
+      }
+
+      // Another bootstrap/sync pass may have created this natural cycle
+      // between the read above and the insert. Keep generation idempotent and
+      // do not enqueue a second operation for a row that was ignored.
+      if (!insertedCycle.changes) {
+        nextCycleNum++;
+        nextStart = nextCycleStart;
+        continue;
+      }
 
       // Queue for sync
       SyncRepository.enqueueOperation({
@@ -602,24 +617,36 @@ export class DebtCycleRepository {
       const operationId = `op-dc-pkg-${generateUUID()}`;
       const now = new Date().toISOString();
 
-      db.runSync(
-        `INSERT INTO debt_cycles (id, center_id, student_id, enrollment_id, group_id, cycle_number, start_date, end_date, cycle_price, status, package_subscription_id, package_id, cycle_type, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, 'package', ?)`,
-        [
-          cycleId,
-          centerId,
-          subscription.studentId,
-          subscription.id,
-          subscription.packageId,
-          nextCycleNum,
-          nextStart,
-          cycleEndDate,
-          cyclePrice,
-          subscription.id,
-          subscription.packageId,
-          now,
-        ],
-      );
+      let insertedCycle = { changes: 1 };
+      try {
+        insertedCycle = db.runSync(
+          `INSERT INTO debt_cycles (id, center_id, student_id, enrollment_id, group_id, cycle_number, start_date, end_date, cycle_price, status, package_subscription_id, package_id, cycle_type, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, 'package', ?)`,
+          [
+            cycleId,
+            centerId,
+            subscription.studentId,
+            subscription.id,
+            subscription.packageId,
+            nextCycleNum,
+            nextStart,
+            cycleEndDate,
+            cyclePrice,
+            subscription.id,
+            subscription.packageId,
+            now,
+          ],
+        );
+      } catch (error) {
+        if (!String((error as any)?.message || error).toLowerCase().includes("unique")) throw error;
+        insertedCycle = { changes: 0 };
+      }
+
+      if (!insertedCycle.changes) {
+        nextCycleNum++;
+        nextStart = nextCycleStart;
+        continue;
+      }
 
       // Queue for sync
       SyncRepository.enqueueOperation({

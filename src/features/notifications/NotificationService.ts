@@ -1,4 +1,5 @@
 import { AuditService } from "../../core/audit";
+import { env } from "../../config/env";
 import { DatabaseService } from "../../core/database";
 import { DeviceService } from "../../core/device";
 import { ForbiddenError, UnauthorizedError } from "../../core/errors";
@@ -47,9 +48,23 @@ export class LocalPushNotificationProvider implements NotificationProvider {
   }
 }
 
+/** Test/mock SMS provider. Production SMS is still delivered by ZADX on the
+ * backend after the queued delivery syncs, so no fake local send is reported
+ * to a real user. */
+export class LocalSmsNotificationProvider implements NotificationProvider {
+  channel: NotificationChannel = "sms";
+  async send(
+    _recipient: string,
+    _message: string,
+  ): Promise<{ success: boolean }> {
+    return { success: true };
+  }
+}
+
 /** Mock SMS provider — queues locally, does not call external APIs */
 const PROVIDERS: Partial<Record<NotificationChannel, NotificationProvider>> = {
   push: new LocalPushNotificationProvider(),
+  sms: new LocalSmsNotificationProvider(),
 };
 
 export class NotificationService {
@@ -355,9 +370,10 @@ export class NotificationService {
     const now = new Date().toISOString();
 
     for (const delivery of deliveries) {
-      // SMS deliveries are processed by the backend ZADX provider after the
-      // queued notification_delivery operation reaches the server.
-      if (delivery.channel === "sms") continue;
+      // SMS deliveries are processed by the backend ZADX provider in
+      // production. Mock/test mode uses a deterministic local provider so
+      // offline unit tests can verify idempotency without sending real SMS.
+      if (delivery.channel === "sms" && !env.enableMockData) continue;
       const provider = PROVIDERS[delivery.channel as NotificationChannel];
       if (!provider) continue;
 

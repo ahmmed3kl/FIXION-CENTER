@@ -317,7 +317,42 @@ export class FinancialCalculationService {
       [this.getActiveContext().centerId, groupId],
     );
     const sessionIds = new Set(sessionRows.map((row) => row.id));
-    const cycles = full.cycles.filter((cycle) => cycle.groupId === groupId);
+    const groupCycles = full.cycles.filter((cycle) => cycle.cycleType !== "package" && cycle.groupId === groupId);
+    // Package cycles are stored once per subscription/month. Include that
+    // cycle in a group-scoped view only when this group is one of the
+    // student's selected package options (subject + teacher + optional group
+    // restriction). The cycle remains a single ledger obligation, so this
+    // query only scopes visibility; it never duplicates or splits the debt.
+    const packageCycleRows = db.getAllSync<{ id: string }>(
+      `SELECT DISTINCT dc.id
+       FROM debt_cycles dc
+       JOIN student_package_subscriptions sps
+         ON sps.center_id = dc.center_id
+        AND (dc.package_subscription_id = sps.id OR dc.enrollment_id = sps.id)
+       JOIN package_subjects ps
+         ON ps.center_id = sps.center_id AND ps.package_id = sps.package_id
+       JOIN groups scoped_group
+         ON scoped_group.center_id = ps.center_id AND scoped_group.id = ?
+       LEFT JOIN package_subject_teacher_overrides selected
+         ON selected.center_id = sps.center_id
+        AND selected.subscription_id = sps.id
+        AND selected.subject_id = ps.subject_id
+       WHERE dc.center_id = ? AND dc.student_id = ? AND dc.cycle_type = 'package'
+         AND ps.subject_id = scoped_group.subject_id
+         AND (ps.group_id IS NULL OR ps.group_id = ?)
+         AND COALESCE(selected.teacher_id, ps.default_teacher_id) = scoped_group.teacher_id
+         AND (
+           selected.id IS NOT NULL
+           OR NOT EXISTS (
+             SELECT 1 FROM package_subject_teacher_overrides any_selection
+             WHERE any_selection.center_id = sps.center_id
+               AND any_selection.subscription_id = sps.id
+           )
+         )`,
+      [groupId, this.getActiveContext().centerId, studentId, groupId],
+    );
+    const packageCycleIds = new Set(packageCycleRows.map((row) => row.id));
+    const cycles = full.cycles.filter((cycle) => groupCycles.some((item) => item.id === cycle.id) || packageCycleIds.has(cycle.id));
     const cycleIds = new Set(cycles.map((cycle) => cycle.id));
     const payments = full.payments.filter(
       (payment) =>
@@ -338,10 +373,16 @@ export class FinancialCalculationService {
         !payment.isReversed &&
         (payment.paymentType === "session" || !!payment.sessionId),
     );
-    const monthlyTotalDue = cycles.reduce(
+    const packageCycles = cycles.filter((cycle) => cycle.cycleType === "package");
+    const monthlyGroupDue = groupCycles.reduce(
       (sum, cycle) => sum + Number(cycle.effectivePrice ?? cycle.cyclePrice ?? 0),
       0,
     );
+    const monthlyPackageDue = packageCycles.reduce(
+      (sum, cycle) => sum + Number(cycle.effectivePrice ?? cycle.cyclePrice ?? 0),
+      0,
+    );
+    const monthlyTotalDue = monthlyGroupDue + monthlyPackageDue;
     // Use the cycle allocation rather than only directly-linked payment rows.
     // An unassigned payment may have been allocated to this group's oldest
     // cycle by the full calculation, so summing `monthlyPayments` alone can
@@ -388,12 +429,12 @@ export class FinancialCalculationService {
       totalRemainingDebt: monthlyRemainingDebt,
       sessionTotalPaid,
       sessionPaymentsTotal: sessionTotalPaid,
-      groupMonthlyDue: monthlyTotalDue,
-      groupMonthlyPaid: monthlyTotalPaid,
-      groupRemainingDebt: monthlyRemainingDebt,
-      packageMonthlyDue: 0,
-      packageMonthlyPaid: 0,
-      packageRemainingDebt: 0,
+      groupMonthlyDue: monthlyGroupDue,
+      groupMonthlyPaid: groupCycles.reduce((sum, cycle) => sum + Number(cycle.paidAmount ?? 0), 0),
+      groupRemainingDebt: groupCycles.reduce((sum, cycle) => sum + Number(cycle.remainingDebt ?? 0), 0),
+      packageMonthlyDue: monthlyPackageDue,
+      packageMonthlyPaid: packageCycles.reduce((sum, cycle) => sum + Number(cycle.paidAmount ?? 0), 0),
+      packageRemainingDebt: packageCycles.reduce((sum, cycle) => sum + Number(cycle.remainingDebt ?? 0), 0),
       cycles,
       adjustments,
       sessionPayments,

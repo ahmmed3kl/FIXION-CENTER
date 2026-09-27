@@ -1876,6 +1876,19 @@ class InMemorySqliteMock implements SqlDatabase {
         ) as T[];
       }
 
+      if (
+        params.length >= 3 &&
+        trimmed.includes("group_id = ? AND session_date = ?") &&
+        !trimmed.includes("schedule_id = ?")
+      ) {
+        return joined.filter(
+          (session) =>
+            session.centerId === params[0] &&
+            session.groupId === params[1] &&
+            session.sessionDate === params[2],
+        ) as T[];
+      }
+
       if (params.length >= 3 && trimmed.includes("JOIN groups")) {
         const [studentId, centerId, dateStr] = params;
         return joined.filter((s) => {
@@ -2169,6 +2182,24 @@ class InMemorySqliteMock implements SqlDatabase {
         return mapped.filter(
           (r) => r.centerId === params[0] && r.id === params[1],
         ) as T[];
+      }
+      // The real SQLite query joins schedules when the dashboard asks for
+      // today's groups. Mirror that day/status predicate in the in-memory
+      // test adapter so dashboard tests exercise the same production logic.
+      if (trimmed.includes("JOIN group_schedules") && params.length >= 2) {
+        const centerId = params[0];
+        const dayOfWeek = Number(params[1]);
+        const schedules = this.tables.get("group_schedules") || [];
+        const scheduledGroupIds = new Set(
+          schedules
+            .filter((schedule) =>
+              schedule.center_id === centerId &&
+              Number(schedule.day_of_week) === dayOfWeek &&
+              (schedule.status || "active") === "active",
+            )
+            .map((schedule) => schedule.group_id),
+        );
+        return mapped.filter((row) => row.centerId === centerId && scheduledGroupIds.has(row.id)) as T[];
       }
       if (params.length >= 1 && trimmed.includes("center_id = ?")) {
         if (trimmed.includes("status = 'active'")) {

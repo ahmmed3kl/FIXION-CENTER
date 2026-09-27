@@ -113,24 +113,32 @@ export class SessionGenerationService {
         const now = new Date().toISOString();
 
         // 1. Insert Session with historical snapshot of configuration
-        db.runSync(
-          `INSERT INTO sessions (id, center_id, group_id, schedule_id, subject_id, teacher_id, session_price, late_after_minutes, session_date, start_time, end_time, status, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)`,
-          [
-            sessionId,
-            centerId,
-            group.id,
-            sched.id,
-            group.subjectId,
-            group.teacherId,
-            group.sessionPrice,
-            group.lateAfterMinutes,
-            dateStr,
-            sched.startTime,
-            sched.endTime,
-            now,
-          ],
-        );
+        try {
+          db.runSync(
+            `INSERT INTO sessions (id, center_id, group_id, schedule_id, subject_id, teacher_id, session_price, late_after_minutes, session_date, start_time, end_time, status, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', ?)`,
+            [
+              sessionId,
+              centerId,
+              group.id,
+              sched.id,
+              group.subjectId,
+              group.teacherId,
+              group.sessionPrice,
+              group.lateAfterMinutes,
+              dateStr,
+              sched.startTime,
+              sched.endTime,
+              now,
+            ],
+          );
+        } catch (error) {
+          // A second device may have generated the same natural session
+          // between the read and insert. Treat that race as idempotent rather
+          // than surfacing a duplicate-key error to the operator.
+          if (!String((error as any)?.message || error).toLowerCase().includes("unique")) throw error;
+          continue;
+        }
 
         // 2. Capture immutable snapshot of expected students based on active enrollment on this date
         const expectedStudentIds = AttendanceSessionService.getExpectedStudentIdsForGroup(group, group.id, dateStr);

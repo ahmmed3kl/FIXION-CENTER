@@ -21,7 +21,7 @@ export function calculateSessionAttendanceCounts(
   const expectedIds = new Set(expectedStudentIds);
   const regularRows = attendance.filter((item) => item.attendanceType !== "makeup");
   const presentIds = new Set(
-    regularRows
+    attendance
       .filter((item) => (item.status === "present" || item.status === "late") && expectedIds.has(item.studentId))
       .map((item) => item.studentId),
   );

@@ -13,6 +13,7 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { getUserErrorMessage } from "../../core/errors";
+import { PermissionService } from "../../core/permissions";
 import {
     Strings,
     formatCurrency,
@@ -37,6 +38,7 @@ import { SessionRepository } from "../../features/sessions/SessionRepository";
 import { SessionClosingService } from "../../features/sessions/SessionClosingService";
 import { ScannerService } from "../../features/scanner/ScannerService";
 import { StudentRepository } from "../../features/students/StudentRepository";
+import { useAuthStore } from "../../features/auth/useAuthStore";
 import { getLocalDateOnly } from "../../shared/utils/date";
 import {
     AppButton,
@@ -77,6 +79,7 @@ function ScannerContent() {
   const styles = useMemo(() => createStyles(), [colors]);
   const services = useServiceVisibility();
   const paymentsEnabled = services.isEnabled("payments");
+  const currentUser = useAuthStore((state) => state.currentUser);
   const [permission, requestPermission] = useCameraPermissions();
   const [isCameraActive, setIsCameraActive] = useState(false);
   const [cameraInstanceKey, setCameraInstanceKey] = useState(0);
@@ -111,6 +114,7 @@ function ScannerContent() {
   const [attendanceSummary, setAttendanceSummary] = useState<AttendanceSummary | null>(null);
   const [makeupNotice, setMakeupNotice] = useState<{ sourceGroupName?: string; teacherName?: string; originalAbsenceId?: string } | null>(null);
   const [isClosingSession, setIsClosingSession] = useState(false);
+  const [isSessionClosed, setIsSessionClosed] = useState(false);
 
   // Quick Payment Modal
   const [showPaymentModal, setShowPaymentModal] = useState(false);
@@ -124,7 +128,7 @@ function ScannerContent() {
     try {
       setTodayGroups(AttendanceSessionService.getTodayGroups());
       const sessions = AttendanceSessionService.getTodaySessions();
-      setActiveSessionsByGroup(Object.fromEntries(sessions.filter((session) => session.status === "open" || session.status === "scheduled").map((session) => [`${session.groupId}:${session.scheduleId}`, session])));
+      setActiveSessionsByGroup(Object.fromEntries(sessions.map((session) => [`${session.groupId}:${session.scheduleId}`, session])));
       setAllGroups(GroupRepository.getAll());
     } catch (error) { setSearchError(getUserErrorMessage(error)); }
   }, []);
@@ -146,7 +150,14 @@ function ScannerContent() {
       const session = activeSessionsByGroup[sessionKey] || AttendanceSessionService.ensureSessionForGroup(selectedGroup.id, undefined, selectedScheduleId || undefined);
       setActiveSessionsByGroup((current) => ({ ...current, [sessionKey]: session }));
       setActiveSessionId(session.id);
+      if (session.status === "closed") {
+        if (!PermissionService.hasPermission(currentUser?.permissions, "sessions.reopen")) {
+          throw new Error("ليس لديك صلاحية إعادة فتح الجلسة.");
+        }
+        SessionClosingService.reopenSession(session.id, "استكمال تسجيل حضور نفس الجلسة");
+      }
       AttendanceSessionService.activate(session.id);
+      setIsSessionClosed(false);
       setAttendanceStarted(true);
       setAttendanceSummary(AttendanceSessionService.getSummary(session.id));
     } catch (error) { setSearchError(getUserErrorMessage(error)); }
@@ -174,6 +185,7 @@ function ScannerContent() {
     setSelectedGroupId(null);
     setSelectedScheduleId(null);
     setAttendanceSummary(null);
+    setIsSessionClosed(false);
     handleReset();
   };
 
@@ -189,7 +201,32 @@ function ScannerContent() {
             setIsClosingSession(true);
             SessionClosingService.closeSession(activeSessionId);
             refreshTodayData();
-            handleBackToGroups();
+            handleReset();
+            setIsSessionClosed(true);
+            setAttendanceSummary(AttendanceSessionService.getSummary(activeSessionId));
+          } catch (error) {
+            Alert.alert(Strings.errorTitle, getUserErrorMessage(error));
+          } finally {
+            setIsClosingSession(false);
+          }
+        },
+      },
+    ]);
+  };
+
+  const reopenCurrentSession = () => {
+    if (!activeSessionId || isClosingSession) return;
+    Alert.alert("إعادة فتح الجلسة", "سيتم استكمال نفس الجلسة بدون إنشاء جلسة جديدة أو إعادة غياب الطلاب.", [
+      { text: "إلغاء", style: "cancel" },
+      {
+        text: "إعادة فتح",
+        onPress: () => {
+          try {
+            setIsClosingSession(true);
+            SessionClosingService.reopenSession(activeSessionId, "استكمال تسجيل الحضور");
+            setIsSessionClosed(false);
+            setAttendanceSummary(AttendanceSessionService.getSummary(activeSessionId));
+            refreshTodayData();
           } catch (error) {
             Alert.alert(Strings.errorTitle, getUserErrorMessage(error));
           } finally {
@@ -201,7 +238,7 @@ function ScannerContent() {
   };
 
   const lookupCard = (rawCode: string) => {
-    if (!attendanceStarted || !activeSessionId) { setSearchError("اختر المجموعة وابدأ جلسة الحضور أولاً."); return; }
+    if (!attendanceStarted || !activeSessionId || isSessionClosed) { setSearchError(isSessionClosed ? "الجلسة مغلقة. أعد فتحها أولاً لاستكمال الحضور." : "اختر المجموعة وابدأ جلسة الحضور أولاً."); return; }
     const normalized = ScannerService.normalizeCardCode(rawCode);
     if (!normalized) {
       setSearchError("يرجى إدخال كود الكارت");
@@ -310,7 +347,7 @@ function ScannerContent() {
   };
 
   const handleRecordAttendance = async () => {
-    if (!student || !selectedSessionId) return;
+    if (!student || !selectedSessionId || isSessionClosed) return;
 
     const session = eligibleSessions.find((s) => s.id === selectedSessionId);
     if (!session) return;
@@ -443,7 +480,7 @@ function ScannerContent() {
                   <Text style={styles.sessionSchedule}>
                     {DAYS_OF_WEEK[schedule.dayOfWeek] || "اليوم"} • {formatTimeArabic(schedule.startTime)} - {formatTimeArabic(schedule.endTime)}
                   </Text>
-                  <Text style={[styles.groupAttendanceState, activeSession && styles.groupAttendanceStateActive]}>{activeSession ? "● نشطة" : "● غير نشطة"}</Text>
+                  <Text style={[styles.groupAttendanceState, activeSession && activeSession.status !== "closed" && styles.groupAttendanceStateActive]}>{activeSession?.status === "closed" ? "● مغلقة — اضغط لإعادة الفتح" : activeSession ? "● نشطة" : "● غير نشطة"}</Text>
                 </AppCard>
               </TouchableOpacity>;
               });
@@ -455,14 +492,23 @@ function ScannerContent() {
         {attendanceStarted && attendanceSummary ? (
           <View style={styles.attendanceCounterBar}>
             <Text style={styles.counterTitle}>حضور الجلسة</Text>
-            <AppButton title={isClosingSession ? "جاري الإغلاق..." : "إغلاق الجلسة"} onPress={closeCurrentSession} disabled={isClosingSession} size="sm" variant="outline" />
+            {isSessionClosed ? (
+              <AppButton title={isClosingSession ? "جاري الفتح..." : "إعادة فتح الجلسة"} onPress={reopenCurrentSession} disabled={isClosingSession || !PermissionService.hasPermission(currentUser?.permissions, "sessions.reopen")} size="sm" variant="outline" />
+            ) : (
+              <AppButton title={isClosingSession ? "جاري الإغلاق..." : "إغلاق الجلسة"} onPress={closeCurrentSession} disabled={isClosingSession} size="sm" variant="outline" />
+            )}
             <Text style={styles.counterItem}>الكل: {attendanceSummary.total}</Text>
             <Text style={[styles.counterItem, { color: Colors.successText }]}>حاضر: {attendanceSummary.present}</Text>
             <Text style={[styles.counterItem, { color: Colors.dangerText }]}>غائب: {attendanceSummary.absent}</Text>
           </View>
         ) : null}
         {/* CAMERA OR MANUAL SCANNER CARD */}
-        {attendanceStarted && !student ? (
+        {attendanceStarted && isSessionClosed ? (
+          <AppCard style={styles.scannerCard}>
+            <Text style={styles.permissionText}>الجلسة مغلقة. يمكنك إعادة فتح نفس الجلسة لاستكمال الحضور بدون تكرار الغياب.</Text>
+          </AppCard>
+        ) : null}
+        {attendanceStarted && !student && !isSessionClosed ? (
           <AppCard style={styles.scannerCard}>
             {isCameraActive ? (
               <View style={styles.cameraContainer}>

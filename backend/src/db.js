@@ -150,6 +150,41 @@ async function ensureSchemaCompatibility() {
      WHERE g.center_id = s.center_id AND g.id = s.group_id;
   `);
 
+  // Enforce the same natural identities as the offline SQLite database.  Do
+  // not make an existing deployment fail just because old duplicate rows are
+  // present: keep a diagnostic non-unique index in that case and let the
+  // sync processor report the duplicate instead of inserting another row.
+  await pool.query(`
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM sessions
+        GROUP BY center_id, group_id, COALESCE(schedule_id, ''), session_date
+        HAVING COUNT(*) > 1
+      ) THEN
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_sessions_group_sched_date
+          ON sessions(center_id, group_id, COALESCE(schedule_id, ''), session_date);
+      ELSE
+        CREATE INDEX IF NOT EXISTS idx_sessions_group_sched_date
+          ON sessions(center_id, group_id, COALESCE(schedule_id, ''), session_date);
+      END IF;
+
+      IF NOT EXISTS (
+        SELECT 1 FROM debt_cycles
+        WHERE cycle_number IS NOT NULL
+        GROUP BY center_id, COALESCE(enrollment_id, package_subscription_id), cycle_number
+        HAVING COUNT(*) > 1
+      ) THEN
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_debt_cycles_natural
+          ON debt_cycles(center_id, COALESCE(enrollment_id, package_subscription_id), cycle_number)
+          WHERE cycle_number IS NOT NULL;
+      ELSE
+        CREATE INDEX IF NOT EXISTS idx_debt_cycles_natural
+          ON debt_cycles(center_id, COALESCE(enrollment_id, package_subscription_id), cycle_number);
+      END IF;
+    END $$;
+  `);
+
   // The mobile app supports external students. Older Neon databases used a
   // check constraint that rejected that valid value, leaving those students
   // permanently stuck in the sync conflict queue. Normalize only unknown

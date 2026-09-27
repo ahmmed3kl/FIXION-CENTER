@@ -1,7 +1,7 @@
 import React from "react";
 import { Permission, UserRole } from "../../shared/types";
 
-export const RolePermissions: Record<UserRole, Permission[]> = {
+const baseRolePermissions: Record<"admin" | "manager" | "secretary" | "accountant", Permission[]> = {
   admin: [
     "dashboard.view",
     "students.view",
@@ -165,6 +165,31 @@ export const RolePermissions: Record<UserRole, Permission[]> = {
   ],
 };
 
+// Keep the mobile role model aligned with the backend. Owners have the full
+// administrative set; assistants use the operational secretary set. This
+// prevents valid backend users from becoming permissionless when offline.
+export const RolePermissions: Record<UserRole, Permission[]> = {
+  ...baseRolePermissions,
+  owner: baseRolePermissions.admin,
+  assistant: baseRolePermissions.secretary,
+};
+
+const legacyPermissionAliases: Record<string, Permission[]> = {
+  can_view_dashboard: ["dashboard.view"],
+  can_manage_students: ["students.view", "students.create", "students.edit", "students.update"],
+  can_manage_teachers: ["teachers.view", "teachers.create", "teachers.update"],
+  can_manage_subjects: ["subjects.view", "subjects.create", "subjects.update"],
+  can_manage_groups: ["groups.view", "groups.create", "groups.update", "groups.schedule.manage"],
+  can_manage_enrollments: ["enrollments.view", "enrollments.create", "enrollments.update", "enrollments.end"],
+  can_mark_attendance: ["attendance.view", "attendance.create", "attendance.makeup"],
+  can_manage_payments: ["payments.view", "payments.create", "payments.reverse", "payments.adjust"],
+  can_manage_packages: ["packages.view", "packages.create", "packages.update", "packages.manage", "packages.subscribe"],
+  can_manage_reports: ["reports.view", "reports.attendance.view", "reports.financial.view"],
+  can_manage_users: ["users.view", "users.manage"],
+  can_manage_settings: ["settings.view"],
+  can_manage_notifications: ["notifications.view", "notifications.send", "notifications.templates.update"],
+};
+
 /**
  * Resolves user permissions strictly adhering to the Principle of Least Privilege:
  * 1. If user has a valid, non-empty Permission[] array, use it directly.
@@ -181,6 +206,25 @@ export function resolveUserPermissions(
   // 1. Valid non-empty array
   if (Array.isArray(user.permissions) && user.permissions.length > 0) {
     return user.permissions as Permission[];
+  }
+
+  // The API historically returned an object of boolean legacy flags, while
+  // the mobile app uses canonical dotted permission names. Translate the
+  // object instead of silently discarding it and falling back to a broader
+  // role.
+  if (user.permissions && typeof user.permissions === "object" && !Array.isArray(user.permissions)) {
+    const mapped = new Set<Permission>();
+    for (const [key, enabled] of Object.entries(user.permissions)) {
+      if (enabled !== true) continue;
+      if (key in legacyPermissionAliases) {
+        legacyPermissionAliases[key].forEach((permission) => mapped.add(permission));
+      } else if (key.includes(".")) {
+        mapped.add(key as Permission);
+      }
+    }
+    if (mapped.size > 0 || Object.keys(user.permissions).length > 0) {
+      return Array.from(mapped);
+    }
   }
 
   // 2. Strict role-based permissions fallback (Principle of Least Privilege)

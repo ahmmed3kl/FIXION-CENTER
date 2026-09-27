@@ -124,6 +124,8 @@ export class DashboardService {
         [centerId, session.id],
       );
       const counts = calculateSessionAttendanceCounts(expectedIds, attendance, covered.map((row: any) => String(row.studentId)));
+      // Makeup is a successful attendance for the daily totals; the separate
+      // makeup counter preserves the compensation breakdown.
       presentCount += counts.present;
       lateCount += counts.late;
       absentCount += counts.absent;

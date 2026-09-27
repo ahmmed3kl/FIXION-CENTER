@@ -148,7 +148,7 @@ class SyncProcessor {
         if (existingOp.rows.length > 0) {
           if (existingOp.rows[0].center_id !== centerId) {
             conflicts.push({
-              operationId,
+              operationId: rawOperationId,
               entityType,
               entityId,
               reason: "operationId is already owned by another center.",
@@ -167,7 +167,7 @@ class SyncProcessor {
         // 2. Tenant isolation assertion: Operation center MUST match authenticated session center
         if (op.centerId && op.centerId !== centerId) {
           conflicts.push({
-            operationId,
+            operationId: rawOperationId,
             entityType,
             entityId,
             reason: `Tenant mismatch: operation belongs to '${op.centerId}', authenticated center is '${centerId}'.`,
@@ -254,7 +254,7 @@ class SyncProcessor {
           }
           // If domain mutation failed with conflict or validation
           conflicts.push({
-            operationId,
+            operationId: rawOperationId,
             entityType,
             entityId,
             reason: opErr.message,

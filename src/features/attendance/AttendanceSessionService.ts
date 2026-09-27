@@ -235,12 +235,21 @@ export class AttendanceSessionService {
     const expectedStudentIds = this.getExpectedStudentIdsForGroup(group, group.id, date);
     const deviceId = DeviceService.getDeviceIdSync();
     const operationId = `op-session-att-${sessionId}`;
-    DatabaseService.runInTransaction(() => {
-      db.runSync(`INSERT INTO sessions (id, center_id, group_id, schedule_id, subject_id, teacher_id, session_price, late_after_minutes, session_date, start_time, end_time, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)`, [sessionId, activeCenterId, group.id, schedule.id, group.subjectId, group.teacherId, group.sessionPrice, group.lateAfterMinutes, date, schedule.startTime, schedule.endTime, now]);
-      for (const studentId of expectedStudentIds) db.runSync("INSERT OR IGNORE INTO session_expected_students (id, center_id, session_id, student_id, created_at) VALUES (?, ?, ?, ?, ?)", [`exp-${sessionId}-${studentId}`, activeCenterId, sessionId, studentId, now]);
-      AuditService.recordEvent({ operationId, centerId: activeCenterId, userId: currentUser.id, deviceId, entityType: "session", entityId: sessionId, action: "session.attendance_start", payload: { groupId: group.id, scheduleId: schedule.id, sessionDate: date } });
-      SyncRepository.enqueueOperation({ operationId, centerId: activeCenterId, userId: currentUser.id, deviceId, operationType: "CREATE", entityType: "session", entityId: sessionId, payload: { groupId: group.id, scheduleId: schedule.id, subjectId: group.subjectId, teacherId: group.teacherId, sessionPrice: group.sessionPrice, lateAfterMinutes: group.lateAfterMinutes, sessionDate: date, startTime: schedule.startTime, endTime: schedule.endTime, expectedStudentIds, status: "open", createdAt: now } });
-    });
+    try {
+      DatabaseService.runInTransaction(() => {
+        db.runSync(`INSERT INTO sessions (id, center_id, group_id, schedule_id, subject_id, teacher_id, session_price, late_after_minutes, session_date, start_time, end_time, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)`, [sessionId, activeCenterId, group.id, schedule.id, group.subjectId, group.teacherId, group.sessionPrice, group.lateAfterMinutes, date, schedule.startTime, schedule.endTime, now]);
+        for (const studentId of expectedStudentIds) db.runSync("INSERT OR IGNORE INTO session_expected_students (id, center_id, session_id, student_id, created_at) VALUES (?, ?, ?, ?, ?)", [`exp-${sessionId}-${studentId}`, activeCenterId, sessionId, studentId, now]);
+        AuditService.recordEvent({ operationId, centerId: activeCenterId, userId: currentUser.id, deviceId, entityType: "session", entityId: sessionId, action: "session.attendance_start", payload: { groupId: group.id, scheduleId: schedule.id, sessionDate: date } });
+        SyncRepository.enqueueOperation({ operationId, centerId: activeCenterId, userId: currentUser.id, deviceId, operationType: "CREATE", entityType: "session", entityId: sessionId, payload: { groupId: group.id, scheduleId: schedule.id, subjectId: group.subjectId, teacherId: group.teacherId, sessionPrice: group.sessionPrice, lateAfterMinutes: group.lateAfterMinutes, sessionDate: date, startTime: schedule.startTime, endTime: schedule.endTime, expectedStudentIds, status: "open", createdAt: now } });
+      });
+    } catch (error) {
+      if (!String((error as any)?.message || error).toLowerCase().includes("unique")) throw error;
+      const racedSession = SessionRepository.getSessionsForDate(date).find(
+        (item) => item.groupId === group.id && item.status !== "cancelled",
+      );
+      if (racedSession) return racedSession;
+      throw error;
+    }
     // A session is a dependency for every attendance record. Queue its sync
     // immediately when attendance starts instead of waiting for the global
     // foreground interval, while preserving offline-first local operation.
@@ -251,7 +260,10 @@ export class AttendanceSessionService {
   }
 
   static getTodaySessions(date = AttendanceSessionService.localDate()): Session[] {
-    const sessions = SessionRepository.getSessionsForDate(date).filter((session) => session.status === "open" || session.status === "scheduled");
+    // Include closed sessions as well. A closed session is still the same
+    // historical session for this group/day and must be shown so an operator
+    // can explicitly reopen it instead of creating a second session.
+    const sessions = SessionRepository.getSessionsForDate(date).filter((session) => session.status !== "cancelled");
     const scheduledGroupIds = new Set(GroupRepository.getGroupsForDay(new Date(`${date}T12:00:00`).getDay()).map((group) => group.id));
     return sessions.filter((session) => scheduledGroupIds.has(session.groupId));
   }
