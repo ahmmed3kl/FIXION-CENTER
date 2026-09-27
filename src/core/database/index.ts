@@ -1069,16 +1069,17 @@ class InMemorySqliteMock implements SqlDatabase {
           }
         }
         if (tableName === "sessions" && row.schedule_id) {
-          const exists = list.some(
+          const existingIndex = list.findIndex(
             (r) =>
               r.group_id === row.group_id &&
               r.schedule_id === row.schedule_id &&
               r.session_date === row.session_date,
           );
-          if (exists) {
-            throw new Error(
-              "UNIQUE constraint failed: sessions.group_id, sessions.schedule_id, sessions.session_date",
-            );
+          if (existingIndex >= 0) {
+            // Bootstrap snapshots can contain a session that was already
+            // generated locally. Keep the local row (and its attendance)
+            // instead of failing initialization on the natural key.
+            return { lastInsertRowId: existingIndex + 1, changes: 0 };
           }
         }
         if (tableName === "attendance") {
@@ -1111,16 +1112,16 @@ class InMemorySqliteMock implements SqlDatabase {
             );
         }
         if (tableName === "debt_cycles") {
-          const exists = list.some(
+          const existingIndex = list.findIndex(
             (r) =>
               r.center_id === row.center_id &&
               r.enrollment_id === row.enrollment_id &&
               r.cycle_number === row.cycle_number,
           );
-          if (exists) {
-            throw new Error(
-              "UNIQUE constraint failed: debt_cycles.center_id, debt_cycles.enrollment_id, debt_cycles.cycle_number",
-            );
+          if (existingIndex >= 0) {
+            // Debt cycles are immutable by natural key. A repeated bootstrap
+            // must be idempotent and must not abort the whole local database.
+            return { lastInsertRowId: existingIndex + 1, changes: 0 };
           }
         }
         if (tableName === "payment_reversals") {

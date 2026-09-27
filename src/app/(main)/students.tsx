@@ -14,7 +14,7 @@ import {
     View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { formatCurrency, Strings } from "../../core/localization";
+import { formatCurrency, formatTimeArabic, Strings } from "../../core/localization";
 import { getLocalDateOnly } from "../../shared/utils/date";
 import { PermissionService } from "../../core/permissions";
 import { Colors, Spacing, Typography, useTheme } from "../../core/theme";
@@ -25,6 +25,7 @@ import { AttendanceRepository } from "../../features/attendance/AttendanceReposi
 import { PackageRepository } from "../../features/packages/PackageRepository";
 import { PackageSubscriptionRepository } from "../../features/packages/PackageSubscriptionRepository";
 import { GroupRepository } from "../../features/groups/GroupRepository";
+import { GroupScheduleRepository } from "../../features/groups/GroupScheduleRepository";
 import { TeacherSubjectRepository } from "../../features/teachers/TeacherSubjectRepository";
 import { TeacherRepository } from "../../features/teachers/TeacherRepository";
 import { DebtAdjustmentRepository } from "../../features/payments/DebtAdjustmentRepository";
@@ -57,6 +58,26 @@ import {
     PackageSubject,
 } from "../../shared/types";
 import { formatDisplayIdentifier } from "../../shared/utils/formatters";
+
+const WEEK_DAYS = ["الأحد", "الإثنين", "الثلاثاء", "الأربعاء", "الخميس", "الجمعة", "السبت"];
+
+function groupScheduleLabel(groupId: string): string {
+  try {
+    const schedules = GroupScheduleRepository.getSchedulesForGroup(groupId);
+    return schedules.slice(0, 2).map((schedule) => `${WEEK_DAYS[schedule.dayOfWeek] || "اليوم"} ${formatTimeArabic(schedule.startTime)}`).join(" · ") || "لم يتم تحديد الموعد";
+  } catch {
+    return "لم يتم تحديد الموعد";
+  }
+}
+
+function firstScheduledDate(groupId: string): string {
+  const today = new Date();
+  const schedules = GroupScheduleRepository.getSchedulesForGroup(groupId);
+  const nextDays = schedules.map((schedule) => (schedule.dayOfWeek - today.getDay() + 7) % 7);
+  const offset = nextDays.length ? Math.min(...nextDays) : 0;
+  const date = new Date(today.getFullYear(), today.getMonth(), today.getDate() + offset);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
 
 export default function StudentsScreen() {
   const { colors } = useTheme();
@@ -503,7 +524,9 @@ export default function StudentsScreen() {
       EnrollmentRepository.enrollStudent({
         studentId: selectedStudent.id,
         groupId: enrollGroupId,
-        startDate: enrollStartDate,
+        // The subscription starts on the first scheduled class, not on the
+        // day the admin happens to create the enrollment.
+        startDate: enrollStartDate || firstScheduledDate(enrollGroupId),
         specialMonthlyPrice: enrollSpecialPrice
           ? parseFloat(enrollSpecialPrice)
           : undefined,
@@ -623,7 +646,7 @@ export default function StudentsScreen() {
   const openEnrollModal = () => {
     setEnrollGroupId("");
     setEnrollGroupSearch("");
-    setEnrollStartDate(getLocalDateOnly());
+    setEnrollStartDate("");
     setEnrollSpecialPrice("");
     setIsEnrollModalOpen(true);
   };
@@ -1404,8 +1427,9 @@ export default function StudentsScreen() {
                     styles.groupPickItem,
                     enrollGroupId === g.id && styles.groupPickItemActive,
                   ]}
-                  onPress={() => setEnrollGroupId(g.id)}
+                  onPress={() => { setEnrollGroupId(g.id); setEnrollStartDate(firstScheduledDate(g.id)); }}
                 >
+                  <Text style={styles.groupPickSchedule}>{groupScheduleLabel(g.id)}</Text>
                   <Text style={[styles.groupPickText, enrollGroupId === g.id && styles.groupPickTextActive]}>{g.name}</Text>
                   <Text style={styles.groupPickMeta}>{[g.subjectName, g.teacherName, g.grade].filter(Boolean).join(" • ")}</Text>
                 </TouchableOpacity>
@@ -2149,6 +2173,13 @@ const createStyles = () => StyleSheet.create({
     color: Colors.slate500,
     fontSize: 10,
     marginTop: 3,
+    textAlign: "right",
+  },
+  groupPickSchedule: {
+    color: Colors.primary,
+    fontSize: 10,
+    fontWeight: "700",
+    marginBottom: 2,
     textAlign: "right",
   },
   groupPickEmpty: {
