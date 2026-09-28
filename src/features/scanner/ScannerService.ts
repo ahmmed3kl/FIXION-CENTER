@@ -131,7 +131,7 @@ export class ScannerService {
         [centerId],
       );
       const pkgOverrides = db.getAllSync<any>(
-        `SELECT subscription_id as subscriptionId, subject_id as subjectId, teacher_id as teacherId
+        `SELECT subscription_id as subscriptionId, subject_id as subjectId, teacher_id as teacherId, group_id as groupId
          FROM package_subject_teacher_overrides WHERE center_id = ?`,
         [centerId],
       );
@@ -166,7 +166,7 @@ export class ScannerService {
             const effectiveTeacherId = override
               ? override.teacherId
               : psub.defaultTeacherId;
-            return effectiveTeacherId === s.teacherId;
+            return effectiveTeacherId === s.teacherId && (!override?.groupId || override.groupId === s.groupId);
           });
         });
         if (isPkgCovered) {

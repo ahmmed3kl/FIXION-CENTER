@@ -66,7 +66,7 @@ export class DailyClosingService {
 
     // Aggregate payments for the day (non-reversed, by payment_date)
     const payments = db.getAllSync<any>(
-      `SELECT id, amount, payment_type, payment_method, session_id, is_reversed
+      `SELECT id, amount, payment_type, payment_method, session_id, debt_cycle_id, is_reversed
        FROM payments
        WHERE center_id = ? AND payment_date = ? AND (is_reversed = 0 OR is_reversed IS NULL)`,
       [centerId, businessDate],
@@ -74,7 +74,7 @@ export class DailyClosingService {
 
     // Also check created_at fallback for payments without payment_date
     const paymentsAlt = db.getAllSync<any>(
-      `SELECT id, amount, payment_type, payment_method, session_id, is_reversed, created_at
+      `SELECT id, amount, payment_type, payment_method, session_id, debt_cycle_id, is_reversed, created_at
        FROM payments
        WHERE center_id = ? AND created_at LIKE ?`,
       [centerId, `${businessDate}%`],
@@ -111,9 +111,13 @@ export class DailyClosingService {
 
     for (const p of activePayments) {
       const amount = Number(p.amount) || 0;
-      const pType = p.payment_type === "cash" ? "session" : p.payment_type;
+      const packagePayment = p.debt_cycle_id && db.getFirstSync<any>(
+        `SELECT id FROM debt_cycles WHERE center_id = ? AND id = ? AND cycle_type = 'package'`,
+        [centerId, p.debt_cycle_id],
+      );
+      const pType = packagePayment ? "package" : (p.payment_type === "cash" ? "session" : p.payment_type);
 
-      if (pType === "monthly" || pType === "full") {
+      if (pType === "monthly" || pType === "full" || pType === "package") {
         monthlyTotal += amount;
       } else if (pType === "partial") {
         partialTotal += amount;

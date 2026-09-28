@@ -256,11 +256,11 @@ export default function StudentsScreen() {
           EnrollmentRepository.enrollStudent({ studentId: selectedStudent.id, groupId, startDate: firstScheduledDate(groupId) });
         }
       }
-      const subscription = await PackageSubscriptionRepository.subscribeStudent({ studentId: selectedStudent.id, packageId, startDate: getLocalDateOnly(), selectedOptionIds: packageOptionIds, selectedTeacherIds: packageTeacherIds });
+      const subscription = await PackageSubscriptionRepository.subscribeStudent({ studentId: selectedStudent.id, packageId, startDate: getLocalDateOnly(), selectedOptionIds: packageOptionIds, selectedTeacherIds: packageTeacherIds, selectedGroupIds: packageGroupIds });
       if (PermissionService.hasPermission(permissions, "packages.manage")) {
         for (const option of selectedOptions) {
           const teacherId = packageTeacherIds[option.id] || option.defaultTeacherId;
-          if (teacherId !== option.defaultTeacherId) await PackageSubscriptionRepository.setTeacherOverride({ subscriptionId: subscription.id, subjectId: option.subjectId, teacherId });
+          if (teacherId !== option.defaultTeacherId) await PackageSubscriptionRepository.setTeacherOverride({ subscriptionId: subscription.id, subjectId: option.subjectId, teacherId, groupId: packageGroupIds[option.id] });
         }
       }
       Alert.alert("تم بنجاح", "تم تحويل الطالب إلى الباقة مع حفظ مدرس كل مادة."); setIsPackageModalOpen(false);
@@ -1499,11 +1499,12 @@ export default function StudentsScreen() {
                   <View style={styles.detailMetricCard}><Text style={[styles.detailMetricValue, { color: Colors.successText }]}>{formatCurrency(groupFinancialStatus.monthlyTotalPaid)}</Text><Text style={styles.detailMetricLabel}>المدفوع</Text></View>
                   <View style={styles.detailMetricCard}><Text style={[styles.detailMetricValue, { color: Colors.dangerText }]}>{formatCurrency(groupFinancialStatus.monthlyRemainingDebt)}</Text><Text style={styles.detailMetricLabel}>المتبقي</Text></View>
                 </View>
+                {(groupFinancialStatus.creditBalance ?? 0) > 0 ? <Text style={styles.detailDebtLine}>رصيد مقدم: {formatCurrency(groupFinancialStatus.creditBalance ?? 0)}</Text> : null}
                 {groupFinancialStatus.sessionDebt && <View style={styles.detailSectionCard}><Text style={styles.groupDetailsSubtitle}>تفصيل حصص الشهر</Text><Text style={styles.detailHistoryMeta}>{groupFinancialStatus.sessionDebt.periodStart} - {groupFinancialStatus.sessionDebt.periodEnd}</Text><Text style={styles.detailLine}>حضر ودفع: {groupFinancialStatus.sessionDebt.attendedPaidSessions}</Text><Text style={styles.detailLine}>حضر ولم يدفع: {groupFinancialStatus.sessionDebt.attendedUnpaidSessions}</Text><Text style={styles.detailLine}>الحصص المستقبلية غير المدفوعة: {groupFinancialStatus.sessionDebt.futureUnpaidSessions}</Text><Text style={styles.detailDebtLine}>المديونية الحالية: {formatCurrency(groupFinancialStatus.sessionDebt.currentDebt)}</Text></View>}
                 <Text style={styles.groupDetailsSubtitle}>دورات المديونية</Text>
                 {groupFinancialStatus.cycles.length === 0 ? <Text style={styles.emptyText}>لا توجد دورات مديونية.</Text> : groupFinancialStatus.cycles.map((cycle) => <View key={cycle.id} style={styles.detailSectionCard}><View style={styles.detailHistoryRow}><View><Text style={styles.detailHistoryTitle}>الدورة {cycle.cycleNumber}</Text><Text style={styles.detailHistoryMeta}>{cycle.startDate} - {cycle.endDate}</Text></View><StatusBadge text={cycle.status === "paid" ? "مدفوعة" : cycle.status === "partial" ? "جزئية" : "مفتوحة"} type={cycle.status === "paid" ? "success" : cycle.status === "partial" ? "warning" : "neutral"} /></View><Text style={styles.detailLine}>الرسوم: {formatCurrency(cycle.effectivePrice ?? cycle.cyclePrice)} | المتبقي: {formatCurrency(cycle.remainingDebt ?? 0)}</Text></View>)}
                 <Text style={styles.groupDetailsSubtitle}>المدفوعات</Text>
-                {groupFinancialStatus.payments.length === 0 ? <Text style={styles.emptyText}>لا توجد مدفوعات مسجلة.</Text> : groupFinancialStatus.payments.map((payment) => <View key={payment.id} style={styles.detailHistoryRow}><View><Text style={styles.detailHistoryTitle}>{formatCurrency(payment.amount)}</Text><Text style={styles.detailHistoryMeta}>{payment.paymentDate || payment.createdAt.slice(0, 10)}{payment.isReversed ? " • ملغاة" : ""}</Text></View><Text style={styles.detailHistoryMeta}>{payment.paymentType}</Text></View>)}
+                {groupFinancialStatus.payments.length === 0 ? <Text style={styles.emptyText}>لا توجد مدفوعات مسجلة.</Text> : groupFinancialStatus.payments.map((payment) => <View key={payment.id} style={styles.detailHistoryRow}><View><Text style={styles.detailHistoryTitle}>{formatCurrency(payment.amount)}</Text><Text style={styles.detailHistoryMeta}>{payment.paymentDate || payment.createdAt.slice(0, 10)}{payment.isReversed ? " • ملغاة" : ""}</Text>{payment.notes ? <Text style={styles.detailHistoryMeta}>ملاحظة: {payment.notes}</Text> : null}</View><Text style={styles.detailHistoryMeta}>{payment.paymentType}</Text></View>)}
               </ScrollView>
             )}
 

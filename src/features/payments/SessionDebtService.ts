@@ -104,21 +104,27 @@ export class SessionDebtService {
     for (const subscription of packageSubscriptions) {
       const options = db.getAllSync<any>(
         `SELECT ps.subject_id as subjectId,
-                COALESCE(o.teacher_id, ps.default_teacher_id) as teacherId
+                COALESCE(o.teacher_id, ps.default_teacher_id) as teacherId,
+                COALESCE(o.group_id, ps.group_id) as groupId
          FROM package_subjects ps
          LEFT JOIN package_subject_teacher_overrides o
            ON o.center_id = ps.center_id AND o.subscription_id = ?
           AND o.subject_id = ps.subject_id
          WHERE ps.center_id = ? AND ps.package_id = ?
+           AND (o.id IS NOT NULL OR NOT EXISTS (
+             SELECT 1 FROM package_subject_teacher_overrides any_selection
+             WHERE any_selection.center_id = ps.center_id
+               AND any_selection.subscription_id = ?
+           ))
          UNION ALL
-         SELECT subject_id as subjectId, teacher_id as teacherId
+         SELECT subject_id as subjectId, teacher_id as teacherId, group_id as groupId
          FROM package_subject_teacher_overrides
          WHERE center_id = ? AND subscription_id = ?
            AND subject_id NOT IN (
              SELECT subject_id FROM package_subjects
              WHERE center_id = ? AND package_id = ?
            )`,
-        [subscription.id, activeCenterId, subscription.packageId, activeCenterId, subscription.id, activeCenterId, subscription.packageId],
+        [subscription.id, activeCenterId, subscription.packageId, subscription.id, activeCenterId, subscription.id, activeCenterId, subscription.packageId],
       );
       if (!options.length) continue;
       const subjectShare = Number(subscription.price || 0) / options.length;
@@ -129,7 +135,8 @@ export class SessionDebtService {
             [activeCenterId, item.groupId],
           );
           return String(teacher?.teacherId) === String(option.teacherId)
-            && (!option.subjectId || String(teacher?.subjectId) === String(option.subjectId));
+            && (!option.subjectId || String(teacher?.subjectId) === String(option.subjectId))
+            && (!option.groupId || String(item.groupId) === String(option.groupId));
         });
         if (!optionItems.length) continue;
         const sessionShare = subjectShare / optionItems.length;
@@ -141,8 +148,8 @@ export class SessionDebtService {
     const monthlyPool = Number(db.getFirstSync<any>(
       `SELECT COALESCE(SUM(amount), 0) as amount FROM payments
        WHERE center_id = ? AND student_id = ? AND payment_date >= ? AND payment_date <= ?
-         AND payment_type IN ('monthly','partial')
-         AND (debt_cycle_id IS NOT NULL OR session_id IS NULL)
+         AND (debt_cycle_id IS NOT NULL
+              OR (payment_type IN ('monthly','partial') AND session_id IS NULL))
          AND is_reversed = 0`,
       [activeCenterId, studentId, periodStart, periodEnd],
     )?.amount || 0);

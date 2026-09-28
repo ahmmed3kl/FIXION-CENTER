@@ -246,7 +246,7 @@ export class PaymentRepository {
         [paymentId, operationId, centerId, params.studentId, params.subscriptionId || null, assignedCycleId, params.sessionId || null, params.amount, normType, paymentMethod, paymentDate, params.notes || null, createdAt, user.id],
       );
       SyncRepository.enqueueOperation({ centerId, userId: user.id, deviceId, operationType: "payment.create", entityType: "payment", entityId: paymentId, payload: paymentEvent, operationId });
-      AuditService.recordEvent({ operationId, centerId, userId: user.id, deviceId, entityType: "payment", entityId: paymentId, action: "payment.record", payload: { amount: params.amount, paymentType: normType, debtCycleId: assignedCycleId, sessionId: params.sessionId } });
+      AuditService.recordEvent({ operationId, centerId, userId: user.id, deviceId, entityType: "payment", entityId: paymentId, action: "payment.record", payload: { amount: params.amount, paymentType: normType, debtCycleId: assignedCycleId, sessionId: params.sessionId, subscriptionId: params.subscriptionId, notes: params.notes || null } });
     });
 
     // 4. Recalculate financial status to update cycle statuses dynamically

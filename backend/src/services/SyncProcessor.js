@@ -1167,9 +1167,31 @@ class SyncProcessor {
         if (remove) {
           await client.query("DELETE FROM package_subject_teacher_overrides WHERE center_id=$1 AND subscription_id=$2 AND subject_id=$3", [centerId, override.subscription_id || override.subscriptionId, override.subject_id || override.subjectId]);
         } else {
-          await client.query(`INSERT INTO package_subject_teacher_overrides (id, center_id, subscription_id, subject_id, teacher_id, created_at)
-             VALUES ($1,$2,$3,$4,$5,NOW()) ON CONFLICT (subscription_id, subject_id) DO UPDATE SET teacher_id=EXCLUDED.teacher_id`,
-            [override.id || context.entityId || `pkg-override-${centerId}-${override.subscription_id || override.subscriptionId}-${override.subject_id || override.subjectId}`, centerId, override.subscription_id || override.subscriptionId, override.subject_id || override.subjectId, override.teacher_id || override.teacherId]);
+          const overrideId = override.id || context.entityId || `pkg-override-${centerId}-${override.subscription_id || override.subscriptionId}-${override.subject_id || override.subjectId}`;
+          const subscriptionId = override.subscription_id || override.subscriptionId;
+          const subjectId = override.subject_id || override.subjectId;
+          const teacherId = override.teacher_id || override.teacherId;
+          const groupId = override.group_id || override.groupId || null;
+          // Do not depend solely on a database unique index here. Some older
+          // Neon databases may still contain duplicate rows from before the
+          // constraint was introduced; updating by natural key makes those
+          // queued operations retryable while the bootstrap migration cleans
+          // the redundant rows.
+          const updated = await client.query(
+            `UPDATE package_subject_teacher_overrides
+                SET teacher_id=$1, group_id=$2
+              WHERE center_id=$3 AND subscription_id=$4 AND subject_id=$5`,
+            [teacherId, groupId, centerId, subscriptionId, subjectId],
+          );
+          if (updated.rowCount === 0) {
+            await client.query(
+              `INSERT INTO package_subject_teacher_overrides
+                (id, center_id, subscription_id, subject_id, teacher_id, group_id, created_at)
+               VALUES ($1,$2,$3,$4,$5,$6,NOW())
+               ON CONFLICT (id) DO UPDATE SET teacher_id=EXCLUDED.teacher_id, group_id=EXCLUDED.group_id`,
+              [overrideId, centerId, subscriptionId, subjectId, teacherId, groupId],
+            );
+          }
         }
         break;
       }

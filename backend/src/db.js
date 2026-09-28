@@ -80,6 +80,7 @@ async function ensureSchemaCompatibility() {
       SELECT id FROM centers
       ON CONFLICT (center_id) DO NOTHING;
   `);
+
   await pool.query(`
     CREATE TABLE IF NOT EXISTS grade_exams (
       id TEXT PRIMARY KEY,
@@ -220,6 +221,32 @@ async function ensureSchemaCompatibility() {
       ADD COLUMN IF NOT EXISTS group_id VARCHAR(64);
     CREATE INDEX IF NOT EXISTS idx_pkg_subj_group
       ON package_subjects(center_id, group_id);
+  `);
+
+  // Persist the concrete group chosen for each student's package option.
+  // Package definitions stay reusable (subject + teacher), while attendance
+  // and teacher settlement must resolve the student's actual group.
+  await pool.query(`
+    ALTER TABLE package_subject_teacher_overrides
+      ADD COLUMN IF NOT EXISTS group_id VARCHAR(64);
+    CREATE INDEX IF NOT EXISTS idx_pkg_override_group
+      ON package_subject_teacher_overrides(center_id, subscription_id, group_id);
+    -- Older clients could create the same subscription/subject override more
+    -- than once. Keep the newest row, remove only the redundant copies, then
+    -- enforce the invariant required by the sync upsert.
+    WITH ranked AS (
+      SELECT id,
+             ROW_NUMBER() OVER (
+               PARTITION BY subscription_id, subject_id
+               ORDER BY created_at DESC NULLS LAST, id DESC
+             ) AS row_number
+      FROM package_subject_teacher_overrides
+    )
+    DELETE FROM package_subject_teacher_overrides o
+     USING ranked r
+     WHERE o.id = r.id AND r.row_number > 1;
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_pkg_override_subscription_subject
+      ON package_subject_teacher_overrides(subscription_id, subject_id);
   `);
 
   // Older databases called the package amount `price`. Only reference that

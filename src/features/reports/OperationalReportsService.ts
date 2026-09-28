@@ -298,6 +298,7 @@ export class OperationalReportsService {
       paymentType: string;
       paymentMethod: string;
       sessionId?: string | null;
+      notes?: string | null;
     }[];
   } {
     const { centerId, user } = this.getActiveContext();
@@ -316,7 +317,7 @@ export class OperationalReportsService {
     const db = DatabaseService.getDb();
 
     const allPaymentsForDate = db.getAllSync<any>(
-      `SELECT id, student_id, amount, payment_type, payment_method, session_id, is_reversed, created_at, payment_date
+      `SELECT id, student_id, amount, payment_type, payment_method, session_id, debt_cycle_id, notes, is_reversed, created_at, payment_date
        FROM payments
        WHERE center_id = ? AND (payment_date = ? OR (payment_date IS NULL AND created_at LIKE ?))
          AND (is_reversed = 0 OR is_reversed IS NULL)`,
@@ -347,8 +348,12 @@ export class OperationalReportsService {
 
     for (const p of activePayments) {
       const amount = Number(p.amount) || 0;
-      const pType = p.payment_type === "cash" ? "session" : p.payment_type;
-      if (pType === "monthly" || pType === "full") monthlyTotal += amount;
+      const packagePayment = p.debt_cycle_id && db.getFirstSync<any>(
+        `SELECT id FROM debt_cycles WHERE center_id = ? AND id = ? AND cycle_type = 'package'`,
+        [centerId, p.debt_cycle_id],
+      );
+      const pType = packagePayment ? "package" : (p.payment_type === "cash" ? "session" : p.payment_type);
+      if (pType === "monthly" || pType === "full" || pType === "package") monthlyTotal += amount;
       else if (pType === "partial") partialTotal += amount;
       else if (pType === "session") {
         const isExternal =
@@ -383,6 +388,7 @@ export class OperationalReportsService {
         paymentType: p.payment_type === "cash" ? "session" : p.payment_type,
         paymentMethod: p.payment_method || "cash",
         sessionId: p.session_id || null,
+        notes: p.notes || null,
       })),
     };
   }

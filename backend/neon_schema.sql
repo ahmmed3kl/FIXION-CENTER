@@ -392,9 +392,12 @@ CREATE TABLE IF NOT EXISTS package_subject_teacher_overrides (
     subscription_id VARCHAR(64) NOT NULL REFERENCES student_package_subscriptions(id) ON DELETE CASCADE,
     subject_id VARCHAR(64) NOT NULL REFERENCES subjects(id) ON DELETE CASCADE,
     teacher_id VARCHAR(64) NOT NULL REFERENCES teachers(id) ON DELETE RESTRICT,
+    group_id VARCHAR(64) REFERENCES groups(id) ON DELETE SET NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT uq_pkg_override UNIQUE (subscription_id, subject_id)
 );
+ALTER TABLE package_subject_teacher_overrides ADD COLUMN IF NOT EXISTS group_id VARCHAR(64);
+CREATE INDEX IF NOT EXISTS idx_pkg_override_group ON package_subject_teacher_overrides(center_id, subscription_id, group_id);
 
 -- Advance Coverages (Handling students attending another session in advance)
 CREATE TABLE IF NOT EXISTS advance_coverages (

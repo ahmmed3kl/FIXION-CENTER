@@ -119,6 +119,8 @@ function ScannerContent() {
   // Quick Payment Modal
   const [showPaymentModal, setShowPaymentModal] = useState(false);
   const [paymentAmount, setPaymentAmount] = useState("");
+  const [paymentPurpose, setPaymentPurpose] = useState<"session" | "cycle">("session");
+  const [paymentNotes, setPaymentNotes] = useState("");
   const [isRecordingPayment, setIsRecordingPayment] = useState(false);
 
   const isScanningBlockedRef = useRef(false);
@@ -309,7 +311,9 @@ function ScannerContent() {
 
       // Load financial status calculated dynamically
       if (paymentsEnabled && currentGroupId) {
-        const fin = PaymentRepository.getStudentFinancialStatusForGroup(foundStudent.id, currentGroupId);
+        // Attendance is group-scoped, but the payment wallet is student-wide:
+        // a package must be payable in full from any teacher's session.
+        const fin = PaymentRepository.getStudentFinancialStatus(foundStudent.id);
         setFinancialStatus(fin);
       } else {
         setFinancialStatus(null);
@@ -404,27 +408,35 @@ function ScannerContent() {
 
     setIsRecordingPayment(true);
     try {
+      const cycle = financialStatus?.cycles.find((item) => item.cycleType === "package" && (item.remainingDebt ?? 0) > 0)
+        || financialStatus?.cycles.find((item) => (item.remainingDebt ?? 0) > 0);
+      const isCyclePayment = paymentPurpose === "cycle";
       await PaymentRepository.recordPayment({
         studentId: student.id,
-        // Keep quick payments tied to the attendance session. Without this
-        // link they appear in daily cash but cannot be attributed to a
-        // teacher/group settlement.
-        sessionId: activeSessionId || selectedSessionId || undefined,
+        // A cycle/package payment is intentionally not tied to the current
+        // teacher session. The operational reports allocate package money to
+        // teachers separately, while the ledger keeps one package balance.
+        sessionId: isCyclePayment ? undefined : (activeSessionId || selectedSessionId || undefined),
         amount,
-        paymentType: "partial",
-        debtCycleId: financialStatus?.cycles.find((cycle) => (cycle.remainingDebt ?? 0) > 0)?.id,
+        paymentType: isCyclePayment ? "partial" : "session",
+        // Keep every payment linked to the current obligation. The payment
+        // purpose controls the session display, while the cycle link lets a
+        // later "complete month/package" payment subtract the earlier
+        // per-session amount from the same cap.
+        debtCycleId: cycle?.id,
+        subscriptionId: cycle?.packageSubscriptionId,
+        notes: paymentNotes.trim() || undefined,
       });
 
       // Recalculate financial status dynamically
       const currentGroupId = activeSessionId
         ? SessionRepository.findById(activeSessionId)?.groupId
         : undefined;
-      const updated = currentGroupId
-        ? PaymentRepository.getStudentFinancialStatusForGroup(student.id, currentGroupId)
-        : PaymentRepository.getStudentFinancialStatus(student.id);
+      const updated = PaymentRepository.getStudentFinancialStatus(student.id);
       setFinancialStatus(updated);
       setShowPaymentModal(false);
       setPaymentAmount("");
+      setPaymentNotes("");
       Alert.alert("نجاح", Strings.paymentRecordedSuccess);
     } catch (err) {
       Alert.alert(Strings.errorTitle, getUserErrorMessage(err));
@@ -840,14 +852,22 @@ function ScannerContent() {
                   </Text>
                 </View>
               </View>
+              {(financialStatus.creditBalance ?? 0) > 0 ? (
+                <Text style={styles.creditBalanceText}>
+                  رصيد مقدم للطالب: {formatCurrency(financialStatus.creditBalance ?? 0)}
+                </Text>
+              ) : null}
 
-              {financialStatus.remainingBalance > 0 ? (
+              {financialStatus.remainingBalance > 0 || (financialStatus.currentPeriodDebt ?? 0) > 0 ? (
                 <AppButton
                   title={Strings.quickPaymentTitle}
                   variant="outline"
                   size="sm"
                   onPress={() => {
-                    setPaymentAmount(String(financialStatus.remainingBalance));
+                    const hasCycleBalance = financialStatus.remainingBalance > 0;
+                    setPaymentPurpose(hasCycleBalance ? "cycle" : "session");
+                    setPaymentAmount(String(hasCycleBalance ? financialStatus.remainingBalance : (financialStatus.currentPeriodDebt ?? 0)));
+                    setPaymentNotes("");
                     setShowPaymentModal(true);
                   }}
                   style={{ marginTop: Spacing.md }}
@@ -876,11 +896,41 @@ function ScannerContent() {
             <Text style={styles.modalTitle}>{Strings.quickPaymentTitle}</Text>
             <Text style={styles.modalSub}>{student?.fullName}</Text>
 
+            <View style={styles.paymentPurposeRow}>
+              {(["session", "cycle"] as const).map((purpose) => (
+                <TouchableOpacity
+                  key={purpose}
+                  style={[styles.paymentPurposeButton, paymentPurpose === purpose && styles.paymentPurposeButtonActive]}
+                  onPress={() => {
+                    setPaymentPurpose(purpose);
+                    if (purpose === "cycle") {
+                      setPaymentAmount(String(financialStatus?.remainingBalance ?? 0));
+                    } else {
+                      const session = activeSessionId ? SessionRepository.findById(activeSessionId) : null;
+                      setPaymentAmount(String(Number(session?.sessionPrice || financialStatus?.currentPeriodDebt || 0)));
+                    }
+                  }}
+                >
+                  <Text style={[styles.paymentPurposeText, paymentPurpose === purpose && styles.paymentPurposeTextActive]}>
+                    {purpose === "session" ? "دفع الحصة" : "استكمال الشهر / الباقة"}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+
             <AppInput
               label={Strings.paymentAmountLabel}
               keyboardType="numeric"
               value={paymentAmount}
               onChangeText={setPaymentAmount}
+            />
+
+            <AppInput
+              label="ملاحظة الدفع (اختياري)"
+              placeholder="مثال: استكمال باقي الشهر"
+              value={paymentNotes}
+              onChangeText={setPaymentNotes}
+              multiline
             />
 
             <View style={styles.modalButtonRow}>
@@ -906,6 +956,12 @@ function ScannerContent() {
 }
 
 const createStyles = () => StyleSheet.create({
+  paymentPurposeRow: { flexDirection: "row", gap: Spacing.sm, marginBottom: Spacing.md },
+  paymentPurposeButton: { flex: 1, borderWidth: 1, borderColor: Colors.slate200, borderRadius: BorderRadius.md, paddingVertical: 10, paddingHorizontal: 8, alignItems: "center", backgroundColor: Colors.white },
+  paymentPurposeButtonActive: { borderColor: Colors.primary, backgroundColor: Colors.primaryMuted },
+  paymentPurposeText: { color: Colors.slate600, fontSize: 12, fontWeight: "700", textAlign: "center" },
+  paymentPurposeTextActive: { color: Colors.primaryDark },
+  creditBalanceText: { marginTop: Spacing.sm, color: Colors.primaryDark, fontSize: 13, fontWeight: "800", textAlign: "center" },
   startAttendancePanel: { backgroundColor: Colors.white, borderRadius: BorderRadius.xl, padding: Spacing.lg, marginBottom: Spacing.lg, ...Shadows.card },
   startTitle: { ...Typography.h2, color: Colors.slate900, marginBottom: 4 },
   startSubtitle: { ...Typography.caption, color: Colors.slate500, textAlign: "right", marginBottom: Spacing.md },

@@ -114,6 +114,7 @@ export class PackageSubscriptionRepository {
     endDate?: string;
     selectedOptionIds?: string[];
     selectedTeacherIds?: Record<string, string>;
+    selectedGroupIds?: Record<string, string>;
   }): Promise<StudentPackageSubscription> {
     const { centerId, user } = this.getActiveContext();
     if (
@@ -155,6 +156,7 @@ export class PackageSubscriptionRepository {
     const now = new Date().toISOString();
 
     const selectedOverrides: PackageTeacherOverride[] = [];
+    const hasGroupSelection = params.selectedGroupIds !== undefined;
     // Keep the student's selected package options in the existing audited
     // override table. A row is written for every selected option (including
     // the default teacher) so a subset selection remains authoritative after
@@ -169,6 +171,19 @@ export class PackageSubscriptionRepository {
       for (const optionId of selectedOptionIds) {
         const option = packageOptions.find((o) => o.id === optionId)!;
         const teacherId = params.selectedTeacherIds?.[optionId] || option.defaultTeacherId;
+        const groupId = params.selectedGroupIds?.[optionId] || option.groupId || null;
+        if (hasGroupSelection && !groupId) {
+          throw new ValidationError("ÙŠØ¬Ø¨ ØªØ­Ø¯ÙŠØ¯ Ù…Ø¬Ù…ÙˆØ¹Ø© Ù„ÙƒÙ„ Ù…Ø§Ø¯Ø© ÙÙŠ Ø§Ù„Ø¨Ø§Ù‚Ø©.");
+        }
+        const selectedGroup = groupId && db.getFirstSync<any>(
+          `SELECT id FROM groups
+           WHERE center_id = ? AND id = ? AND status = 'active'
+             AND subject_id = ? AND teacher_id = ? AND grade = ?`,
+          [centerId, groupId, option.subjectId, teacherId, student.grade],
+        );
+        if (groupId && !selectedGroup) {
+          throw new ValidationError("Ø§Ù„Ù…Ø¬Ù…ÙˆØ¹Ø© Ø§Ù„Ù…Ø®ØªØ§Ø±Ø© Ù„Ø§ ØªØ·Ø§Ø¨Ù‚ Ø§Ù„Ù…Ø§Ø¯Ø© ÙˆØ§Ù„Ù…Ø¯Ø±Ø³ ÙˆØ§Ù„ØµÙ.");
+        }
         if (teacherId !== option.defaultTeacherId && !PermissionService.hasPermission(user.permissions, "packages.manage")) {
           throw new ForbiddenError("لا تملك صلاحية تغيير مدرس مادة الباقة.");
         }
@@ -177,11 +192,11 @@ export class PackageSubscriptionRepository {
         }
         const overrideId = `sel-${generateUUID()}`;
         db.runSync(
-          `INSERT INTO package_subject_teacher_overrides (id, center_id, subscription_id, subject_id, teacher_id, created_at)
-           VALUES (?, ?, ?, ?, ?, ?)`,
-          [overrideId, centerId, id, option.subjectId, teacherId, now],
+          `INSERT INTO package_subject_teacher_overrides (id, center_id, subscription_id, subject_id, teacher_id, group_id, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [overrideId, centerId, id, option.subjectId, teacherId, groupId, now],
         );
-        selectedOverrides.push({ id: overrideId, centerId, subscriptionId: id, subjectId: option.subjectId, teacherId, createdAt: now });
+        selectedOverrides.push({ id: overrideId, centerId, subscriptionId: id, subjectId: option.subjectId, teacherId, groupId, createdAt: now });
       }
     });
 
@@ -370,7 +385,7 @@ export class PackageSubscriptionRepository {
     const db = DatabaseService.getDb();
     return db.getAllSync<PackageTeacherOverride>(
       `SELECT o.id, o.center_id as centerId, o.subscription_id as subscriptionId,
-              o.subject_id as subjectId, o.teacher_id as teacherId, o.created_at as createdAt,
+              o.subject_id as subjectId, o.teacher_id as teacherId, o.group_id as groupId, o.created_at as createdAt,
               t.name as teacherName
        FROM package_subject_teacher_overrides o
        JOIN teachers t ON o.teacher_id = t.id
@@ -387,6 +402,7 @@ export class PackageSubscriptionRepository {
     subscriptionId: string;
     subjectId: string;
     teacherId: string;
+    groupId?: string | null;
   }): Promise<PackageTeacherOverride> {
     const { centerId, user } = this.getActiveContext();
     if (!PermissionService.hasPermission(user.permissions, "packages.manage")) {
@@ -424,6 +440,16 @@ export class PackageSubscriptionRepository {
     }
 
     const db = DatabaseService.getDb();
+    const selectedGroupId = params.groupId || subjectInPackage.groupId || null;
+    if (selectedGroupId) {
+      const selectedGroup = db.getFirstSync<any>(
+        `SELECT id FROM groups
+         WHERE center_id = ? AND id = ? AND status = 'active'
+           AND subject_id = ? AND teacher_id = ?`,
+        [centerId, selectedGroupId, params.subjectId, params.teacherId],
+      );
+      if (!selectedGroup) throw new ValidationError("Ø§Ù„Ù…Ø¬Ù…ÙˆØ¹Ø© Ø§Ù„Ù…Ø®ØªØ§Ø±Ø© Ù„Ø§ ØªØ·Ø§Ø¨Ù‚ Ø§Ù„Ù…Ø§Ø¯Ø© ÙˆØ§Ù„Ù…Ø¯Ø±Ø³.");
+    }
     // Remove existing override if any
     db.runSync(
       `DELETE FROM package_subject_teacher_overrides
@@ -435,14 +461,15 @@ export class PackageSubscriptionRepository {
     const now = new Date().toISOString();
 
     db.runSync(
-      `INSERT INTO package_subject_teacher_overrides (id, center_id, subscription_id, subject_id, teacher_id, created_at)
-       VALUES (?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO package_subject_teacher_overrides (id, center_id, subscription_id, subject_id, teacher_id, group_id, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
       [
         id,
         centerId,
         params.subscriptionId,
         params.subjectId,
         params.teacherId,
+        selectedGroupId,
         now,
       ],
     );
@@ -453,6 +480,7 @@ export class PackageSubscriptionRepository {
       subscriptionId: params.subscriptionId,
       subjectId: params.subjectId,
       teacherId: params.teacherId,
+      groupId: selectedGroupId,
       createdAt: now,
       teacherName: teacher.name,
     };

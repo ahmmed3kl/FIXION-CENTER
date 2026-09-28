@@ -313,6 +313,8 @@ export interface PackageTeacherOverride {
   packageId?: string;
   subjectId: string;
   teacherId: string;
+  /** The concrete group selected for this subject/teacher in this subscription. */
+  groupId?: string | null;
   originalTeacherId?: string;
   overrideTeacherId?: string;
   status?: "active" | "inactive";
@@ -460,6 +462,8 @@ export interface DetailedStudentFinancialStatus extends StudentFinancialStatus {
   sessionDebt?: SessionDebtBreakdown;
   /** Canonical current-period amount owed by attended sessions. */
   currentPeriodDebt?: number;
+  /** Unallocated overpayment carried into a future cycle. */
+  creditBalance?: number;
 }
 
 export interface SessionDebtBreakdown {

@@ -182,8 +182,49 @@ export class DebtCycleRepository {
           .filter((groupId): groupId is string => Boolean(groupId)),
       ),
     );
-
     const candidates: string[] = [];
+
+    // Student assignment stores the concrete group chosen for each package
+    // option as a normal enrollment.  Use that relationship when the package
+    // definition itself has no group_id (the normal, reusable package case).
+    // This keeps billing anchored to the first real class instead of the day
+    // the administrator created the subscription.
+    if (groupIds.length === 0) {
+      const selectedEnrollments = db.getAllSync<{ groupId: string; startDate: string }>(
+        `SELECT DISTINCT e.group_id as groupId, e.start_date as startDate
+         FROM student_package_subscriptions sps
+         JOIN student_group_enrollments e
+           ON e.center_id = sps.center_id AND e.student_id = sps.student_id
+          AND e.status = 'active'
+         JOIN groups g
+           ON g.center_id = e.center_id AND g.id = e.group_id
+         JOIN package_subjects ps
+           ON ps.center_id = sps.center_id AND ps.package_id = sps.package_id
+          AND ps.subject_id = g.subject_id
+         LEFT JOIN package_subject_teacher_overrides selected
+           ON selected.center_id = sps.center_id
+          AND selected.subscription_id = sps.id
+          AND selected.subject_id = ps.subject_id
+         WHERE sps.center_id = ? AND sps.id = ?
+           AND (selected.id IS NOT NULL OR NOT EXISTS (
+             SELECT 1 FROM package_subject_teacher_overrides any_selection
+             WHERE any_selection.center_id = sps.center_id
+               AND any_selection.subscription_id = sps.id
+           ))
+           AND g.teacher_id = COALESCE(selected.teacher_id, ps.default_teacher_id)
+           AND (selected.group_id IS NULL OR selected.group_id = e.group_id)`,
+        [activeCenterId, subscriptionId],
+      );
+      for (const row of selectedEnrollments) {
+        // A legacy enrollment can predate this package subscription.  The
+        // package must never start billing before the subscription was
+        // created, so clamp the candidate to the subscription start date.
+        const enrollmentStart = normalizeDateOnly(row.startDate) || normalizedStartDate;
+        const start = enrollmentStart < normalizedStartDate ? normalizedStartDate : enrollmentStart;
+        candidates.push(this.getFirstScheduledDate(row.groupId, start));
+      }
+    }
+
     for (const groupId of groupIds) {
       // A group without an active schedule has no "actual class" to anchor
       // to, so ignore it when another package group has a real schedule.
@@ -594,101 +635,20 @@ export class DebtCycleRepository {
       }
     }
 
-    // Fetch snapshotted package price. A package is one monthly obligation,
-    // but its amount must be split across the selected subject/group
-    // enrollments. Previously every package cycle used the full package price,
-    // so each teacher's group displayed the entire amount.
+    // Fetch the snapshotted package price. A package is one monthly
+    // obligation and must remain one debt cycle; operational reports perform
+    // the teacher/group allocation separately.
     const pkg = db.getFirstSync<any>(
       `SELECT price, name FROM packages WHERE center_id = ? AND id = ?`,
       [centerId, subscription.packageId],
     );
     const packagePrice = Number(pkg?.price ?? 0);
-    const selectedOptions = db.getAllSync<any>(
-      `SELECT ps.subject_id as subjectId,
-              o.teacher_id as teacherId
-       FROM package_subject_teacher_overrides o
-       JOIN package_subjects ps
-         ON ps.center_id = o.center_id
-        AND ps.package_id = ?
-        AND ps.subject_id = o.subject_id
-       WHERE o.center_id = ? AND o.subscription_id = ?
-       ORDER BY ps.subject_id`,
-      [subscription.packageId, centerId, subscription.id],
-    );
-    const packageAllocations: Array<{ enrollmentId: string; groupId: string }> = [];
-    for (const option of selectedOptions) {
-      const enrollment = db.getFirstSync<any>(
-        `SELECT e.id as enrollmentId, e.group_id as groupId
-         FROM student_group_enrollments e
-         JOIN groups g ON g.center_id = e.center_id AND g.id = e.group_id
-         WHERE e.center_id = ? AND e.student_id = ? AND e.status = 'active'
-           AND g.subject_id = ? AND g.teacher_id = ?
-           AND e.start_date >= ?
-         ORDER BY e.start_date ASC, e.created_at ASC
-         LIMIT 1`,
-        [centerId, subscription.studentId, option.subjectId, option.teacherId, subscriptionStartDate],
-      );
-      if (enrollment) {
-        packageAllocations.push({ enrollmentId: enrollment.enrollmentId, groupId: enrollment.groupId });
-      }
-    }
-    const uniqueAllocations = Array.from(
-      new Map(packageAllocations.map((item) => [item.enrollmentId, item])).values(),
-    );
-    // Legacy subscriptions may not have persisted option/group metadata. Keep
-    // their original single-cycle behavior instead of creating an incomplete
-    // or zero-value ledger.
-    const allocations = selectedOptions.length > 0 && uniqueAllocations.length === selectedOptions.length
-      ? uniqueAllocations.map((item) => ({ ...item, cyclePrice: packagePrice / uniqueAllocations.length }))
-      : [{ enrollmentId: subscription.id, groupId: subscription.packageId, cyclePrice: packagePrice }];
-
-    // Repair cycles created by the old implementation (one full-price cycle
-    // shared by every package group). Preserve the original cycle id so any
-    // payment already linked to it remains valid, then create the remaining
-    // group ledgers at their proportional prices.
-    if (allocations.length > 1) {
-      const legacyCycles = existingCycles.filter(
-        (cycle) => cycle.enrollmentId === subscription.id && cycle.groupId === subscription.packageId,
-      );
-      for (const legacyCycle of legacyCycles) {
-        const first = allocations[0];
-        const now = new Date().toISOString();
-        db.runSync(
-          `UPDATE debt_cycles
-           SET enrollment_id = ?, group_id = ?, cycle_price = ?, updated_at = ?
-           WHERE center_id = ? AND id = ?`,
-          [first.enrollmentId, first.groupId, first.cyclePrice, now, centerId, legacyCycle.id],
-        );
-        SyncRepository.enqueueOperation({
-          operationId: `op-dc-pkg-repair-${generateUUID()}`,
-          centerId,
-          userId: user.id,
-          deviceId,
-          operationType: "UPDATE",
-          entityType: "debt_cycle",
-          entityId: legacyCycle.id,
-          payload: { ...legacyCycle, enrollmentId: first.enrollmentId, groupId: first.groupId, cyclePrice: first.cyclePrice, updatedAt: now },
-        });
-        for (const allocation of allocations.slice(1)) {
-          const cycleId = `dc-${generateUUID()}`;
-          try {
-            db.runSync(
-              `INSERT INTO debt_cycles (id, center_id, student_id, enrollment_id, group_id, cycle_number, start_date, end_date, cycle_price, status, package_subscription_id, package_id, cycle_type, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'package', ?)`,
-              [cycleId, centerId, subscription.studentId, allocation.enrollmentId, allocation.groupId, legacyCycle.cycleNumber, legacyCycle.startDate, legacyCycle.endDate, allocation.cyclePrice, legacyCycle.status, subscription.id, subscription.packageId, now],
-            );
-            SyncRepository.enqueueOperation({
-              operationId: `op-dc-pkg-repair-${generateUUID()}`,
-              centerId, userId: user.id, deviceId, operationType: "debt_cycle.create", entityType: "debt_cycle", entityId: cycleId,
-              payload: { id: cycleId, centerId, studentId: subscription.studentId, enrollmentId: allocation.enrollmentId, groupId: allocation.groupId, packageSubscriptionId: subscription.id, packageId: subscription.packageId, cycleType: "package", cycleNumber: legacyCycle.cycleNumber, startDate: legacyCycle.startDate, endDate: legacyCycle.endDate, cyclePrice: allocation.cyclePrice, status: legacyCycle.status, createdAt: now },
-            });
-          } catch (error) {
-            if (!String((error as any)?.message || error).toLowerCase().includes("unique")) throw error;
-          }
-        }
-      }
-      existingCycles = this.getCyclesForPackageSubscription(subscriptionId);
-    }
+    this.repairLegacyPackageCycles(subscription.id, existingCycles, packagePrice);
+    existingCycles = this.getCyclesForPackageSubscription(subscriptionId);
+    // The debt ledger is intentionally one cycle for the whole package. The
+    // selected groups are used for reporting/teacher settlement only; they
+    // must never create separate package debts.
+    const allocations = [{ enrollmentId: subscription.id, groupId: subscription.packageId, cyclePrice: packagePrice }];
 
     // Generate cycles while nextStart <= cutoffDate and within subscription validity
     while (nextStart <= cutoffDate) {
@@ -736,6 +696,61 @@ export class DebtCycleRepository {
     }
 
     return this.getCyclesForPackageSubscription(subscriptionId);
+  }
+
+  /** Collapse old per-group package cycles into one package ledger cycle. */
+  private static repairLegacyPackageCycles(subscriptionId: string, cycles: DebtCycle[], packagePrice = 0): void {
+    const { centerId, user } = this.getActiveContext();
+    const db = DatabaseService.getDb();
+    const deviceId = DeviceService.getDeviceIdSync();
+    const byNumber = new Map<number, DebtCycle[]>();
+    for (const cycle of cycles.filter((item) => item.cycleType === "package" && item.status !== "cancelled")) {
+      const list = byNumber.get(cycle.cycleNumber) || [];
+      list.push(cycle);
+      byNumber.set(cycle.cycleNumber, list);
+    }
+    for (const list of byNumber.values()) {
+      if (list.length < 2) continue;
+      const canonical = list.find((item) => item.enrollmentId === subscriptionId) || list[0];
+      const rawTotal = list.reduce((sum, item) => sum + Number(item.cyclePrice || 0), 0);
+      // A previous build created one full-price package cycle per selected
+      // group.  Do not carry that inflation forward; proportional legacy
+      // rows (which already sum to the package amount) are preserved.
+      const duplicatedFullPrice = packagePrice > 0 && rawTotal > packagePrice + 0.01 &&
+        list.every((item) => Math.abs(Number(item.cyclePrice || 0) - packagePrice) < 0.01);
+      const totalPrice = duplicatedFullPrice ? packagePrice : rawTotal;
+      const now = new Date().toISOString();
+      db.runSync(
+        `UPDATE debt_cycles SET enrollment_id = ?, group_id = ?, cycle_price = ?, status = ?, updated_at = ? WHERE center_id = ? AND id = ?`,
+        [subscriptionId, canonical.packageId || canonical.groupId || "", totalPrice, canonical.status === "cancelled" ? "open" : canonical.status, now, centerId, canonical.id],
+      );
+      SyncRepository.enqueueOperation({
+        operationId: `op-dc-package-repair-${generateUUID()}`, centerId, userId: user.id, deviceId,
+        operationType: "UPDATE", entityType: "debt_cycle", entityId: canonical.id,
+        payload: { ...canonical, enrollmentId: subscriptionId, groupId: canonical.packageId || canonical.groupId, cyclePrice: totalPrice, updatedAt: now },
+      });
+      for (const duplicate of list) {
+        if (duplicate.id === canonical.id) continue;
+        const payments = db.getAllSync<any>(
+          `SELECT id, operation_id as operationId, student_id as studentId, amount, payment_type as paymentType, payment_method as paymentMethod, payment_date as paymentDate, subscription_id as subscriptionId, session_id as sessionId, notes, is_reversed as isReversed, created_at as createdAt, user_id as userId FROM payments WHERE center_id = ? AND debt_cycle_id = ?`,
+          [centerId, duplicate.id],
+        );
+        for (const payment of payments) {
+          db.runSync(`UPDATE payments SET debt_cycle_id = ?, updated_at = ? WHERE center_id = ? AND id = ?`, [canonical.id, now, centerId, payment.id]);
+          SyncRepository.enqueueOperation({
+            operationId: `op-payment-package-repair-${generateUUID()}`, centerId, userId: user.id, deviceId,
+            operationType: "UPDATE", entityType: "payment", entityId: payment.id,
+            payload: { ...payment, debtCycleId: canonical.id, updatedAt: now },
+          });
+        }
+        db.runSync(`UPDATE debt_cycles SET status = 'cancelled', cycle_price = 0, updated_at = ? WHERE center_id = ? AND id = ?`, [now, centerId, duplicate.id]);
+        SyncRepository.enqueueOperation({
+          operationId: `op-dc-package-repair-${generateUUID()}`, centerId, userId: user.id, deviceId,
+          operationType: "UPDATE", entityType: "debt_cycle", entityId: duplicate.id,
+          payload: { ...duplicate, cyclePrice: 0, status: "cancelled", updatedAt: now },
+        });
+      }
+    }
   }
 
   /**

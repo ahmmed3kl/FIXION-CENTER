@@ -275,7 +275,12 @@ function orderOperationsByDependencies(rows: SyncOperation[]): SyncOperation[] {
       refs.push(["student", value("studentId", "student_id")]);
       refs.push(["package", value("packageId", "package_id")]);
     }
-    if (entity === "package_teacher_override") refs.push(["package_subscription", value("subscriptionId", "subscription_id")]);
+    if (entity === "package_teacher_override") {
+      refs.push(["package_subscription", value("subscriptionId", "subscription_id")]);
+      refs.push(["teacher", value("teacherId", "teacher_id")]);
+      refs.push(["subject", value("subjectId", "subject_id")]);
+      refs.push(["group", value("groupId", "group_id")]);
+    }
     return refs.filter(([, id]) => id !== undefined).map(([type, id]) => `${type}:${id}`);
   };
 
@@ -968,6 +973,31 @@ export class SyncRepository {
     }
   }
 
+  /** Resolve a stale local session with the same natural key as a server row. */
+  static reconcileSessionNaturalKey(
+    db: any,
+    centerId: string,
+    sessionId: string,
+    groupId: string,
+    scheduleId: string | null | undefined,
+    sessionDate: string,
+  ): void {
+    if (!groupId || !scheduleId || !sessionDate) return;
+    const duplicate: { id: string } | null = db.getFirstSync(
+      `SELECT id FROM sessions
+       WHERE center_id = ? AND group_id = ? AND schedule_id = ?
+         AND session_date = ? AND id <> ? LIMIT 1`,
+      [centerId, groupId, scheduleId, sessionDate, sessionId],
+    );
+    if (!duplicate?.id) return;
+    for (const table of ["attendance", "payments", "session_expected_students", "session_closing_records"]) {
+      try {
+        db.runSync(`UPDATE ${table} SET session_id = ? WHERE center_id = ? AND session_id = ?`, [sessionId, centerId, duplicate.id]);
+      } catch {}
+    }
+    try { db.runSync(`DELETE FROM sessions WHERE center_id = ? AND id = ?`, [centerId, duplicate.id]); } catch {}
+  }
+
   /** Clears center operational data after an authoritative server reset. */
   static clearLocalOperationalDataInTransaction(db: any, centerId: string): void {
     const tables = [
@@ -1276,7 +1306,7 @@ export class SyncEngine {
 
     const overrides = db.getAllSync<any>(
       `SELECT id, subscription_id as subscriptionId, subject_id as subjectId,
-              teacher_id as teacherId, created_at as createdAt
+              teacher_id as teacherId, group_id as groupId, created_at as createdAt
        FROM package_subject_teacher_overrides WHERE center_id = ?`,
       [centerId],
     );
@@ -1567,6 +1597,11 @@ export class SyncEngine {
       // Upsert Sessions
       if (Array.isArray(data.sessions)) {
         for (const sess of data.sessions) {
+          const sessionId = sess.id || sess.sessionId;
+          const groupId = sess.group_id || sess.groupId;
+          const scheduleId = sess.schedule_id || sess.scheduleId || null;
+          const sessionDate = sess.session_date || sess.sessionDate;
+          SyncRepository.reconcileSessionNaturalKey(db, centerId, sessionId, groupId, scheduleId, sessionDate);
           db.runSync(
             `INSERT INTO sessions
                (id, center_id, group_id, session_date, start_time, end_time, status, schedule_id, subject_id, teacher_id, session_price, late_after_minutes, created_at, updated_at)
@@ -1738,10 +1773,10 @@ export class SyncEngine {
       }
       if (Array.isArray(data.packageTeacherOverrides)) {
         for (const o of data.packageTeacherOverrides) {
-          db.runSync(`INSERT INTO package_subject_teacher_overrides (id, center_id, subscription_id, subject_id, teacher_id, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET teacher_id=excluded.teacher_id`,
-            [o.id, o.center_id || centerId, o.subscription_id || o.subscriptionId, o.subject_id || o.subjectId, o.teacher_id || o.teacherId, o.created_at || new Date().toISOString()]);
+          db.runSync(`INSERT INTO package_subject_teacher_overrides (id, center_id, subscription_id, subject_id, teacher_id, group_id, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET teacher_id=excluded.teacher_id, group_id=excluded.group_id`,
+            [o.id, o.center_id || centerId, o.subscription_id || o.subscriptionId, o.subject_id || o.subjectId, o.teacher_id || o.teacherId, o.group_id || o.groupId || null, o.created_at || new Date().toISOString()]);
         }
       }
       if (Array.isArray(data.debtCycles)) {
@@ -2022,6 +2057,14 @@ export class SyncEngine {
           const existingSession = db.getFirstSync<any>(`SELECT group_id, session_date, start_time, end_time, schedule_id, subject_id, teacher_id, session_price, late_after_minutes, created_at FROM sessions WHERE center_id = ? AND id = ?`, [centerId, sessionId]);
           const sessionAction = String(session.action || change.action || "").toLowerCase();
           const requestedSessionStatus = sessionAction === "close" ? "closed" : sessionAction === "reopen" ? "open" : (session.status || "open");
+          SyncRepository.reconcileSessionNaturalKey(
+            db,
+            centerId,
+            sessionId,
+            session.group_id || session.groupId || existingSession?.group_id || "",
+            session.schedule_id || session.scheduleId || existingSession?.schedule_id || null,
+            session.session_date || session.sessionDate || existingSession?.session_date || "",
+          );
           db.runSync(
             `INSERT INTO sessions
                (id, center_id, group_id, session_date, start_time, end_time, status, schedule_id, subject_id, teacher_id, session_price, late_after_minutes, created_at, updated_at)
@@ -2272,9 +2315,9 @@ export class SyncEngine {
           const overrideAction = String(change.action || "").toUpperCase();
           const remove = overrideAction === "DELETE" || overrideAction.includes("REMOVE") || o.status === "inactive";
           if (remove) db.runSync(`DELETE FROM package_subject_teacher_overrides WHERE center_id=? AND subscription_id=? AND subject_id=?`, [centerId, o.subscription_id || o.subscriptionId, o.subject_id || o.subjectId]);
-          else db.runSync(`INSERT INTO package_subject_teacher_overrides (id, center_id, subscription_id, subject_id, teacher_id, created_at) VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET teacher_id=excluded.teacher_id`,
-            [o.id || change.entityId, centerId, o.subscription_id || o.subscriptionId, o.subject_id || o.subjectId, o.teacher_id || o.teacherId, o.created_at || new Date().toISOString()]);
+          else db.runSync(`INSERT INTO package_subject_teacher_overrides (id, center_id, subscription_id, subject_id, teacher_id, group_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET teacher_id=excluded.teacher_id, group_id=excluded.group_id`,
+            [o.id || change.entityId, centerId, o.subscription_id || o.subscriptionId, o.subject_id || o.subjectId, o.teacher_id || o.teacherId, o.group_id || o.groupId || null, o.created_at || new Date().toISOString()]);
          } else if (entityType === "debt_cycle") {
            const c = data.debtCycle || data;
            upsertLocalDebtCycle(db, { ...c, id: c.id || change.entityId }, centerId);

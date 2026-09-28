@@ -140,13 +140,12 @@ export class FinancialCalculationService {
     const activeMonthlyPayments = payments.filter(
       (p) =>
         !p.isReversed &&
-        p.paymentType !== "session" &&
-        (!!p.debtCycleId || !p.sessionId),
+        (!!p.debtCycleId || (p.paymentType !== "session" && !p.sessionId)),
     );
     const activeSessionPayments = payments.filter(
       (p) =>
         !p.isReversed &&
-        (p.paymentType === "session" || (!!p.sessionId && !p.debtCycleId)),
+        !p.debtCycleId && (p.paymentType === "session" || !!p.sessionId),
     );
 
     // Track unassigned payments (payments without debtCycleId), and direct
@@ -264,6 +263,7 @@ export class FinancialCalculationService {
     const totalDue = monthlyTotalDue;
     const totalPaid = monthlyTotalPaid;
     const remainingBalance = totalRemainingDebt;
+    const creditBalance = Math.max(0, unassignedPool);
 
     const sessionTotalPaid = activeSessionPayments.reduce(
       (sum, p) => sum + p.amount,
@@ -306,6 +306,7 @@ export class FinancialCalculationService {
       reversals,
       sessionDebt,
       currentPeriodDebt: sessionDebt.currentDebt,
+      creditBalance,
     };
   }
 
@@ -375,14 +376,13 @@ export class FinancialCalculationService {
     const monthlyPayments = payments.filter(
       (payment) =>
         !payment.isReversed &&
-        payment.paymentType !== "session" &&
-        (!!payment.debtCycleId || !payment.sessionId),
+        (!!payment.debtCycleId || (payment.paymentType !== "session" && !payment.sessionId)),
     );
     const sessionPayments = payments.filter(
       (payment) =>
         !payment.isReversed &&
-        (payment.paymentType === "session" ||
-          (!!payment.sessionId && !payment.debtCycleId)),
+        !payment.debtCycleId &&
+        (payment.paymentType === "session" || !!payment.sessionId),
     );
     const packageCycles = cycles.filter((cycle) => cycle.cycleType === "package");
     const monthlyGroupDue = groupCycles.reduce(
@@ -453,6 +453,7 @@ export class FinancialCalculationService {
       reversals,
       sessionDebt,
       currentPeriodDebt: sessionDebt.currentDebt,
+      creditBalance: full.creditBalance,
     };
   }
 }

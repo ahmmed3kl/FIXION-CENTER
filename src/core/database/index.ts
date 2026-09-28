@@ -879,6 +879,17 @@ export const MIGRATIONS: Migration[] = [
       try { db.execSync("CREATE INDEX IF NOT EXISTS idx_grade_exams_group ON grade_exams(center_id, group_id, grade, status);"); } catch {}
     },
   },
+  {
+    version: 15,
+    name: "package_subscription_group_selection",
+    up: (db: SqlDatabase) => {
+      // A package option is selected for one concrete group when a student is
+      // subscribed.  Keep that choice on the subscription override (the
+      // package definition itself intentionally remains subject + teacher).
+      try { db.execSync("ALTER TABLE package_subject_teacher_overrides ADD COLUMN group_id TEXT;"); } catch {}
+      try { db.execSync("CREATE INDEX IF NOT EXISTS idx_pkg_overrides_group ON package_subject_teacher_overrides(center_id, subscription_id, group_id);"); } catch {}
+    },
+  },
 ];
 
 // In-Memory SQLite Mock for Jest / Test environments

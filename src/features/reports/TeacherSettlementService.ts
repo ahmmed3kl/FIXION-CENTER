@@ -58,6 +58,12 @@ export class TeacherSettlementService {
            p.session_id IS NULL
            AND p.payment_date = s.session_date
            AND p.payment_type IN ('partial', 'session', 'cash')
+           AND NOT EXISTS (
+             SELECT 1 FROM debt_cycles package_cycle
+             WHERE package_cycle.center_id = p.center_id
+               AND package_cycle.id = p.debt_cycle_id
+               AND package_cycle.cycle_type = 'package'
+           )
            AND EXISTS (
              SELECT 1
              FROM student_group_enrollments payment_enrollment
@@ -97,6 +103,61 @@ export class TeacherSettlementService {
       ${filters.groupId ? "AND s.group_id = ?" : ""}
       GROUP BY s.id, s.session_date, s.start_time, g.id, g.name, t.name ORDER BY s.session_date DESC, s.start_time DESC`,
       filters.groupId ? [centerId, filters.teacherId, filters.fromDate, filters.toDate, filters.groupId] : [centerId, filters.teacherId, filters.fromDate, filters.toDate]);
-    return { teacherId: filters.teacherId, teacherName: teacher.name, fromDate: filters.fromDate, toDate: filters.toDate, totalAmount: rows.reduce((sum, row) => sum + Number(row.amount || 0), 0), paymentCount: rows.reduce((sum, row) => sum + Number(row.paymentCount || 0), 0), rows: rows.map((row) => ({ ...row, amount: Number(row.amount || 0), paymentCount: Number(row.paymentCount || 0) })) };
+    // Package payments are made once at any teacher's session. They belong to
+    // the package wallet, so attribute their amount proportionally to the
+    // selected teacher/group rows for operational settlement only.
+    const packageRows = db.getAllSync<any>(
+      `SELECT DISTINCT p.id as paymentId, p.payment_date as sessionDate,
+              p.amount, g.id as groupId, g.name as groupName,
+              t.id as teacherId,
+              t.name as teacherName
+       FROM payments p
+       JOIN debt_cycles dc
+         ON dc.center_id = p.center_id AND dc.id = p.debt_cycle_id
+        AND dc.cycle_type = 'package'
+       JOIN student_package_subscriptions sps
+         ON sps.center_id = dc.center_id
+        AND sps.id = dc.package_subscription_id
+       JOIN package_subjects ps
+         ON ps.center_id = sps.center_id AND ps.package_id = sps.package_id
+       LEFT JOIN package_subject_teacher_overrides selected
+         ON selected.center_id = sps.center_id
+        AND selected.subscription_id = sps.id
+        AND selected.subject_id = ps.subject_id
+       JOIN student_group_enrollments e
+         ON e.center_id = sps.center_id AND e.student_id = sps.student_id
+        AND e.status = 'active'
+       JOIN groups g
+         ON g.center_id = e.center_id AND g.id = e.group_id
+        AND g.subject_id = ps.subject_id
+        AND g.teacher_id = COALESCE(selected.teacher_id, ps.default_teacher_id)
+        AND (selected.id IS NULL OR selected.group_id IS NULL OR selected.group_id = e.group_id)
+       JOIN teachers t ON t.center_id = g.center_id AND t.id = g.teacher_id
+       WHERE p.center_id = ? AND p.is_reversed = 0
+         AND p.payment_date >= ? AND p.payment_date <= ?
+         AND (selected.id IS NOT NULL OR NOT EXISTS (
+           SELECT 1 FROM package_subject_teacher_overrides any_selection
+           WHERE any_selection.center_id = sps.center_id
+             AND any_selection.subscription_id = sps.id
+         ))`,
+      [centerId, filters.fromDate, filters.toDate],
+    );
+    const packageCountByPayment = new Map<string, number>();
+    for (const row of packageRows) packageCountByPayment.set(row.paymentId, (packageCountByPayment.get(row.paymentId) || 0) + 1);
+    const normalizedRows = rows.map((row) => ({ ...row, amount: Number(row.amount || 0), paymentCount: Number(row.paymentCount || 0) }));
+    const packageSettlementRows = packageRows.map((row) => ({
+        sessionId: `package-payment-${row.paymentId}-${row.groupId}`,
+        sessionDate: row.sessionDate,
+        startTime: "",
+        groupId: row.groupId,
+        groupName: row.groupName,
+        teacherId: row.teacherId,
+        teacherName: row.teacherName,
+        amount: Number(row.amount || 0) / Math.max(1, packageCountByPayment.get(row.paymentId) || 1),
+        paymentCount: 1,
+      }));
+    const filteredPackageRows = packageSettlementRows.filter((row) => row.teacherId === filters.teacherId && (!filters.groupId || row.groupId === filters.groupId));
+    const combinedRows = [...normalizedRows, ...filteredPackageRows].sort((a, b) => String(b.sessionDate).localeCompare(String(a.sessionDate)) || String(b.startTime).localeCompare(String(a.startTime)));
+    return { teacherId: filters.teacherId, teacherName: teacher.name, fromDate: filters.fromDate, toDate: filters.toDate, totalAmount: combinedRows.reduce((sum, row) => sum + Number(row.amount || 0), 0), paymentCount: combinedRows.reduce((sum, row) => sum + Number(row.paymentCount || 0), 0), rows: combinedRows };
   }
 }

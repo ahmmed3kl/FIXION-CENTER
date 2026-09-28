@@ -22,6 +22,7 @@ import { CenterAcademicStageRepository, DEFAULT_ACADEMIC_STAGES, AcademicStage }
 import { useAuthStore } from "../../auth/useAuthStore";
 import { GroupRepository } from "../../groups/GroupRepository";
 import { GroupScheduleRepository } from "../../groups/GroupScheduleRepository";
+import { EnrollmentRepository } from "../../enrollments/EnrollmentRepository";
 import { PackageRepository } from "../../packages/PackageRepository";
 import { PackageSubscriptionRepository } from "../../packages/PackageSubscriptionRepository";
 import { TeacherRepository } from "../../teachers/TeacherRepository";
@@ -259,6 +260,16 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({ vi
     const groupSchedules = schedules[groupId] || GroupScheduleRepository.getSchedulesForGroup(groupId);
     return groupSchedules.slice(0, 2).map((item) => `${DAYS[item.dayOfWeek] || "اليوم"} ${formatTimeArabic(item.startTime)}`).join("  •  ") || "لم يتم تحديد الموعد";
   };
+  const firstScheduledDate = (groupId: string) => {
+    const start = new Date(`${getLocalDateOnly()}T12:00:00`);
+    const groupSchedules = schedules[groupId] || GroupScheduleRepository.getSchedulesForGroup(groupId);
+    for (let offset = 0; offset < 7; offset += 1) {
+      const candidate = new Date(start);
+      candidate.setDate(start.getDate() + offset);
+      if (groupSchedules.some((item) => item.dayOfWeek === candidate.getDay())) return candidate.toISOString().slice(0, 10);
+    }
+    return getLocalDateOnly();
+  };
 
   const selectPackage = (nextPackageId: string) => {
     if (!nextPackageId) { setPackageId(""); setPackageOptionIds([]); setPackageTeacherIds({}); setPackageGroupIds({}); return; }
@@ -299,13 +310,18 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({ vi
     setSubmitting(true);
     try {
       const packageGroups = packageOptionIds.map((id) => packageGroupIds[id]).filter(Boolean);
-      const student = StudentRepository.createStudent({ studentCode: cardCode.trim(), cardCode: cardCode.trim(), fullName: fullName.trim(), phone: phone.trim(), parentPhone: parentPhone.trim(), grade, notes: notes.trim(), groupIds: Array.from(new Set([...selectedGroupIds, ...packageGroups])) });
+      // Package groups are enrolled with their first real scheduled class as
+      // the start date; StudentRepository's generic groupIds path uses today.
+      const student = StudentRepository.createStudent({ studentCode: cardCode.trim(), cardCode: cardCode.trim(), fullName: fullName.trim(), phone: phone.trim(), parentPhone: parentPhone.trim(), grade, notes: notes.trim(), groupIds: packageId ? selectedGroupIds : Array.from(new Set([...selectedGroupIds, ...packageGroups])) });
       if (packageId) {
-        const subscription = await PackageSubscriptionRepository.subscribeStudent({ studentId: student.id, packageId, startDate: getLocalDateOnly(), selectedOptionIds: packageOptionIds, selectedTeacherIds: packageTeacherIds });
+        for (const groupId of Array.from(new Set(packageGroups))) {
+          EnrollmentRepository.enrollStudent({ studentId: student.id, groupId, startDate: firstScheduledDate(groupId) });
+        }
+        const subscription = await PackageSubscriptionRepository.subscribeStudent({ studentId: student.id, packageId, startDate: getLocalDateOnly(), selectedOptionIds: packageOptionIds, selectedTeacherIds: packageTeacherIds, selectedGroupIds: packageGroupIds });
         if (currentUser?.permissions?.includes("packages.manage")) {
           for (const option of selectedPackageOptions) {
             const teacherId = packageTeacherIds[option.id];
-            if (teacherId && teacherId !== option.defaultTeacherId) await PackageSubscriptionRepository.setTeacherOverride({ subscriptionId: subscription.id, subjectId: option.subjectId, teacherId });
+            if (teacherId && teacherId !== option.defaultTeacherId) await PackageSubscriptionRepository.setTeacherOverride({ subscriptionId: subscription.id, subjectId: option.subjectId, teacherId, groupId: packageGroupIds[option.id] });
           }
         }
       }
