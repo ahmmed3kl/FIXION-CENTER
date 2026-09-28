@@ -1,17 +1,19 @@
 import { Ionicons } from "@expo/vector-icons";
 import { CameraView, useCameraPermissions } from "expo-camera";
-import { useLocalSearchParams } from "expo-router";
+import { router, useLocalSearchParams } from "expo-router";
 import { useEffect, useMemo, useState } from "react";
 import {
     Alert,
     FlatList,
     Linking,
     Modal,
+    Platform,
     ScrollView,
     StyleSheet,
     Text,
     TouchableOpacity,
     View,
+    useWindowDimensions,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { formatCurrency, formatTimeArabic, Strings } from "../../core/localization";
@@ -51,6 +53,7 @@ import {
     PaymentEvent,
     Student,
     StudentCard,
+    StudentPackageSubscription,
     StudentGroupEnrollment,
   StudentGroupAttendanceSummary,
   Attendance,
@@ -60,6 +63,26 @@ import {
 import { formatDisplayIdentifier } from "../../shared/utils/formatters";
 
 const WEEK_DAYS = ["الأحد", "الإثنين", "الثلاثاء", "الأربعاء", "الخميس", "الجمعة", "السبت"];
+
+const CODE39_DIGITS: Record<string, string> = {
+  "0": "nnnwwnwnn", "1": "wnnwnnnnw", "2": "nnwwnnnnw", "3": "wnwwnnnnn", "4": "nnnwwnnnw",
+  "5": "wnnwwnnnn", "6": "nnwwwnnnn", "7": "nnnwnnwnw", "8": "wnnwnnwnn", "9": "nnwwnnwnn",
+  "*": "nwnnwnwnn",
+};
+
+function StudentCodeBarcode({ value }: { value: string }) {
+  const { width: screenWidth } = useWindowDimensions();
+  const normalizedValue = value.trim();
+  const encoded = `*${normalizedValue}*`;
+  const valid = encoded.length > 2 && [...encoded].every((char) => CODE39_DIGITS[char]);
+  if (!valid) return <Text style={{ color: Colors.slate500, textAlign: "center", padding: 18 }}>لا يمكن عرض الرمز بهذا التنسيق.</Text>;
+  const narrow = Math.max(1, Math.min(2, (screenWidth - 82) / (encoded.length * 14)));
+  return <View style={{ flexDirection: "row", justifyContent: "center", alignItems: "stretch", paddingVertical: 14, paddingHorizontal: 7, backgroundColor: "#FFFFFF" }} accessibilityLabel={`باركود كود الطالب ${value}`}>
+    {[...encoded].map((character, charIndex) => <View key={`${charIndex}-${character}`} style={{ flexDirection: "row", marginRight: narrow }}>
+      {[...CODE39_DIGITS[character]].map((width, index) => <View key={`${charIndex}-${index}`} style={{ width: width === "w" ? narrow * 2 : narrow, height: 76, backgroundColor: index % 2 === 0 ? "#10233F" : "#FFFFFF" }} />)}
+    </View>)}
+  </View>;
+}
 
 function groupScheduleLabel(groupId: string): string {
   try {
@@ -97,6 +120,10 @@ export default function StudentsScreen() {
   const [cardCameraPermission, requestCardCameraPermission] = useCameraPermissions();
   const [selectedStudent, setSelectedStudent] = useState<Student | null>(null);
   const [studentCards, setStudentCards] = useState<StudentCard[]>([]);
+  const [studentSubscriptions, setStudentSubscriptions] = useState<StudentPackageSubscription[]>([]);
+  const [studentAttendance, setStudentAttendance] = useState<Attendance[]>([]);
+  const [profileTab, setProfileTab] = useState<"groups" | "packages" | "attendance" | "payments" | "notes">("groups");
+  const [barcodeModalOpen, setBarcodeModalOpen] = useState(false);
   const [studentEnrollments, setStudentEnrollments] = useState<
     StudentGroupEnrollment[]
   >([]);
@@ -130,6 +157,9 @@ export default function StudentsScreen() {
   const [editFullName, setEditFullName] = useState("");
   const [editPhone, setEditPhone] = useState("");
   const [editParentPhone, setEditParentPhone] = useState("");
+  const [editGrade, setEditGrade] = useState("");
+  const [editStudentType, setEditStudentType] = useState<"registered" | "external">("registered");
+  const [editNotes, setEditNotes] = useState("");
   const [availablePackages, setAvailablePackages] = useState<Package[]>([]);
   const [packageOptions, setPackageOptions] = useState<PackageSubject[]>([]);
   const [packageId, setPackageId] = useState("");
@@ -259,7 +289,14 @@ export default function StudentsScreen() {
   }, [activeCenterId, studentId]);
 
   const openStudentDetails = (student: Student) => {
+    if (selectedStudent?.id !== student.id) setProfileTab("groups");
     setSelectedStudent(student);
+    setFinancialStatus(null);
+    setStudentCards([]);
+    setStudentEnrollments([]);
+    setStudentSubscriptions([]);
+    setStudentAttendance([]);
+    setAttendanceSummaries([]);
     try {
       const cards = StudentCardRepository.getCardsByStudentId(student.id);
       setStudentCards(cards);
@@ -267,6 +304,14 @@ export default function StudentsScreen() {
         student.id,
       );
       setStudentEnrollments(enrollments);
+      try {
+        setStudentSubscriptions(PermissionService.hasPermission(permissions, "packages.view")
+          ? PackageSubscriptionRepository.getSubscriptionsForStudent(student.id, true)
+          : []);
+      } catch { setStudentSubscriptions([]); }
+      try {
+        setStudentAttendance(AttendanceRepository.getStudentAttendance(student.id));
+      } catch { setStudentAttendance([]); }
       try {
         setAttendanceSummaries(AttendanceRepository.getStudentGroupAttendanceSummaries(student.id));
       } catch {
@@ -288,6 +333,9 @@ export default function StudentsScreen() {
     setEditFullName(selectedStudent.fullName);
     setEditPhone(selectedStudent.phone);
     setEditParentPhone(selectedStudent.parentPhone);
+    setEditGrade(selectedStudent.grade);
+    setEditStudentType(selectedStudent.studentType === "external" ? "external" : "registered");
+    setEditNotes(selectedStudent.notes || "");
     setIsStudentEditModalOpen(true);
   };
 
@@ -298,6 +346,9 @@ export default function StudentsScreen() {
         fullName: editFullName,
         phone: editPhone,
         parentPhone: editParentPhone,
+        grade: editGrade,
+        studentType: editStudentType,
+        notes: editNotes,
       });
       setSelectedStudent(updated);
       setIsStudentEditModalOpen(false);
@@ -336,6 +387,24 @@ export default function StudentsScreen() {
       { text: "رقم الطالب", onPress: () => call("رقم الطالب", selectedStudent.phone) },
       { text: "رقم ولي الأمر", onPress: () => call("رقم ولي الأمر", selectedStudent.parentPhone) },
       { text: "إلغاء", style: "cancel" },
+    ]);
+  };
+
+  const callNumber = (phone: string | undefined, label: string) => {
+    if (!phone?.trim()) return Alert.alert("لا يوجد رقم", `لا يوجد ${label} مسجل لهذا الطالب.`);
+    Linking.openURL(`tel:${phone.trim()}`).catch(() => Alert.alert("تعذر الاتصال", "لا يمكن فتح تطبيق الاتصال على هذا الجهاز."));
+  };
+
+  const handleCancelPackage = (subscription: StudentPackageSubscription) => {
+    Alert.alert("إلغاء اشتراك الباقة", `سيتم تطبيق سياسة الاشتراك المالي الحالية على «${subscription.packageName || "الباقة"}». هل تريد المتابعة؟`, [
+      { text: "رجوع", style: "cancel" },
+      { text: "تأكيد الإلغاء", style: "destructive", onPress: async () => {
+        try {
+          await PackageSubscriptionRepository.cancelSubscription(subscription.id, getLocalDateOnly());
+          if (selectedStudent) openStudentDetails(StudentRepository.findById(selectedStudent.id) || selectedStudent);
+          Alert.alert("تم", "تم إلغاء الاشتراك وفق السياسة الحالية.");
+        } catch (error: any) { Alert.alert("تعذر الإلغاء", error?.message || "حاول مرة أخرى."); }
+      } },
     ]);
   };
 
@@ -619,6 +688,7 @@ export default function StudentsScreen() {
     "enrollments.create",
   );
   const canUpdateStudent = PermissionService.hasPermission(permissions, "students.update");
+  const canViewPackages = PermissionService.hasPermission(permissions, "packages.view");
   const eligibleEnrollmentGroups = availableGroups
     .filter(
       (group) =>
@@ -640,6 +710,7 @@ export default function StudentsScreen() {
     permissions,
     "payments.view",
   );
+  const canViewAttendance = PermissionService.hasAnyPermission(permissions, ["attendance.view", "reports.attendance.view", "reports.view"]);
   const canCreatePayment = paymentsEnabled && PermissionService.hasPermission(
     permissions,
     "payments.create",
@@ -759,9 +830,70 @@ export default function StudentsScreen() {
         </View>
       </Modal>
 
-      {/* 2. Student Details Modal */}
+      {/* Student profile, rebuilt as a full-screen profile with section navigation. */}
       {selectedStudent && (
-        <Modal visible={!!selectedStudent} animationType="fade" transparent>
+        <Modal visible animationType="slide" presentationStyle="fullScreen" onRequestClose={() => { setGroupDetailsModalOpen(false); setSelectedStudent(null); }}>
+          <SafeAreaView style={styles.profileScreen}>
+            <View style={styles.profileTopBar}>
+              <TouchableOpacity style={styles.profileTopButton} accessibilityLabel="رجوع" onPress={() => { setGroupDetailsModalOpen(false); setSelectedStudent(null); }}><Ionicons name="chevron-forward" size={22} color={Colors.slate900} /></TouchableOpacity>
+              <Text style={styles.profileTopTitle}>بيانات الطالب</Text>
+              {canUpdateStudent ? <TouchableOpacity style={styles.profileTopButton} accessibilityLabel="تعديل بيانات الطالب" onPress={openStudentEdit}><Ionicons name="create-outline" size={21} color={Colors.primary} /></TouchableOpacity> : <View style={{ width: 40 }} />}
+            </View>
+            <ScrollView style={styles.profileMainScroll} contentContainerStyle={styles.profileContent} showsVerticalScrollIndicator={false}>
+              <View style={styles.profileHero}>
+                <View style={styles.profileAvatarLarge}><Text style={styles.profileAvatarLargeText}>{selectedStudent.fullName.trim().charAt(0) || "ط"}</Text></View>
+                <Text style={styles.profileStudentName}>{selectedStudent.fullName}</Text>
+                <Text style={styles.profileGrade}>{selectedStudent.grade}</Text>
+                <Text style={styles.profileGroupSummary} numberOfLines={2}>{studentEnrollments.length ? studentEnrollments.map((item) => item.groupName || availableGroups.find((group) => group.id === item.groupId)?.name).filter(Boolean).join(" · ") : "غير مسجل في مجموعة حالية"}</Text>
+                <View style={[styles.profileStatusPill, selectedStudent.status !== "active" && styles.profileStatusPillInactive]}><View style={[styles.profileStatusDot, selectedStudent.status !== "active" && styles.profileStatusDotInactive]} /><Text style={styles.profileStatusPillText}>{selectedStudent.status === "active" ? "طالب نشط" : "غير نشط"}</Text></View>
+              </View>
+
+              <View style={styles.profileContactList}>
+                <TouchableOpacity style={styles.profileContactRow} onPress={() => callNumber(selectedStudent.phone, "رقم الطالب")}><View style={styles.profileContactText}><Text style={styles.profileContactLabel}>رقم الهاتف</Text><Text style={styles.profileContactValue} selectable>{selectedStudent.phone || "غير مسجل"}</Text></View><View style={styles.profileContactIcon}><Ionicons name="call" size={20} color={Colors.primary} /></View><Ionicons name="chevron-back" size={18} color={Colors.slate500} /></TouchableOpacity>
+                <TouchableOpacity style={styles.profileContactRow} onPress={() => callNumber(selectedStudent.parentPhone, "رقم ولي الأمر")}><View style={styles.profileContactText}><Text style={styles.profileContactLabel}>رقم ولي الأمر</Text><Text style={styles.profileContactValue} selectable>{selectedStudent.parentPhone || "غير مسجل"}</Text></View><View style={styles.profileContactIcon}><Ionicons name="call" size={20} color={Colors.primary} /></View><Ionicons name="chevron-back" size={18} color={Colors.slate500} /></TouchableOpacity>
+                <View style={styles.profileContactRow}><View style={styles.profileContactText}><Text style={styles.profileContactLabel}>كود الطالب</Text><Text style={styles.profileContactValue} selectable>{formatDisplayIdentifier(selectedStudent.studentCode)}</Text></View><View style={styles.profileContactIcon}><Ionicons name="barcode-outline" size={21} color={Colors.primary} /></View><Ionicons name="chevron-back" size={18} color={Colors.slate400} /></View>
+              </View>
+
+              <View style={styles.profilePrimaryActions}>
+                <TouchableOpacity style={styles.profileCodeButton} onPress={() => setBarcodeModalOpen(true)}><Ionicons name="barcode-outline" size={20} color={Colors.white} /><Text style={styles.profileCodeButtonText}>عرض كود الطالب</Text></TouchableOpacity>
+                {canManageCards && <TouchableOpacity style={styles.profileManageCardButton} onPress={() => setIsCardModalOpen(true)}><Ionicons name="card-outline" size={19} color={Colors.primary} /><Text style={styles.profileManageCardText}>إدارة البطاقة</Text></TouchableOpacity>}
+              </View>
+              {studentCards.length > 0 && <View style={styles.profileCardList}>{studentCards.map((card) => <View key={card.id} style={styles.profileCardRow}><View style={styles.profileRowCopy}><Text style={styles.profileRowTitle}>بطاقة {formatDisplayIdentifier(card.cardCode)}</Text><Text style={styles.profileRowMeta}>صدرت في {card.issuedAt.slice(0, 10)}</Text></View><StatusBadge text={card.status === "active" ? "نشطة" : "ملغاة"} type={card.status === "active" ? "success" : "neutral"} />{canManageCards && card.status === "active" && <TouchableOpacity accessibilityLabel="إلغاء البطاقة" onPress={() => handleDeactivateCard(card.id)}><Ionicons name="trash-outline" size={17} color={Colors.danger} /></TouchableOpacity>}</View>)}</View>}
+              {canDeactivate && selectedStudent.status === "active" && <TouchableOpacity style={styles.profileDeactivateButton} onPress={handleDeactivateStudent}><Ionicons name="pause-circle-outline" size={17} color={Colors.danger} /><Text style={styles.profileDeactivateText}>تعطيل حساب الطالب</Text></TouchableOpacity>}
+
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.profileTabsScroller} contentContainerStyle={styles.profileTabs}>
+                {([
+                  ["groups", "المجموعات", "people-outline"], ...(canViewPackages ? [["packages", "الباقات", "card-outline"] as const] : []), ...(canViewAttendance ? [["attendance", "الحضور والغياب", "calendar-outline"] as const] : []), ...(canViewPayments ? [["payments", "المدفوعات", "wallet-outline"] as const] : []), ["notes", "الملاحظات", "document-text-outline"],
+                ] as const).map(([key, label, icon]) => <TouchableOpacity key={key} style={[styles.profileTab, profileTab === key && styles.profileTabActive]} onPress={() => setProfileTab(key)}><Ionicons name={icon} size={16} color={profileTab === key ? Colors.primary : Colors.slate500} /><Text style={[styles.profileTabText, profileTab === key && styles.profileTabTextActive]}>{label}</Text></TouchableOpacity>)}
+              </ScrollView>
+
+              {profileTab === "groups" && <View style={styles.profileSection}>
+                <View style={styles.profileSectionHeader}><View><Text style={styles.profileSectionTitle}>المجموعات</Text><Text style={styles.profileSectionCaption}>{studentEnrollments.length} مجموعة نشطة</Text></View>{canEnroll && <TouchableOpacity style={styles.profileInlineAction} onPress={openEnrollModal}><Ionicons name="add" size={18} color={Colors.primary} /><Text style={styles.profileInlineActionText}>تسجيل</Text></TouchableOpacity>}</View>
+                {studentEnrollments.length === 0 ? <View style={styles.profileEmpty}><Ionicons name="people-outline" size={25} color={Colors.slate400} /><Text style={styles.profileEmptyTitle}>لا توجد مجموعات حالية</Text><Text style={styles.profileEmptyText}>ستظهر هنا المجموعات المسجل بها الطالب.</Text></View> : studentEnrollments.map((enrollment) => { const group = availableGroups.find((item) => item.id === enrollment.groupId); return <View key={enrollment.id} style={styles.profileListRow}><TouchableOpacity style={styles.profileRowMain} onPress={() => group && router.push({ pathname: "/(main)/group-details", params: { groupId: group.id } })}><View style={styles.profileRowIcon}><Ionicons name="people-outline" size={19} color={Colors.primary} /></View><View style={styles.profileRowCopy}><Text style={styles.profileRowTitle}>{enrollment.groupName || group?.name || "مجموعة"}</Text><Text style={styles.profileRowMeta}>{[group?.subjectName, group?.teacherName, group?.grade].filter(Boolean).join(" · ") || selectedStudent.grade}</Text><Text style={styles.profileRowMeta}>{groupScheduleLabel(enrollment.groupId)} · منذ {enrollment.startDate}</Text></View><Ionicons name="chevron-back" size={17} color={Colors.slate500} /></TouchableOpacity><View style={styles.profileRowActions}><TouchableOpacity onPress={() => openGroupPanel(enrollment.groupId, "attendance")}><Text style={styles.profileSmallAction}>الحضور</Text></TouchableOpacity><TouchableOpacity onPress={() => openGroupGrades(enrollment.groupId)}><Text style={styles.profileSmallAction}>الدرجات</Text></TouchableOpacity>{enrollment.status === "active" && PermissionService.hasPermission(permissions, "enrollments.end") && <TouchableOpacity onPress={() => handleEndEnrollment(enrollment.id)}><Text style={styles.profileSmallDanger}>إنهاء</Text></TouchableOpacity>}</View></View>; })}
+              </View>}
+
+              {profileTab === "packages" && canViewPackages && <View style={styles.profileSection}>
+                <View style={styles.profileSectionHeader}><View><Text style={styles.profileSectionTitle}>الباقات</Text><Text style={styles.profileSectionCaption}>الاشتراكات المسجلة للطالب</Text></View>{PermissionService.hasPermission(permissions, "packages.subscribe") && availablePackages.length > 0 && <TouchableOpacity style={styles.profileInlineAction} onPress={openPackageModal}><Ionicons name="add" size={18} color={Colors.primary} /><Text style={styles.profileInlineActionText}>إضافة</Text></TouchableOpacity>}</View>
+                {studentSubscriptions.length === 0 ? <View style={styles.profileEmpty}><Ionicons name="card-outline" size={25} color={Colors.slate400} /><Text style={styles.profileEmptyTitle}>لا توجد باقات مسجلة</Text><Text style={styles.profileEmptyText}>ستظهر هنا تفاصيل اشتراكات الطالب.</Text></View> : studentSubscriptions.map((subscription) => { let subjects: PackageSubject[] = []; let overrides: ReturnType<typeof PackageSubscriptionRepository.getTeacherOverrides> = []; try { subjects = PackageRepository.getPackageSubjects(subscription.packageId); overrides = PackageSubscriptionRepository.getTeacherOverrides(subscription.id); } catch {} return <View key={subscription.id} style={styles.profilePackageRow}><View style={styles.profileSectionHeader}><View style={{ flex: 1 }}><Text style={styles.profileRowTitle}>{subscription.packageName || "باقة"}</Text><Text style={styles.profileRowMeta}>{subscription.startDate}{subscription.endDate ? ` إلى ${subscription.endDate}` : " · مستمرة"}</Text></View><StatusBadge text={subscription.status === "active" ? "نشطة" : subscription.status === "cancelled" ? "ملغاة" : "منتهية"} type={subscription.status === "active" ? "success" : "neutral"} /></View>{subjects.map((subject) => { const override = overrides.find((item) => item.subjectId === subject.subjectId); const teacherName = teachers.find((item) => item.id === (override?.teacherId || subject.defaultTeacherId))?.name || override?.teacherName || subject.defaultTeacherName || "غير محدد"; return <View key={subject.id} style={styles.profileSubjectRow}><Text style={styles.profileSubjectName}>{subject.subjectName || "مادة"}{subject.groupName ? ` · ${subject.groupName}` : ""}</Text><Text style={styles.profileRowMeta}>المدرس: {teacherName}</Text></View>; })}{typeof subscription.packagePrice === "number" && <Text style={styles.profilePackagePrice}>قيمة الباقة: {formatCurrency(subscription.packagePrice)}</Text>}{subscription.status === "active" && PermissionService.hasPermission(permissions, "packages.manage") && <TouchableOpacity style={styles.profileSmallDangerButton} onPress={() => handleCancelPackage(subscription)}><Text style={styles.profileSmallDanger}>إلغاء الاشتراك</Text></TouchableOpacity>}</View>; })}
+              </View>}
+
+              {profileTab === "attendance" && canViewAttendance && <View style={styles.profileSection}><View style={styles.profileSectionHeader}><View><Text style={styles.profileSectionTitle}>الحضور والغياب</Text><Text style={styles.profileSectionCaption}>ملخص حضور الطالب في جميع مجموعاته</Text></View></View>{attendanceSummaries.length === 0 ? <View style={styles.profileEmpty}><Ionicons name="calendar-outline" size={25} color={Colors.slate400} /><Text style={styles.profileEmptyTitle}>لا توجد سجلات حضور</Text><Text style={styles.profileEmptyText}>ستظهر بيانات الحضور بعد تسجيل الجلسات.</Text></View> : attendanceSummaries.map((summary) => <View key={summary.groupId} style={styles.profileAttendanceGroup}><View style={styles.profileSectionHeader}><Text style={styles.profileRowTitle}>{summary.groupName}</Text><TouchableOpacity onPress={() => openGroupPanel(summary.groupId, "attendance")}><Text style={styles.profileSmallAction}>السجل</Text></TouchableOpacity></View><Text style={styles.profileRowMeta}>{[summary.subjectName, summary.teacherName].filter(Boolean).join(" · ")}</Text><View style={styles.profileAttendanceMetrics}><View><Text style={styles.profileAttendanceValue}>{summary.presentCount}</Text><Text style={styles.profileAttendanceLabel}>حضور</Text></View><View><Text style={[styles.profileAttendanceValue, { color: Colors.danger }]}>{summary.absentCount}</Text><Text style={styles.profileAttendanceLabel}>غياب</Text></View><View><Text style={[styles.profileAttendanceValue, { color: Colors.warning }]}>{summary.makeupCount}</Text><Text style={styles.profileAttendanceLabel}>تعويض</Text></View><View><Text style={styles.profileAttendanceValue}>{summary.expectedSessions}</Text><Text style={styles.profileAttendanceLabel}>حصص</Text></View></View></View>)}<Text style={styles.profileSubsectionTitle}>آخر السجلات</Text>{studentAttendance.slice(0, 12).map((row) => <View key={row.id} style={styles.profileHistoryRow}><View style={styles.profileHistoryIcon}><Ionicons name={row.attendanceType === "makeup" ? "refresh-outline" : "checkmark-outline"} size={16} color={row.attendanceType === "makeup" ? Colors.warning : Colors.success} /></View><View style={styles.profileRowCopy}><Text style={styles.profileRowTitle}>{row.attendanceType === "makeup" ? "حصة تعويضية" : row.status === "late" ? "حضور متأخر" : "حضور"}</Text><Text style={styles.profileRowMeta}>{row.groupName || "مجموعة"} · {row.checkInTime?.slice(0, 16).replace("T", " ") || "بدون تاريخ"}</Text></View></View>)}</View>}
+
+              {profileTab === "payments" && canViewPayments && <View style={styles.profileSection}><View style={styles.profileSectionHeader}><View><Text style={styles.profileSectionTitle}>{Strings.financialStatusTitle}</Text><Text style={styles.profileSectionCaption}>الموقف المالي وسجل المدفوعات</Text></View>{canCreatePayment && <TouchableOpacity style={styles.profileInlineAction} onPress={() => { setPaymentAmount(""); setPaymentType("monthly"); setPaymentCycleId(""); setPaymentNotes(""); setIsPaymentModalOpen(true); }}><Ionicons name="add" size={18} color={Colors.primary} /><Text style={styles.profileInlineActionText}>تسجيل دفعة</Text></TouchableOpacity>}</View>{!financialStatus ? <View style={styles.profileEmpty}><Text style={styles.profileEmptyText}>تعذر تحميل بيانات المدفوعات.</Text></View> : <><View style={styles.profileFinanceSummary}><View><Text style={styles.profileFinanceLabel}>{Strings.totalDueLabel}</Text><Text style={styles.profileFinanceValue}>{formatCurrency(financialStatus.monthlyTotalDue)}</Text></View><View><Text style={styles.profileFinanceLabel}>{Strings.totalPaidLabel}</Text><Text style={[styles.profileFinanceValue, { color: Colors.successText }]}>{formatCurrency(financialStatus.monthlyTotalPaid)}</Text></View><View><Text style={styles.profileFinanceLabel}>{Strings.remainingBalanceLabel}</Text><Text style={[styles.profileFinanceValue, { color: Colors.dangerText }]}>{formatCurrency(financialStatus.monthlyRemainingDebt)}</Text></View></View>{financialStatus.sessionDebt && <View style={styles.profileSessionDebt}><Text style={styles.profileRowTitle}>مديونية الحصص الحالية</Text><Text style={styles.profileRowMeta}>{financialStatus.sessionDebt.periodStart} إلى {financialStatus.sessionDebt.periodEnd}</Text><Text style={styles.profileFinanceValue}>{formatCurrency(financialStatus.sessionDebt.currentDebt)}</Text></View>}<Text style={styles.profileSubsectionTitle}>{Strings.debtCyclesTitle}</Text>{financialStatus.cycles.length ? financialStatus.cycles.map((cycle) => <View key={cycle.id} style={styles.profilePaymentRow}><View style={styles.profileRowCopy}><Text style={styles.profileRowTitle}>{Strings.cycleNumberPrefix} {cycle.cycleNumber} · {cycle.groupName || "مجموعة"}</Text><Text style={styles.profileRowMeta}>{cycle.startDate} إلى {cycle.endDate} · المتبقي {formatCurrency(cycle.remainingDebt ?? 0)}</Text></View><View style={styles.profilePaymentActions}>{cycle.status === "paid" ? <StatusBadge text={Strings.cycleStatusPaid} type="success" /> : <StatusBadge text={cycle.status === "partial" ? Strings.cycleStatusPartial : Strings.cycleStatusOpen} type="warning" />}{canAdjustDebt && <TouchableOpacity onPress={() => { setTargetCycleForAdj(cycle); setAdjAmount(""); setAdjReason(""); setIsAdjModalOpen(true); }}><Ionicons name="create-outline" size={18} color={Colors.primary} /></TouchableOpacity>}</View></View>) : <Text style={styles.profileEmptyText}>لا توجد دورات مديونية مسجلة.</Text>}<Text style={styles.profileSubsectionTitle}>سجل المدفوعات النقدية</Text>{financialStatus.payments.length ? financialStatus.payments.map((payment) => <View key={payment.id} style={styles.profilePaymentRow}><View style={styles.profileRowCopy}><Text style={[styles.profileRowTitle, payment.isReversed && styles.strikeText]}>{formatCurrency(payment.amount)} · {payment.paymentType === "session" ? "حصة" : payment.paymentType === "monthly" ? "شهري" : "جزئي"}</Text><Text style={styles.profileRowMeta}>{payment.paymentDate || payment.createdAt.slice(0, 10)}{payment.notes ? ` · ${payment.notes}` : ""}</Text></View>{payment.isReversed ? <StatusBadge text={Strings.reversedBadge} type="danger" /> : canReversePayment ? <TouchableOpacity style={styles.reverseBtn} onPress={() => { setTargetPaymentForRev(payment); setRevReason(""); setIsRevModalOpen(true); }}><Text style={styles.reverseBtnText}>{Strings.reversePaymentButton}</Text></TouchableOpacity> : null}</View>) : <Text style={styles.profileEmptyText}>لا توجد مدفوعات مسجلة.</Text>}</>}</View>}
+
+              {profileTab === "notes" && <View style={styles.profileSection}><View style={styles.profileSectionHeader}><View><Text style={styles.profileSectionTitle}>الملاحظات</Text><Text style={styles.profileSectionCaption}>ملاحظة الطالب المحفوظة في بياناته</Text></View>{canUpdateStudent && <TouchableOpacity style={styles.profileInlineAction} onPress={openStudentEdit}><Ionicons name="create-outline" size={17} color={Colors.primary} /><Text style={styles.profileInlineActionText}>{selectedStudent.notes ? "تعديل" : "إضافة"}</Text></TouchableOpacity>}</View>{selectedStudent.notes?.trim() ? <View style={styles.profileNoteCard}><Ionicons name="document-text-outline" size={18} color={Colors.primary} /><Text style={styles.profileNoteText}>{selectedStudent.notes}</Text></View> : <View style={styles.profileEmpty}><Ionicons name="document-text-outline" size={25} color={Colors.slate400} /><Text style={styles.profileEmptyTitle}>لا توجد ملاحظات بعد</Text><Text style={styles.profileEmptyText}>يمكنك إضافة ملاحظة ضمن بيانات الطالب.</Text></View>}</View>}
+            </ScrollView>
+          </SafeAreaView>
+        </Modal>
+      )}
+
+      <Modal visible={barcodeModalOpen} animationType="fade" transparent onRequestClose={() => setBarcodeModalOpen(false)}>
+        <View style={styles.modalOverlay}><View style={styles.barcodeModalCard}><View style={styles.profileSectionHeader}><Text style={styles.profileSectionTitle}>كود الطالب</Text><TouchableOpacity accessibilityLabel="إغلاق" onPress={() => setBarcodeModalOpen(false)}><Ionicons name="close" size={24} color={Colors.slate600} /></TouchableOpacity></View><Text style={styles.barcodeModalHint}>اعرض هذا الرمز لمسحه بواسطة قارئ FIXION</Text>{selectedStudent && <StudentCodeBarcode value={selectedStudent.studentCode} />}<Text style={styles.barcodeCodeText}>{selectedStudent ? formatDisplayIdentifier(selectedStudent.studentCode) : ""}</Text><TouchableOpacity style={styles.barcodeCloseButton} onPress={() => setBarcodeModalOpen(false)}><Text style={styles.barcodeCloseButtonText}>إغلاق</Text></TouchableOpacity></View></View>
+      </Modal>
+
+      {/* Legacy modal is intentionally disabled; the full-screen profile above uses the same repositories and actions. */}
+      {selectedStudent && (
+        <Modal visible={false} animationType="fade" transparent>
           <View style={styles.modalOverlay}>
             <View style={styles.detailsModalCard}>
               <View style={styles.modalHeader}>
@@ -1280,14 +1412,22 @@ export default function StudentsScreen() {
         </Modal>
       )}
 
-      <Modal visible={isStudentEditModalOpen} animationType="slide" transparent>
-        <View style={styles.modalOverlay}><View style={styles.smallModalCard}>
-          <Text style={styles.modalTitle}>تعديل بيانات الطالب</Text>
-          <AppInput label="اسم الطالب" value={editFullName} onChangeText={setEditFullName} />
-          <AppInput label="رقم الطالب" value={editPhone} onChangeText={setEditPhone} keyboardType="phone-pad" />
-          <AppInput label="رقم ولي الأمر" value={editParentPhone} onChangeText={setEditParentPhone} keyboardType="phone-pad" />
-          <View style={{ flexDirection: "row", gap: 8, marginTop: Spacing.md }}><AppButton title="حفظ" onPress={saveStudentEdit} style={{ flex: 1 }} /><AppButton title="إلغاء" variant="outline" onPress={() => setIsStudentEditModalOpen(false)} style={{ flex: 1 }} /></View>
-        </View></View>
+      <Modal visible={isStudentEditModalOpen} animationType="slide" presentationStyle="fullScreen" onRequestClose={() => setIsStudentEditModalOpen(false)}>
+        <SafeAreaView style={styles.profileScreen}>
+          <View style={styles.profileTopBar}><TouchableOpacity style={styles.profileTopButton} onPress={() => setIsStudentEditModalOpen(false)} accessibilityLabel="إغلاق التعديل"><Ionicons name="close" size={22} color={Colors.slate900} /></TouchableOpacity><Text style={styles.profileTopTitle}>تعديل بيانات الطالب</Text><View style={{ width: 40 }} /></View>
+          <ScrollView contentContainerStyle={styles.editProfileContent} keyboardShouldPersistTaps="handled">
+            <Text style={styles.profileSectionTitle}>البيانات الأساسية</Text><Text style={styles.profileSectionCaption}>حدّث البيانات المسموح بها للطالب.</Text>
+            <AppInput label="اسم الطالب" value={editFullName} onChangeText={setEditFullName} containerStyle={styles.editField} />
+            <AppInput label="رقم هاتف الطالب" value={editPhone} onChangeText={setEditPhone} keyboardType="phone-pad" containerStyle={styles.editField} />
+            <AppInput label="رقم هاتف ولي الأمر" value={editParentPhone} onChangeText={setEditParentPhone} keyboardType="phone-pad" containerStyle={styles.editField} />
+            <AppInput label="المرحلة الدراسية" value={editGrade} onChangeText={setEditGrade} containerStyle={styles.editField} />
+            <Text style={styles.inputLabel}>نوع الطالب</Text>
+            <View style={styles.editTypeRow}><TouchableOpacity style={[styles.editTypeChoice, editStudentType === "registered" && styles.editTypeChoiceActive]} onPress={() => setEditStudentType("registered")}><Text style={[styles.editTypeText, editStudentType === "registered" && styles.editTypeTextActive]}>مسجل</Text></TouchableOpacity><TouchableOpacity style={[styles.editTypeChoice, editStudentType === "external" && styles.editTypeChoiceActive]} onPress={() => setEditStudentType("external")}><Text style={[styles.editTypeText, editStudentType === "external" && styles.editTypeTextActive]}>خارجي</Text></TouchableOpacity></View>
+            <AppInput label="ملاحظات الطالب" value={editNotes} onChangeText={setEditNotes} multiline numberOfLines={4} containerStyle={styles.editField} style={{ minHeight: 100, textAlignVertical: "top" }} />
+            <View style={styles.profileInfoNotice}><Ionicons name="information-circle-outline" size={18} color={Colors.slate500} /><Text style={styles.profileInfoNoticeText}>كود الطالب ثابت. يمكنك إدارة كود البطاقة من صفحة الملف. إدارة المجموعات والباقات متاحة من تبويباتها.</Text></View>
+            <View style={styles.editProfileActions}><AppButton title="حفظ التعديلات" onPress={saveStudentEdit} style={{ flex: 1 }} /><AppButton title="إلغاء" variant="outline" onPress={() => setIsStudentEditModalOpen(false)} style={{ flex: 1 }} /></View>
+          </ScrollView>
+        </SafeAreaView>
       </Modal>
 
       <Modal visible={isCustomSmsModalOpen} animationType="slide" transparent>
@@ -2399,4 +2539,95 @@ const createStyles = () => StyleSheet.create({
     fontWeight: "700",
     color: Colors.primary,
   },
+  profileScreen: { flex: 1, backgroundColor: Colors.background },
+  profileTopBar: { minHeight: 54, paddingHorizontal: Spacing.md, flexDirection: "row-reverse", alignItems: "center", justifyContent: "space-between", borderBottomWidth: 1, borderBottomColor: Colors.border, backgroundColor: Colors.cardBackground },
+  profileTopButton: { width: 40, height: 40, borderRadius: 13, alignItems: "center", justifyContent: "center", backgroundColor: Colors.primaryLight + "30" },
+  profileTopTitle: { flex: 1, marginHorizontal: 12, color: Colors.slate900, fontSize: 17, fontWeight: "800", textAlign: "right" },
+  profileMainScroll: { flex: 1 },
+  profileContent: { paddingHorizontal: Spacing.md, paddingBottom: 36 },
+  profileHero: { alignItems: "center", paddingTop: 18, paddingBottom: 16 },
+  profileAvatarLarge: { width: 88, height: 88, borderRadius: 44, alignItems: "center", justifyContent: "center", backgroundColor: Colors.primaryLight + "70", marginBottom: 9 },
+  profileAvatarLargeText: { color: Colors.primary, fontSize: 42, fontWeight: "800" },
+  profileStudentName: { color: Colors.slate900, fontSize: 22, fontWeight: "900", textAlign: "center" },
+  profileGrade: { color: Colors.slate600, fontSize: 14, fontWeight: "700", marginTop: 2 },
+  profileGroupSummary: { maxWidth: "100%", color: Colors.slate500, fontSize: 12, marginTop: 5, textAlign: "center" },
+  profileStatusPill: { flexDirection: "row-reverse", alignItems: "center", gap: 6, marginTop: 9, paddingHorizontal: 13, paddingVertical: 6, borderRadius: 20, backgroundColor: Colors.primaryLight + "55" },
+  profileStatusPillInactive: { backgroundColor: Colors.slate200 },
+  profileStatusDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: Colors.success },
+  profileStatusDotInactive: { backgroundColor: Colors.slate500 },
+  profileStatusPillText: { color: Colors.primaryDark, fontSize: 12, fontWeight: "800" },
+  profileContactList: { gap: 8, marginBottom: 10 },
+  profileContactRow: { minHeight: 70, flexDirection: "row-reverse", alignItems: "center", gap: 10, paddingHorizontal: 12, paddingVertical: 10, borderWidth: 1, borderColor: Colors.border, borderRadius: 15, backgroundColor: Colors.cardBackground, ...Platform.select({ ios: { shadowColor: Colors.slate900, shadowOpacity: 0.04, shadowRadius: 9, shadowOffset: { width: 0, height: 3 } }, android: { elevation: 1 } }) },
+  profileContactText: { flex: 1, alignItems: "flex-end" },
+  profileContactLabel: { color: Colors.slate500, fontSize: 11 },
+  profileContactValue: { color: Colors.slate900, fontSize: 16, fontWeight: "700", marginTop: 2 },
+  profileContactIcon: { width: 46, height: 46, borderRadius: 14, alignItems: "center", justifyContent: "center", backgroundColor: Colors.primaryLight + "55" },
+  profilePrimaryActions: { flexDirection: "row-reverse", gap: 8, marginTop: 1, marginBottom: 10 },
+  profileCardList: { marginBottom: 8, paddingHorizontal: 11, borderRadius: 13, backgroundColor: Colors.cardBackground },
+  profileCardRow: { minHeight: 48, flexDirection: "row-reverse", alignItems: "center", gap: 8, borderBottomWidth: 1, borderBottomColor: Colors.slate100 },
+  profileCodeButton: { minHeight: 48, flex: 1, flexDirection: "row-reverse", justifyContent: "center", alignItems: "center", gap: 8, borderRadius: 12, backgroundColor: Colors.primary },
+  profileCodeButtonText: { color: Colors.white, fontSize: 14, fontWeight: "800" },
+  profileManageCardButton: { minHeight: 48, flex: 1, flexDirection: "row-reverse", justifyContent: "center", alignItems: "center", gap: 7, borderRadius: 12, backgroundColor: Colors.primaryLight + "55" },
+  profileManageCardText: { color: Colors.primary, fontSize: 13, fontWeight: "800" },
+  profileDeactivateButton: { flexDirection: "row-reverse", alignItems: "center", justifyContent: "center", gap: 6, paddingVertical: 7, marginBottom: 8 },
+  profileDeactivateText: { color: Colors.danger, fontSize: 12, fontWeight: "700" },
+  profileTabsScroller: { marginHorizontal: -Spacing.md, borderBottomWidth: 1, borderBottomColor: Colors.border, backgroundColor: Colors.cardBackground },
+  profileTabs: { flexDirection: "row-reverse", paddingHorizontal: Spacing.sm, gap: 3 },
+  profileTab: { minHeight: 47, flexDirection: "row-reverse", alignItems: "center", justifyContent: "center", gap: 6, paddingHorizontal: 12, borderBottomWidth: 2, borderBottomColor: "transparent" },
+  profileTabActive: { borderBottomColor: Colors.primary },
+  profileTabText: { color: Colors.slate500, fontSize: 11, fontWeight: "700" },
+  profileTabTextActive: { color: Colors.primary, fontWeight: "900" },
+  profileSection: { paddingTop: 16, paddingBottom: 10 },
+  profileSectionHeader: { flexDirection: "row-reverse", alignItems: "center", justifyContent: "space-between", gap: 10 },
+  profileSectionTitle: { color: Colors.slate900, fontSize: 16, fontWeight: "900", textAlign: "right" },
+  profileSectionCaption: { color: Colors.slate500, fontSize: 11, marginTop: 2, textAlign: "right" },
+  profileInlineAction: { minHeight: 35, flexDirection: "row-reverse", alignItems: "center", gap: 3, paddingHorizontal: 10, borderRadius: 10, backgroundColor: Colors.primaryLight + "45" },
+  profileInlineActionText: { color: Colors.primary, fontSize: 11, fontWeight: "800" },
+  profileEmpty: { alignItems: "center", justifyContent: "center", paddingVertical: 30, paddingHorizontal: 16, marginTop: 12, borderRadius: 15, backgroundColor: Colors.slate50 },
+  profileEmptyTitle: { color: Colors.slate800, fontSize: 13, fontWeight: "800", marginTop: 8 },
+  profileEmptyText: { color: Colors.slate500, fontSize: 11, marginTop: 4, textAlign: "center" },
+  profileListRow: { marginTop: 9, padding: 11, borderRadius: 14, borderWidth: 1, borderColor: Colors.border, backgroundColor: Colors.cardBackground },
+  profileRowMain: { flexDirection: "row-reverse", alignItems: "center", gap: 9 },
+  profileRowIcon: { width: 42, height: 42, borderRadius: 13, alignItems: "center", justifyContent: "center", backgroundColor: Colors.primaryLight + "50" },
+  profileRowCopy: { flex: 1, alignItems: "flex-end" },
+  profileRowTitle: { color: Colors.slate900, fontSize: 13, fontWeight: "800", textAlign: "right" },
+  profileRowMeta: { color: Colors.slate500, fontSize: 10, marginTop: 3, textAlign: "right" },
+  profileRowActions: { flexDirection: "row-reverse", alignItems: "center", gap: 18, marginTop: 9, paddingTop: 8, borderTopWidth: 1, borderTopColor: Colors.slate100 },
+  profileSmallAction: { color: Colors.primary, fontSize: 11, fontWeight: "800" },
+  profileSmallDanger: { color: Colors.danger, fontSize: 11, fontWeight: "800" },
+  profilePackageRow: { padding: 13, marginTop: 10, borderRadius: 14, borderWidth: 1, borderColor: Colors.border, backgroundColor: Colors.cardBackground },
+  profileSubjectRow: { flexDirection: "row-reverse", justifyContent: "space-between", alignItems: "center", gap: 8, paddingTop: 9, marginTop: 8, borderTopWidth: 1, borderTopColor: Colors.slate100 },
+  profileSubjectName: { flex: 1, color: Colors.slate800, fontSize: 11, fontWeight: "800", textAlign: "right" },
+  profilePackagePrice: { color: Colors.slate700, fontSize: 11, fontWeight: "700", marginTop: 9, textAlign: "right" },
+  profileSmallDangerButton: { alignSelf: "flex-start", paddingVertical: 6, paddingHorizontal: 9, marginTop: 8, borderRadius: 8, backgroundColor: Colors.dangerLight },
+  profileAttendanceGroup: { padding: 12, marginTop: 9, borderRadius: 14, borderWidth: 1, borderColor: Colors.border, backgroundColor: Colors.cardBackground },
+  profileAttendanceMetrics: { flexDirection: "row-reverse", justifyContent: "space-around", marginTop: 12, paddingTop: 9, borderTopWidth: 1, borderTopColor: Colors.slate100 },
+  profileAttendanceValue: { color: Colors.slate900, fontSize: 16, fontWeight: "900", textAlign: "center" },
+  profileAttendanceLabel: { color: Colors.slate500, fontSize: 9, marginTop: 2, textAlign: "center" },
+  profileSubsectionTitle: { marginTop: 18, marginBottom: 7, color: Colors.slate700, fontSize: 12, fontWeight: "900", textAlign: "right" },
+  profileHistoryRow: { flexDirection: "row-reverse", alignItems: "center", gap: 9, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: Colors.slate100 },
+  profileHistoryIcon: { width: 30, height: 30, borderRadius: 10, alignItems: "center", justifyContent: "center", backgroundColor: Colors.slate50 },
+  profileFinanceSummary: { flexDirection: "row-reverse", justifyContent: "space-between", gap: 6, padding: 12, marginTop: 13, borderRadius: 13, backgroundColor: Colors.slate50 },
+  profileFinanceLabel: { color: Colors.slate500, fontSize: 9, textAlign: "right" },
+  profileFinanceValue: { color: Colors.slate900, fontSize: 13, fontWeight: "900", marginTop: 5, textAlign: "right" },
+  profileSessionDebt: { padding: 12, marginTop: 9, borderRadius: 12, backgroundColor: Colors.primaryLight + "35" },
+  profilePaymentRow: { flexDirection: "row-reverse", alignItems: "center", justifyContent: "space-between", gap: 8, paddingVertical: 11, borderBottomWidth: 1, borderBottomColor: Colors.slate100 },
+  profilePaymentActions: { flexDirection: "row-reverse", alignItems: "center", gap: 8 },
+  profileNoteCard: { flexDirection: "row-reverse", alignItems: "flex-start", gap: 9, padding: 14, marginTop: 12, borderRadius: 13, backgroundColor: Colors.slate50 },
+  profileNoteText: { flex: 1, color: Colors.slate800, fontSize: 13, lineHeight: 21, textAlign: "right" },
+  barcodeModalCard: { width: "92%", padding: 18, borderRadius: 18, backgroundColor: Colors.cardBackground },
+  barcodeModalHint: { marginTop: 8, color: Colors.slate500, fontSize: 11, textAlign: "center" },
+  barcodeCodeText: { color: Colors.slate900, fontSize: 18, fontWeight: "900", letterSpacing: 1.5, textAlign: "center" },
+  barcodeCloseButton: { minHeight: 43, alignItems: "center", justifyContent: "center", marginTop: 15, borderRadius: 11, backgroundColor: Colors.primary },
+  barcodeCloseButtonText: { color: Colors.white, fontWeight: "800" },
+  editTypeRow: { flexDirection: "row-reverse", gap: 8, marginVertical: 6 },
+  editTypeChoice: { flex: 1, paddingVertical: 9, alignItems: "center", borderRadius: 10, borderWidth: 1, borderColor: Colors.border, backgroundColor: Colors.slate50 },
+  editTypeChoiceActive: { borderColor: Colors.primary, backgroundColor: Colors.primaryLight + "40" },
+  editTypeText: { color: Colors.slate600, fontSize: 12, fontWeight: "700" },
+  editTypeTextActive: { color: Colors.primary, fontWeight: "900" },
+  editProfileContent: { padding: Spacing.lg, paddingBottom: 36 },
+  editField: { marginTop: 13 },
+  editProfileActions: { flexDirection: "row", gap: 9, marginTop: 20 },
+  profileInfoNotice: { flexDirection: "row-reverse", alignItems: "flex-start", gap: 7, padding: 11, marginTop: 12, borderRadius: 11, backgroundColor: Colors.slate100 },
+  profileInfoNoticeText: { flex: 1, color: Colors.slate600, fontSize: 10, lineHeight: 16, textAlign: "right" },
 });
