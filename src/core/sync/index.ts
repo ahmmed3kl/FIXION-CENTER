@@ -566,6 +566,7 @@ export class SyncRepository {
            OR last_error LIKE '%value too long%'
            OR last_error LIKE '%outside the authenticated center%'
            OR last_error LIKE '%CARD_BELONGS_TO_OTHER_CENTER%'
+           OR last_error LIKE '%no unique or exclusion constraint%'
            OR last_error LIKE '%uq_center_card_code%'
            OR last_error LIKE '%package%constraint%'
            OR last_error LIKE '%grade_%'

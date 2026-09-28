@@ -133,11 +133,20 @@ export class FinancialCalculationService {
 
     // 7. Calculate per-cycle effective price, payments, and remaining debt
     // Separate non-reversed payments:
+    // A payment linked to a debt cycle is a debt payment even when it was
+    // collected while an attendance session was open.  Only session-only
+    // payments (no debt cycle) belong to the per-session ledger.  This keeps
+    // the group financial card and the payment history in agreement.
     const activeMonthlyPayments = payments.filter(
-      (p) => !p.isReversed && p.paymentType !== "session" && !p.sessionId,
+      (p) =>
+        !p.isReversed &&
+        p.paymentType !== "session" &&
+        (!!p.debtCycleId || !p.sessionId),
     );
     const activeSessionPayments = payments.filter(
-      (p) => !p.isReversed && (p.paymentType === "session" || !!p.sessionId),
+      (p) =>
+        !p.isReversed &&
+        (p.paymentType === "session" || (!!p.sessionId && !p.debtCycleId)),
     );
 
     // Track unassigned payments (payments without debtCycleId), and direct
@@ -339,6 +348,7 @@ export class FinancialCalculationService {
         AND selected.subject_id = ps.subject_id
        WHERE dc.center_id = ? AND dc.student_id = ? AND dc.cycle_type = 'package'
          AND ps.subject_id = scoped_group.subject_id
+         AND dc.group_id = scoped_group.id
          AND (ps.group_id IS NULL OR ps.group_id = ?)
          AND COALESCE(selected.teacher_id, ps.default_teacher_id) = scoped_group.teacher_id
          AND (
@@ -366,12 +376,13 @@ export class FinancialCalculationService {
       (payment) =>
         !payment.isReversed &&
         payment.paymentType !== "session" &&
-        !payment.sessionId,
+        (!!payment.debtCycleId || !payment.sessionId),
     );
     const sessionPayments = payments.filter(
       (payment) =>
         !payment.isReversed &&
-        (payment.paymentType === "session" || !!payment.sessionId),
+        (payment.paymentType === "session" ||
+          (!!payment.sessionId && !payment.debtCycleId)),
     );
     const packageCycles = cycles.filter((cycle) => cycle.cycleType === "package");
     const monthlyGroupDue = groupCycles.reduce(

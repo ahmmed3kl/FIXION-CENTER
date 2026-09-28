@@ -1168,7 +1168,7 @@ class SyncProcessor {
           await client.query("DELETE FROM package_subject_teacher_overrides WHERE center_id=$1 AND subscription_id=$2 AND subject_id=$3", [centerId, override.subscription_id || override.subscriptionId, override.subject_id || override.subjectId]);
         } else {
           await client.query(`INSERT INTO package_subject_teacher_overrides (id, center_id, subscription_id, subject_id, teacher_id, created_at)
-             VALUES ($1,$2,$3,$4,$5,NOW()) ON CONFLICT (center_id, subscription_id, subject_id) DO UPDATE SET teacher_id=EXCLUDED.teacher_id`,
+             VALUES ($1,$2,$3,$4,$5,NOW()) ON CONFLICT (subscription_id, subject_id) DO UPDATE SET teacher_id=EXCLUDED.teacher_id`,
             [override.id || context.entityId || `pkg-override-${centerId}-${override.subscription_id || override.subscriptionId}-${override.subject_id || override.subjectId}`, centerId, override.subscription_id || override.subscriptionId, override.subject_id || override.subjectId, override.teacher_id || override.teacherId]);
         }
         break;

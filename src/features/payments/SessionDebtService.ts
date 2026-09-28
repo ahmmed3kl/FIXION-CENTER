@@ -83,7 +83,8 @@ export class SessionDebtService {
         ) : null;
         const directPayment = session ? Number(db.getFirstSync<any>(
           `SELECT COALESCE(SUM(amount), 0) as amount FROM payments
-           WHERE center_id = ? AND student_id = ? AND session_id = ? AND is_reversed = 0`,
+           WHERE center_id = ? AND student_id = ? AND session_id = ?
+             AND debt_cycle_id IS NULL AND is_reversed = 0`,
           [activeCenterId, studentId, session.id],
         )?.amount || 0) : 0;
         planned.push({ date, groupId: enrollment.groupId, price: Math.max(0, perSessionPrice), sessionId: session?.id, attended: Boolean(attendance), directlyPaid: directPayment });
@@ -140,7 +141,9 @@ export class SessionDebtService {
     const monthlyPool = Number(db.getFirstSync<any>(
       `SELECT COALESCE(SUM(amount), 0) as amount FROM payments
        WHERE center_id = ? AND student_id = ? AND payment_date >= ? AND payment_date <= ?
-         AND payment_type IN ('monthly','partial') AND is_reversed = 0`,
+         AND payment_type IN ('monthly','partial')
+         AND (debt_cycle_id IS NOT NULL OR session_id IS NULL)
+         AND is_reversed = 0`,
       [activeCenterId, studentId, periodStart, periodEnd],
     )?.amount || 0);
 

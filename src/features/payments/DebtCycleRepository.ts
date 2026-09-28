@@ -547,7 +547,7 @@ export class DebtCycleRepository {
     }
 
     // Existing cycles for this package subscription
-    const existingCycles = this.getCyclesForPackageSubscription(subscriptionId);
+    let existingCycles = this.getCyclesForPackageSubscription(subscriptionId);
 
     // Cancelled / inactive subscriptions: if ended, cannot generate cycles past effective end date
     if (
@@ -594,12 +594,101 @@ export class DebtCycleRepository {
       }
     }
 
-    // Fetch snapshotted package price
+    // Fetch snapshotted package price. A package is one monthly obligation,
+    // but its amount must be split across the selected subject/group
+    // enrollments. Previously every package cycle used the full package price,
+    // so each teacher's group displayed the entire amount.
     const pkg = db.getFirstSync<any>(
       `SELECT price, name FROM packages WHERE center_id = ? AND id = ?`,
       [centerId, subscription.packageId],
     );
-    const cyclePrice = Number(pkg?.price ?? 0);
+    const packagePrice = Number(pkg?.price ?? 0);
+    const selectedOptions = db.getAllSync<any>(
+      `SELECT ps.subject_id as subjectId,
+              o.teacher_id as teacherId
+       FROM package_subject_teacher_overrides o
+       JOIN package_subjects ps
+         ON ps.center_id = o.center_id
+        AND ps.package_id = ?
+        AND ps.subject_id = o.subject_id
+       WHERE o.center_id = ? AND o.subscription_id = ?
+       ORDER BY ps.subject_id`,
+      [subscription.packageId, centerId, subscription.id],
+    );
+    const packageAllocations: Array<{ enrollmentId: string; groupId: string }> = [];
+    for (const option of selectedOptions) {
+      const enrollment = db.getFirstSync<any>(
+        `SELECT e.id as enrollmentId, e.group_id as groupId
+         FROM student_group_enrollments e
+         JOIN groups g ON g.center_id = e.center_id AND g.id = e.group_id
+         WHERE e.center_id = ? AND e.student_id = ? AND e.status = 'active'
+           AND g.subject_id = ? AND g.teacher_id = ?
+           AND e.start_date >= ?
+         ORDER BY e.start_date ASC, e.created_at ASC
+         LIMIT 1`,
+        [centerId, subscription.studentId, option.subjectId, option.teacherId, subscriptionStartDate],
+      );
+      if (enrollment) {
+        packageAllocations.push({ enrollmentId: enrollment.enrollmentId, groupId: enrollment.groupId });
+      }
+    }
+    const uniqueAllocations = Array.from(
+      new Map(packageAllocations.map((item) => [item.enrollmentId, item])).values(),
+    );
+    // Legacy subscriptions may not have persisted option/group metadata. Keep
+    // their original single-cycle behavior instead of creating an incomplete
+    // or zero-value ledger.
+    const allocations = selectedOptions.length > 0 && uniqueAllocations.length === selectedOptions.length
+      ? uniqueAllocations.map((item) => ({ ...item, cyclePrice: packagePrice / uniqueAllocations.length }))
+      : [{ enrollmentId: subscription.id, groupId: subscription.packageId, cyclePrice: packagePrice }];
+
+    // Repair cycles created by the old implementation (one full-price cycle
+    // shared by every package group). Preserve the original cycle id so any
+    // payment already linked to it remains valid, then create the remaining
+    // group ledgers at their proportional prices.
+    if (allocations.length > 1) {
+      const legacyCycles = existingCycles.filter(
+        (cycle) => cycle.enrollmentId === subscription.id && cycle.groupId === subscription.packageId,
+      );
+      for (const legacyCycle of legacyCycles) {
+        const first = allocations[0];
+        const now = new Date().toISOString();
+        db.runSync(
+          `UPDATE debt_cycles
+           SET enrollment_id = ?, group_id = ?, cycle_price = ?, updated_at = ?
+           WHERE center_id = ? AND id = ?`,
+          [first.enrollmentId, first.groupId, first.cyclePrice, now, centerId, legacyCycle.id],
+        );
+        SyncRepository.enqueueOperation({
+          operationId: `op-dc-pkg-repair-${generateUUID()}`,
+          centerId,
+          userId: user.id,
+          deviceId,
+          operationType: "UPDATE",
+          entityType: "debt_cycle",
+          entityId: legacyCycle.id,
+          payload: { ...legacyCycle, enrollmentId: first.enrollmentId, groupId: first.groupId, cyclePrice: first.cyclePrice, updatedAt: now },
+        });
+        for (const allocation of allocations.slice(1)) {
+          const cycleId = `dc-${generateUUID()}`;
+          try {
+            db.runSync(
+              `INSERT INTO debt_cycles (id, center_id, student_id, enrollment_id, group_id, cycle_number, start_date, end_date, cycle_price, status, package_subscription_id, package_id, cycle_type, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'package', ?)`,
+              [cycleId, centerId, subscription.studentId, allocation.enrollmentId, allocation.groupId, legacyCycle.cycleNumber, legacyCycle.startDate, legacyCycle.endDate, allocation.cyclePrice, legacyCycle.status, subscription.id, subscription.packageId, now],
+            );
+            SyncRepository.enqueueOperation({
+              operationId: `op-dc-pkg-repair-${generateUUID()}`,
+              centerId, userId: user.id, deviceId, operationType: "debt_cycle.create", entityType: "debt_cycle", entityId: cycleId,
+              payload: { id: cycleId, centerId, studentId: subscription.studentId, enrollmentId: allocation.enrollmentId, groupId: allocation.groupId, packageSubscriptionId: subscription.id, packageId: subscription.packageId, cycleType: "package", cycleNumber: legacyCycle.cycleNumber, startDate: legacyCycle.startDate, endDate: legacyCycle.endDate, cyclePrice: allocation.cyclePrice, status: legacyCycle.status, createdAt: now },
+            });
+          } catch (error) {
+            if (!String((error as any)?.message || error).toLowerCase().includes("unique")) throw error;
+          }
+        }
+      }
+      existingCycles = this.getCyclesForPackageSubscription(subscriptionId);
+    }
 
     // Generate cycles while nextStart <= cutoffDate and within subscription validity
     while (nextStart <= cutoffDate) {
@@ -613,86 +702,34 @@ export class DebtCycleRepository {
         ? subscriptionEndDate
         : getCycleEndDate(nextCycleStart);
 
-      const cycleId = `dc-${generateUUID()}`;
-      const operationId = `op-dc-pkg-${generateUUID()}`;
       const now = new Date().toISOString();
 
-      let insertedCycle = { changes: 1 };
-      try {
-        insertedCycle = db.runSync(
-          `INSERT INTO debt_cycles (id, center_id, student_id, enrollment_id, group_id, cycle_number, start_date, end_date, cycle_price, status, package_subscription_id, package_id, cycle_type, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, 'package', ?)`,
-          [
-            cycleId,
-            centerId,
-            subscription.studentId,
-            subscription.id,
-            subscription.packageId,
-            nextCycleNum,
-            nextStart,
-            cycleEndDate,
-            cyclePrice,
-            subscription.id,
-            subscription.packageId,
-            now,
-          ],
-        );
-      } catch (error) {
-        if (!String((error as any)?.message || error).toLowerCase().includes("unique")) throw error;
-        insertedCycle = { changes: 0 };
+      for (const allocation of allocations) {
+        const cycleId = `dc-${generateUUID()}`;
+        const operationId = `op-dc-pkg-${generateUUID()}`;
+        let insertedCycle = { changes: 1 };
+        try {
+          insertedCycle = db.runSync(
+            `INSERT INTO debt_cycles (id, center_id, student_id, enrollment_id, group_id, cycle_number, start_date, end_date, cycle_price, status, package_subscription_id, package_id, cycle_type, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, 'package', ?)`,
+            [cycleId, centerId, subscription.studentId, allocation.enrollmentId, allocation.groupId, nextCycleNum, nextStart, cycleEndDate, allocation.cyclePrice, subscription.id, subscription.packageId, now],
+          );
+        } catch (error) {
+          if (!String((error as any)?.message || error).toLowerCase().includes("unique")) throw error;
+          insertedCycle = { changes: 0 };
+        }
+        if (!insertedCycle.changes) continue;
+
+        SyncRepository.enqueueOperation({
+          centerId, userId: user.id, deviceId, operationType: "debt_cycle.create", entityType: "debt_cycle", entityId: cycleId,
+          payload: { id: cycleId, centerId, studentId: subscription.studentId, enrollmentId: allocation.enrollmentId, groupId: allocation.groupId, packageSubscriptionId: subscription.id, packageId: subscription.packageId, cycleType: "package", cycleNumber: nextCycleNum, startDate: nextStart, endDate: cycleEndDate, cyclePrice: allocation.cyclePrice, status: "open", createdAt: now },
+          operationId,
+        });
+        AuditService.recordEvent({
+          operationId, centerId, userId: user.id, deviceId, entityType: "debt_cycle", entityId: cycleId, action: "debt_cycle.generate",
+          payload: { packageSubscriptionId: subscription.id, cycleNumber: nextCycleNum, startDate: nextStart, endDate: cycleEndDate, cyclePrice: allocation.cyclePrice, cycleType: "package" },
+        });
       }
-
-      if (!insertedCycle.changes) {
-        nextCycleNum++;
-        nextStart = nextCycleStart;
-        continue;
-      }
-
-      // Queue for sync
-      SyncRepository.enqueueOperation({
-        centerId,
-        userId: user.id,
-        deviceId,
-        operationType: "debt_cycle.create",
-        entityType: "debt_cycle",
-        entityId: cycleId,
-        payload: {
-          id: cycleId,
-          centerId,
-          studentId: subscription.studentId,
-          enrollmentId: subscription.id,
-          groupId: subscription.packageId,
-          packageSubscriptionId: subscription.id,
-          packageId: subscription.packageId,
-          cycleType: "package",
-          cycleNumber: nextCycleNum,
-          startDate: nextStart,
-          endDate: cycleEndDate,
-          cyclePrice,
-          status: "open",
-          createdAt: now,
-        },
-        operationId,
-      });
-
-      // Record in audit log
-      AuditService.recordEvent({
-        operationId,
-        centerId,
-        userId: user.id,
-        deviceId,
-        entityType: "debt_cycle",
-        entityId: cycleId,
-        action: "debt_cycle.generate",
-        payload: {
-          packageSubscriptionId: subscription.id,
-          cycleNumber: nextCycleNum,
-          startDate: nextStart,
-          endDate: cycleEndDate,
-          cyclePrice,
-          cycleType: "package",
-        },
-      });
 
       nextCycleNum++;
       nextStart = nextCycleStart;
