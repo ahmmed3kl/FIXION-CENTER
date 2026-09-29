@@ -1,7 +1,7 @@
 import { Ionicons } from "@expo/vector-icons";
 import { CameraView, useCameraPermissions } from "expo-camera";
-import { useFocusEffect } from "expo-router";
-import { useCallback, useMemo, useRef, useState } from "react";
+import { router, useFocusEffect, useLocalSearchParams } from "expo-router";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
     Alert,
     Modal,
@@ -46,6 +46,7 @@ import {
     AppInput,
     StatusBadge,
 } from "../../shared/components";
+import { BarcodeScannerView } from "../../shared/components/BarcodeScannerView";
 import {
     Attendance,
     DetailedStudentFinancialStatus,
@@ -80,6 +81,7 @@ function ScannerContent() {
   const services = useServiceVisibility();
   const paymentsEnabled = services.isEnabled("payments");
   const currentUser = useAuthStore((state) => state.currentUser);
+  const { attendanceSessionId, addedStudentId } = useLocalSearchParams<{ attendanceSessionId?: string; addedStudentId?: string }>();
   const [permission, requestPermission] = useCameraPermissions();
   const [isCameraActive, setIsCameraActive] = useState(false);
   const [cameraInstanceKey, setCameraInstanceKey] = useState(0);
@@ -122,9 +124,11 @@ function ScannerContent() {
   const [paymentPurpose, setPaymentPurpose] = useState<"session" | "cycle">("session");
   const [paymentNotes, setPaymentNotes] = useState("");
   const [isRecordingPayment, setIsRecordingPayment] = useState(false);
+  const [financialExpanded, setFinancialExpanded] = useState(false);
 
   const isScanningBlockedRef = useRef(false);
   const lastScannedRef = useRef<{ code: string; at: number } | null>(null);
+  const returnedStudentHandledRef = useRef<string | null>(null);
 
   const refreshTodayData = useCallback(() => {
     try {
@@ -143,6 +147,21 @@ function ScannerContent() {
     const timer = setInterval(refreshTodayData, 60_000);
     return () => clearInterval(timer);
   }, [refreshTodayData]));
+
+  // Restore the exact session when returning from the existing Add Student flow
+  // without creating a new session or changing the selected roster.
+  useEffect(() => {
+    if (!attendanceSessionId || addedStudentId) return;
+    const session = SessionRepository.findById(String(attendanceSessionId));
+    if (!session) return;
+    setAttendanceStarted(true);
+    setActiveSessionId(session.id);
+    setSelectedGroupId(session.groupId);
+    setSelectedScheduleId(session.scheduleId || null);
+    setIsSessionClosed(session.status === "closed");
+    setAttendanceSummary(AttendanceSessionService.getSummary(session.id));
+    setCurrentGroupLabel([session.groupName, session.subjectName, session.teacherName].filter(Boolean).join(" • "));
+  }, [addedStudentId, attendanceSessionId]);
 
   const startAttendance = () => {
     const selectedGroup = (showAllGroups ? allGroups : todayGroups).find((group) => group.id === selectedGroupId);
@@ -176,6 +195,7 @@ function ScannerContent() {
     setGroupAttendanceSummary(null);
     setCurrentGroupLabel("");
     setMakeupNotice(null);
+    setFinancialExpanded(false);
     setSearchError(null);
     isScanningBlockedRef.current = false;
     lastScannedRef.current = null;
@@ -243,7 +263,7 @@ function ScannerContent() {
     ]);
   };
 
-  const lookupCard = (rawCode: string) => {
+  const lookupCard = async (rawCode: string) => {
     if (!attendanceStarted || !activeSessionId || isSessionClosed) { setSearchError(isSessionClosed ? "الجلسة مغلقة. أعد فتحها أولاً لاستكمال الحضور." : "اختر المجموعة وابدأ جلسة الحضور أولاً."); return; }
     const normalized = ScannerService.normalizeCardCode(rawCode);
     if (!normalized) {
@@ -308,6 +328,16 @@ function ScannerContent() {
           foundStudent.id,
         );
         setIsAlreadyAttended(attended);
+        // A successful scan is the attendance action. Keep the write local
+        // and enqueue it immediately; the existing sync layer handles the
+        // online/offline delivery and idempotency.
+        if (!attended) {
+          await recordAttendanceFor(foundStudent, sessions[0], makeupEligibility.eligible ? {
+            sourceGroupName: makeupEligibility.sourceGroupName,
+            teacherName: makeupEligibility.teacherName,
+            originalAbsenceId: makeupEligibility.originalAbsenceId,
+          } : undefined);
+        }
       } else if (sessions.length > 1) {
         setSelectedSessionId(null);
         setIsAlreadyAttended(false);
@@ -354,12 +384,7 @@ function ScannerContent() {
     }
   };
 
-  const handleRecordAttendance = async () => {
-    if (!student || !selectedSessionId || isSessionClosed) return;
-
-    const session = eligibleSessions.find((s) => s.id === selectedSessionId);
-    if (!session) return;
-
+  const recordAttendanceFor = async (targetStudent: Student, session: Session, makeup?: typeof makeupNotice) => {
     setIsProcessing(true);
 
     try {
@@ -373,15 +398,15 @@ function ScannerContent() {
         session.lateAfterMinutes ?? 15,
       );
 
-      const result = makeupNotice
+      const result = makeup
         ? await MakeupService.recordMakeupAttendance({
-            studentId: student.id,
+            studentId: targetStudent.id,
             sessionId: session.id,
-            originalAbsenceId: makeupNotice.originalAbsenceId!,
+            originalAbsenceId: makeup.originalAbsenceId!,
             isLate: lateCalc.isLate,
           })
         : await AttendanceRepository.recordAttendance({
-            studentId: student.id,
+            studentId: targetStudent.id,
             sessionId: session.id,
             status: lateCalc.status,
             isLate: lateCalc.isLate,
@@ -392,7 +417,7 @@ function ScannerContent() {
       setIsAlreadyAttended(true);
       setAttendanceSummary(AttendanceSessionService.getSummary(session.id));
       setGroupAttendanceSummary(
-        AttendanceRepository.getStudentGroupAttendanceSummaries(student.id)
+        AttendanceRepository.getStudentGroupAttendanceSummaries(targetStudent.id)
           .find((summary) => summary.groupId === session.groupId) || null,
       );
     } catch (err: any) {
@@ -400,6 +425,53 @@ function ScannerContent() {
     } finally {
       setIsProcessing(false);
     }
+  };
+
+  // Returning from the existing Add Student flow can continue the same
+  // attendance session without creating a second student workflow. The
+  // operator explicitly confirms whether the newly-created student should
+  // be recorded as regular attendance or makeup.
+  useEffect(() => {
+    if (!attendanceSessionId || !addedStudentId || returnedStudentHandledRef.current === String(addedStudentId)) return;
+    returnedStudentHandledRef.current = String(addedStudentId);
+    const session = SessionRepository.findById(String(attendanceSessionId));
+    const createdStudent = StudentRepository.findById(String(addedStudentId));
+    if (!session || !createdStudent) return;
+    setAttendanceStarted(true);
+    setActiveSessionId(session.id);
+    setIsSessionClosed(session.status === "closed");
+    setAttendanceSummary(AttendanceSessionService.getSummary(session.id));
+    setStudent(createdStudent);
+    setCurrentGroupLabel([session.groupName, session.subjectName, session.teacherName].filter(Boolean).join(" • "));
+    const expected = AttendanceSessionService.isExpected(session.id, createdStudent.id);
+    const makeupEligibility = expected ? { eligible: false } : AttendanceSessionService.getMakeupEligibility(session.id, createdStudent.id);
+    const makeup = makeupEligibility.eligible ? {
+      sourceGroupName: makeupEligibility.sourceGroupName,
+      teacherName: makeupEligibility.teacherName,
+      originalAbsenceId: makeupEligibility.originalAbsenceId,
+    } : undefined;
+    setMakeupNotice(makeup || null);
+    setEligibleSessions([session]);
+    setSelectedSessionId(session.id);
+    setIsAlreadyAttended(AttendanceRepository.isAlreadyAttended(session.id, createdStudent.id));
+    if (!expected && !makeupEligibility.eligible) {
+      Alert.alert("تعذر تسجيل الحضور", "الطالب أُضيف بنجاح لكنه ليس ضمن الجلسة الحالية ولا تنطبق عليه قاعدة الحضور التعويضي.");
+      return;
+    }
+    Alert.alert(
+      "تمت إضافة الطالب",
+      makeup ? "هل تريد تسجيل حضور الطالب تعويضياً في الجلسة الحالية؟" : "هل تريد تسجيل حضور الطالب في الجلسة الحالية؟",
+      [
+        { text: "ليس الآن", style: "cancel" },
+        { text: "تسجيل الحضور", onPress: () => { if (!AttendanceRepository.isAlreadyAttended(session.id, createdStudent.id) && session.status !== "closed") void recordAttendanceFor(createdStudent, session, makeup); } },
+      ],
+    );
+  }, [addedStudentId, attendanceSessionId]);
+
+  const handleRecordAttendance = async () => {
+    if (!student || !selectedSessionId || isSessionClosed) return;
+    const session = eligibleSessions.find((s) => s.id === selectedSessionId);
+    if (session) await recordAttendanceFor(student, session, makeupNotice || undefined);
   };
 
   const handleConfirmQuickPayment = async () => {
@@ -449,11 +521,39 @@ function ScannerContent() {
     }
   };
 
+  // Rebuilt attendance composition. The legacy JSX below is intentionally
+  // unreachable while the migration is in progress; all business logic above
+  // (repositories, offline queue, makeup rules and payment handling) is shared.
+  return (
+    <SafeAreaView style={styles.safeArea}>
+      <View style={styles.rebuildHeader}>
+        <TouchableOpacity onPress={attendanceStarted ? handleBackToGroups : () => router.back()} style={styles.rebuildBack}><Ionicons name="chevron-forward" size={24} color={Colors.slate900} /></TouchableOpacity>
+        <View style={styles.rebuildHeaderCopy}><Text style={styles.rebuildTitle}>{attendanceStarted ? "حضور الجلسة" : "جلسات الحضور"}</Text><Text style={styles.rebuildSubtitle}>{attendanceStarted ? currentGroupLabel : "اختر مجموعة لبدء تسجيل الحضور"}</Text></View>
+        {attendanceStarted ? <TouchableOpacity onPress={isSessionClosed ? reopenCurrentSession : closeCurrentSession} style={styles.headerMenu}><Ionicons name={isSessionClosed ? "lock-open-outline" : "ellipsis-horizontal"} size={21} color={Colors.primary} /></TouchableOpacity> : null}
+      </View>
+      {!attendanceStarted ? (
+        <ScrollView contentContainerStyle={styles.rebuildContent}>
+          <View style={styles.startAttendancePanel}><Text style={styles.rebuildSectionTitle}>مجموعات اليوم</Text><View style={styles.attendanceFilterRow}><TouchableOpacity style={[styles.attendanceFilter, !showAllGroups && styles.attendanceFilterActive]} onPress={() => setShowAllGroups(false)}><Text style={[styles.attendanceFilterText, !showAllGroups && styles.attendanceFilterTextActive]}>اليوم</Text></TouchableOpacity><TouchableOpacity style={[styles.attendanceFilter, showAllGroups && styles.attendanceFilterActive]} onPress={() => setShowAllGroups(true)}><Text style={[styles.attendanceFilterText, showAllGroups && styles.attendanceFilterTextActive]}>كل المجموعات</Text></TouchableOpacity></View>{(showAllGroups ? allGroups : todayGroups).flatMap((group) => GroupScheduleRepository.getSchedulesForGroup(group.id).filter((schedule) => showAllGroups || schedule.dayOfWeek === new Date().getDay()).map((schedule) => { const key = `${group.id}:${schedule.id}`; const selected = selectedGroupId === group.id && selectedScheduleId === schedule.id; return <TouchableOpacity key={key} onPress={() => { setSelectedGroupId(group.id); setSelectedScheduleId(schedule.id); }} style={[styles.rebuildGroupRow, selected && styles.rebuildGroupRowActive]}><View style={styles.rebuildGroupIcon}><Ionicons name="people-outline" size={20} color={Colors.primary} /></View><View style={styles.rebuildGroupCopy}><Text style={styles.rebuildGroupName}>{group.name}</Text><Text style={styles.rebuildGroupMeta}>{[group.subjectName, group.grade, group.teacherName].filter(Boolean).join(" · ")}</Text><Text style={styles.rebuildGroupMeta}>{DAYS_OF_WEEK[schedule.dayOfWeek]} · {formatTimeArabic(schedule.startTime)} - {formatTimeArabic(schedule.endTime)}</Text></View><Ionicons name="chevron-back" size={18} color={Colors.slate400} /></TouchableOpacity>; }))}<AppButton title="بدء جلسة الحضور" onPress={startAttendance} disabled={!selectedGroupId} size="lg" />{searchError ? <Text style={styles.errorAlertText}>{searchError}</Text> : null}</View>
+        </ScrollView>
+      ) : (
+        <ScrollView contentContainerStyle={styles.rebuildContent} keyboardShouldPersistTaps="handled">
+          {attendanceSummary ? <View style={styles.rebuildSummary}><View style={[styles.summaryTile, styles.summaryAll]}><Ionicons name="people" size={21} color={Colors.primary} /><Text style={styles.summaryValue}>{attendanceSummary.total}</Text><Text style={styles.summaryLabel}>الكل</Text></View><View style={[styles.summaryTile, styles.summaryPresent]}><Ionicons name="checkmark-circle" size={21} color={Colors.successText} /><Text style={styles.summaryValue}>{attendanceSummary.present}</Text><Text style={styles.summaryLabel}>حاضر</Text></View><View style={[styles.summaryTile, styles.summaryAbsent]}><Ionicons name="close-circle" size={21} color={Colors.dangerText} /><Text style={styles.summaryValue}>{attendanceSummary.absent}</Text><Text style={styles.summaryLabel}>غائب</Text></View><View style={[styles.summaryTile, styles.summaryMakeup]}><Ionicons name="people-outline" size={21} color={Colors.warningText} /><Text style={styles.summaryValue}>{attendanceSummary.makeup}</Text><Text style={styles.summaryLabel}>تعويض</Text></View></View> : null}
+          <View style={styles.rebuildScanPanel}><View style={styles.rebuildScanInput}><Ionicons name="search-outline" size={23} color={Colors.slate400} /><AppInput value={manualCode} onChangeText={setManualCode} placeholder="اكتب كود الطالب للبحث اليدوي" containerStyle={{ flex: 1, marginBottom: 0 }} /></View><TouchableOpacity style={styles.rebuildManualButton} onPress={() => lookupCard(manualCode)}><Text style={styles.rebuildManualText}>بحث بالكود</Text></TouchableOpacity>{isCameraActive ? <BarcodeScannerView onDetected={(data) => handleBarcodeScanned({ data })} onClose={() => { setIsTorchOn(false); setIsCameraActive(false); }} style={styles.rebuildCamera} /> : <TouchableOpacity style={styles.rebuildScanButton} onPress={() => { isScanningBlockedRef.current = false; lastScannedRef.current = null; setIsCameraActive(true); }}><Ionicons name="scan-outline" size={25} color={Colors.white} /><Text style={styles.rebuildScanButtonText}>مسح كود الطالب</Text></TouchableOpacity>}</View>
+          {student ? <View style={styles.rebuildStudentCard}><View style={styles.rebuildStudentAvatar}><Ionicons name="person" size={34} color={Colors.primary} /></View><View style={styles.rebuildStudentCopy}><Text style={styles.rebuildStudentName}>{student.fullName}</Text><Text style={styles.rebuildStudentMeta}>كود الطالب: {student.cardCode || student.studentCode}</Text><Text style={styles.rebuildStudentMeta}>{[student.grade, currentGroupLabel].filter(Boolean).join(" · ")}</Text></View><View style={styles.rebuildStatus}><Ionicons name={attendanceResult?.isLate ? "time-outline" : "checkmark-circle"} size={22} color={attendanceResult?.isLate ? Colors.warningText : Colors.successText} /><Text style={styles.rebuildStatusText}>{attendanceResult?.isLate ? "متأخر" : attendanceResult ? "حاضر" : isAlreadyAttended ? "مسجل" : "قيد المعالجة"}</Text>{attendanceResult?.checkInTime ? <Text style={styles.rebuildTime}>{attendanceResult.checkInTime}</Text> : null}</View><View style={styles.rebuildActions}><TouchableOpacity style={styles.rebuildSecondaryAction} onPress={handleReset}><Ionicons name="refresh" size={20} color={Colors.primary} /><Text style={styles.rebuildActionText}>مسح طالب آخر</Text></TouchableOpacity><TouchableOpacity style={styles.rebuildSecondaryAction} onPress={() => router.push({ pathname: "/(main)/students", params: { add: "1", attendanceSessionId: activeSessionId } } as any)}><Ionicons name="person-add-outline" size={20} color={Colors.primary} /><Text style={styles.rebuildActionText}>إضافة طالب</Text></TouchableOpacity></View></View> : null}
+          {student ? <View style={styles.rebuildNotesSection}><View style={styles.rebuildSectionHeader}><View><Text style={styles.rebuildSectionTitle}>ملاحظات الطالب</Text><Text style={styles.rebuildFinanceHint}>{student.notes?.trim() ? "ملاحظة محفوظة" : "لا توجد ملاحظات"}</Text></View><TouchableOpacity onPress={() => router.push({ pathname: "/(main)/students", params: { studentId: student.id } } as any)}><Text style={styles.rebuildLink}>+ إضافة ملاحظة</Text></TouchableOpacity></View>{student.notes?.trim() ? <View style={styles.rebuildNote}><Ionicons name="document-text-outline" size={19} color={Colors.primary} /><Text style={styles.rebuildNoteText}>{student.notes}</Text></View> : <Text style={styles.rebuildEmpty}>لا توجد ملاحظات لهذا الطالب</Text>}</View> : null}
+          {paymentsEnabled && student && financialStatus ? <View style={styles.rebuildFinance}><TouchableOpacity style={styles.rebuildSectionHeader} onPress={() => setFinancialExpanded((value) => !value)}><View><Text style={styles.rebuildSectionTitle}>الحالة المالية</Text><Text style={styles.rebuildFinanceHint}>المستحق · المدفوع · المتبقي</Text></View><Ionicons name={financialExpanded ? "chevron-up" : "chevron-down"} size={23} color={Colors.primary} /></TouchableOpacity><View style={styles.rebuildFinanceTiles}><View><Text style={styles.rebuildFinanceLabel}>المستحق</Text><Text style={styles.rebuildFinanceDue}>{formatCurrency(financialStatus.totalDue)}</Text></View><View><Text style={styles.rebuildFinanceLabel}>المدفوع</Text><Text style={styles.rebuildFinancePaid}>{formatCurrency(financialStatus.totalPaid)}</Text></View><View><Text style={styles.rebuildFinanceLabel}>المتبقي</Text><Text style={styles.rebuildFinanceRemaining}>{formatCurrency(financialStatus.remainingBalance)}</Text></View></View>{financialExpanded ? <><Text style={styles.paymentHistoryTitle}>سجل مدفوعات الطالب</Text>{financialStatus.payments.map((payment) => <View key={payment.id} style={styles.paymentHistoryRow}><Text style={styles.paymentHistoryAmount}>{formatCurrency(payment.amount)}</Text><Text style={styles.paymentHistoryType}>{payment.paymentType === "monthly" ? "دفعة شهرية" : payment.paymentType === "session" ? "دفعة حصة" : "دفعة جزئية"}</Text><Text style={styles.paymentHistoryMeta}>{payment.paymentDate || payment.createdAt.slice(0, 10)}</Text></View>)}<AppButton title="تسجيل دفعة" onPress={() => { setPaymentAmount(String(Math.max(0, financialStatus.remainingBalance))); setShowPaymentModal(true); }} size="lg" /></> : null}</View> : null}
+        </ScrollView>
+      )}
+      <Modal visible={showPaymentModal} transparent animationType="fade"><View style={styles.modalBackdrop}><View style={styles.modalContent}><Text style={styles.modalTitle}>تسجيل دفعة نقدية</Text><Text style={styles.modalSub}>{student?.fullName}</Text><AppInput label="المبلغ" keyboardType="numeric" value={paymentAmount} onChangeText={setPaymentAmount} /><View style={styles.modalButtonRow}><AppButton title="حفظ" onPress={handleConfirmQuickPayment} loading={isRecordingPayment} variant="success" style={{ flex: 1 }} /><AppButton title="إلغاء" variant="outline" onPress={() => setShowPaymentModal(false)} style={{ flex: 1 }} /></View></View></View></Modal>
+    </SafeAreaView>
+  );
+
+  /* Legacy composition retained temporarily for source-level comparison only. */
   return (
     <SafeAreaView style={styles.safeArea}>
       {/* Top Header */}
       <View style={styles.headerBar}>
-        <Text style={styles.headerTitle}>{Strings.scanCardTitle}</Text>
+        <View><Text style={styles.headerTitle}>{attendanceStarted ? "حضور الجلسة" : Strings.scanCardTitle}</Text>{attendanceStarted && currentGroupLabel ? <Text style={styles.headerSubtitle}>{currentGroupLabel}</Text> : null}</View>
         {attendanceStarted ? (
           <TouchableOpacity onPress={handleBackToGroups} style={styles.resetButton}>
             <Ionicons name="arrow-forward" size={20} color={Colors.primary} />
@@ -513,9 +613,10 @@ function ScannerContent() {
             ) : (
               <AppButton title={isClosingSession ? "جاري الإغلاق..." : "إغلاق الجلسة"} onPress={closeCurrentSession} disabled={isClosingSession} size="sm" variant="outline" />
             )}
-            <Text style={styles.counterItem}>الكل: {attendanceSummary.total}</Text>
-            <Text style={[styles.counterItem, { color: Colors.successText }]}>حاضر: {attendanceSummary.present}</Text>
-            <Text style={[styles.counterItem, { color: Colors.dangerText }]}>غائب: {attendanceSummary.absent}</Text>
+            <Text style={styles.counterItem}>الكل: {attendanceSummary!.total}</Text>
+            <Text style={[styles.counterItem, { color: Colors.successText }]}>حاضر: {attendanceSummary!.present}</Text>
+            <Text style={[styles.counterItem, { color: Colors.dangerText }]}>غائب: {attendanceSummary!.absent}</Text>
+            <Text style={[styles.counterItem, { color: Colors.warningText }]}>تعويض: {attendanceSummary!.makeup}</Text>
           </View>
         ) : null}
         {/* CAMERA OR MANUAL SCANNER CARD */}
@@ -626,6 +727,14 @@ function ScannerContent() {
                 <Text style={styles.errorAlertText}>{searchError}</Text>
               </View>
             ) : null}
+            <TouchableOpacity
+              style={styles.addStudentFromAttendance}
+              onPress={() => router.push({ pathname: "/(main)/students", params: { add: "1", attendanceSessionId: activeSessionId } } as any)}
+              activeOpacity={0.8}
+            >
+              <Ionicons name="person-add-outline" size={19} color={Colors.primary} />
+              <Text style={styles.addStudentFromAttendanceText}>إضافة طالب</Text>
+            </TouchableOpacity>
           </AppCard>
         ) : null}
 
@@ -635,7 +744,7 @@ function ScannerContent() {
             {makeupNotice && (
               <View style={styles.makeupNotice}>
                 <Ionicons name="swap-horizontal" size={20} color={Colors.warningText} />
-                <Text style={styles.makeupNoticeText}>هذا الطالب مسجل مع نفس المدرس في مجموعة {makeupNotice.sourceGroupName || "أخرى"}، وسيتم تسجيل حضوره تعويضياً في المجموعة الحالية.</Text>
+                <Text style={styles.makeupNoticeText}>هذا الطالب مسجل مع نفس المدرس في مجموعة {makeupNotice!.sourceGroupName || "أخرى"}، وسيتم تسجيل حضوره تعويضياً في المجموعة الحالية.</Text>
               </View>
             )}
             <View style={styles.studentHeader}>
@@ -643,18 +752,18 @@ function ScannerContent() {
                 <Ionicons name="person" size={28} color={Colors.primary} />
               </View>
               <View style={styles.studentDetails}>
-                <Text style={styles.studentName}>{student.fullName}</Text>
+                <Text style={styles.studentName}>{student!.fullName}</Text>
                 <Text style={styles.studentSub}>
-                  {Strings.cardCodePrefix} {student.cardCode} • {student.grade}
+                  {Strings.cardCodePrefix} {student!.cardCode} • {student!.grade}
                 </Text>
               </View>
               <StatusBadge
                 text={
-                  student.status === "active"
+                  student!.status === "active"
                     ? Strings.studentStatusActive
                     : Strings.studentStatusInactive
                 }
-                type={student.status === "active" ? "success" : "neutral"}
+                type={student!.status === "active" ? "success" : "neutral"}
               />
             </View>
             <View style={styles.groupProfileCard}>
@@ -746,7 +855,7 @@ function ScannerContent() {
         {/* STEP 3: ATTENDANCE ACTION & RESULT */}
         {student && selectedSessionId ? (
           <View style={styles.attendanceActionBox}>
-            {isAlreadyAttended ? (
+            {!attendanceResult && isAlreadyAttended ? (
               <View style={styles.duplicateWarning}>
                 <Ionicons
                   name="alert-circle"
@@ -757,19 +866,7 @@ function ScannerContent() {
                   {Strings.duplicateScanWarning}
                 </Text>
               </View>
-            ) : (
-              <AppButton
-                title={
-                  isProcessing
-                    ? Strings.recordingAttendance
-                    : Strings.recordAttendanceButton
-                }
-                onPress={handleRecordAttendance}
-                loading={isProcessing}
-                size="lg"
-                variant="success"
-              />
-            )}
+            ) : null}
 
             {attendanceResult ? (
               <View style={styles.attendanceSuccessCard}>
@@ -784,32 +881,32 @@ function ScannerContent() {
                   </Text>
                   <Text style={styles.attendanceSuccessSub}>
                     {Strings.attendanceTimePrefix}{" "}
-                    {attendanceResult.checkInTime}
+                    {attendanceResult!.checkInTime}
                   </Text>
                 </View>
                 <StatusBadge
                   text={
-                    attendanceResult.isLate
+                    attendanceResult!.isLate
                       ? Strings.attendanceStatusLate
                       : Strings.attendanceStatusPresent
                   }
-                  type={attendanceResult.isLate ? "warning" : "success"}
+                  type={attendanceResult!.isLate ? "warning" : "success"}
                 />
               </View>
             ) : null}
           </View>
         ) : null}
 
+        {student ? <View style={styles.sectionContainer}><View style={styles.notesHeading}><Text style={styles.sectionTitle}>ملاحظات الطالب</Text><TouchableOpacity onPress={() => router.push({ pathname: "/(main)/students", params: { studentId: student!.id } } as any)}><Text style={styles.notesLink}>إدارة الملاحظات</Text></TouchableOpacity></View>{student!.notes?.trim() ? <AppCard style={styles.noteCard}><Ionicons name="document-text-outline" size={18} color={Colors.primary} /><Text style={styles.noteText}>{student!.notes}</Text></AppCard> : <Text style={styles.emptyNote}>لا توجد ملاحظات محفوظة لهذا الطالب.</Text>}</View> : null}
+
         {/* STEP 4: FINANCIAL STATUS & QUICK PAYMENT */}
         {paymentsEnabled && student && financialStatus ? (
           <View style={styles.sectionContainer}>
-            <Text style={styles.sectionTitle}>
-              مديونية المجموعة الحالية
-            </Text>
+            <TouchableOpacity style={styles.financialHeading} onPress={() => setFinancialExpanded((value) => !value)}><View><Text style={styles.sectionTitle}>الحالة المالية</Text><Text style={styles.financialHint}>المستحق · المدفوع · المتبقي</Text></View><Ionicons name={financialExpanded ? "chevron-up" : "chevron-down"} size={22} color={Colors.primary} /></TouchableOpacity>
             <AppCard style={styles.financialCard}>
-              {financialStatus.subscriptions.length > 0 ? (
+              {financialStatus!.subscriptions.length > 0 ? (
                 <Text style={styles.packageNameText}>
-                  {financialStatus.subscriptions[0].packageName}
+                  {financialStatus!.subscriptions[0].packageName}
                 </Text>
               ) : null}
 
@@ -819,7 +916,7 @@ function ScannerContent() {
                     {Strings.totalDueLabel}
                   </Text>
                   <Text style={styles.financialItemVal}>
-                    {formatCurrency(financialStatus.totalDue)}
+                    {formatCurrency(financialStatus!.totalDue)}
                   </Text>
                 </View>
 
@@ -833,7 +930,7 @@ function ScannerContent() {
                       { color: Colors.successText },
                     ]}
                   >
-                    {formatCurrency(financialStatus.totalPaid)}
+                    {formatCurrency(financialStatus!.totalPaid)}
                   </Text>
                 </View>
 
@@ -846,31 +943,32 @@ function ScannerContent() {
                       styles.financialItemVal,
                       {
                         color:
-                          financialStatus.remainingBalance > 0
+                          financialStatus!.remainingBalance > 0
                             ? Colors.dangerText
                             : Colors.successText,
                       },
                     ]}
                   >
-                    {formatCurrency(financialStatus.remainingBalance)}
+                    {formatCurrency(financialStatus!.remainingBalance)}
                   </Text>
                 </View>
               </View>
-              {(financialStatus.creditBalance ?? 0) > 0 ? (
+              {(financialStatus!.creditBalance ?? 0) > 0 ? (
                 <Text style={styles.creditBalanceText}>
-                  رصيد مقدم للطالب: {formatCurrency(financialStatus.creditBalance ?? 0)}
+                  رصيد مقدم للطالب: {formatCurrency(financialStatus!.creditBalance ?? 0)}
                 </Text>
               ) : null}
 
-              {financialStatus.remainingBalance > 0 || (financialStatus.currentPeriodDebt ?? 0) > 0 ? (
+              {financialExpanded && financialStatus!.payments.length ? <View style={styles.paymentHistory}><Text style={styles.paymentHistoryTitle}>سجل المدفوعات ({financialStatus!.payments.length})</Text>{financialStatus!.payments.map((payment) => <View key={payment.id} style={styles.paymentHistoryRow}><View><Text style={styles.paymentHistoryAmount}>{formatCurrency(payment.amount)}</Text><Text style={styles.paymentHistoryMeta}>{payment.paymentDate || payment.createdAt.slice(0, 10)}</Text></View><Text style={styles.paymentHistoryType}>{payment.paymentType === "monthly" ? "دفعة شهرية" : payment.paymentType === "session" ? "دفعة حصة" : "دفعة جزئية"}</Text></View>)}</View> : null}
+              {financialStatus!.remainingBalance > 0 || (financialStatus!.currentPeriodDebt ?? 0) > 0 ? (
                 <AppButton
                   title={Strings.quickPaymentTitle}
                   variant="outline"
                   size="sm"
                   onPress={() => {
-                    const hasCycleBalance = financialStatus.remainingBalance > 0;
+                    const hasCycleBalance = financialStatus!.remainingBalance > 0;
                     setPaymentPurpose(hasCycleBalance ? "cycle" : "session");
-                    setPaymentAmount(String(hasCycleBalance ? financialStatus.remainingBalance : (financialStatus.currentPeriodDebt ?? 0)));
+                    setPaymentAmount(String(hasCycleBalance ? financialStatus!.remainingBalance : (financialStatus!.currentPeriodDebt ?? 0)));
                     setPaymentNotes("");
                     setShowPaymentModal(true);
                   }}
@@ -1000,6 +1098,25 @@ const createStyles = () => StyleSheet.create({
     ...Typography.h3,
     color: Colors.slate900,
   },
+  rebuildHeader: { flexDirection: "row", alignItems: "center", gap: Spacing.sm, paddingHorizontal: Spacing.lg, paddingVertical: Spacing.md, backgroundColor: Colors.white, borderBottomWidth: 1, borderBottomColor: Colors.border },
+  rebuildBack: { width: 42, height: 42, borderRadius: 14, backgroundColor: Colors.slate50, alignItems: "center", justifyContent: "center" },
+  rebuildHeaderCopy: { flex: 1, alignItems: "flex-end" },
+  rebuildTitle: { ...Typography.h2, color: Colors.slate900, textAlign: "right" },
+  rebuildSubtitle: { ...Typography.caption, color: Colors.slate500, marginTop: 2, textAlign: "right" },
+  headerMenu: { width: 42, height: 42, borderRadius: 14, backgroundColor: Colors.primaryMuted, alignItems: "center", justifyContent: "center" },
+  rebuildContent: { padding: Spacing.md, gap: Spacing.md, paddingBottom: 44 },
+  rebuildSectionTitle: { ...Typography.h3, color: Colors.slate900, textAlign: "right" },
+  rebuildGroupRow: { flexDirection: "row", alignItems: "center", gap: Spacing.sm, padding: Spacing.md, borderRadius: BorderRadius.lg, borderWidth: 1, borderColor: Colors.border, backgroundColor: Colors.white, marginBottom: Spacing.sm },
+  rebuildGroupRowActive: { borderColor: Colors.primary, backgroundColor: Colors.primaryMuted },
+  rebuildGroupIcon: { width: 42, height: 42, borderRadius: 13, backgroundColor: Colors.primaryLight, alignItems: "center", justifyContent: "center" },
+  rebuildGroupCopy: { flex: 1, alignItems: "flex-end" }, rebuildGroupName: { color: Colors.slate900, fontSize: 15, fontWeight: "900", textAlign: "right" }, rebuildGroupMeta: { color: Colors.slate500, fontSize: 11, marginTop: 3, textAlign: "right" },
+  rebuildSummary: { flexDirection: "row-reverse", gap: 8, backgroundColor: Colors.white, borderRadius: BorderRadius.xl, padding: 10, ...Shadows.card },
+  summaryTile: { flex: 1, minHeight: 91, borderRadius: BorderRadius.lg, alignItems: "center", justifyContent: "center", gap: 4 }, summaryAll: { backgroundColor: Colors.primaryMuted }, summaryPresent: { backgroundColor: Colors.successLight }, summaryAbsent: { backgroundColor: Colors.dangerLight }, summaryMakeup: { backgroundColor: Colors.warningLight }, summaryValue: { color: Colors.slate900, fontSize: 23, fontWeight: "900" }, summaryLabel: { color: Colors.slate600, fontSize: 11, fontWeight: "800" },
+  rebuildScanPanel: { backgroundColor: Colors.white, borderRadius: BorderRadius.xl, padding: Spacing.md, ...Shadows.card }, rebuildScanInput: { flexDirection: "row", alignItems: "center", gap: 7, borderWidth: 1, borderColor: Colors.border, borderRadius: BorderRadius.lg, paddingHorizontal: 10 }, rebuildScanButton: { marginTop: Spacing.sm, minHeight: 50, borderRadius: BorderRadius.lg, backgroundColor: Colors.primary, alignItems: "center", justifyContent: "center", flexDirection: "row", gap: 7 }, rebuildScanButtonText: { color: Colors.white, fontWeight: "900" }, rebuildManualButton: { marginTop: 7, alignItems: "center", paddingVertical: 8 }, rebuildManualText: { color: Colors.primary, fontWeight: "800" }, rebuildCamera: { marginTop: Spacing.sm, height: 230, borderRadius: BorderRadius.lg, overflow: "hidden", backgroundColor: Colors.slate900 }, closeCameraButton: { position: "absolute", bottom: 10, alignSelf: "center", backgroundColor: "rgba(15,23,42,.75)", paddingHorizontal: 14, paddingVertical: 7, borderRadius: 9 }, closeCameraText: { color: Colors.white, fontWeight: "800" },
+  rebuildStudentCard: { backgroundColor: Colors.white, borderRadius: BorderRadius.xl, padding: Spacing.md, ...Shadows.card }, rebuildStudentAvatar: { width: 76, height: 76, borderRadius: 38, backgroundColor: Colors.primaryLight, alignItems: "center", justifyContent: "center", alignSelf: "flex-end" }, rebuildStudentCopy: { alignItems: "flex-end", marginTop: -63, marginRight: 90, minHeight: 74 }, rebuildStudentName: { color: Colors.slate900, fontSize: 19, fontWeight: "900", textAlign: "right" }, rebuildStudentMeta: { color: Colors.slate500, fontSize: 12, marginTop: 4, textAlign: "right" }, rebuildStatus: { marginTop: 17, backgroundColor: Colors.successLight, borderRadius: 28, paddingVertical: 9, paddingHorizontal: 16, alignSelf: "flex-start", alignItems: "center", minWidth: 105 }, rebuildStatusText: { color: Colors.successText, fontWeight: "900", marginTop: 2 }, rebuildTime: { color: Colors.successText, fontSize: 11, marginTop: 2 }, rebuildActions: { flexDirection: "row-reverse", gap: 8, marginTop: Spacing.md, borderTopWidth: 1, borderTopColor: Colors.border, paddingTop: Spacing.md }, rebuildSecondaryAction: { flex: 1, minHeight: 46, borderRadius: BorderRadius.md, borderWidth: 1, borderColor: Colors.primaryLight, alignItems: "center", justifyContent: "center", flexDirection: "row-reverse", gap: 6 }, rebuildActionText: { color: Colors.primary, fontWeight: "800", fontSize: 12 },
+  rebuildNotesSection: { backgroundColor: Colors.white, borderRadius: BorderRadius.xl, padding: Spacing.md, ...Shadows.card }, rebuildSectionHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" }, rebuildLink: { color: Colors.primary, fontWeight: "800", fontSize: 12 }, rebuildNote: { flexDirection: "row", gap: 8, marginTop: Spacing.md, padding: Spacing.md, borderRadius: BorderRadius.md, backgroundColor: Colors.slate50 }, rebuildNoteText: { flex: 1, color: Colors.slate700, lineHeight: 20, textAlign: "right" }, rebuildEmpty: { color: Colors.slate500, fontSize: 12, textAlign: "right", marginTop: Spacing.md },
+  rebuildFinance: { backgroundColor: Colors.white, borderRadius: BorderRadius.xl, padding: Spacing.md, ...Shadows.card }, rebuildFinanceHint: { color: Colors.slate500, fontSize: 11, marginTop: 3, textAlign: "right" }, rebuildFinanceTiles: { flexDirection: "row-reverse", gap: 7, marginTop: Spacing.md }, rebuildFinanceLabel: { color: Colors.slate500, fontSize: 11, textAlign: "center" }, rebuildFinanceDue: { color: Colors.warningText, fontWeight: "900", marginTop: 4, textAlign: "center" }, rebuildFinancePaid: { color: Colors.primary, fontWeight: "900", marginTop: 4, textAlign: "center" }, rebuildFinanceRemaining: { color: Colors.dangerText, fontWeight: "900", marginTop: 4, textAlign: "center" },
+  headerSubtitle: { ...Typography.caption, color: Colors.slate500, marginTop: 2, textAlign: "right" },
   resetButton: {
     flexDirection: "row",
     alignItems: "center",
@@ -1115,6 +1232,23 @@ const createStyles = () => StyleSheet.create({
   },
   manualSearchButton: {
     height: 48,
+  },
+  addStudentFromAttendance: {
+    marginTop: Spacing.md,
+    minHeight: 44,
+    borderRadius: BorderRadius.md,
+    borderWidth: 1,
+    borderColor: Colors.primaryLight,
+    backgroundColor: Colors.primaryMuted,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: Spacing.xs,
+  },
+  addStudentFromAttendanceText: {
+    color: Colors.primary,
+    fontWeight: "800",
+    fontSize: 13,
   },
   errorAlert: {
     flexDirection: "row",
@@ -1320,6 +1454,19 @@ const createStyles = () => StyleSheet.create({
     padding: Spacing.md,
     marginBottom: Spacing.xxl,
   },
+  notesHeading: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
+  notesLink: { color: Colors.primary, fontSize: 12, fontWeight: "800" },
+  noteCard: { flexDirection: "row", alignItems: "flex-start", gap: Spacing.sm, padding: Spacing.md },
+  noteText: { flex: 1, color: Colors.slate700, textAlign: "right", lineHeight: 20 },
+  emptyNote: { color: Colors.slate500, fontSize: 12, textAlign: "right", paddingVertical: Spacing.sm },
+  financialHeading: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: Spacing.sm },
+  financialHint: { ...Typography.caption, color: Colors.slate500, textAlign: "right", marginTop: 2 },
+  paymentHistory: { marginTop: Spacing.md, borderTopWidth: 1, borderTopColor: Colors.border, paddingTop: Spacing.sm },
+  paymentHistoryTitle: { ...Typography.bodyBold, color: Colors.slate800, textAlign: "right", marginBottom: Spacing.xs },
+  paymentHistoryRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingVertical: Spacing.sm, borderBottomWidth: 1, borderBottomColor: Colors.slate100 },
+  paymentHistoryAmount: { ...Typography.bodyBold, color: Colors.slate900 },
+  paymentHistoryMeta: { ...Typography.caption, color: Colors.slate500, marginTop: 2 },
+  paymentHistoryType: { ...Typography.captionBold, color: Colors.primary },
   packageNameText: {
     ...Typography.captionBold,
     color: Colors.slate700,

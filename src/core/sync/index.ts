@@ -1323,6 +1323,7 @@ export class SyncEngine {
       `SELECT id, student_code as studentCode, full_name as fullName,
               card_code as cardCode, phone, parent_phone as parentPhone,
               grade, status, student_type as studentType, notes,
+              deleted_at as deletedAt, deleted_by as deletedBy,
               created_at as createdAt, updated_at as updatedAt
        FROM students WHERE center_id = ?`,
       [centerId],
@@ -1589,6 +1590,14 @@ export class SyncEngine {
       // Upsert Students
       if (Array.isArray(data.students)) {
         for (const std of data.students) {
+          const localStudent = db.getFirstSync<any>(
+            "SELECT deleted_at, deleted_by FROM students WHERE center_id = ? AND id = ?",
+            [centerId, std.id],
+          );
+          const hasDeletedAt = Object.prototype.hasOwnProperty.call(std, "deleted_at") || Object.prototype.hasOwnProperty.call(std, "deletedAt");
+          const hasDeletedBy = Object.prototype.hasOwnProperty.call(std, "deleted_by") || Object.prototype.hasOwnProperty.call(std, "deletedBy");
+          const deletedAt = hasDeletedAt ? (std.deleted_at ?? std.deletedAt ?? null) : (localStudent?.deleted_at ?? null);
+          const deletedBy = hasDeletedBy ? (std.deleted_by ?? std.deletedBy ?? null) : (localStudent?.deleted_by ?? null);
           const studentCode =
             std.student_code ||
             std.studentCode ||
@@ -1597,9 +1606,9 @@ export class SyncEngine {
             "";
           const cardCode = std.card_code || std.cardCode || studentCode;
           db.runSync(
-            `INSERT INTO students (id, center_id, student_code, full_name, card_code, phone, parent_phone, grade, status, student_type, notes, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT(id) DO UPDATE SET student_code=excluded.student_code, card_code=excluded.card_code, full_name=excluded.full_name, phone=excluded.phone, parent_phone=excluded.parent_phone, grade=excluded.grade, status=excluded.status, student_type=excluded.student_type, notes=excluded.notes, updated_at=excluded.updated_at`,
+            `INSERT INTO students (id, center_id, student_code, full_name, card_code, phone, parent_phone, grade, status, student_type, notes, deleted_at, deleted_by, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET student_code=excluded.student_code, card_code=excluded.card_code, full_name=excluded.full_name, phone=excluded.phone, parent_phone=excluded.parent_phone, grade=excluded.grade, status=excluded.status, student_type=excluded.student_type, notes=excluded.notes, deleted_at=excluded.deleted_at, deleted_by=excluded.deleted_by, updated_at=excluded.updated_at`,
             [
               std.id,
               std.center_id || centerId,
@@ -1612,6 +1621,8 @@ export class SyncEngine {
               std.status || "active",
               std.student_type || std.studentType || "registered",
               std.notes || null,
+              deletedAt,
+              deletedBy,
               std.created_at || new Date().toISOString(),
               std.updated_at || new Date().toISOString(),
             ],
@@ -1916,19 +1927,23 @@ export class SyncEngine {
           const s = data.student || data;
           const studentId = s.id || change.entityId;
           const existingStudent = db.getFirstSync<any>(
-            `SELECT student_code, card_code, full_name, phone, parent_phone, grade, status, student_type, notes, created_at, updated_at
+            `SELECT student_code, card_code, full_name, phone, parent_phone, grade, status, student_type, notes, deleted_at, deleted_by, created_at, updated_at
              FROM students WHERE center_id = ? AND id = ?`,
             [centerId, studentId],
           );
+          const hasDeletedAt = Object.prototype.hasOwnProperty.call(s, "deleted_at") || Object.prototype.hasOwnProperty.call(s, "deletedAt");
+          const hasDeletedBy = Object.prototype.hasOwnProperty.call(s, "deleted_by") || Object.prototype.hasOwnProperty.call(s, "deletedBy");
+          const deletedAt = hasDeletedAt ? (s.deleted_at ?? s.deletedAt ?? null) : (existingStudent?.deleted_at ?? null);
+          const deletedBy = hasDeletedBy ? (s.deleted_by ?? s.deletedBy ?? null) : (existingStudent?.deleted_by ?? null);
           const studentCode =
             s.student_code || s.studentCode || s.card_code || s.cardCode || existingStudent?.student_code || existingStudent?.card_code || "";
           const cardCode = s.card_code || s.cardCode || existingStudent?.card_code || studentCode;
           const cardWasProvided = Boolean(data.card || !existingStudent);
 
           db.runSync(
-            `INSERT INTO students (id, center_id, student_code, full_name, card_code, phone, parent_phone, grade, status, student_type, notes, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT(id) DO UPDATE SET student_code=excluded.student_code, card_code=excluded.card_code, full_name=excluded.full_name, phone=excluded.phone, parent_phone=excluded.parent_phone, grade=excluded.grade, status=excluded.status, student_type=excluded.student_type, notes=excluded.notes, updated_at=excluded.updated_at`,
+            `INSERT INTO students (id, center_id, student_code, full_name, card_code, phone, parent_phone, grade, status, student_type, notes, deleted_at, deleted_by, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET student_code=excluded.student_code, card_code=excluded.card_code, full_name=excluded.full_name, phone=excluded.phone, parent_phone=excluded.parent_phone, grade=excluded.grade, status=excluded.status, student_type=excluded.student_type, notes=excluded.notes, deleted_at=excluded.deleted_at, deleted_by=excluded.deleted_by, updated_at=excluded.updated_at`,
             [
               studentId,
               centerId,
@@ -1941,6 +1956,8 @@ export class SyncEngine {
               s.status || existingStudent?.status || "active",
               s.student_type || s.studentType || existingStudent?.student_type || "registered",
               s.notes !== undefined ? s.notes : (existingStudent?.notes || null),
+              deletedAt,
+              deletedBy,
               s.created_at || existingStudent?.created_at || new Date().toISOString(),
               s.updated_at || s.updatedAt || existingStudent?.updated_at || new Date().toISOString(),
             ],

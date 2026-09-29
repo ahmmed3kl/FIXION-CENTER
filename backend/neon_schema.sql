@@ -177,6 +177,8 @@ CREATE TABLE IF NOT EXISTS students (
     student_type VARCHAR(32) NOT NULL DEFAULT 'registered' CHECK (student_type IN ('registered', 'external', 'guest', 'scholarship')),
     notes TEXT,
     status VARCHAR(32) NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive', 'suspended')),
+    deleted_at TIMESTAMPTZ,
+    deleted_by VARCHAR(64),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT uq_center_student_code UNIQUE (center_id, student_code)
@@ -576,6 +578,7 @@ CREATE INDEX IF NOT EXISTS idx_center_services_center ON center_services(center_
 CREATE INDEX IF NOT EXISTS idx_devices_center ON devices(center_id, status);
 CREATE INDEX IF NOT EXISTS idx_students_center_code ON students(center_id, student_code);
 CREATE INDEX IF NOT EXISTS idx_students_center_name ON students(center_id, full_name);
+CREATE INDEX IF NOT EXISTS idx_students_deleted ON students(center_id, deleted_at);
 CREATE INDEX IF NOT EXISTS idx_student_cards_center_code ON student_cards(center_id, card_code);
 CREATE INDEX IF NOT EXISTS idx_student_cards_student ON student_cards(student_id, status);
 CREATE INDEX IF NOT EXISTS idx_teacher_subjects ON teacher_subjects(center_id, teacher_id, subject_id);

@@ -60,6 +60,7 @@ export class GradeBookRepository {
        FROM students s
        JOIN student_group_enrollments e ON e.student_id = s.id AND e.center_id = s.center_id
        WHERE s.center_id = ? AND e.group_id = ? AND e.status = 'active' AND s.status = 'active'
+         AND s.deleted_at IS NULL
        ORDER BY s.full_name COLLATE NOCASE`,
       [centerId, groupId],
     );

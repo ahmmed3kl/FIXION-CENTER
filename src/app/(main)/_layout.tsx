@@ -73,6 +73,7 @@ export default function MainLayout() {
           tabBarIcon: ({ color, size }) => <Ionicons name="menu-outline" size={size} color={color} />,
         }}
       />
+      <Tabs.Screen name="deleted-students" options={{ href: null, title: "الطلاب المحذوفون" }} />
       <Tabs.Screen
         name="academic"
         options={{
@@ -115,6 +116,9 @@ export default function MainLayout() {
       />
       {/* Internal route opened from academic/group screens; never show as a bottom tab. */}
       <Tabs.Screen name="group-details" options={{ href: null }} />
+      <Tabs.Screen name="groups" options={{ href: null }} />
+      <Tabs.Screen name="grade-groups" options={{ href: null }} />
+      <Tabs.Screen name="center-accounts" options={{ href: null }} />
       <Tabs.Screen name="absence-reports" options={{ href: null }} />
       <Tabs.Screen name="absence-group" options={{ href: null }} />
       <Tabs.Screen name="packages" options={{ href: null }} />

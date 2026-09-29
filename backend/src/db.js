@@ -201,6 +201,16 @@ async function ensureSchemaCompatibility() {
       CHECK (student_type IN ('registered', 'external', 'guest', 'scholarship'));
   `);
 
+  // Student deletion is archival: retain the original row and its relations.
+  // Additive columns keep existing Neon databases compatible with offline clients.
+  await pool.query(`
+    ALTER TABLE students
+      ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS deleted_by VARCHAR(64);
+    CREATE INDEX IF NOT EXISTS idx_students_deleted
+      ON students(center_id, deleted_at);
+  `);
+
   // Package subjects are unique by teacher, not by subject alone. This lets a
   // package include the same subject with different teachers while preventing
   // the same teacher from being added twice.

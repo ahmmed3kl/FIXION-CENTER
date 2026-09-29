@@ -3,13 +3,17 @@ import { useRouter } from "expo-router";
 import { useMemo } from "react";
 import { Alert, ScrollView, StyleSheet, Switch, Text, TouchableOpacity, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { PermissionService } from "../../core/permissions";
 import { Spacing, Typography, useTheme } from "../../core/theme";
 import { useAuthStore } from "../../features/auth/useAuthStore";
 
 const items = [
   { label: "مركز المزامنة", caption: "تابع العمليات والأخطاء", route: "/(main)/sync-debug", icon: "bug-outline" as const, tint: "#EEF2FF" },
   { label: "الإدارة الأكاديمية", caption: "المراحل والمدرسون والمجموعات", route: "/(main)/academic", icon: "school-outline" as const, tint: "#ECFDF5" },
-  { label: "رصد الدرجات", caption: "الامتحانات ودرجات الطلاب", route: "/(main)/grades", icon: "reader-outline" as const, tint: "#EFF6FF" },
+  { label: "رصد الدرجات", caption: "الامتحانات ودرجات الطلاب", route: "/(main)/grade-groups", icon: "reader-outline" as const, tint: "#EFF6FF" },
+  { label: "المجموعات", caption: "المجموعات والطلاب والجداول", route: "/(main)/groups", icon: "people-outline" as const, tint: "#ECFDF5" },
+  { label: "حسابات السنتر", caption: "إدارة المديرين والمساعدين", route: "/(main)/center-accounts", icon: "shield-checkmark-outline" as const, tint: "#EEF2FF" },
+  { label: "الطلاب المحذوفون", caption: "عرض الطلاب المحذوفين واسترجاعهم", route: "/(main)/deleted-students", icon: "archive-outline" as const, tint: "#FFF7ED" },
   { label: "الباقات", caption: "الاشتراكات والمواد", route: "/(main)/packages", icon: "pricetags-outline" as const, tint: "#FFF7ED" },
   { label: "الإشعارات", caption: "القوالب ورسائل SMS", route: "/(main)/notifications", icon: "notifications-outline" as const, tint: "#FFF1F2" },
   { label: "تقارير الغياب", caption: "تحليل حضور المجموعات", route: "/(main)/absence-reports", icon: "document-text-outline" as const, tint: "#ECFEFF" },
@@ -22,6 +26,8 @@ export default function MoreScreen() {
   const { colors, isDarkMode, toggleDarkMode } = useTheme();
   const styles = useMemo(() => createStyles(), [colors]);
   const logout = useAuthStore((state) => state.logout);
+  const currentUser = useAuthStore((state) => state.currentUser);
+  const canViewStudents = PermissionService.hasPermission(currentUser?.permissions || [], "students.view");
   const confirmLogout = () => Alert.alert("تسجيل الخروج", "هل تريد تسجيل الخروج من هذا الجهاز؟", [
     { text: "إلغاء", style: "cancel" },
     { text: "تسجيل الخروج", style: "destructive", onPress: () => logout() },
@@ -39,7 +45,7 @@ export default function MoreScreen() {
           <Switch value={isDarkMode} onValueChange={toggleDarkMode} trackColor={{ false: colors.slate300, true: colors.primary }} thumbColor={colors.white}/>
         </View>
         <Text style={[styles.sectionTitle, { color: colors.textPrimary }]}>أدوات المركز</Text>
-        <View style={styles.grid}>{items.map((item) => <TouchableOpacity key={item.route} style={[styles.item, { backgroundColor: colors.cardBackground, borderColor: colors.border }]} onPress={() => router.push(item.route as any)} activeOpacity={0.78}><View style={[styles.itemIcon, { backgroundColor: isDarkMode ? colors.slate100 : item.tint }]}><Ionicons name={item.icon} size={22} color={colors.primary} /></View><View style={styles.itemCopy}><Text style={[styles.label, { color: colors.textPrimary }]}>{item.label}</Text><Text style={[styles.itemCaption, { color: colors.textSecondary }]} numberOfLines={1}>{item.caption}</Text></View><Ionicons name="chevron-back" size={18} color={colors.slate400} /></TouchableOpacity>)}</View>
+        <View style={styles.grid}>{items.filter((item) => item.route !== "/(main)/deleted-students" || canViewStudents).map((item) => <TouchableOpacity key={item.route} style={[styles.item, { backgroundColor: colors.cardBackground, borderColor: colors.border }]} onPress={() => router.push(item.route as any)} activeOpacity={0.78}><View style={[styles.itemIcon, { backgroundColor: isDarkMode ? colors.slate100 : item.tint }]}><Ionicons name={item.icon} size={22} color={colors.primary} /></View><View style={styles.itemCopy}><Text style={[styles.label, { color: colors.textPrimary }]}>{item.label}</Text><Text style={[styles.itemCaption, { color: colors.textSecondary }]} numberOfLines={1}>{item.caption}</Text></View><Ionicons name="chevron-back" size={18} color={colors.slate400} /></TouchableOpacity>)}</View>
         <TouchableOpacity style={[styles.logoutItem, { backgroundColor: isDarkMode ? colors.dangerLight : "#FFF1F2", borderColor: isDarkMode ? colors.danger : "#FECDD3" }]} onPress={confirmLogout} activeOpacity={0.8}><View style={styles.logoutIcon}><Ionicons name="log-out-outline" size={21} color={colors.danger} /></View><Text style={[styles.logoutLabel, { color: colors.danger }]}>تسجيل الخروج</Text><Ionicons name="chevron-back" size={19} color={colors.danger} /></TouchableOpacity>
       </ScrollView>
     </SafeAreaView>

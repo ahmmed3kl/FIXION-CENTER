@@ -1,7 +1,7 @@
 import { Ionicons } from "@expo/vector-icons";
-import { CameraView, useCameraPermissions } from "expo-camera";
+import { useCameraPermissions } from "expo-camera";
 import { router, useLocalSearchParams } from "expo-router";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
     Alert,
     FlatList,
@@ -46,6 +46,7 @@ import {
     EmptyState,
     StatusBadge,
 } from "../../shared/components";
+import { BarcodeScannerView } from "../../shared/components/BarcodeScannerView";
 import {
     DebtCycle,
     DetailedStudentFinancialStatus,
@@ -105,7 +106,7 @@ function firstScheduledDate(groupId: string): string {
 export default function StudentsScreen() {
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(), [colors]);
-  const { studentId } = useLocalSearchParams<{ studentId?: string }>();
+  const { studentId, add, attendanceSessionId } = useLocalSearchParams<{ studentId?: string; add?: string; attendanceSessionId?: string }>();
   const services = useServiceVisibility();
   const paymentsEnabled = services.isEnabled("payments");
   const currentUser = useAuthStore((s) => s.currentUser);
@@ -145,6 +146,8 @@ export default function StudentsScreen() {
 
   // Modal States
   const [isAddStudentOpen, setIsAddStudentOpen] = useState(false);
+  const [returningToAttendanceAfterCreate, setReturningToAttendanceAfterCreate] = useState(false);
+  const returningToAttendanceAfterCreateRef = useRef(false);
   const [isCardModalOpen, setIsCardModalOpen] = useState(false);
   const [isEnrollModalOpen, setIsEnrollModalOpen] = useState(false);
   const [isPaymentModalOpen, setIsPaymentModalOpen] = useState(false);
@@ -291,7 +294,8 @@ export default function StudentsScreen() {
       const requested = StudentRepository.findById(String(studentId));
       if (requested) openStudentDetails(requested);
     }
-  }, [activeCenterId, studentId]);
+    if (add === "1") setIsAddStudentOpen(true);
+  }, [activeCenterId, studentId, add]);
 
   // Keep the profile payment form aligned with the attendance payment flow:
   // cycle payments start with the open month/package balance, while a session
@@ -695,23 +699,23 @@ export default function StudentsScreen() {
     ]);
   };
 
-  const handleDeactivateStudent = () => {
+  const handleDeleteStudent = () => {
     if (!selectedStudent) return;
     Alert.alert(
-      "تأكيد التعطيل",
-      `هل أنت متأكد من تعطيل حساب الطالب (${selectedStudent.fullName})؟`,
+      "حذف الطالب",
+      `سيختفي الطالب (${selectedStudent.fullName}) من القوائم الحالية، مع الاحتفاظ ببياناته ومجموعاته وباقاته وسجل الحضور والمدفوعات لإمكانية استرجاعه لاحقًا.`,
       [
         { text: "إلغاء", style: "cancel" },
         {
-          text: "نعم، تعطيل",
+          text: "حذف الطالب",
           style: "destructive",
           onPress: () => {
             try {
-              StudentRepository.deactivateStudent(selectedStudent.id);
+              StudentRepository.deleteStudent(selectedStudent.id);
               setSelectedStudent(null);
               loadData();
             } catch (e: any) {
-              Alert.alert("خطأ", e?.message || "فشل تعطيل حساب الطالب");
+              Alert.alert("خطأ", e?.message || "تعذر حذف الطالب.");
             }
           },
         },
@@ -855,14 +859,6 @@ export default function StudentsScreen() {
                 </View>
 
                 <View style={styles.cardActions}>
-                  <StatusBadge
-                    text={
-                      item.status === "active"
-                        ? Strings.studentStatusActive
-                        : Strings.studentStatusInactive
-                    }
-                    type={item.status === "active" ? "success" : "neutral"}
-                  />
                   <Ionicons
                     name="chevron-back"
                     size={20}
@@ -879,15 +875,29 @@ export default function StudentsScreen() {
       {/* 1. Add Student Guided Wizard Modal */}
       <AddStudentWizardModal
         visible={isAddStudentOpen}
-        onClose={() => setIsAddStudentOpen(false)}
-        onStudentCreated={loadData}
+        onClose={() => {
+          setIsAddStudentOpen(false);
+          if (attendanceSessionId && !returningToAttendanceAfterCreateRef.current) {
+            router.replace({ pathname: "/(main)/scanner", params: { attendanceSessionId: String(attendanceSessionId) } } as any);
+          }
+          returningToAttendanceAfterCreateRef.current = false;
+          setReturningToAttendanceAfterCreate(false);
+        }}
+        onStudentCreated={(createdStudent) => {
+          loadData();
+          if (attendanceSessionId && createdStudent?.id) {
+            setReturningToAttendanceAfterCreate(true);
+            returningToAttendanceAfterCreateRef.current = true;
+            router.replace({ pathname: "/(main)/scanner", params: { attendanceSessionId: String(attendanceSessionId), addedStudentId: createdStudent.id } } as any);
+          }
+        }}
       />
 
       <Modal visible={cardScannerOpen} animationType="slide" transparent onRequestClose={() => setCardScannerOpen(false)}>
         <View style={styles.cardScannerOverlay}>
           <View style={styles.cardScannerSheet}>
             <Text style={styles.cardScannerTitle}>امسح كارت الطالب</Text>
-            <CameraView style={styles.cardScannerCamera} facing="back" autofocus="on" onBarcodeScanned={handleStudentCardScan} barcodeScannerSettings={{ barcodeTypes: ["qr", "code128", "code39", "ean13", "ean8"] }} />
+            <BarcodeScannerView onDetected={(data) => handleStudentCardScan({ data })} onClose={() => setCardScannerOpen(false)} style={styles.cardScannerCamera} />
             <TouchableOpacity style={styles.cardScannerClose} onPress={() => setCardScannerOpen(false)}><Text style={styles.cardScannerCloseText}>إلغاء</Text></TouchableOpacity>
           </View>
         </View>
@@ -908,7 +918,6 @@ export default function StudentsScreen() {
                 <Text style={styles.profileStudentName}>{selectedStudent.fullName}</Text>
                 <Text style={styles.profileGrade}>{selectedStudent.grade}</Text>
                 <Text style={styles.profileGroupSummary} numberOfLines={2}>{studentEnrollments.length ? studentEnrollments.map((item) => item.groupName || availableGroups.find((group) => group.id === item.groupId)?.name).filter(Boolean).join(" · ") : "غير مسجل في مجموعة حالية"}</Text>
-                <View style={[styles.profileStatusPill, selectedStudent.status !== "active" && styles.profileStatusPillInactive]}><View style={[styles.profileStatusDot, selectedStudent.status !== "active" && styles.profileStatusDotInactive]} /><Text style={styles.profileStatusPillText}>{selectedStudent.status === "active" ? "طالب نشط" : "غير نشط"}</Text></View>
               </View>
 
               <View style={styles.profileContactList}>
@@ -922,7 +931,7 @@ export default function StudentsScreen() {
                 {canManageCards && <TouchableOpacity style={styles.profileManageCardButton} onPress={() => setIsCardModalOpen(true)}><Ionicons name="card-outline" size={19} color={Colors.primary} /><Text style={styles.profileManageCardText}>إدارة البطاقة</Text></TouchableOpacity>}
               </View>
               {studentCards.length > 0 && <View style={styles.profileCardList}>{studentCards.map((card) => <View key={card.id} style={styles.profileCardRow}><View style={styles.profileRowCopy}><Text style={styles.profileRowTitle}>بطاقة {formatDisplayIdentifier(card.cardCode)}</Text><Text style={styles.profileRowMeta}>صدرت في {card.issuedAt.slice(0, 10)}</Text></View><StatusBadge text={card.status === "active" ? "نشطة" : "ملغاة"} type={card.status === "active" ? "success" : "neutral"} />{canManageCards && card.status === "active" && <TouchableOpacity accessibilityLabel="إلغاء البطاقة" onPress={() => handleDeactivateCard(card.id)}><Ionicons name="trash-outline" size={17} color={Colors.danger} /></TouchableOpacity>}</View>)}</View>}
-              {canDeactivate && selectedStudent.status === "active" && <TouchableOpacity style={styles.profileDeactivateButton} onPress={handleDeactivateStudent}><Ionicons name="pause-circle-outline" size={17} color={Colors.danger} /><Text style={styles.profileDeactivateText}>تعطيل حساب الطالب</Text></TouchableOpacity>}
+              {canDeactivate && <TouchableOpacity style={styles.profileDeactivateButton} onPress={handleDeleteStudent}><Ionicons name="trash-outline" size={17} color={Colors.danger} /><Text style={styles.profileDeactivateText}>حذف الطالب</Text></TouchableOpacity>}
 
               <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.profileTabsScroller} contentContainerStyle={styles.profileTabs}>
                 {([
@@ -1464,7 +1473,7 @@ export default function StudentsScreen() {
                     <AppButton
                       title="تعطيل حساب الطالب"
                       variant="outline"
-                      onPress={handleDeactivateStudent}
+                      onPress={handleDeleteStudent}
                       style={{ borderColor: Colors.danger }}
                     />
                   </View>

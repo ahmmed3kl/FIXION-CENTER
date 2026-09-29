@@ -65,8 +65,8 @@ export class StudentRepository {
     // the normal bootstrap/sync flow.
     const card = StudentCardRepository.findByCardCode(normalizedCardCode);
     if (card) {
-      const student = this.findByIdInternal(card.studentId);
-      if (!student) return null;
+      const student = this.findByIdInternal(card.studentId, false);
+      if (!student || student.deletedAt) return null;
 
       return {
         ...student,
@@ -81,14 +81,14 @@ export class StudentRepository {
        FROM students s
        LEFT JOIN student_cards linked_card
          ON linked_card.student_id = s.id AND linked_card.card_code = ?
-       WHERE s.center_id = ? AND s.status = 'active'
+       WHERE s.center_id = ? AND s.status = 'active' AND s.deleted_at IS NULL
          AND (s.card_code = ? OR linked_card.id IS NOT NULL)
        LIMIT 1`,
       [normalizedCardCode, centerId, normalizedCardCode],
     );
     if (!legacyStudent) return null;
 
-    const student = this.findByIdInternal(legacyStudent.id);
+    const student = this.findByIdInternal(legacyStudent.id, false);
     return student ? { ...student, cardCode: normalizedCardCode } : null;
   }
 
@@ -99,6 +99,7 @@ export class StudentRepository {
     const row = db.getFirstSync<any>(
       `SELECT id, center_id as centerId, student_code as studentCode, full_name as fullName, card_code as cardCode,
               phone, parent_phone as parentPhone, grade, status, student_type as studentType, notes,
+              deleted_at as deletedAt, deleted_by as deletedBy,
               created_at as createdAt, updated_at as updatedAt
        FROM students
        WHERE center_id = ? AND student_code = ?`,
@@ -113,16 +114,17 @@ export class StudentRepository {
     };
   }
 
-  private static findByIdInternal(studentId: string): Student | null {
+  private static findByIdInternal(studentId: string, includeDeleted = true): Student | null {
     const { centerId } = this.getActiveContext();
     const db = DatabaseService.getDb();
 
     const row = db.getFirstSync<any>(
       `SELECT id, center_id as centerId, student_code as studentCode, full_name as fullName, card_code as cardCode,
               phone, parent_phone as parentPhone, grade, status, student_type as studentType, notes,
+              deleted_at as deletedAt, deleted_by as deletedBy,
               created_at as createdAt, updated_at as updatedAt
        FROM students
-       WHERE center_id = ? AND id = ?`,
+       WHERE center_id = ? AND id = ?${includeDeleted ? "" : " AND deleted_at IS NULL"}`,
       [centerId, studentId],
     );
 
@@ -139,7 +141,7 @@ export class StudentRepository {
     if (!PermissionService.hasPermission(user.permissions, "students.view")) {
       throw new ForbiddenError("ليس لديك صلاحية عرض بيانات الطلاب.");
     }
-    return this.findByIdInternal(studentId);
+    return this.findByIdInternal(studentId, false);
   }
 
   /** Read-only lookup for attendance/report screens that may not have student-management permission. */
@@ -149,6 +151,35 @@ export class StudentRepository {
       throw new ForbiddenError("Ù„ÙŠØ³ Ù„Ø¯ÙŠÙƒ ØµÙ„Ø§Ø­ÙŠØ© Ø¹Ø±Ø¶ Ø¨ÙŠØ§Ù†Ø§Øª Ø§Ù„Ø­Ø¶ÙˆØ±.");
     }
     return this.findByIdInternal(studentId);
+  }
+
+  static getDeletedStudents(): Student[] {
+    const { centerId, user } = this.getActiveContext();
+    if (!PermissionService.hasPermission(user.permissions, "students.view")) {
+      throw new ForbiddenError("Ù„ÙŠØ³ Ù„Ø¯ÙŠÙƒ ØµÙ„Ø§Ø­ÙŠØ© Ø¹Ø±Ø¶ Ø¨ÙŠØ§Ù†Ø§Øª Ø§Ù„Ø·Ù„Ø§Ø¨.");
+    }
+    const db = DatabaseService.getDb();
+    const rows = db.getAllSync<any>(
+      `SELECT id, center_id as centerId, student_code as studentCode, full_name as fullName, card_code as cardCode,
+              phone, parent_phone as parentPhone, grade, status, student_type as studentType, notes,
+              deleted_at as deletedAt, deleted_by as deletedBy, created_at as createdAt, updated_at as updatedAt
+       FROM students WHERE center_id = ? AND deleted_at IS NOT NULL ORDER BY deleted_at DESC, full_name ASC`,
+      [centerId],
+    );
+    return rows.map((row) => ({
+      ...row,
+      cardCode: StudentCardRepository.getActiveCardByStudentId(row.id)?.cardCode ?? row.cardCode,
+    }));
+  }
+
+  static searchDeletedStudents(query: string): Student[] {
+    return smartSearch(this.getDeletedStudents(), query, [
+      { get: (student) => student.fullName, weight: 1.2 },
+      { get: (student) => student.studentCode, weight: 1.1 },
+      { get: (student) => student.cardCode, weight: 1.1 },
+      { get: (student) => student.phone },
+      { get: (student) => student.parentPhone },
+    ]);
   }
 
   /**
@@ -181,7 +212,7 @@ export class StudentRepository {
     );
   }
 
-  static getAll(includeInactive = false): Student[] {
+  static getAll(includeInactive = false, includeDeleted = false): Student[] {
     const { centerId, user } = this.getActiveContext();
     if (!PermissionService.hasPermission(user.permissions, "students.view")) {
       throw new ForbiddenError("ليس لديك صلاحية عرض بيانات الطلاب.");
@@ -191,14 +222,15 @@ export class StudentRepository {
     const rows = db.getAllSync<any>(
       `SELECT id, center_id as centerId, student_code as studentCode, full_name as fullName, card_code as cardCode,
               phone, parent_phone as parentPhone, grade, status, student_type as studentType, notes,
+              deleted_at as deletedAt, deleted_by as deletedBy,
               created_at as createdAt, updated_at as updatedAt
        FROM students
-       WHERE center_id = ?
+       WHERE center_id = ?${includeDeleted ? "" : " AND deleted_at IS NULL"}
        ORDER BY full_name ASC`,
       [centerId],
     );
 
-    const filtered = includeInactive
+    const filtered = includeInactive || includeDeleted
       ? rows
       : rows.filter((r) => {
           // Legacy/synced databases may store status with different casing
@@ -417,6 +449,7 @@ export class StudentRepository {
     if (!existing) {
       throw new NotFoundError("الطالب غير موجود.");
     }
+    if (existing.deletedAt) throw new ConflictError("الطالب محذوف بالفعل.");
 
     const db = DatabaseService.getDb();
     const fullName = dto.fullName?.trim() || existing.fullName;
@@ -532,7 +565,7 @@ export class StudentRepository {
     };
   }
 
-  static deactivateStudent(studentId: string): void {
+  static deleteStudent(studentId: string): Student {
     const { centerId, user } = this.getActiveContext();
     if (
       !PermissionService.hasPermission(user.permissions, "students.deactivate")
@@ -545,24 +578,19 @@ export class StudentRepository {
       throw new NotFoundError("الطالب غير موجود.");
     }
 
+    if (existing.deletedAt) throw new ConflictError("Student is already deleted.");
     const db = DatabaseService.getDb();
     const now = new Date().toISOString();
     const deviceId = DeviceService.getDeviceIdSync();
-    const operationId = `op-std-deact-${Date.now()}-${studentId}`;
+    const operationId = `op-std-del-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
     // Soft delete student
     DatabaseService.runInTransaction(() => {
       db.runSync(
-        `UPDATE students SET status = 'inactive', updated_at = ? WHERE center_id = ? AND id = ?`,
-        [now, centerId, studentId],
+        `UPDATE students SET deleted_at = ?, deleted_by = ?, updated_at = ?
+         WHERE center_id = ? AND id = ? AND deleted_at IS NULL`,
+        [now, user.id, now, centerId, studentId],
       );
-
-      // Deactivate active card in the same transaction as the student status.
-      const activeCard =
-        StudentCardRepository.getActiveCardByStudentId(studentId);
-      if (activeCard) {
-        StudentCardRepository.deactivateCard(activeCard.id);
-      }
       // Keep audit and outbox in the same local commit as the status change.
 
     AuditService.recordEvent({
@@ -572,8 +600,8 @@ export class StudentRepository {
       deviceId,
       entityType: "student",
       entityId: studentId,
-      action: "student.deactivate",
-      payload: { fullName: existing.fullName },
+      action: "student.delete",
+      payload: { studentId, deletedAt: now },
     });
 
     SyncRepository.enqueueOperation({
@@ -587,20 +615,77 @@ export class StudentRepository {
       payload: {
         id: studentId,
         studentId,
-        status: "inactive",
         updatedAt: now,
         updated_at: now,
         student: {
           id: studentId,
-          status: "inactive",
+          deletedAt: now,
+          deleted_at: now,
+          deletedBy: user.id,
+          deleted_by: user.id,
+          updatedAt: now,
+          updated_at: now,
         },
       },
     });
     });
 
     SyncEngine.syncCenterNow(centerId).catch((e) => {
-      console.warn("Background auto-sync student deactivate notice:", e);
+      console.warn("Background auto-sync student archive notice:", e);
     });
+    return { ...existing, deletedAt: now, deletedBy: user.id, updatedAt: now };
+  }
+
+  static restoreDeletedStudent(studentId: string): Student {
+    const { centerId, user } = this.getActiveContext();
+    if (!PermissionService.hasPermission(user.permissions, "students.deactivate")) {
+      throw new ForbiddenError("Ù„ÙŠØ³ Ù„Ø¯ÙŠÙƒ ØµÙ„Ø§Ø­ÙŠØ© Ø§Ø³ØªØ±Ø¬Ø§Ø¹ Ø§Ù„Ø·Ø§Ù„Ø¨.");
+    }
+    const existing = this.findByIdInternal(studentId);
+    if (!existing) throw new NotFoundError("Ø§Ù„Ø·Ø§Ù„Ø¨ ØºÙŠØ± Ù…ÙˆØ¬ÙˆØ¯.");
+    if (!existing.deletedAt) throw new ConflictError("Ø§Ù„Ø·Ø§Ù„Ø¨ Ù…Ø³ØªØ±Ø¬Ø¹ Ø¨Ø§Ù„ÙØ¹Ù„.");
+
+    const db = DatabaseService.getDb();
+    const now = new Date().toISOString();
+    const deviceId = DeviceService.getDeviceIdSync();
+    const operationId = `op-std-res-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    DatabaseService.runInTransaction(() => {
+      db.runSync(
+        `UPDATE students SET deleted_at = NULL, deleted_by = NULL, updated_at = ?
+         WHERE center_id = ? AND id = ? AND deleted_at IS NOT NULL`,
+        [now, centerId, studentId],
+      );
+      AuditService.recordEvent({
+        operationId,
+        centerId,
+        userId: user.id,
+        deviceId,
+        entityType: "student",
+        entityId: studentId,
+        action: "student.restore",
+        payload: { studentId },
+      });
+      SyncRepository.enqueueOperation({
+        operationId,
+        centerId,
+        userId: user.id,
+        deviceId,
+        operationType: "UPDATE",
+        entityType: "student",
+        entityId: studentId,
+        payload: {
+          id: studentId,
+          studentId,
+          updatedAt: now,
+          updated_at: now,
+          student: { id: studentId, deletedAt: null, deleted_at: null, deletedBy: null, deleted_by: null, updatedAt: now, updated_at: now },
+        },
+      });
+    });
+    SyncEngine.syncCenterNow(centerId).catch((error) => {
+      console.warn("Background auto-sync student restore notice:", error);
+    });
+    return { ...existing, deletedAt: null, deletedBy: null, updatedAt: now };
   }
 
   static search(query: string): Student[] {

@@ -1,7 +1,7 @@
 import { Ionicons } from "@expo/vector-icons";
 import DateTimePicker from "@expo/ui/community/datetime-picker";
-import { useFocusEffect, useRouter } from "expo-router";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
     Alert,
     FlatList,
@@ -62,6 +62,9 @@ export default function AcademicScreen() {
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(), [colors]);
   const router = useRouter();
+  const { addGroup, editGroupId } = useLocalSearchParams<{ addGroup?: string; editGroupId?: string }>();
+  const handledGroupParamRef = useRef<string | null>(null);
+  const handledEditGroupParamRef = useRef<string | null>(null);
   const currentUser = useAuthStore((s) => s.currentUser);
   const activeCenterId = useAuthStore((s) => s.activeCenterId);
   const permissions = resolveUserPermissions(currentUser);
@@ -316,6 +319,24 @@ export default function AcademicScreen() {
     }
     setIsAddGroupOpen(true);
   };
+  useEffect(() => {
+    if (addGroup === "1" && handledGroupParamRef.current !== addGroup) {
+      handledGroupParamRef.current = addGroup;
+      setActiveTab("groups");
+      setEditingGroup(null);
+      setGroupName("");
+      setGroupGrade(availableGroupGrades[0] || "");
+      setGroupNameCustomized(false);
+      setSelectedScheduleDays([]);
+      setScheduleTimes({});
+      setIsAddGroupOpen(true);
+    }
+  }, [addGroup, availableGroupGrades]);
+  useEffect(() => {
+    if (!editGroupId || handledEditGroupParamRef.current === String(editGroupId)) return;
+    const group = groups.find((item) => item.id === String(editGroupId));
+    if (group) { handledEditGroupParamRef.current = String(editGroupId); setActiveTab("groups"); openGroupEditor(group); }
+  }, [editGroupId, groups]);
   const deleteGroup = (group: Group) => { Alert.alert("تأكيد الحذف", "سيتم الحذف فقط إذا لم توجد تسجيلات.", [{ text: "إلغاء", style: "cancel" }, { text: "حذف", style: "destructive", onPress: () => { try { GroupRepository.deleteGroup(group.id); loadData(); Alert.alert("تم بنجاح", "تم حذف المجموعة."); } catch (e: any) { Alert.alert("لا يمكن الحذف", e?.message || "استخدم التعطيل للحفاظ على السجل."); } } }]); };
   const deleteTeacher = (teacher: Teacher) => { Alert.alert("تأكيد الحذف", "سيتم الحذف فقط إذا لم توجد سجلات مرتبطة.", [{ text: "إلغاء", style: "cancel" }, { text: "حذف", style: "destructive", onPress: () => { try { TeacherRepository.deleteTeacher(teacher.id); loadData(); Alert.alert("تم بنجاح", "تم حذف المدرس."); } catch (e: any) { Alert.alert("لا يمكن الحذف", e?.message || "استخدم التعطيل للحفاظ على السجل."); } } }]); };
   const deleteSubject = (subject: Subject) => { Alert.alert("تأكيد الحذف", "سيتم الحذف فقط إذا لم توجد سجلات مرتبطة.", [{ text: "إلغاء", style: "cancel" }, { text: "حذف", style: "destructive", onPress: () => { try { SubjectRepository.deleteSubject(subject.id); loadData(); Alert.alert("تم بنجاح", "تم حذف المادة."); } catch (e: any) { Alert.alert("لا يمكن الحذف", e?.message || "استخدم التعطيل للحفاظ على السجل."); } } }]); };
@@ -470,12 +491,6 @@ export default function AcademicScreen() {
     <SafeAreaView style={styles.safeArea}>
       <View style={styles.header}>
         <Text style={styles.headerTitle}>{Strings.tabAcademic}</Text>
-        {PermissionService.hasPermission(permissions, "packages.view") && (
-          <TouchableOpacity style={styles.headerPackagesButton} onPress={() => router.push("/(main)/packages") }>
-            <Ionicons name="pricetags-outline" size={18} color={Colors.white} />
-            <Text style={styles.headerPackagesText}>الباقات</Text>
-          </TouchableOpacity>
-        )}
       </View>
 
       {/* Segmented Control Bar */}
@@ -516,6 +531,7 @@ export default function AcademicScreen() {
           style={[
             styles.tabButton,
             activeTab === "groups" && styles.tabButtonActive,
+            { display: "none" },
           ]}
           onPress={() => setActiveTab("groups")}
         >

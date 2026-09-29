@@ -76,7 +76,7 @@ export class EnrollmentRepository {
               e.created_at as createdAt, e.updated_at as updatedAt,
               s.full_name as studentName, g.name as groupName
        FROM student_group_enrollments e
-       LEFT JOIN students s ON e.student_id = s.id
+       JOIN students s ON e.student_id = s.id AND s.deleted_at IS NULL
        LEFT JOIN groups g ON e.group_id = g.id
        WHERE e.center_id = ? AND e.group_id = ? AND e.status = 'active'
        ORDER BY s.full_name ASC`,
@@ -117,7 +117,7 @@ export class EnrollmentRepository {
     const student = db.getFirstSync<{ id: string; fullName: string; status: "active" | "inactive" }>(
       `SELECT id, full_name as fullName, status
        FROM students
-       WHERE center_id = ? AND id = ?`,
+       WHERE center_id = ? AND id = ? AND deleted_at IS NULL`,
       [centerId, dto.studentId],
     );
     if (!student || student.status !== "active") {

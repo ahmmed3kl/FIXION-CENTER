@@ -1,5 +1,5 @@
 import { Ionicons as BaseIonicons } from "@expo/vector-icons";
-import { CameraView, useCameraPermissions } from "expo-camera";
+import { useCameraPermissions } from "expo-camera";
 import React, { useEffect, useMemo, useState } from "react";
 import {
   Alert,
@@ -14,7 +14,8 @@ import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { formatCurrency, formatTimeArabic } from "../../../core/localization";
 import { Colors, useTheme } from "../../../core/theme";
 import { AppButton, AppInput } from "../../../shared/components";
-import { Group, GroupSchedule, Package, PackageSubject, Teacher } from "../../../shared/types";
+import { BarcodeScannerView } from "../../../shared/components/BarcodeScannerView";
+import { Group, GroupSchedule, Package, PackageSubject, Student, Teacher } from "../../../shared/types";
 import { smartSearch } from "../../../shared/utils/smartSearch";
 import { getLocalDateOnly } from "../../../shared/utils/date";
 import { isEgyptianPhone, isNumericCode, isValidName, ValidationMessages } from "../../../shared/utils/validation";
@@ -43,7 +44,7 @@ const DAYS = ["الأحد", "الإثنين", "الثلاثاء", "الأربع�
 interface AddStudentWizardModalProps {
   visible: boolean;
   onClose: () => void;
-  onStudentCreated: () => void;
+  onStudentCreated: (student?: Student) => void;
 }
 
 type FieldErrors = {
@@ -332,7 +333,7 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({ vi
         }
       }
       Alert.alert("تمت الإضافة", "تمت إضافة الطالب بنجاح.");
-      resetForm(); onStudentCreated(); onClose();
+      resetForm(); onStudentCreated(student); onClose();
     } catch (error: any) {
       Alert.alert("تعذر إضافة الطالب", error?.message || "حدث خطأ غير متوقع.");
     } finally { setSubmitting(false); }
@@ -350,7 +351,7 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({ vi
           </View>
           <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
             <Section icon="card-outline" title="الكارت / كود الطالب" hint="امسح الكارت أو أدخل الكود يدوياً">
-              {cameraActive ? <View style={styles.cameraWrap}><CameraView style={styles.camera} facing="back" autofocus="on" zoom={0.2} enableTorch={torchEnabled} onBarcodeScanned={onBarcodeScanned} barcodeScannerSettings={{ barcodeTypes: ["qr", "code128", "code39", "ean13", "ean8"] }} /><View style={styles.cameraActions}><TouchableOpacity style={styles.cameraAction} onPress={() => setTorchEnabled((value) => !value)}><Ionicons name={torchEnabled ? "flash" : "flash-outline"} size={18} color="#FFF" /></TouchableOpacity><TouchableOpacity style={styles.cameraAction} onPress={() => setCameraActive(false)}><Text style={styles.cameraActionText}>إلغاء</Text></TouchableOpacity></View></View> : <View style={styles.codeRow}><AppInput value={cardCode} onChangeText={(value) => { setCardCode(value); setScanError(null); clearError("cardCode"); }} onBlur={() => cardCode && validateCard(cardCode)} error={scanError || errors.cardCode} placeholder="00126" keyboardType="number-pad" inputKind="cardCode" containerStyle={styles.codeInputWrap} style={styles.compactInput} /><TouchableOpacity style={styles.scanButton} onPress={openCamera}><Ionicons name="camera-outline" size={22} color="#FFF" /></TouchableOpacity></View>}
+              {cameraActive ? <BarcodeScannerView onDetected={(data) => { if (validateCard(data)) setCameraActive(false); }} onClose={() => { setTorchEnabled(false); setCameraActive(false); }} style={styles.cameraWrap} /> : <View style={styles.codeRow}><AppInput value={cardCode} onChangeText={(value) => { setCardCode(value); setScanError(null); clearError("cardCode"); }} onBlur={() => cardCode && validateCard(cardCode)} error={scanError || errors.cardCode} placeholder="00126" keyboardType="number-pad" inputKind="cardCode" containerStyle={styles.codeInputWrap} style={styles.compactInput} /><TouchableOpacity style={styles.scanButton} onPress={openCamera}><Ionicons name="camera-outline" size={22} color="#FFF" /></TouchableOpacity></View>}
             </Section>
 
             <Section icon="person-outline" title="بيانات الطالب">

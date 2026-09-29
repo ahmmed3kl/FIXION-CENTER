@@ -225,6 +225,15 @@ class SyncProcessor {
           }
 
           // 5. Record Server-Side Audit Trail
+          const studentAuditState = entityType === "student" ? (payload?.student || payload || {}) : {};
+          const hasStudentArchiveMutation = entityType === "student" && (
+            Object.prototype.hasOwnProperty.call(studentAuditState, "deleted_at") ||
+            Object.prototype.hasOwnProperty.call(studentAuditState, "deletedAt")
+          );
+          const studentIsArchived = Boolean(studentAuditState.deleted_at || studentAuditState.deletedAt);
+          const auditAction = hasStudentArchiveMutation
+            ? (studentIsArchived ? "student.delete" : "student.restore")
+            : `${entityType || "entity"}.${operationType || "mutate"}`;
           await client.query(
             `INSERT INTO audit_logs
              (id, operation_id, center_id, user_id, device_id, entity_type, entity_id, action, timestamp, payload)
@@ -237,7 +246,7 @@ class SyncProcessor {
               deviceId,
               entityType || "unknown",
               entityId || operationId,
-              `${entityType || "entity"}.${operationType || "mutate"}`,
+              auditAction,
               JSON.stringify(ledgerPayload),
             ],
           );
@@ -365,11 +374,15 @@ class SyncProcessor {
         const student = payload.student || payload;
         const studentId = student.id || student.studentId || context.entityId;
         const existingStudentRes = await client.query(
-          `SELECT student_code, card_code, full_name, phone, parent_phone, grade, student_type, notes, status
+          `SELECT student_code, card_code, full_name, phone, parent_phone, grade, student_type, notes, status, deleted_at, deleted_by
            FROM students WHERE center_id = $1 AND id = $2`,
           [centerId, studentId],
         );
         const existingStudent = existingStudentRes.rows[0];
+        const hasDeletedAt = Object.prototype.hasOwnProperty.call(student, "deleted_at") || Object.prototype.hasOwnProperty.call(student, "deletedAt");
+        const hasDeletedBy = Object.prototype.hasOwnProperty.call(student, "deleted_by") || Object.prototype.hasOwnProperty.call(student, "deletedBy");
+        const deletedAt = hasDeletedAt ? (student.deleted_at ?? student.deletedAt ?? null) : (existingStudent?.deleted_at ?? null);
+        const deletedBy = hasDeletedBy ? (student.deleted_by ?? student.deletedBy ?? null) : (existingStudent?.deleted_by ?? null);
         const cardCode = String(
           student.card_code || student.cardCode || student.student_code || student.studentCode || existingStudent?.card_code || existingStudent?.student_code || "",
         ).trim();
@@ -434,8 +447,8 @@ class SyncProcessor {
         // 1. Insert Student with exact leading zeros preserved
         await client.query(
           `INSERT INTO students 
-           (id, center_id, student_code, full_name, card_code, phone, parent_phone, grade, student_type, notes, status, created_at, updated_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), NOW())
+           (id, center_id, student_code, full_name, card_code, phone, parent_phone, grade, student_type, notes, status, deleted_at, deleted_by, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW(), NOW())
            ON CONFLICT (id) DO UPDATE SET
              student_code = EXCLUDED.student_code,
              card_code = EXCLUDED.card_code,
@@ -445,6 +458,8 @@ class SyncProcessor {
              grade = EXCLUDED.grade,
              notes = EXCLUDED.notes,
              status = EXCLUDED.status,
+             deleted_at = EXCLUDED.deleted_at,
+             deleted_by = EXCLUDED.deleted_by,
              updated_at = NOW();`,
           [
             studentId,
@@ -458,6 +473,8 @@ class SyncProcessor {
             studentType,
             student.notes !== undefined ? student.notes : (existingStudent?.notes || null),
             status,
+            deletedAt,
+            deletedBy,
           ],
         );
 

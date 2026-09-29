@@ -7,6 +7,9 @@ export type Permission =
   | "students.edit"
   | "students.update"
   | "students.deactivate"
+  | "students.delete"
+  | "students.restore"
+  | "students.profile.view"
   | "students.cards.manage"
   | "teachers.view"
   | "teachers.create"
@@ -22,6 +25,7 @@ export type Permission =
   | "groups.update"
   | "groups.deactivate"
   | "groups.schedule.manage"
+  | "groups.students.view"
   | "grades.view"
   | "grades.manage"
   | "enrollments.view"
@@ -38,6 +42,8 @@ export type Permission =
   | "attendance.create"
   | "attendance.makeup"
   | "attendance.external"
+  | "attendance.edit"
+  | "attendance.close"
   | "packages.view"
   | "packages.create"
   | "packages.update"
@@ -47,6 +53,8 @@ export type Permission =
   | "payments.create"
   | "payments.reverse"
   | "payments.adjust"
+  | "payments.edit"
+  | "payments.debt.view"
   | "reports.view"
   | "reports.attendance.view"
   | "reports.financial.view"
@@ -59,6 +67,11 @@ export type Permission =
   | "notifications.view"
   | "notifications.send"
   | "notifications.templates.update"
+  | "notifications.templates.view"
+  | "notifications.templates.manage"
+  | "center.settings.view"
+  | "center.settings.manage"
+  | "sync.view"
   | "daily_closing.view"
   | "daily_closing.close"
   | "daily_closing.reopen";
@@ -105,6 +118,8 @@ export interface Student {
   status: "active" | "inactive";
   studentType?: "registered" | "external";
   notes?: string | null;
+  deletedAt?: string | null;
+  deletedBy?: string | null;
   createdAt?: string;
   updatedAt?: string | null;
 }

@@ -907,6 +907,15 @@ export const MIGRATIONS: Migration[] = [
       try { db.execSync("CREATE UNIQUE INDEX IF NOT EXISTS uq_debt_cycles_center_enrollment_cycle ON debt_cycles(center_id, enrollment_id, cycle_number);"); } catch {}
     },
   },
+  {
+    version: 17,
+    name: "student_soft_delete",
+    up: (db: SqlDatabase) => {
+      try { db.execSync("ALTER TABLE students ADD COLUMN deleted_at TEXT;"); } catch {}
+      try { db.execSync("ALTER TABLE students ADD COLUMN deleted_by TEXT;"); } catch {}
+      try { db.execSync("CREATE INDEX IF NOT EXISTS idx_students_deleted ON students(center_id, deleted_at);"); } catch {}
+    },
+  },
 ];
 
 // In-Memory SQLite Mock for Jest / Test environments
@@ -1364,7 +1373,15 @@ class InMemorySqliteMock implements SqlDatabase {
           const id = params[params.length - 1];
           const row = list.find((r) => r.id === id);
           if (row) {
-            if (trimmed.includes("status = ?")) {
+            if (trimmed.includes("deleted_at = NULL")) {
+              row.deleted_at = null;
+              row.deleted_by = null;
+              row.updated_at = params[0];
+            } else if (trimmed.includes("deleted_at = ?")) {
+              row.deleted_at = params[0];
+              row.deleted_by = params[1];
+              row.updated_at = params[2];
+            } else if (trimmed.includes("status = ?")) {
               row.status = params[0];
               if (params.length >= 2 && trimmed.includes("updated_at = ?")) {
                 row.updated_at = params[1];
@@ -2550,16 +2567,23 @@ class InMemorySqliteMock implements SqlDatabase {
         status: r.status,
         studentType: r.student_type || "registered",
         notes: r.notes || null,
+        deletedAt: r.deleted_at || null,
+        deletedBy: r.deleted_by || null,
         createdAt: r.created_at,
         updatedAt: r.updated_at || null,
       }));
+      const archiveFiltered = trimmed.includes("deleted_at IS NOT NULL")
+        ? mapped.filter((student) => Boolean(student.deletedAt))
+        : trimmed.includes("deleted_at IS NULL")
+          ? mapped.filter((student) => !student.deletedAt)
+          : mapped;
       if (params.length >= 2 && trimmed.includes("card_code = ?")) {
-        return mapped.filter(
+        return archiveFiltered.filter(
           (r) => r.centerId === params[0] && r.cardCode === params[1],
         ) as T[];
       }
       if (params.length >= 2 && trimmed.includes("student_code = ?")) {
-        return mapped.filter(
+        return archiveFiltered.filter(
           (r) => r.centerId === params[0] && r.studentCode === params[1],
         ) as T[];
       }
@@ -2567,14 +2591,14 @@ class InMemorySqliteMock implements SqlDatabase {
         params.length >= 2 &&
         (trimmed.includes("AND id = ?") || trimmed.includes("WHERE id = ?"))
       ) {
-        return mapped.filter(
+        return archiveFiltered.filter(
           (r) => r.centerId === params[0] && r.id === params[1],
         ) as T[];
       }
       if (params.length >= 1 && trimmed.includes("center_id = ?")) {
-        return mapped.filter((r) => r.centerId === params[0]) as T[];
+        return archiveFiltered.filter((r) => r.centerId === params[0]) as T[];
       }
-      return mapped as T[];
+      return archiveFiltered as T[];
     }
 
     if (trimmed.includes("FROM student_subscriptions")) {
@@ -3695,6 +3719,9 @@ export class DatabaseService {
       "ALTER TABLE teachers ADD COLUMN notes TEXT;",
       "ALTER TABLE teachers ADD COLUMN created_at TEXT;",
       "ALTER TABLE teachers ADD COLUMN updated_at TEXT;",
+      // Student archive metadata is additive and preserves all historical rows.
+      "ALTER TABLE students ADD COLUMN deleted_at TEXT;",
+      "ALTER TABLE students ADD COLUMN deleted_by TEXT;",
       // 2. Subjects
       "ALTER TABLE subjects ADD COLUMN status TEXT NOT NULL DEFAULT 'active';",
       "ALTER TABLE subjects ADD COLUMN created_at TEXT;",

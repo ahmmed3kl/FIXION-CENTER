@@ -93,6 +93,12 @@ async function authMiddleware(req, res, next) {
     let allowedCenters = memberships.rows.length > 0
       ? memberships.rows.filter((row) => row.center_status === "active").map((row) => row.center_id)
       : [user.center_id];
+    // Center manager/assistant accounts are single-center identities. Even if
+    // stale membership rows or a forged x-center-id header exist, they cannot
+    // switch tenant context like a platform/admin account.
+    if (user.role === "manager" || user.role === "assistant") {
+      allowedCenters = [user.center_id];
+    }
     // The system owner/admin manages every active center. Other roles remain
     // restricted to their explicit user_centers memberships.
     if (user.role === "admin" || user.role === "owner") {
@@ -100,7 +106,9 @@ async function authMiddleware(req, res, next) {
       allowedCenters = allCenters.rows.map((row) => row.id);
     }
     const clientHeaderCenterId = req.headers["x-center-id"];
-    const requestedCenterId = clientHeaderCenterId || decoded.centerId || user.center_id;
+    const requestedCenterId = (user.role === "manager" || user.role === "assistant")
+      ? user.center_id
+      : (clientHeaderCenterId || decoded.centerId || user.center_id);
     if (!allowedCenters.includes(requestedCenterId)) {
       throw new AppError(
         "TENANT_MISMATCH",

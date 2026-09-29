@@ -17,6 +17,7 @@ export interface AttendanceSummary {
   total: number;
   present: number;
   absent: number;
+  makeup: number;
 }
 
 export interface MakeupEligibility {
@@ -141,6 +142,10 @@ export class AttendanceSessionService {
     const rows = db.getAllSync<{ studentId?: string; student_id?: string }>(
       `SELECT DISTINCT sps.student_id as studentId
        FROM student_package_subscriptions sps
+       JOIN students enrolled_student
+         ON enrolled_student.center_id = sps.center_id
+        AND enrolled_student.id = sps.student_id
+        AND enrolled_student.deleted_at IS NULL
        JOIN package_subjects ps
          ON ps.center_id = sps.center_id AND ps.package_id = sps.package_id
        LEFT JOIN package_subject_teacher_overrides selected
@@ -468,7 +473,7 @@ export class AttendanceSessionService {
       "SELECT center_id as centerId FROM sessions WHERE id = ?",
       [sessionId],
     );
-    if (!session) return { total: 0, present: 0, absent: 0 };
+    if (!session) return { total: 0, present: 0, absent: 0, makeup: 0 };
     const expected = db.getAllSync<any>(
       "SELECT student_id as studentId FROM session_expected_students WHERE center_id = ? AND session_id = ?",
       [session.centerId, sessionId],
@@ -513,6 +518,6 @@ export class AttendanceSessionService {
       normalizedAttendance,
       coveredInAdvance.map((row: any) => row.studentId ?? row.student_id).filter(Boolean),
     );
-    return { total: counts.expected, present: counts.present, absent: counts.absent };
+    return { total: counts.expected, present: counts.present, absent: counts.absent, makeup: counts.makeup };
   }
 }
