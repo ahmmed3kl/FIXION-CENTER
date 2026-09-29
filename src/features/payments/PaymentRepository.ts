@@ -16,6 +16,7 @@ import {
     PaymentReversal,
 } from "../../shared/types";
 import { isValidIsoDate } from "../../shared/utils/validation";
+import { getLocalDateOnly } from "../../shared/utils/date";
 import { useAuthStore } from "../auth/useAuthStore";
 import { FinancialCalculationService } from "./FinancialCalculationService";
 
@@ -160,7 +161,10 @@ export class PaymentRepository {
     const operationId = params.operationId || `op-pay-${generateUUID()}`;
     const deviceId = DeviceService.getDeviceIdSync();
     const createdAt = new Date().toISOString();
-    const paymentDate = params.paymentDate || createdAt.slice(0, 10);
+    // Payment dates are business-calendar values. Deriving them from the UTC
+    // ISO timestamp makes late-night Cairo payments appear on the previous
+    // day in the dashboard and daily closing reports.
+    const paymentDate = params.paymentDate || getLocalDateOnly();
     if (!isValidIsoDate(paymentDate)) {
       throw new ValidationError("تاريخ الدفع غير صحيح.");
     }

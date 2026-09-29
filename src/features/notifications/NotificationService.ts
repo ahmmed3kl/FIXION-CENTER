@@ -90,6 +90,7 @@ export class NotificationService {
     vars: Record<string, string>;
     customMessage?: string;
     channels?: NotificationChannel[];
+    recipientType?: "student" | "parent";
   }): NotificationEvent {
     const { centerId, user } = this.getActiveContext();
     if (
@@ -213,7 +214,9 @@ export class NotificationService {
 
       const recipient =
         channel === "sms"
-          ? studentRow?.parent_phone || studentRow?.phone || ""
+          ? params.recipientType === "student"
+            ? studentRow?.phone || ""
+            : studentRow?.parent_phone || studentRow?.phone || ""
           : studentRow?.phone || "";
 
       const deliveryId = `ndlv-${generateUUID()}`;
@@ -548,7 +551,7 @@ export class NotificationService {
     return event;
   }
 
-  static notifyCustomSms(params: { studentId: string; message: string; operationId?: string }): NotificationEvent {
+  static notifyCustomSms(params: { studentId: string; message: string; recipientType?: "student" | "parent"; operationId?: string }): NotificationEvent {
     const message = params.message.trim();
     if (!message) throw new Error("نص الرسالة مطلوب.");
     return this.createNotificationEvent({
@@ -556,9 +559,10 @@ export class NotificationService {
       studentId: params.studentId,
       sessionId: "",
       eventType: "custom",
-      vars: {},
+      vars: this.buildTemplateVariables(params.studentId, "", ""),
       customMessage: message,
       channels: ["sms"],
+      recipientType: params.recipientType || "parent",
     });
   }
 }

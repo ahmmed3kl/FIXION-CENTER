@@ -14,6 +14,7 @@ const items = [
   { label: "الإشعارات", caption: "القوالب ورسائل SMS", route: "/(main)/notifications", icon: "notifications-outline" as const, tint: "#FFF1F2" },
   { label: "تقارير الغياب", caption: "تحليل حضور المجموعات", route: "/(main)/absence-reports", icon: "document-text-outline" as const, tint: "#ECFEFF" },
   { label: "التقارير", caption: "ملخصات الأداء والماليات", route: "/(main)/reports", icon: "bar-chart-outline" as const, tint: "#F0FDFA" },
+  { label: "التقارير المالية", caption: "مديونية الطلاب حسب المدرس والمجموعة", route: "/(main)/financial-reports", icon: "wallet-outline" as const, tint: "#EFF6FF" },
 ];
 
 export default function MoreScreen() {

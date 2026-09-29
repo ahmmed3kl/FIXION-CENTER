@@ -674,14 +674,14 @@ class SyncProcessor {
       case "session":
       case "session_created": {
         const sess = payload;
-        const sessionId = sess.id || context.entityId;
+        let sessionId = sess.id || context.entityId;
         const existingSessionRes = await client.query(
           `SELECT group_id, schedule_id, subject_id, teacher_id, session_price,
                   late_after_minutes, session_date, start_time, end_time, status
            FROM sessions WHERE center_id = $1::varchar AND id = $2::varchar`,
           [centerId, sessionId],
         );
-        const existingSession = existingSessionRes.rows[0];
+        let existingSession = existingSessionRes.rows[0];
         const groupId = sess.group_id || sess.groupId || existingSession?.group_id;
         const scheduleId = sess.schedule_id || sess.scheduleId || existingSession?.schedule_id || null;
         const subjectId = sess.subject_id || sess.subjectId || existingSession?.subject_id || null;
@@ -696,6 +696,32 @@ class SyncProcessor {
         const status = action === "close" ? "closed" : action === "reopen" ? "open" : (sess.status || existingSession?.status || "open");
         if (!sessionId || !groupId || !sessionDate || !startTime || !endTime) {
           throw new Error("Session requires group, date, start time, and end time.");
+        }
+        // Older APKs generated random session ids. If that row already exists
+        // under the same natural schedule/date key, reconcile it to the
+        // canonical server row instead of tripping the unique index.
+        await client.query(
+          "SELECT pg_advisory_xact_lock(hashtext($1))",
+          [`session:${centerId}:${groupId}:${scheduleId || ""}:${sessionDate}`],
+        );
+        const naturalSessionRes = await client.query(
+          `SELECT id FROM sessions
+           WHERE center_id = $1 AND group_id = $2
+             AND COALESCE(schedule_id, '') = COALESCE($3, '')
+             AND session_date = $4
+           LIMIT 1`,
+          [centerId, groupId, scheduleId, sessionDate],
+        );
+        const naturalSessionId = naturalSessionRes.rows[0]?.id;
+        if (naturalSessionId && naturalSessionId !== sessionId) {
+          sessionId = naturalSessionId;
+          const canonicalSessionRes = await client.query(
+            `SELECT group_id, schedule_id, subject_id, teacher_id, session_price,
+                    late_after_minutes, session_date, start_time, end_time, status
+             FROM sessions WHERE center_id = $1::varchar AND id = $2::varchar`,
+            [centerId, sessionId],
+          );
+          existingSession = canonicalSessionRes.rows[0] || existingSession;
         }
         // Reconciliation is used to repair a local session after an offline
         // start. If the server already has that session, keep the server's
@@ -1079,6 +1105,31 @@ class SyncProcessor {
         if (existing.rows[0] && (!sched.groupId && !sched.group_id && sched.status === "active")) {
           break;
         }
+        const groupId = sched.group_id || sched.groupId || existing.rows[0]?.group_id;
+        const dayOfWeek = parseInt(sched.day_of_week ?? sched.dayOfWeek ?? existing.rows[0]?.day_of_week, 10);
+        const startTime = sched.start_time || sched.startTime || existing.rows[0]?.start_time;
+        const endTime = sched.end_time || sched.endTime || existing.rows[0]?.end_time;
+        const groupRes = await client.query(
+          `SELECT teacher_id FROM groups WHERE center_id = $1 AND id = $2 AND status = 'active'`,
+          [centerId, groupId],
+        );
+        if (!groupRes.rows[0]) throw new Error("GROUP_NOT_FOUND_OR_INACTIVE");
+        // Serialize schedule writes and reject any overlap for the same
+        // teacher, including partial overlaps (15:00-17:00 vs 16:00-18:00).
+        await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`schedule:${centerId}:${groupRes.rows[0].teacher_id}:${dayOfWeek}`]);
+        const conflict = await client.query(
+          `SELECT gs.start_time, gs.end_time, g.name AS group_name
+           FROM group_schedules gs
+           JOIN groups g ON g.center_id = gs.center_id AND g.id = gs.group_id
+           WHERE gs.center_id = $1 AND gs.id <> $2 AND gs.day_of_week = $3
+             AND g.teacher_id = $4
+             AND NOT ($5::varchar <= gs.start_time OR $6::varchar >= gs.end_time)
+           LIMIT 1`,
+          [centerId, schedId, dayOfWeek, groupRes.rows[0].teacher_id, endTime, startTime],
+        );
+        if (conflict.rows[0]) {
+          throw new Error(`TEACHER_SCHEDULE_CONFLICT:${conflict.rows[0].group_name || "group"}:${conflict.rows[0].start_time}-${conflict.rows[0].end_time}`);
+        }
         await client.query(
           `INSERT INTO group_schedules (id, center_id, group_id, day_of_week, start_time, end_time, created_at)
            VALUES ($1, $2, $3, $4, $5, $6, NOW())
@@ -1090,10 +1141,10 @@ class SyncProcessor {
           [
             schedId,
             centerId,
-            sched.group_id || sched.groupId || existing.rows[0]?.group_id,
-            parseInt(sched.day_of_week ?? sched.dayOfWeek ?? existing.rows[0]?.day_of_week, 10),
-            sched.start_time || sched.startTime || existing.rows[0]?.start_time,
-            sched.end_time || sched.endTime || existing.rows[0]?.end_time,
+            groupId,
+            dayOfWeek,
+            startTime,
+            endTime,
           ],
         );
         break;
@@ -1232,6 +1283,39 @@ class SyncProcessor {
           cycle.cycle_type || cycle.cycleType,
           Boolean(packageSubscriptionId),
         );
+        // Reconcile by the business identity as well as the operation id.
+        // Devices can generate different UUIDs for the same monthly/package
+        // cycle while offline; inserting the second UUID would violate the
+        // natural unique index and leave the operation stuck in conflict.
+        const naturalOwner = enrollmentId || packageSubscriptionId;
+        if (naturalOwner && cycleNumber !== null && cycleNumber !== undefined) {
+          const naturalRes = await client.query(
+            `SELECT id FROM debt_cycles
+             WHERE center_id = $1
+               AND COALESCE(enrollment_id, package_subscription_id) = $2
+               AND cycle_number = $3
+             LIMIT 1`,
+            [centerId, naturalOwner, cycleNumber],
+          );
+          const naturalId = naturalRes.rows[0]?.id;
+          if (naturalId && naturalId !== targetId) {
+            await client.query(
+              `UPDATE debt_cycles
+                  SET student_id=$2, enrollment_id=$3, group_id=$4,
+                      package_subscription_id=$5, package_id=$6,
+                      cycle_number=$7, cycle_type=$8, period_start=$9,
+                      period_end=$10, amount_due=$11, status=$12,
+                      notes=$13, updated_at=NOW()
+                WHERE center_id=$1 AND id=$14`,
+              [centerId, studentId, enrollmentId, groupId, packageSubscriptionId, packageId,
+                cycleNumber, cycleType, cycle.start_date || cycle.startDate || cycle.period_start,
+                cycle.end_date || cycle.endDate || cycle.period_end,
+                Number(cycle.cycle_price ?? cycle.cyclePrice ?? cycle.amount_due ?? cycle.amountDue ?? 0),
+                normalizeDebtCycleStatus(cycle.status), cycle.notes || null, naturalId],
+            );
+            break;
+          }
+        }
         await client.query(`INSERT INTO debt_cycles
           (id, center_id, student_id, enrollment_id, group_id, package_subscription_id, package_id, cycle_number, cycle_type, period_start, period_end, amount_due, status, notes, created_at, updated_at)
           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,NOW(),NOW())

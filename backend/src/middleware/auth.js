@@ -3,6 +3,29 @@ const config = require("../config");
 const db = require("../db");
 const { AppError } = require("./errorHandler");
 
+// Keep server-side defaults aligned with the mobile role fallback. Platform
+// user creation historically stored `{}` and relied on the client to infer
+// permissions, which made offline UI and online sync disagree.
+const ROLE_DEFAULT_PERMISSIONS = {
+  admin: "*",
+  owner: "*",
+  manager: ["dashboard.view","students.view","students.create","students.edit","students.update","students.deactivate","students.cards.manage","teachers.view","teachers.create","teachers.update","teachers.deactivate","subjects.view","subjects.create","subjects.update","subjects.deactivate","subjects.teachers.manage","groups.view","groups.create","groups.update","groups.deactivate","groups.schedule.manage","grades.view","grades.manage","enrollments.view","enrollments.create","enrollments.update","enrollments.end","sessions.view","sessions.generate","sessions.update","sessions.cancel","sessions.close","sessions.reopen","attendance.view","attendance.create","attendance.makeup","attendance.external","packages.view","packages.manage","packages.subscribe","payments.view","payments.create","payments.reverse","payments.adjust","reports.view","reports.attendance.view","reports.financial.view","users.view","devices.view","settings.view","sync.manage","audit.view","notifications.view","notifications.send","notifications.templates.update","daily_closing.view","daily_closing.close"],
+  secretary: ["dashboard.view","students.view","students.create","students.edit","students.update","students.cards.manage","teachers.view","subjects.view","groups.view","grades.view","grades.manage","enrollments.view","enrollments.create","enrollments.update","enrollments.end","sessions.view","attendance.view","attendance.create","attendance.makeup","attendance.external","packages.view","packages.subscribe","payments.view","payments.create","notifications.view","notifications.send","reports.attendance.view"],
+  assistant: ["dashboard.view","students.view","students.create","students.edit","students.update","students.cards.manage","teachers.view","subjects.view","groups.view","grades.view","grades.manage","enrollments.view","enrollments.create","enrollments.update","enrollments.end","sessions.view","attendance.view","attendance.create","attendance.makeup","attendance.external","packages.view","packages.subscribe","payments.view","payments.create","notifications.view","notifications.send","reports.attendance.view"],
+  accountant: ["dashboard.view","students.view","groups.view","enrollments.view","packages.view","payments.view","payments.create","payments.reverse","reports.view","reports.attendance.view","reports.financial.view","sessions.view","daily_closing.view","daily_closing.close"],
+};
+
+function resolveLivePermissions(user) {
+  let value = user.permissions;
+  if (typeof value === "string") {
+    try { value = JSON.parse(value); } catch { value = {}; }
+  }
+  if (Array.isArray(value) && value.length) return value;
+  if (value && typeof value === "object" && Object.keys(value).length) return value;
+  const defaults = ROLE_DEFAULT_PERMISSIONS[user.role] || [];
+  return defaults === "*" ? { "*": true } : Object.fromEntries(defaults.map((key) => [key, true]));
+}
+
 /**
  * Authentication middleware that strictly verifies JWT and derives center_id authoritatively.
  */
@@ -88,7 +111,7 @@ async function authMiddleware(req, res, next) {
     }
 
     // Authoritatively derive the selected tenant context after membership validation.
-    req.user = { ...user, center_id: requestedCenterId, centerIds: allowedCenters };
+    req.user = { ...user, permissions: resolveLivePermissions(user), center_id: requestedCenterId, centerIds: allowedCenters };
     req.centerId = requestedCenterId;
 
     next();
@@ -123,7 +146,10 @@ function requirePermission(permissionKey) {
         ? JSON.parse(req.user.permissions)
         : req.user.permissions || {};
 
-    if (!permissions[permissionKey]) {
+    const allowed = Array.isArray(permissions)
+      ? permissions.includes(permissionKey)
+      : permissions[permissionKey] === true || permissions["*"] === true;
+    if (!allowed) {
       return next(
         new AppError(
           "FORBIDDEN",

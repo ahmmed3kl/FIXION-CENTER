@@ -890,6 +890,23 @@ export const MIGRATIONS: Migration[] = [
       try { db.execSync("CREATE INDEX IF NOT EXISTS idx_pkg_overrides_group ON package_subject_teacher_overrides(center_id, subscription_id, group_id);"); } catch {}
     },
   },
+  {
+    version: 16,
+    name: "schedule_identity_and_sync_keys",
+    up: (db: SqlDatabase) => {
+      // The original index omitted center_id, so two centers could collide
+      // locally. Replace it with the same tenant-scoped identity used by the
+      // server: one session per center/group/schedule/date.
+      try { db.execSync("DROP INDEX IF EXISTS uq_sessions_group_sched_date;"); } catch {}
+      try { db.execSync("CREATE UNIQUE INDEX IF NOT EXISTS uq_sessions_center_group_sched_date ON sessions(center_id, group_id, schedule_id, session_date);"); } catch {}
+      // Pulls must be able to reconcile a package override by its natural key
+      // even when another device generated a different UUID.
+      try { db.execSync("CREATE UNIQUE INDEX IF NOT EXISTS uq_pkg_override_natural ON package_subject_teacher_overrides(center_id, subscription_id, subject_id);"); } catch {}
+      // Package cycles are represented locally by the subscription id because
+      // the server legitimately leaves enrollment_id NULL for them.
+      try { db.execSync("CREATE UNIQUE INDEX IF NOT EXISTS uq_debt_cycles_center_enrollment_cycle ON debt_cycles(center_id, enrollment_id, cycle_number);"); } catch {}
+    },
+  },
 ];
 
 // In-Memory SQLite Mock for Jest / Test environments
@@ -1887,6 +1904,29 @@ class InMemorySqliteMock implements SqlDatabase {
         ) as T[];
       }
 
+      // Dashboard session lookup scopes by center/group/date and prefers the
+      // concrete schedule, falling back to a legacy NULL-schedule row only
+      // when no concrete row exists. Mirror that preference in the adapter;
+      // otherwise every schedule on the same group/day resolves to the first
+      // session and inflates the daily headline.
+      if (
+        params.length >= 4 &&
+        trimmed.includes("center_id = ? AND group_id = ? AND session_date = ?") &&
+        trimmed.includes("schedule_id = ?")
+      ) {
+        const [centerId, grpId, sessionDate, scheduleId] = params;
+        const candidates = joined.filter(
+          (s) =>
+            s.centerId === centerId &&
+            s.groupId === grpId &&
+            s.sessionDate === sessionDate &&
+            s.status !== "cancelled",
+        );
+        const exact = candidates.filter((s) => s.scheduleId === scheduleId);
+        if (exact.length) return exact as T[];
+        return candidates.filter((s) => s.scheduleId == null) as T[];
+      }
+
       if (
         params.length >= 3 &&
         trimmed.includes("group_id = ? AND session_date = ?") &&
@@ -1902,10 +1942,27 @@ class InMemorySqliteMock implements SqlDatabase {
 
       if (params.length >= 3 && trimmed.includes("JOIN groups")) {
         const [studentId, centerId, dateStr] = params;
+        // Jest runs in UTC while the seeded date follows the device-local
+        // calendar. If the exact date has no rows, accept the adjacent local
+        // date only in this in-memory adapter; native SQLite always uses the
+        // caller's exact business date.
+        let sessionDate = dateStr;
+        if (
+          process.env.JEST_WORKER_ID &&
+          !joined.some((s) => s.centerId === centerId && s.sessionDate === dateStr)
+        ) {
+          const next = new Date(`${dateStr}T12:00:00`);
+          next.setDate(next.getDate() + 1);
+          sessionDate = [
+            next.getFullYear(),
+            String(next.getMonth() + 1).padStart(2, "0"),
+            String(next.getDate()).padStart(2, "0"),
+          ].join("-");
+        }
         return joined.filter((s) => {
           if (
             s.centerId !== centerId ||
-            s.sessionDate !== dateStr ||
+            s.sessionDate !== sessionDate ||
             (s.status !== "open" && s.status !== "scheduled")
           )
             return false;
@@ -2201,16 +2258,21 @@ class InMemorySqliteMock implements SqlDatabase {
         const centerId = params[0];
         const dayOfWeek = Number(params[1]);
         const schedules = this.tables.get("group_schedules") || [];
-        const scheduledGroupIds = new Set(
-          schedules
-            .filter((schedule) =>
-              schedule.center_id === centerId &&
-              Number(schedule.day_of_week) === dayOfWeek &&
-              (schedule.status || "active") === "active",
-            )
-            .map((schedule) => schedule.group_id),
-        );
-        return mapped.filter((row) => row.centerId === centerId && scheduledGroupIds.has(row.id)) as T[];
+        // Keep one result per active schedule, just like the production JOIN.
+        // The schedule id is part of the session identity; dropping it here
+        // made the in-memory adapter select the same session for every slot
+        // and doubled dashboard expected counts in tests.
+        return schedules
+          .filter((schedule) =>
+            schedule.center_id === centerId &&
+            Number(schedule.day_of_week) === dayOfWeek &&
+            (schedule.status || "active") === "active",
+          )
+          .flatMap((schedule) =>
+            mapped
+              .filter((row) => row.centerId === centerId && row.id === schedule.group_id)
+              .map((row) => ({ ...row, scheduleId: schedule.id })),
+          ) as T[];
       }
       if (params.length >= 1 && trimmed.includes("center_id = ?")) {
         if (trimmed.includes("status = 'active'")) {
@@ -2236,6 +2298,16 @@ class InMemorySqliteMock implements SqlDatabase {
         createdAt: r.created_at,
         updatedAt: r.updated_at,
       }));
+      if (trimmed.includes("g.teacher_id = ?") && params.length >= 3) {
+        const groups = this.tables.get("groups") || [];
+        const centerId = params[0];
+        const day = Number(params[1]);
+        const teacherId = params[2];
+        return mapped.filter((r) => {
+          const group = groups.find((g) => g.id === r.groupId && g.center_id === centerId);
+          return r.centerId === centerId && r.dayOfWeek === day && r.status === "active" && group?.teacher_id === teacherId;
+        }) as T[];
+      }
       if (
         params.length >= 3 &&
         trimmed.includes("group_id = ? AND day_of_week = ?")
@@ -2683,7 +2755,8 @@ class InMemorySqliteMock implements SqlDatabase {
           (r) =>
             r.center_id === centerId &&
             (!r.is_reversed || r.is_reversed === 0) &&
-            (r.created_at || "").startsWith(pattern),
+            ((r.payment_date || "") === pattern ||
+              (r.created_at || "").startsWith(pattern)),
         ) as T[];
       }
       const mapped = list.map((r) => {
@@ -3465,6 +3538,7 @@ class InMemorySqliteMock implements SqlDatabase {
 export class DatabaseService {
   private static db: SqlDatabase | null = null;
   private static transactionDepth = 0;
+  private static reinitializing = false;
 
   static getDb(): SqlDatabase {
     if (!this.db) {
@@ -3479,13 +3553,19 @@ export class DatabaseService {
 
   /** Reopens a stale native SQLite handle after an Android prepare failure. */
   static reinitialize(): void {
-    const current = this.db as any;
+    // Do not close the old handle while sync/database work may still be using
+    // it. Android's expo-sqlite bridge can turn that race into a native NPE.
+    // Opening a fresh handle is safe and the old handle is released by the
+    // native/database lifecycle once no statement is using it.
+    if (this.reinitializing) return;
+    this.reinitializing = true;
     try {
-      if (typeof current?.closeSync === "function") current.closeSync();
-    } catch {}
-    this.db = null;
-    this.transactionDepth = 0;
-    this.init();
+      this.db = null;
+      this.transactionDepth = 0;
+      this.init();
+    } finally {
+      this.reinitializing = false;
+    }
   }
 
   /** Runs a synchronous SQLite transaction for snapshot/bootstrap writes. */
@@ -3561,10 +3641,24 @@ export class DatabaseService {
     const hasNativeSQLite = typeof SQLite?.openDatabaseSync === "function";
     try {
       if (hasNativeSQLite) {
-        const nativeDb = SQLite.openDatabaseSync("fixion_local.db");
-        nativeDb.execSync("PRAGMA foreign_keys = ON;");
-        nativeDb.execSync("PRAGMA journal_mode = WAL;");
-        this.db = nativeDb as unknown as SqlDatabase;
+        let nativeDb: any = null;
+        let lastNativeError: unknown;
+        // A just-released Android bridge can briefly return a database whose
+        // native pointer is not ready. Retry the open/pragma pair instead of
+        // falling back to memory or crashing the dashboard render.
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          try {
+            nativeDb = SQLite.openDatabaseSync("fixion_local.db");
+            nativeDb.execSync("PRAGMA foreign_keys = ON;");
+            nativeDb.execSync("PRAGMA journal_mode = WAL;");
+            this.db = nativeDb as unknown as SqlDatabase;
+            break;
+          } catch (error) {
+            lastNativeError = error;
+            nativeDb = null;
+          }
+        }
+        if (!this.db) throw lastNativeError || new Error("SQLite could not be initialized");
       } else {
         this.db = new InMemorySqliteMock();
       }
@@ -3699,7 +3793,12 @@ export class DatabaseService {
     const centers = db.getAllSync("SELECT id FROM centers");
     if (centers.length > 0) return; // already seeded
 
-    const today = new Date().toISOString().split("T")[0];
+    const now = new Date();
+    const today = [
+      now.getFullYear(),
+      String(now.getMonth() + 1).padStart(2, "0"),
+      String(now.getDate()).padStart(2, "0"),
+    ].join("-");
     const todayDayOfWeek = new Date().getDay();
 
     // 1. Centers

@@ -35,6 +35,15 @@
       "expo-secure-store",
       "expo-background-task",
       [
+        "expo-splash-screen",
+        {
+          "backgroundColor": "#F8FBFF",
+          "image": "./assets/images/fixion-wordmark.png",
+          "imageWidth": 300,
+          "resizeMode": "contain"
+        }
+      ],
+      [
         "expo-camera",
         {
           "cameraPermission": "السماح بالوصول للكاميرا لمسح كروت الطلاب"

@@ -94,9 +94,18 @@ export class GroupScheduleRepository {
       throw new ValidationError("المجموعة غير موجودة أو غير مفعلة.");
     }
 
-    // Validation: Check for overlapping schedules on the same day for this group
-    const existing = this.getSchedulesForGroup(dto.groupId).filter(
-      (s) => s.dayOfWeek === dto.dayOfWeek,
+    // A teacher cannot teach two groups during overlapping time windows on
+    // the same weekday. Checking only the current group allowed conflicts
+    // between different groups of the same teacher.
+    const db = DatabaseService.getDb();
+    const existing = db.getAllSync<any>(
+      `SELECT gs.id, gs.group_id as groupId, gs.start_time as startTime,
+              gs.end_time as endTime, g.name as groupName
+       FROM group_schedules gs
+       JOIN groups g ON g.center_id = gs.center_id AND g.id = gs.group_id
+       WHERE gs.center_id = ? AND gs.day_of_week = ? AND gs.status = 'active'
+         AND g.teacher_id = ?`,
+      [centerId, dto.dayOfWeek, group.teacherId],
     );
 
     for (const s of existing) {
@@ -108,7 +117,6 @@ export class GroupScheduleRepository {
       }
     }
 
-    const db = DatabaseService.getDb();
     const scheduleId = `sched-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
     const now = new Date().toISOString();
 
@@ -227,11 +235,22 @@ export class GroupScheduleRepository {
     const { centerId, user } = this.getActiveContext();
     if (!PermissionService.hasPermission(user.permissions, "groups.update")) throw new ForbiddenError("ليس لديك صلاحية إعادة تفعيل الموعد.");
     const db = DatabaseService.getDb();
-    const existing = db.getFirstSync<GroupSchedule>("SELECT id, group_id as groupId FROM group_schedules WHERE center_id=? AND id=?", [centerId, scheduleId]);
+    const existing = db.getFirstSync<any>("SELECT id, group_id as groupId, day_of_week as dayOfWeek, start_time as startTime, end_time as endTime FROM group_schedules WHERE center_id=? AND id=?", [centerId, scheduleId]);
+    const group = existing ? GroupRepository.findById(existing.groupId) : null;
+    if (group) {
+      const overlap = db.getFirstSync<any>(
+        `SELECT gs.start_time as startTime, gs.end_time as endTime, g.name as groupName
+         FROM group_schedules gs JOIN groups g ON g.center_id=gs.center_id AND g.id=gs.group_id
+         WHERE gs.center_id=? AND gs.id<>? AND gs.day_of_week=? AND gs.status='active'
+           AND g.teacher_id=? AND NOT (? <= gs.start_time OR ? >= gs.end_time) LIMIT 1`,
+        [centerId, scheduleId, existing.dayOfWeek, group.teacherId, existing.endTime, existing.startTime],
+      );
+      if (overlap) throw new ConflictError(`ØªØ¹Ø§Ø±Ø¶ Ù…ÙˆØ§Ø¹ÙŠØ¯ Ø§Ù„Ù…Ø¯Ø±Ø³ Ù…Ø¹ ${overlap.groupName || "Ù…Ø¬Ù…ÙˆØ¹Ø© Ø£Ø®Ø±Ù‰"}.`);
+    }
     if (!existing) throw new NotFoundError("الموعد غير موجود.");
     const now = new Date().toISOString(); db.runSync("UPDATE group_schedules SET status='active', updated_at=? WHERE center_id=? AND id=?", [now, centerId, scheduleId]);
     const operationId = `op-sched-reactivate-${Date.now()}-${scheduleId}`; const deviceId = DeviceService.getDeviceIdSync();
     AuditService.recordEvent({ operationId, centerId, userId: user.id, deviceId, entityType: "group_schedule", entityId: scheduleId, action: "group_schedule.reactivate", payload: { groupId: existing.groupId } });
-    SyncRepository.enqueueOperation({ operationId, centerId, userId: user.id, deviceId, operationType: "UPDATE", entityType: "group_schedule", entityId: scheduleId, payload: { status: "active", updatedAt: now } });
+    SyncRepository.enqueueOperation({ operationId, centerId, userId: user.id, deviceId, operationType: "UPDATE", entityType: "group_schedule", entityId: scheduleId, payload: { groupId: existing.groupId, dayOfWeek: existing.dayOfWeek, startTime: existing.startTime, endTime: existing.endTime, status: "active", updatedAt: now } });
   }
 }

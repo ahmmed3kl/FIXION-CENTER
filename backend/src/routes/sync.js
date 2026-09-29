@@ -11,6 +11,38 @@ const router = express.Router();
 const { requireService } = require("../middleware/serviceGuard");
 const { getServiceKeyForEntity } = require("../services/serviceCatalog");
 
+function requiredPermission(operation) {
+  const entity = String(operation.entityType || operation.entity_type || "").toLowerCase();
+  const action = String(operation.operationType || operation.operation_type || operation.payload?.action || "").toLowerCase();
+  if (entity.includes("student_card")) return "students.cards.manage";
+  if (entity === "student" || entity.startsWith("student_")) return action.includes("create") ? "students.create" : "students.update";
+  if (entity === "teacher" || entity.startsWith("teacher_")) return action.includes("create") ? "teachers.create" : "teachers.update";
+  if (entity === "subject" || entity.startsWith("subject_")) return action.includes("create") ? "subjects.create" : "subjects.update";
+  if (entity === "group_schedule") return "groups.schedule.manage";
+  if (entity === "group" || entity.startsWith("group_")) return action.includes("create") ? "groups.create" : "groups.update";
+  if (entity === "enrollment" || entity === "student_group_enrollment") return action.includes("create") ? "enrollments.create" : "enrollments.update";
+  if (entity === "session") return String(operation.payload?.action || "").toLowerCase() === "close" ? "sessions.close" : String(operation.payload?.action || "").toLowerCase() === "reopen" ? "sessions.reopen" : "attendance.create";
+  if (entity === "attendance" || entity === "advance_coverage") return "attendance.create";
+  if (entity === "payment_reversal") return "payments.reverse";
+  if (entity === "debt_adjustment") return "payments.adjust";
+  if (entity === "payment" || entity === "debt_cycle") return "payments.create";
+  if (entity === "package_subscription") return "packages.subscribe";
+  if (entity === "package" || entity === "package_subject" || entity === "package_teacher_override") return "packages.manage";
+  if (entity === "grade_exam" || entity === "grade_score") return "grades.manage";
+  if (entity === "notification_template") return "notifications.templates.update";
+  if (entity === "notification_event" || entity === "notification_delivery") return "notifications.send";
+  if (entity === "daily_closing") return action.includes("reopen") ? "daily_closing.reopen" : "daily_closing.close";
+  return null;
+}
+
+function assertSyncPermission(req, operation) {
+  const permission = requiredPermission(operation);
+  if (!permission || req.user.role === "admin" || req.user.role === "owner") return;
+  const permissions = req.user.permissions || {};
+  if (Array.isArray(permissions) ? permissions.includes(permission) : permissions[permission] === true) return;
+  throw new AppError("FORBIDDEN", `Missing required permission: ${permission}`, "Ù„ÙŠØ³ Ù„Ø¯ÙŠÙƒ Ø§Ù„ØµÙ„Ø§Ø­ÙŠØ© Ø§Ù„ÙƒØ§ÙÙŠØ© Ù„Ù…Ø²Ø§Ù…Ù†Ø© Ù‡Ø°Ù‡ Ø§Ù„Ø¹Ù…Ù„ÙŠØ©.", 403);
+}
+
 /**
  * Full snapshot bootstrap for center
  * Supplies all authoritative domain tables directly from PostgreSQL
@@ -183,6 +215,7 @@ router.post("/push", authMiddleware, deviceGuard, async (req, res, next) => {
     }
 
     for (const operation of operations) {
+      assertSyncPermission(req, operation);
       const serviceKey = getServiceKeyForEntity(operation.entityType || operation.entity_type, operation.operationType || operation.operation_type, operation.payload);
       // SMS delivery is deliberately handled as an isolated operation. A
       // disabled/unconfigured SMS service must not block unrelated sync work;

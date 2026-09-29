@@ -12,6 +12,7 @@ import { DatabaseService } from "../database";
 import { DeviceRepository, DeviceService } from "../device";
 import { DatabaseError } from "../errors";
 import { Logger } from "../logger";
+import { getLocalDateOnly } from "../../shared/utils/date";
 
 export type SyncEngineState = "online" | "offline" | "syncing" | "error";
 
@@ -133,16 +134,19 @@ function upsertLocalDebtCycle(db: any, cycle: any, centerId: string): void {
   if (!id) return;
   const cycleCenterId = cycle.center_id || cycle.centerId || centerId;
   const studentId = cycle.student_id || cycle.studentId || "";
-  const enrollmentId = cycle.enrollment_id || cycle.enrollmentId || "";
+  const packageSubscriptionId = cycle.package_subscription_id || cycle.packageSubscriptionId || null;
+  // PostgreSQL package cycles may have a NULL enrollment_id. The local
+  // schema predates package cycles and requires a value, so use the package
+  // subscription as the canonical natural owner instead of an empty string.
+  const enrollmentId = cycle.enrollment_id || cycle.enrollmentId || packageSubscriptionId || "";
   const groupId = cycle.group_id || cycle.groupId || "";
   const cycleNumber = Number(cycle.cycle_number || cycle.cycleNumber || 1);
-  const startDate = cycle.start_date || cycle.period_start || cycle.startDate || new Date().toISOString().slice(0, 10);
+  const startDate = cycle.start_date || cycle.period_start || cycle.startDate || getLocalDateOnly();
   const endDate = cycle.end_date || cycle.period_end || cycle.endDate || startDate;
   const cyclePrice = Number(cycle.cycle_price ?? cycle.amount_due ?? cycle.amountDue ?? cycle.cyclePrice ?? 0);
   const status = cycle.status === "pending" ? "open" : (cycle.status || "open");
   const createdAt = cycle.created_at || cycle.createdAt || new Date().toISOString();
   const updatedAt = cycle.updated_at || cycle.updatedAt || createdAt;
-  const packageSubscriptionId = cycle.package_subscription_id || cycle.packageSubscriptionId || null;
   // PostgreSQL accepts only monthly, per_session, or package. Legacy local
   // rows used "group"; treat those as monthly when repairing/bootstraping.
   const rawCycleType = String(cycle.cycle_type || cycle.cycleType || "monthly")
@@ -162,7 +166,17 @@ function upsertLocalDebtCycle(db: any, cycle: any, centerId: string): void {
         [cycleCenterId, enrollmentId, cycleNumber],
       )
     : null;
-  const targetId = natural?.id || id;
+  // Native SQLite can reject a multi-target UPSERT at finalize time even when
+  // the natural row already exists. Update the canonical row directly in
+  // that case so bootstrap remains idempotent.
+  if (natural?.id) {
+    db.runSync(
+      `UPDATE debt_cycles SET student_id=?, group_id=?, start_date=?, end_date=?, cycle_price=?, status=?, updated_at=?, package_subscription_id=?, cycle_type=? WHERE id=? AND center_id=?`,
+      [studentId, groupId, startDate, endDate, cyclePrice, status, updatedAt, packageSubscriptionId, cycleType, natural.id, cycleCenterId],
+    );
+    return;
+  }
+  const targetId = id;
   db.runSync(
     `INSERT INTO debt_cycles
        (id, center_id, student_id, enrollment_id, group_id, cycle_number,
@@ -194,6 +208,27 @@ function upsertLocalDebtCycle(db: any, cycle: any, centerId: string): void {
     [targetId, cycleCenterId, studentId, enrollmentId, groupId, cycleNumber,
       startDate, endDate, cyclePrice, status, createdAt, updatedAt,
       packageSubscriptionId, cycleType],
+  );
+}
+
+function upsertLocalPackageOverride(db: any, override: any, centerId: string): void {
+  const subscriptionId = override.subscription_id || override.subscriptionId;
+  const subjectId = override.subject_id || override.subjectId;
+  const teacherId = override.teacher_id || override.teacherId;
+  if (!subscriptionId || !subjectId || !teacherId) return;
+  const natural = db.getFirstSync(
+    `SELECT id FROM package_subject_teacher_overrides
+     WHERE center_id = ? AND subscription_id = ? AND subject_id = ?`,
+    [centerId, subscriptionId, subjectId],
+  );
+  const id = natural?.id || override.id || `sel-${subscriptionId}-${subjectId}`;
+  db.runSync(
+    `INSERT INTO package_subject_teacher_overrides
+       (id, center_id, subscription_id, subject_id, teacher_id, group_id, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET teacher_id=excluded.teacher_id,
+       group_id=excluded.group_id`,
+    [id, centerId, subscriptionId, subjectId, teacherId, override.group_id || override.groupId || null, override.created_at || override.createdAt || new Date().toISOString()],
   );
 }
 
@@ -455,6 +490,21 @@ export class SyncRepository {
           [centerId],
         );
     return Number(row?.count || 0) > 0;
+  }
+
+  /** Local operational rows are durable user history, not a disposable cache.
+   * Keep them across a server bootstrap/reset unless the operator explicitly
+   * runs the local reset flow. This prevents an Expo/APK restart from making
+   * the dashboard, attendance, and payments appear empty. */
+  static hasLocalOperationalData(centerId: string): boolean {
+    const db = DatabaseService.getDb();
+    for (const table of ["sessions", "attendance", "payments", "student_group_enrollments"]) {
+      try {
+        const row = db.getFirstSync<{ count: number }>(`SELECT COUNT(*) as count FROM ${table} WHERE center_id = ?`, [centerId]);
+        if (Number(row?.count || 0) > 0) return true;
+      } catch {}
+    }
+    return false;
   }
 
   /**
@@ -983,19 +1033,23 @@ export class SyncRepository {
     sessionDate: string,
   ): void {
     if (!groupId || !scheduleId || !sessionDate) return;
-    const duplicate: { id: string } | null = db.getFirstSync(
+    // A previous bootstrap could have left more than one local row for the
+    // same natural key. Merge every duplicate before the upsert below so one
+    // stale row cannot make the entire bootstrap transaction fail.
+    const duplicates: Array<{ id: string }> = db.getAllSync(
       `SELECT id FROM sessions
        WHERE center_id = ? AND group_id = ? AND schedule_id = ?
-         AND session_date = ? AND id <> ? LIMIT 1`,
+         AND session_date = ? AND id <> ? ORDER BY created_at ASC`,
       [centerId, groupId, scheduleId, sessionDate, sessionId],
     );
-    if (!duplicate?.id) return;
-    for (const table of ["attendance", "payments", "session_expected_students", "session_closing_records"]) {
-      try {
-        db.runSync(`UPDATE ${table} SET session_id = ? WHERE center_id = ? AND session_id = ?`, [sessionId, centerId, duplicate.id]);
-      } catch {}
+    for (const duplicate of duplicates) {
+      for (const table of ["attendance", "payments", "session_expected_students", "session_closing_records"]) {
+        try {
+          db.runSync(`UPDATE ${table} SET session_id = ? WHERE center_id = ? AND session_id = ?`, [sessionId, centerId, duplicate.id]);
+        } catch {}
+      }
+      try { db.runSync(`DELETE FROM sessions WHERE center_id = ? AND id = ?`, [centerId, duplicate.id]); } catch {}
     }
-    try { db.runSync(`DELETE FROM sessions WHERE center_id = ? AND id = ?`, [centerId, duplicate.id]); } catch {}
   }
 
   /** Clears center operational data after an authoritative server reset. */
@@ -1330,10 +1384,8 @@ export class SyncEngine {
         // offline, keep those outbox rows and let the normal push phase upload
         // them after bootstrap. This prevents an Expo restart from silently
         // deleting a just-opened session, attendance, or payment.
-        const preserveLocalWork = SyncRepository.hasUnsyncedOperationsSince(
-          centerId,
-          data.resetAt,
-        );
+        const preserveLocalWork = SyncRepository.hasUnsyncedOperationsSince(centerId, data.resetAt)
+          || SyncRepository.hasLocalOperationalData(centerId);
         if (preserveLocalWork) {
           Logger.warn("sync", "server_reset_deferred_for_local_work", {
             centerId,
@@ -1618,7 +1670,7 @@ export class SyncEngine {
                session_price = excluded.session_price,
                late_after_minutes = excluded.late_after_minutes,
                updated_at = excluded.updated_at
-             ON CONFLICT(group_id, schedule_id, session_date) DO UPDATE SET
+             ON CONFLICT(center_id, group_id, schedule_id, session_date) DO UPDATE SET
                group_id = excluded.group_id,
                session_date = excluded.session_date,
                start_time = excluded.start_time,
@@ -1682,7 +1734,7 @@ export class SyncEngine {
               enr.group_id || enr.groupId,
               enr.start_date ||
                 enr.joined_at ||
-                new Date().toISOString().slice(0, 10),
+                getLocalDateOnly(),
               enr.end_date || enr.ended_at || null,
               enr.status === "withdrawn" ? "ended" : (enr.status || "active"),
               enr.special_monthly_price ?? enr.specialMonthlyPrice ?? enr.price_override ?? enr.priceOverride ?? null,
@@ -1773,10 +1825,7 @@ export class SyncEngine {
       }
       if (Array.isArray(data.packageTeacherOverrides)) {
         for (const o of data.packageTeacherOverrides) {
-          db.runSync(`INSERT INTO package_subject_teacher_overrides (id, center_id, subscription_id, subject_id, teacher_id, group_id, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET teacher_id=excluded.teacher_id, group_id=excluded.group_id`,
-            [o.id, o.center_id || centerId, o.subscription_id || o.subscriptionId, o.subject_id || o.subjectId, o.teacher_id || o.teacherId, o.group_id || o.groupId || null, o.created_at || new Date().toISOString()]);
+          upsertLocalPackageOverride(db, o, o.center_id || centerId);
         }
       }
       if (Array.isArray(data.debtCycles)) {
@@ -1987,7 +2036,7 @@ export class SyncEngine {
               centerId,
               enrollment.student_id || enrollment.studentId,
               enrollment.group_id || enrollment.groupId,
-              enrollment.start_date || enrollment.startDate || enrollment.joined_at || enrollment.joinedAt || new Date().toISOString().slice(0, 10),
+              enrollment.start_date || enrollment.startDate || enrollment.joined_at || enrollment.joinedAt || getLocalDateOnly(),
               enrollment.end_date || enrollment.endDate || enrollment.ended_at || enrollment.endedAt || null,
               enrollment.status === "withdrawn" ? "ended" : (enrollment.status || "active"),
               enrollment.special_monthly_price ?? enrollment.specialMonthlyPrice ?? enrollment.price_override ?? enrollment.priceOverride ?? null,
@@ -2081,7 +2130,7 @@ export class SyncEngine {
                session_price = excluded.session_price,
                late_after_minutes = excluded.late_after_minutes,
                updated_at = excluded.updated_at
-             ON CONFLICT(group_id, schedule_id, session_date) DO UPDATE SET
+             ON CONFLICT(center_id, group_id, schedule_id, session_date) DO UPDATE SET
                start_time = excluded.start_time,
                end_time = excluded.end_time,
                status = excluded.status,
@@ -2315,9 +2364,7 @@ export class SyncEngine {
           const overrideAction = String(change.action || "").toUpperCase();
           const remove = overrideAction === "DELETE" || overrideAction.includes("REMOVE") || o.status === "inactive";
           if (remove) db.runSync(`DELETE FROM package_subject_teacher_overrides WHERE center_id=? AND subscription_id=? AND subject_id=?`, [centerId, o.subscription_id || o.subscriptionId, o.subject_id || o.subjectId]);
-          else db.runSync(`INSERT INTO package_subject_teacher_overrides (id, center_id, subscription_id, subject_id, teacher_id, group_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET teacher_id=excluded.teacher_id, group_id=excluded.group_id`,
-            [o.id || change.entityId, centerId, o.subscription_id || o.subscriptionId, o.subject_id || o.subjectId, o.teacher_id || o.teacherId, o.group_id || o.groupId || null, o.created_at || new Date().toISOString()]);
+          else upsertLocalPackageOverride(db, { ...o, id: o.id || change.entityId }, centerId);
          } else if (entityType === "debt_cycle") {
            const c = data.debtCycle || data;
            upsertLocalDebtCycle(db, { ...c, id: c.id || change.entityId }, centerId);

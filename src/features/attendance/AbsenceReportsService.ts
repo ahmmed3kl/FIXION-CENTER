@@ -63,9 +63,9 @@ export class AbsenceReportsService {
     const dailySessions = new Map<string, Session>();
     for (const session of SessionRepository.getSessionsForMonth(month)) {
       if (session.status === "cancelled") continue;
-      const key = `${session.groupId}:${session.sessionDate}`;
-      // Keep the first canonical session for a group/day. This also prevents
-      // old duplicate rows from producing duplicate absence/SMS reports.
+      const key = `${session.groupId}:${session.scheduleId || "legacy"}:${session.sessionDate}`;
+      // A schedule is part of the session identity. Keep one canonical row
+      // per group/schedule/day while still collapsing exact legacy duplicates.
       if (!dailySessions.has(key)) dailySessions.set(key, session);
     }
     return Array.from(dailySessions.values())

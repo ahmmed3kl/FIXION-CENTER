@@ -13,12 +13,18 @@ import {
   View,
 } from "react-native";
 import { DatabaseService } from "../../core/database";
+import { formatTimeArabic } from "../../core/localization";
 import { PermissionGate } from "../../core/permissions";
 import { Colors, useTheme } from "../../core/theme";
 import { useServiceVisibility } from "../../core/services/ServiceVisibilityContext";
 import { useAuthStore } from "../../features/auth/useAuthStore";
 import { NotificationService } from "../../features/notifications/NotificationService";
 import { NotificationTemplateRepository } from "../../features/notifications/NotificationTemplateRepository";
+import { StudentRepository } from "../../features/students/StudentRepository";
+import { Student, Group } from "../../shared/types";
+import { GroupRepository } from "../../features/groups/GroupRepository";
+import { EnrollmentRepository } from "../../features/enrollments/EnrollmentRepository";
+import { GroupScheduleRepository } from "../../features/groups/GroupScheduleRepository";
 import {
   NotificationDelivery,
   NotificationEvent,
@@ -26,12 +32,23 @@ import {
 } from "../../shared/types";
 import { getLocalDateOnly } from "../../shared/utils/date";
 
+const DAYS_OF_WEEK = ["الأحد", "الإثنين", "الثلاثاء", "الأربعاء", "الخميس", "الجمعة", "السبت"];
+
+function groupScheduleLabel(groupId: string): string {
+  try {
+    const schedules = GroupScheduleRepository.getSchedulesForGroup(groupId);
+    return schedules.slice(0, 2).map((schedule) => `${DAYS_OF_WEEK[schedule.dayOfWeek] || "اليوم"} ${formatTimeArabic(schedule.startTime)} - ${formatTimeArabic(schedule.endTime)}`).join(" · ") || "لم يتم تحديد الموعد";
+  } catch {
+    return "لم يتم تحديد الموعد";
+  }
+}
+
 export default function NotificationsScreen() {
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(), [colors]);
   const services = useServiceVisibility();
   const { currentUser, activeCenterId } = useAuthStore();
-  const [activeTab, setActiveTab] = useState<"history" | "templates">("history");
+  const [activeTab, setActiveTab] = useState<"history" | "templates" | "compose">("history");
 
   const [loading, setLoading] = useState(false);
   const [templates, setTemplates] = useState<NotificationTemplate[]>([]);
@@ -42,6 +59,13 @@ export default function NotificationsScreen() {
   const [statsMonthA, setStatsMonthA] = useState(currentMonth);
   const [statsMonthB, setStatsMonthB] = useState(previousMonth);
   const [messageStats, setMessageStats] = useState<Record<string, { absence: number; grades: number; custom: number; total: number }>>({});
+  const [students, setStudents] = useState<Student[]>([]);
+  const [groups, setGroups] = useState<Group[]>([]);
+  const [smsGroupId, setSmsGroupId] = useState("");
+  const [smsGroupSearch, setSmsGroupSearch] = useState("");
+  const [smsRecipient, setSmsRecipient] = useState<"parent" | "student">("parent");
+  const [smsMessage, setSmsMessage] = useState("");
+  const [sendingSms, setSendingSms] = useState(false);
 
   // Editing template modal state
   const [editingTemplate, setEditingTemplate] = useState<NotificationTemplate | null>(null);
@@ -57,6 +81,8 @@ export default function NotificationsScreen() {
       NotificationTemplateRepository.ensureDefaultTemplates();
       const tmpls = NotificationTemplateRepository.getTemplates();
       setTemplates(tmpls);
+      setStudents(StudentRepository.getAll(false));
+      setGroups(GroupRepository.getAll().filter((group) => group.status === "active"));
 
       // Fetch recent notification events
       const db = DatabaseService.getDb();
@@ -125,6 +151,43 @@ export default function NotificationsScreen() {
     }
   };
 
+  const sendDirectSms = async () => {
+    if (!smsGroupId) return Alert.alert("تنبيه", "اختر المجموعة أولًا.");
+    if (!smsMessage.trim()) return Alert.alert("تنبيه", "اكتب نص الرسالة أولًا.");
+    const enrollments = EnrollmentRepository.getActiveEnrollmentsForGroup(smsGroupId);
+    const targets = enrollments.map((enrollment) => students.find((student) => student.id === enrollment.studentId)).filter(Boolean) as Student[];
+    if (!targets.length) return Alert.alert("لا يوجد طلاب", "لا يوجد طلاب نشطون في هذه المجموعة.");
+    const sendableTargets = targets.filter((target) => (smsRecipient === "student" ? target.phone : (target.parentPhone || target.phone))?.trim());
+    if (!sendableTargets.length) return Alert.alert("لا توجد أرقام", "لا يوجد أي رقم صالح للمستلمين في هذه المجموعة.");
+    setSendingSms(true);
+    try {
+      for (const target of sendableTargets) {
+        const event = NotificationService.notifyCustomSms({ studentId: target.id, message: smsMessage, recipientType: smsRecipient });
+        await NotificationService.sendPendingDeliveries(event.id);
+      }
+      setSmsMessage("");
+      setSmsGroupId("");
+      setSmsGroupSearch("");
+      setActiveTab("history");
+      loadData();
+      Alert.alert("تم تجهيز الرسائل", `تم تجهيز ${sendableTargets.length} رسالة وإضافتها إلى طابور SMS للمزامنة.`);
+    } catch (error: any) {
+      Alert.alert("تعذر إرسال الرسالة", error?.message || "حاول مرة أخرى.");
+    } finally {
+      setSendingSms(false);
+    }
+  };
+
+  const filteredSmsGroups = groups.filter((group) => {
+    const query = smsGroupSearch.trim().toLocaleLowerCase();
+    if (!query) return true;
+    return [group.name, group.subjectName, group.teacherName, group.grade]
+      .filter(Boolean)
+      .some((value) => String(value).toLocaleLowerCase().includes(query));
+  }).slice(0, 30);
+  const selectedSmsGroup = groups.find((group) => group.id === smsGroupId);
+  const smsGroupMemberCount = smsGroupId ? EnrollmentRepository.getActiveEnrollmentsForGroup(smsGroupId).length : 0;
+
   return (
     <View style={styles.container}>
       {/* Header */}
@@ -153,6 +216,12 @@ export default function NotificationsScreen() {
             قوالب الإشعارات
           </Text>
         </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.tabButton, activeTab === "compose" && styles.tabButtonActive]}
+          onPress={() => setActiveTab("compose")}
+        >
+          <Text style={[styles.tabText, activeTab === "compose" && styles.tabTextActive]}>SMS مباشر</Text>
+        </TouchableOpacity>
       </View>
 
       {loading ? (
@@ -160,6 +229,31 @@ export default function NotificationsScreen() {
           <ActivityIndicator size="large" color={Colors.primary} />
           <Text style={styles.loadingText}>جارٍ تحميل البيانات...</Text>
         </View>
+      ) : activeTab === "compose" ? (
+        <ScrollView contentContainerStyle={styles.listContent} keyboardShouldPersistTaps="handled">
+          <View style={styles.composeHero}>
+            <View style={styles.composeIcon}><Ionicons name="chatbubble-ellipses-outline" size={26} color={Colors.primary} /></View>
+            <Text style={styles.composeTitle}>رسالة SMS مخصصة</Text>
+            <Text style={styles.composeHint}>اكتب رسالتك بحرية واختر إرسالها للطالب أو لولي الأمر.</Text>
+          </View>
+          <View style={styles.card}>
+            <Text style={styles.fieldLabel}>المجموعة</Text>
+            <TextInput style={styles.composeInput} value={smsGroupSearch} onChangeText={setSmsGroupSearch} placeholder="ابحث باسم المجموعة أو المادة أو المدرس" placeholderTextColor={Colors.slate400} textAlign="right" />
+            <ScrollView style={styles.studentPicker} nestedScrollEnabled>
+              {filteredSmsGroups.map((group) => <TouchableOpacity key={group.id} style={[styles.studentChoice, smsGroupId === group.id && styles.studentChoiceActive]} onPress={() => { setSmsGroupId(group.id); setSmsGroupSearch(group.name); }}><View style={{ flex: 1 }}><Text style={styles.studentChoiceName}>{group.name}</Text><Text style={styles.studentChoiceMeta}>{[group.subjectName, group.teacherName, group.grade].filter(Boolean).join(" · ")}</Text><Text style={styles.studentChoiceSchedule}>{groupScheduleLabel(group.id)}</Text><Text style={styles.studentChoiceMeta}>{smsGroupId === group.id ? `${smsGroupMemberCount} طالب` : "اضغط للاختيار"}</Text></View><Ionicons name={smsGroupId === group.id ? "checkmark-circle" : "ellipse-outline"} size={20} color={smsGroupId === group.id ? Colors.primary : Colors.slate400} /></TouchableOpacity>)}
+            </ScrollView>
+            {selectedSmsGroup ? <Text style={styles.selectedGroupHint}>تم اختيار {selectedSmsGroup.name} · سيتم الإرسال إلى {smsGroupMemberCount} طالب</Text> : null}
+            <Text style={styles.fieldLabel}>إرسال إلى</Text>
+            <View style={styles.recipientRow}>
+              {(["parent", "student"] as const).map((recipient) => <TouchableOpacity key={recipient} style={[styles.recipientButton, smsRecipient === recipient && styles.recipientButtonActive]} onPress={() => setSmsRecipient(recipient)}><Ionicons name={recipient === "parent" ? "people-outline" : "person-outline"} size={18} color={smsRecipient === recipient ? Colors.primary : Colors.slate500} /><Text style={[styles.recipientTextButton, smsRecipient === recipient && styles.recipientTextButtonActive]}>{recipient === "parent" ? "ولي الأمر" : "الطالب"}</Text></TouchableOpacity>)}
+            </View>
+            <Text style={styles.fieldLabel}>نص الرسالة</Text>
+            <TextInput style={styles.composeTextArea} value={smsMessage} onChangeText={setSmsMessage} placeholder="اكتب رسالة SMS هنا..." placeholderTextColor={Colors.slate400} multiline numberOfLines={6} textAlign="right" textAlignVertical="top" maxLength={480} />
+            <Text style={styles.composeCounter}>{smsMessage.length}/480</Text>
+            <Text style={styles.variablesHint}>يمكنك استخدام: {"{{student_name}}"} · {"{{student_first_name}}"} · {"{{parent_name}}"} · {"{{center_name}}"}</Text>
+            <TouchableOpacity style={styles.sendSmsButton} onPress={sendDirectSms} disabled={sendingSms} activeOpacity={0.8}><Ionicons name="send-outline" size={19} color={Colors.white} /><Text style={styles.sendSmsText}>{sendingSms ? "جاري التجهيز..." : "تجهيز وإرسال SMS"}</Text></TouchableOpacity>
+          </View>
+        </ScrollView>
       ) : activeTab === "history" ? (
         <FlatList
           data={events}
@@ -325,6 +419,29 @@ const createStyles = () => StyleSheet.create({
   tabText: { fontSize: 14, fontWeight: "600", color: Colors.slate500 },
   tabTextActive: { color: Colors.primary },
   listContent: { padding: 16 },
+  composeHero: { backgroundColor: Colors.primaryLight, borderRadius: 18, padding: 18, marginBottom: 12, alignItems: "flex-end", borderWidth: 1, borderColor: Colors.primaryMuted },
+  composeIcon: { width: 48, height: 48, borderRadius: 15, backgroundColor: Colors.white, alignItems: "center", justifyContent: "center", marginBottom: 10 },
+  composeTitle: { color: Colors.slate900, fontSize: 18, fontWeight: "900", textAlign: "right" },
+  composeHint: { color: Colors.slate600, fontSize: 12, textAlign: "right", marginTop: 5, lineHeight: 19 },
+  fieldLabel: { color: Colors.slate800, fontSize: 13, fontWeight: "800", textAlign: "right", marginTop: 4, marginBottom: 7 },
+  composeInput: { height: 46, borderWidth: 1, borderColor: Colors.border, borderRadius: 12, paddingHorizontal: 12, color: Colors.slate900, backgroundColor: Colors.slate50, fontSize: 13 },
+  studentPicker: { maxHeight: 190, marginTop: 7, marginBottom: 10 },
+  studentChoice: { minHeight: 52, flexDirection: "row", alignItems: "center", gap: 10, padding: 10, borderRadius: 12, borderWidth: 1, borderColor: Colors.border, backgroundColor: Colors.white, marginBottom: 6 },
+  studentChoiceActive: { borderColor: Colors.primary, backgroundColor: Colors.primaryLight },
+  studentChoiceName: { color: Colors.slate900, fontSize: 13, fontWeight: "800", textAlign: "right" },
+  studentChoiceMeta: { color: Colors.slate500, fontSize: 11, textAlign: "right", marginTop: 2 },
+  studentChoiceSchedule: { color: Colors.primary, fontSize: 11, fontWeight: "800", textAlign: "right", marginTop: 3 },
+  selectedGroupHint: { color: Colors.primary, backgroundColor: Colors.primaryLight, borderRadius: 10, padding: 9, fontSize: 11, fontWeight: "800", textAlign: "right", marginBottom: 10 },
+  recipientRow: { flexDirection: "row", gap: 8, marginBottom: 12 },
+  recipientButton: { flex: 1, minHeight: 48, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 7, borderWidth: 1, borderColor: Colors.border, borderRadius: 12, backgroundColor: Colors.white },
+  recipientButtonActive: { borderColor: Colors.primary, backgroundColor: Colors.primaryLight },
+  recipientTextButton: { color: Colors.slate600, fontSize: 13, fontWeight: "800" },
+  recipientTextButtonActive: { color: Colors.primary },
+  composeTextArea: { minHeight: 132, borderWidth: 1, borderColor: Colors.border, borderRadius: 12, padding: 12, color: Colors.slate900, backgroundColor: Colors.slate50, fontSize: 14, lineHeight: 21 },
+  composeCounter: { color: Colors.slate400, fontSize: 10, textAlign: "left", marginTop: 4 },
+  variablesHint: { color: Colors.slate500, fontSize: 11, textAlign: "right", lineHeight: 18, marginTop: 10 },
+  sendSmsButton: { minHeight: 50, borderRadius: 13, backgroundColor: Colors.primary, flexDirection: "row-reverse", alignItems: "center", justifyContent: "center", gap: 8, marginTop: 16 },
+  sendSmsText: { color: Colors.white, fontSize: 14, fontWeight: "900" },
   card: {
     backgroundColor: Colors.white,
     borderRadius: 18,

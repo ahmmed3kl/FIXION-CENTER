@@ -15,6 +15,7 @@ import { GroupRepository } from "../groups/GroupRepository";
 import { GroupScheduleRepository } from "../groups/GroupScheduleRepository";
 import { StudentRepository } from "../students/StudentRepository";
 import { AttendanceSessionService } from "../attendance/AttendanceSessionService";
+import { stableSessionId } from "../../shared/utils/stableIds";
 
 /** Parse a DATE at local noon so weekday calculations cannot cross a timezone boundary. */
 function parseLocalDateOnly(dateValue: string): Date {
@@ -94,14 +95,15 @@ export class SessionGenerationService {
         const group = groupsMap.get(sched.groupId);
         if (!group) continue;
 
-        // There is one attendance session per group/day. A schedule is shown
-        // as metadata, but must not cause a second session for the same date.
+        // The schedule is part of the session identity. A group may legally
+        // have two non-overlapping classes on the same day, while running the
+        // same schedule again must always reuse its existing session.
         const existingSession = db.getFirstSync<Session>(
           `SELECT id FROM sessions
-           WHERE center_id = ? AND group_id = ? AND session_date = ?
+           WHERE center_id = ? AND group_id = ? AND schedule_id = ? AND session_date = ?
              AND status <> 'cancelled'
            ORDER BY created_at ASC LIMIT 1`,
-          [centerId, sched.groupId, dateStr],
+          [centerId, sched.groupId, sched.id, dateStr],
         );
 
         if (existingSession) {
@@ -109,7 +111,7 @@ export class SessionGenerationService {
           continue;
         }
 
-        const sessionId = `sess-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+        const sessionId = stableSessionId(centerId, group.id, sched.id, dateStr);
         const now = new Date().toISOString();
 
         // 1. Insert Session with historical snapshot of configuration

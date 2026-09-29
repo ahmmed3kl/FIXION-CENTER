@@ -283,7 +283,7 @@ export class AttendanceRepository {
       if (sessionPrice > 0) {
         const payId = `pay-${generateUUID()}`;
         const payOpId = `op-pay-ext-${generateUUID()}`;
-        const payDate = now.toISOString().slice(0, 10);
+        const payDate = getLocalDateOnly(now);
 
         db.runSync(
           `INSERT INTO payments (id, operation_id, center_id, student_id, session_id, amount, payment_type, payment_method, payment_date, is_reversed, notes, created_at, user_id)

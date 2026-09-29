@@ -2,6 +2,7 @@ import { AuditService } from "../../core/audit";
 import { DatabaseService } from "../../core/database";
 import { DeviceService } from "../../core/device";
 import {
+    ConflictError,
     ForbiddenError,
     NotFoundError,
     UnauthorizedError,
@@ -287,6 +288,19 @@ export class GroupRepository {
     }
 
     const db = DatabaseService.getDb();
+    const scheduleConflict = db.getFirstSync<any>(
+      `SELECT other.name as groupName, gs.start_time as startTime, gs.end_time as endTime
+       FROM group_schedules gs
+       JOIN groups other ON other.center_id=gs.center_id AND other.id=gs.group_id
+       JOIN group_schedules own ON own.center_id=gs.center_id AND own.group_id=?
+         AND own.day_of_week=gs.day_of_week
+       WHERE gs.center_id=? AND gs.group_id<>? AND gs.status='active'
+         AND other.teacher_id=? AND own.status='active'
+         AND NOT (own.end_time <= gs.start_time OR own.start_time >= gs.end_time)
+       LIMIT 1`,
+      [groupId, centerId, groupId, teacherId],
+    );
+    if (scheduleConflict) throw new ConflictError(`Ø§Ù„Ù…Ø¯Ø±Ø³ Ù…Ø´ØºÙˆÙ„ Ù…Ø¹ ${scheduleConflict.groupName || "Ù…Ø¬Ù…ÙˆØ¹Ø© Ø£Ø®Ø±Ù‰"} (${scheduleConflict.startTime} - ${scheduleConflict.endTime}).`);
     const now = new Date().toISOString();
     const name = dto.name !== undefined ? dto.name.trim() : existing.name;
     const grade = dto.grade !== undefined ? dto.grade.trim() : existing.grade;

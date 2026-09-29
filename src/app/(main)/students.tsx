@@ -191,6 +191,7 @@ export default function StudentsScreen() {
 
   // Enrollment Form State
   const [enrollGroupId, setEnrollGroupId] = useState("");
+  const [transferFromEnrollmentId, setTransferFromEnrollmentId] = useState<string | null>(null);
   const [enrollStartDate, setEnrollStartDate] = useState(
     getLocalDateOnly(),
   );
@@ -249,14 +250,14 @@ export default function StudentsScreen() {
     if (selectedOptions.some((option) => !packageTeacherIds[option.id])) return Alert.alert("تنبيه", "اختار مدرس للمادة دي.");
     if (selectedOptions.some((option) => !packageGroupIds[option.id])) return Alert.alert("تنبيه", "اختار مجموعة لكل مدرس في الباقة.");
     try {
-      // Create the selected group enrollments first so package debt-cycle
-      // generation can split the package price across the actual groups.
+      // Create the package first. Package billing is one ledger obligation;
+      // the selected groups are attendance/reporting scopes only.
+      const subscription = await PackageSubscriptionRepository.subscribeStudent({ studentId: selectedStudent.id, packageId, startDate: getLocalDateOnly(), selectedOptionIds: packageOptionIds, selectedTeacherIds: packageTeacherIds, selectedGroupIds: packageGroupIds });
       for (const groupId of selectedOptions.map((option) => packageGroupIds[option.id]).filter(Boolean)) {
         if (!studentEnrollments.some((enrollment) => enrollment.groupId === groupId && enrollment.status === "active")) {
           EnrollmentRepository.enrollStudent({ studentId: selectedStudent.id, groupId, startDate: firstScheduledDate(groupId) });
         }
       }
-      const subscription = await PackageSubscriptionRepository.subscribeStudent({ studentId: selectedStudent.id, packageId, startDate: getLocalDateOnly(), selectedOptionIds: packageOptionIds, selectedTeacherIds: packageTeacherIds, selectedGroupIds: packageGroupIds });
       if (PermissionService.hasPermission(permissions, "packages.manage")) {
         for (const option of selectedOptions) {
           const teacherId = packageTeacherIds[option.id] || option.defaultTeacherId;
@@ -287,6 +288,24 @@ export default function StudentsScreen() {
       if (requested) openStudentDetails(requested);
     }
   }, [activeCenterId, studentId]);
+
+  // Keep the profile payment form aligned with the attendance payment flow:
+  // cycle payments start with the open month/package balance, while a session
+  // payment starts with a per-session amount and remains separate.
+  useEffect(() => {
+    if (!isPaymentModalOpen || !financialStatus) return;
+    if (paymentType !== "session") {
+      const openCycle = financialStatus.cycles
+        .filter((cycle) => (cycle.remainingDebt ?? 0) > 0)
+        .sort((a, b) => {
+          const byStart = String(a.startDate).localeCompare(String(b.startDate));
+          if (byStart !== 0) return byStart;
+          return a.cycleType === "package" ? -1 : b.cycleType === "package" ? 1 : 0;
+        })[0];
+      const balance = openCycle?.remainingDebt ?? financialStatus.monthlyRemainingDebt ?? 0;
+      if (!paymentAmount || Number(paymentAmount) === 0) setPaymentAmount(String(balance));
+    }
+  }, [isPaymentModalOpen, paymentType, financialStatus]);
 
   const openStudentDetails = (student: Student) => {
     if (selectedStudent?.id !== student.id) setProfileTab("groups");
@@ -353,6 +372,7 @@ export default function StudentsScreen() {
       setSelectedStudent(updated);
       setIsStudentEditModalOpen(false);
       loadData();
+      openStudentDetails(updated);
       Alert.alert("تم بنجاح", "تم تحديث بيانات الطالب.");
     } catch (error: any) {
       Alert.alert("تعذر الحفظ", error?.message || "راجع الاسم وأرقام الهاتف.");
@@ -477,11 +497,31 @@ export default function StudentsScreen() {
       return;
     }
     try {
+      // A session payment must stay in the per-session ledger. Monthly and
+      // partial payments belong to the oldest open debt cycle unless the
+      // operator explicitly selected a cycle. This keeps profile payments
+      // consistent with the attendance payment flow and package-as-one-ledger
+      // rule.
+      const cyclePayment = paymentType !== "session";
+      const openCycles = cyclePayment
+        ? (financialStatus?.cycles || [])
+            .filter((cycle) => (cycle.remainingDebt ?? 0) > 0)
+            .sort((a, b) => {
+              const byStart = String(a.startDate).localeCompare(String(b.startDate));
+              if (byStart !== 0) return byStart;
+              if (a.cycleType === b.cycleType) return 0;
+              return a.cycleType === "package" ? -1 : 1;
+            })
+        : [];
+      const selectedCycle = cyclePayment
+        ? (openCycles.find((cycle) => cycle.id === paymentCycleId) || openCycles[0])
+        : undefined;
       await PaymentRepository.recordPayment({
         studentId: selectedStudent.id,
         amount: amountNum,
         paymentType,
-        debtCycleId: paymentCycleId || undefined,
+        debtCycleId: cyclePayment ? selectedCycle?.id : undefined,
+        subscriptionId: cyclePayment ? selectedCycle?.packageSubscriptionId : undefined,
         notes: paymentNotes.trim() || undefined,
       });
       Alert.alert("تم بنجاح", Strings.paymentRecordedSuccess);
@@ -489,6 +529,7 @@ export default function StudentsScreen() {
       setPaymentAmount("");
       setPaymentNotes("");
       setPaymentCycleId("");
+      openStudentDetails(selectedStudent);
       const updatedFin = FinancialCalculationService.getStudentFinancialStatus(
         selectedStudent.id,
       );
@@ -600,21 +641,28 @@ export default function StudentsScreen() {
     }
 
     try {
-      EnrollmentRepository.enrollStudent({
-        studentId: selectedStudent.id,
-        groupId: enrollGroupId,
-        // The subscription starts on the first scheduled class, not on the
-        // day the admin happens to create the enrollment.
-        startDate: enrollStartDate || firstScheduledDate(enrollGroupId),
-        specialMonthlyPrice: enrollSpecialPrice
-          ? parseFloat(enrollSpecialPrice)
-          : undefined,
-      });
+      if (transferFromEnrollmentId) {
+        // Keep the same enrollment identity (and therefore the same debt
+        // cycle) when transferring between groups.
+        EnrollmentRepository.transferEnrollment(transferFromEnrollmentId, enrollGroupId);
+      } else {
+        EnrollmentRepository.enrollStudent({
+          studentId: selectedStudent.id,
+          groupId: enrollGroupId,
+          // The subscription starts on the first scheduled class, not on the
+          // day the admin happens to create the enrollment.
+          startDate: enrollStartDate || firstScheduledDate(enrollGroupId),
+          specialMonthlyPrice: enrollSpecialPrice
+            ? parseFloat(enrollSpecialPrice)
+            : undefined,
+        });
+      }
 
       Alert.alert("تم بنجاح", "تم تسجيل الطالب في المجموعة بنجاح.");
       setIsEnrollModalOpen(false);
       setEnrollGroupId("");
       setEnrollSpecialPrice("");
+      setTransferFromEnrollmentId(null);
       openStudentDetails(selectedStudent);
       loadData();
     } catch (e: any) {
@@ -729,8 +777,19 @@ export default function StudentsScreen() {
     setEnrollGroupSearch("");
     setEnrollStartDate("");
     setEnrollSpecialPrice("");
+    setTransferFromEnrollmentId(null);
     setIsEnrollModalOpen(true);
   };
+
+  const openTransferModal = (enrollmentId: string) => {
+    setEnrollGroupId("");
+    setEnrollGroupSearch("");
+    setEnrollStartDate(getLocalDateOnly());
+    setEnrollSpecialPrice("");
+    setTransferFromEnrollmentId(enrollmentId);
+    setIsEnrollModalOpen(true);
+  };
+
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -869,7 +928,7 @@ export default function StudentsScreen() {
 
               {profileTab === "groups" && <View style={styles.profileSection}>
                 <View style={styles.profileSectionHeader}><View><Text style={styles.profileSectionTitle}>المجموعات</Text><Text style={styles.profileSectionCaption}>{studentEnrollments.length} مجموعة نشطة</Text></View>{canEnroll && <TouchableOpacity style={styles.profileInlineAction} onPress={openEnrollModal}><Ionicons name="add" size={18} color={Colors.primary} /><Text style={styles.profileInlineActionText}>تسجيل</Text></TouchableOpacity>}</View>
-                {studentEnrollments.length === 0 ? <View style={styles.profileEmpty}><Ionicons name="people-outline" size={25} color={Colors.slate400} /><Text style={styles.profileEmptyTitle}>لا توجد مجموعات حالية</Text><Text style={styles.profileEmptyText}>ستظهر هنا المجموعات المسجل بها الطالب.</Text></View> : studentEnrollments.map((enrollment) => { const group = availableGroups.find((item) => item.id === enrollment.groupId); return <View key={enrollment.id} style={styles.profileListRow}><TouchableOpacity style={styles.profileRowMain} onPress={() => group && router.push({ pathname: "/(main)/group-details", params: { groupId: group.id } })}><View style={styles.profileRowIcon}><Ionicons name="people-outline" size={19} color={Colors.primary} /></View><View style={styles.profileRowCopy}><Text style={styles.profileRowTitle}>{enrollment.groupName || group?.name || "مجموعة"}</Text><Text style={styles.profileRowMeta}>{[group?.subjectName, group?.teacherName, group?.grade].filter(Boolean).join(" · ") || selectedStudent.grade}</Text><Text style={styles.profileRowMeta}>{groupScheduleLabel(enrollment.groupId)} · منذ {enrollment.startDate}</Text></View><Ionicons name="chevron-back" size={17} color={Colors.slate500} /></TouchableOpacity><View style={styles.profileRowActions}><TouchableOpacity onPress={() => openGroupPanel(enrollment.groupId, "attendance")}><Text style={styles.profileSmallAction}>الحضور</Text></TouchableOpacity><TouchableOpacity onPress={() => openGroupGrades(enrollment.groupId)}><Text style={styles.profileSmallAction}>الدرجات</Text></TouchableOpacity>{enrollment.status === "active" && PermissionService.hasPermission(permissions, "enrollments.end") && <TouchableOpacity onPress={() => handleEndEnrollment(enrollment.id)}><Text style={styles.profileSmallDanger}>إنهاء</Text></TouchableOpacity>}</View></View>; })}
+                {studentEnrollments.length === 0 ? <View style={styles.profileEmpty}><Ionicons name="people-outline" size={25} color={Colors.slate400} /><Text style={styles.profileEmptyTitle}>لا توجد مجموعات حالية</Text><Text style={styles.profileEmptyText}>ستظهر هنا المجموعات المسجل بها الطالب.</Text></View> : studentEnrollments.map((enrollment) => { const group = availableGroups.find((item) => item.id === enrollment.groupId); return <View key={enrollment.id} style={styles.profileListRow}><TouchableOpacity style={styles.profileRowMain} onPress={() => group && router.push({ pathname: "/(main)/group-details", params: { groupId: group.id } })}><View style={styles.profileRowIcon}><Ionicons name="people-outline" size={19} color={Colors.primary} /></View><View style={styles.profileRowCopy}><Text style={styles.profileRowTitle}>{enrollment.groupName || group?.name || "مجموعة"}</Text><Text style={styles.profileRowMeta}>{[group?.subjectName, group?.teacherName, group?.grade].filter(Boolean).join(" · ") || selectedStudent.grade}</Text><Text style={styles.profileRowMeta}>{groupScheduleLabel(enrollment.groupId)} · منذ {enrollment.startDate}</Text></View><Ionicons name="chevron-back" size={17} color={Colors.slate500} /></TouchableOpacity><View style={styles.profileRowActions}><TouchableOpacity onPress={() => openGroupPanel(enrollment.groupId, "attendance")}><Text style={styles.profileSmallAction}>الحضور</Text></TouchableOpacity><TouchableOpacity onPress={() => openGroupGrades(enrollment.groupId)}><Text style={styles.profileSmallAction}>الدرجات</Text></TouchableOpacity>{enrollment.status === "active" && canEnroll && <TouchableOpacity onPress={() => openTransferModal(enrollment.id)}><Text style={styles.profileSmallAction}>تحويل</Text></TouchableOpacity>}{enrollment.status === "active" && PermissionService.hasPermission(permissions, "enrollments.end") && <TouchableOpacity onPress={() => handleEndEnrollment(enrollment.id)}><Text style={styles.profileSmallDanger}>إنهاء</Text></TouchableOpacity>}</View></View>; })}
               </View>}
 
               {profileTab === "packages" && canViewPackages && <View style={styles.profileSection}>
@@ -1439,7 +1498,7 @@ export default function StudentsScreen() {
         </View></View>
       </Modal>
 
-      <Modal visible={isPackageModalOpen} animationType="slide" transparent>
+      <Modal visible={isPackageModalOpen} animationType="slide" transparent onDismiss={() => { if (selectedStudent) { loadData(); openStudentDetails(selectedStudent); } }}>
         <View style={styles.modalOverlay}><View style={styles.packageModalCard}>
           <Text style={styles.modalTitle}>تحويل الطالب إلى باقة</Text>
           <Text style={styles.fieldNote}>يبدأ الاشتراك من اليوم، ولا يتم حذف التسجيلات أو الدورات السابقة.</Text>
@@ -2584,6 +2643,7 @@ const createStyles = () => StyleSheet.create({
   profileSectionCaption: { color: Colors.slate500, fontSize: 11, marginTop: 2, textAlign: "right" },
   profileInlineAction: { minHeight: 35, flexDirection: "row-reverse", alignItems: "center", gap: 3, paddingHorizontal: 10, borderRadius: 10, backgroundColor: Colors.primaryLight + "45" },
   profileInlineActionText: { color: Colors.primary, fontSize: 11, fontWeight: "800" },
+  profileTransferAction: { flexDirection: "row-reverse", alignItems: "center", alignSelf: "flex-start", gap: 5, marginTop: 10, paddingHorizontal: 12, paddingVertical: 8, borderRadius: 10, backgroundColor: Colors.primaryLight + "45" },
   profileEmpty: { alignItems: "center", justifyContent: "center", paddingVertical: 30, paddingHorizontal: 16, marginTop: 12, borderRadius: 15, backgroundColor: Colors.slate50 },
   profileEmptyTitle: { color: Colors.slate800, fontSize: 13, fontWeight: "800", marginTop: 8 },
   profileEmptyText: { color: Colors.slate500, fontSize: 11, marginTop: 4, textAlign: "center" },

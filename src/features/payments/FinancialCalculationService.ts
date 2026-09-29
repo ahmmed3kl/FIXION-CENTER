@@ -86,7 +86,12 @@ export class FinancialCalculationService {
     );
 
     const payments: PaymentEvent[] = rawPayments.map((p) => {
-      const pType = p.paymentType === "cash" ? "session" : p.paymentType;
+      const storedType = p.paymentType === "cash" ? "session" : p.paymentType;
+      // Older attendance builds could store a cash/session label while also
+      // linking the payment to a debt cycle. The cycle link is authoritative:
+      // such a payment reduces the monthly/package obligation, so expose it
+      // as a partial ledger payment in profile/report views.
+      const pType = p.debtCycleId && storedType === "session" ? "partial" : storedType;
       const pMethod = p.paymentMethod || "cash";
       return {
         id: p.id,
@@ -453,7 +458,11 @@ export class FinancialCalculationService {
       reversals,
       sessionDebt,
       currentPeriodDebt: sessionDebt.currentDebt,
-      creditBalance: full.creditBalance,
+      // A package is intentionally one student-level ledger and must not be
+      // shown as credit inside an unrelated group card. Preserve the global
+      // credit only when this scoped view contains the student's full cycle
+      // set (the usual single-group case).
+      creditBalance: cycles.length === full.cycles.length ? full.creditBalance : 0,
     };
   }
 }

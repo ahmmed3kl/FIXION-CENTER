@@ -7,6 +7,7 @@ import { GroupScheduleRepository } from "../groups/GroupScheduleRepository";
 type PlannedSession = {
   date: string;
   groupId: string;
+  scheduleId?: string;
   price: number;
   sessionId?: string;
   attended: boolean;
@@ -61,21 +62,28 @@ export class SessionDebtService {
       );
       if (!group) continue;
       const schedules = GroupScheduleRepository.getSchedulesForGroup(enrollment.groupId);
-      const dates: string[] = [];
+      const dates: { date: string; scheduleId: string }[] = [];
       for (let cursor = new Date(monthStart); cursor <= monthEnd; cursor = addDays(cursor, 1)) {
         if (cursor < new Date(`${enrollment.startDate}T12:00:00`)) continue;
         if (enrollment.endDate && cursor > new Date(`${enrollment.endDate}T12:00:00`)) continue;
-        if (schedules.some((schedule) => schedule.dayOfWeek === cursor.getDay())) dates.push(isoDate(cursor));
+        for (const schedule of schedules) {
+          if (schedule.dayOfWeek === cursor.getDay()) {
+            dates.push({ date: isoDate(cursor), scheduleId: schedule.id });
+          }
+        }
       }
       // Monthly price is spread over this month's actual scheduled meetings;
       // otherwise the configured session price is used directly.
       const perSessionPrice = Number(group.monthlyPrice || 0) > 0
         ? Number(group.monthlyPrice) / Math.max(1, dates.length)
         : Number(group.sessionPrice || group.defaultFee || 0);
-      for (const date of dates) {
+      for (const slot of dates) {
+        const date = slot.date;
         const session = db.getFirstSync<any>(
-          `SELECT id FROM sessions WHERE center_id = ? AND group_id = ? AND session_date = ? ORDER BY id LIMIT 1`,
-          [activeCenterId, enrollment.groupId, date],
+          `SELECT id FROM sessions
+           WHERE center_id = ? AND group_id = ? AND schedule_id = ? AND session_date = ?
+           ORDER BY id LIMIT 1`,
+          [activeCenterId, enrollment.groupId, slot.scheduleId, date],
         );
         const attendance = session ? db.getFirstSync<any>(
           `SELECT id FROM attendance WHERE center_id = ? AND session_id = ? AND student_id = ? AND status IN ('present','late')`,
@@ -87,7 +95,7 @@ export class SessionDebtService {
              AND debt_cycle_id IS NULL AND is_reversed = 0`,
           [activeCenterId, studentId, session.id],
         )?.amount || 0) : 0;
-        planned.push({ date, groupId: enrollment.groupId, price: Math.max(0, perSessionPrice), sessionId: session?.id, attended: Boolean(attendance), directlyPaid: directPayment });
+        planned.push({ date, groupId: enrollment.groupId, scheduleId: slot.scheduleId, price: Math.max(0, perSessionPrice), sessionId: session?.id, attended: Boolean(attendance), directlyPaid: directPayment });
       }
     }
 

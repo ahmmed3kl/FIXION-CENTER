@@ -18,14 +18,35 @@ export interface DashboardSummary {
 
 /** Dashboard metrics are based on today's timetable and durable history. */
 export class DashboardService {
+  private static lastGoodByCenter = new Map<string, DashboardSummary>();
+
   static getTodaySummary(targetDate?: string): DashboardSummary {
     try {
-      return this.readTodaySummary(targetDate);
+      const summary = this.readTodaySummary(targetDate);
+      const centerId = useAuthStore.getState().activeCenterId;
+      if (centerId) this.lastGoodByCenter.set(centerId, summary);
+      return summary;
     } catch (error: any) {
       const message = String(error?.message || error || "");
       if (message.includes("NativeDatabase.prepareSync") || message.includes("NullPointerException")) {
-        DatabaseService.reinitialize();
-        return this.readTodaySummary(targetDate);
+        try {
+          DatabaseService.reinitialize();
+          const summary = this.readTodaySummary(targetDate);
+          const centerId = useAuthStore.getState().activeCenterId;
+          if (centerId) this.lastGoodByCenter.set(centerId, summary);
+          return summary;
+        } catch (reinitializeError) {
+          // A native bridge restart can take one render tick. Keep the UI
+          // alive and let the existing dashboard refresh timer retry instead
+          // of surfacing a fatal native error during render.
+          console.warn("Dashboard SQLite recovery deferred:", reinitializeError);
+          const centerId = useAuthStore.getState().activeCenterId;
+          const previous = centerId ? this.lastGoodByCenter.get(centerId) : undefined;
+          if (previous) return previous;
+          // Never present a failed database read as a destructive reset. The
+          // caller can show its existing error state and retry the durable DB.
+          throw reinitializeError;
+        }
       }
       throw error;
     }
@@ -38,7 +59,7 @@ export class DashboardService {
     const dateStr = targetDate || getLocalDateOnly();
     const dayOfWeek = new Date(`${dateStr}T12:00:00`).getDay();
     const groups = db.getAllSync<any>(
-      `SELECT DISTINCT g.id, g.subject_id as subjectId, g.teacher_id as teacherId
+      `SELECT DISTINCT g.id, gs.id as scheduleId, g.subject_id as subjectId, g.teacher_id as teacherId
        FROM groups g JOIN group_schedules gs
          ON gs.center_id = g.center_id AND gs.group_id = g.id
        WHERE g.center_id = ? AND g.status = 'active'
@@ -85,6 +106,7 @@ export class DashboardService {
     };
 
     let expectedCount = 0;
+    const countedExpected = new Set<string>();
     let presentCount = 0;
     let lateCount = 0;
     let absentCount = 0;
@@ -96,8 +118,16 @@ export class DashboardService {
       const session = db.getFirstSync<any>(
         `SELECT id, status, subject_id as subjectId, teacher_id as teacherId
          FROM sessions WHERE center_id = ? AND group_id = ? AND session_date = ?
-           AND status <> 'cancelled' ORDER BY created_at ASC LIMIT 1`,
-        [centerId, group.id, dateStr],
+           AND (schedule_id = ? OR (schedule_id IS NULL AND NOT EXISTS (
+             SELECT 1 FROM sessions exact_session
+             WHERE exact_session.center_id = sessions.center_id
+               AND exact_session.group_id = sessions.group_id
+               AND exact_session.session_date = sessions.session_date
+               AND exact_session.schedule_id = ?
+           )))
+           AND status <> 'cancelled'
+         ORDER BY CASE WHEN schedule_id = ? THEN 0 ELSE 1 END, created_at ASC LIMIT 1`,
+        [centerId, group.id, dateStr, group.scheduleId, group.scheduleId, group.scheduleId],
       );
       let expectedIds = session
         ? db.getAllSync<any>(
@@ -106,8 +136,24 @@ export class DashboardService {
             [centerId, session.id],
           ).map((row: any) => String(row.studentId ?? row.student_id)).filter(Boolean)
         : [];
-      if (!expectedIds.length) expectedIds = expectedForGroup(group.id, session?.subjectId || group.subjectId, session?.teacherId || group.teacherId);
-      expectedCount += expectedIds.length;
+      const rosterForDate = expectedForGroup(group.id, session?.subjectId || group.subjectId, session?.teacherId || group.teacherId);
+      if (!expectedIds.length) expectedIds = rosterForDate;
+      // An open session is live operational state. If a student is enrolled
+      // while the session is running, include them immediately so the
+      // dashboard shows the new expected/absent count without a second session.
+      if (session?.status === "open") {
+        expectedIds = Array.from(new Set([...expectedIds, ...rosterForDate]));
+      }
+      // A student enrolled in two timetable slots for the same group is still
+      // one expected student for the dashboard's daily headline. Attendance
+      // details remain counted per concrete session below.
+      for (const studentId of expectedIds) {
+        const key = `${group.id}:${studentId}`;
+        if (!countedExpected.has(key)) {
+          countedExpected.add(key);
+          expectedCount += 1;
+        }
+      }
 
       // Scheduled sessions are timetable rows only. Absence starts when the
       // operator explicitly opens the session; closing it does not erase data.
@@ -135,9 +181,9 @@ export class DashboardService {
 
     const paymentRows = db.getAllSync<any>(
       `SELECT amount FROM payments WHERE center_id = ?
-       AND (payment_date = ? OR (payment_date IS NULL AND created_at LIKE ?))
+       AND (payment_date = ? OR payment_date LIKE ? OR (payment_date IS NULL AND created_at LIKE ?))
        AND (is_reversed = 0 OR is_reversed IS NULL)`,
-      [centerId, dateStr, `${dateStr}%`],
+      [centerId, dateStr, `${dateStr}%`, `${dateStr}%`],
     );
     const todayCollections = paymentRows.reduce((sum: number, row: any) => sum + (Number(row.amount) || 0), 0);
     return { expectedCount, presentCount, lateCount, absentCount, makeupCount, totalSessions: groups.length, openSessions, closedSessions, todayCollections };

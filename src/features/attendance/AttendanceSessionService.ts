@@ -11,6 +11,7 @@ import { SessionRepository } from "../sessions/SessionRepository";
 import { GroupScheduleRepository } from "../groups/GroupScheduleRepository";
 import { AuditService } from "../../core/audit";
 import { calculateSessionAttendanceCounts } from "./AttendanceCalculations";
+import { stableSessionId } from "../../shared/utils/stableIds";
 
 export interface AttendanceSummary {
   total: number;
@@ -188,7 +189,7 @@ export class AttendanceSessionService {
     // A group has one attendance session per calendar day. Reuse the same
     // record so reopening the scanner cannot duplicate attendance or payments.
     const existing = SessionRepository.getSessionsForDate(date)
-      .filter((session) => session.groupId === groupId && session.status !== "cancelled")
+      .filter((session) => session.groupId === groupId && session.status !== "cancelled" && (!scheduleId || session.scheduleId === scheduleId))
       .sort((a, b) => String(a.createdAt || a.id).localeCompare(String(b.createdAt || b.id)))[0];
     if (existing) {
       // A session can have been generated before enrollments were synced (or
@@ -200,17 +201,15 @@ export class AttendanceSessionService {
         // Never add students who enrolled after this session took place. Only
         // hydrate a completely empty legacy snapshot; a non-empty snapshot is
         // authoritative and must not be expanded on every activation.
-        const hasExpected = db.getFirstSync<{ id: string }>(
-          "SELECT id FROM session_expected_students WHERE center_id = ? AND session_id = ? LIMIT 1",
-          [existing.centerId, existing.id],
+        // Keep an open session's roster in sync with active enrollments. This
+        // matters when a student is added while attendance is already running:
+        // the student must immediately become expected/absent instead of only
+        // appearing after a second session is created.
+        const expectedStudentIds = this.getExpectedStudentIdsForGroup(
+          { id: groupId, subjectId: existing.subjectId, teacherId: existing.teacherId } as Group,
+          groupId,
+          existing.sessionDate,
         );
-        const expectedStudentIds = hasExpected
-          ? []
-          : this.getExpectedStudentIdsForGroup(
-              { id: groupId, subjectId: existing.subjectId, teacherId: existing.teacherId } as Group,
-              groupId,
-              existing.sessionDate,
-            );
         const now = new Date().toISOString();
         DatabaseService.runInTransaction(() => {
           for (const studentId of expectedStudentIds) {
@@ -232,7 +231,7 @@ export class AttendanceSessionService {
     );
     if (!schedule) throw new ConflictError("لا يوجد موعد للمجموعة اليوم.");
     const now = new Date().toISOString();
-    const sessionId = `sess-att-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+    const sessionId = stableSessionId(activeCenterId, group.id, schedule.id, date);
     const expectedStudentIds = this.getExpectedStudentIdsForGroup(group, group.id, date);
     const deviceId = DeviceService.getDeviceIdSync();
     const operationId = `op-session-att-${sessionId}`;
@@ -246,7 +245,7 @@ export class AttendanceSessionService {
     } catch (error) {
       if (!String((error as any)?.message || error).toLowerCase().includes("unique")) throw error;
       const racedSession = SessionRepository.getSessionsForDate(date).find(
-        (item) => item.groupId === group.id && item.status !== "cancelled",
+        (item) => item.groupId === group.id && item.status !== "cancelled" && (!scheduleId || item.scheduleId === scheduleId),
       );
       if (racedSession) return racedSession;
       throw error;
@@ -298,17 +297,11 @@ export class AttendanceSessionService {
       // Activation must not mutate the historical roster.  Session generation
       // already captured students valid on session.sessionDate; only hydrate
       // an empty legacy snapshot using that same date.
-      const existingExpected = db.getFirstSync<{ id: string }>(
-        "SELECT id FROM session_expected_students WHERE center_id = ? AND session_id = ? LIMIT 1",
-        [session.centerId, sessionId],
+      const expectedStudentIds = this.getExpectedStudentIdsForGroup(
+        { id: session.groupId, subjectId: session.subjectId, teacherId: session.teacherId } as Group,
+        session.groupId,
+        session.sessionDate,
       );
-      const expectedStudentIds = existingExpected
-        ? []
-        : this.getExpectedStudentIdsForGroup(
-            { id: session.groupId, subjectId: session.subjectId, teacherId: session.teacherId } as Group,
-            session.groupId,
-            session.sessionDate,
-          );
       const now = new Date().toISOString();
       for (const studentId of expectedStudentIds) {
         db.runSync(

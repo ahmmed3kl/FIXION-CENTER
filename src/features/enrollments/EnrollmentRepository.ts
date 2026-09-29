@@ -224,4 +224,37 @@ export class EnrollmentRepository {
       SyncRepository.enqueueOperation({ operationId, centerId, userId: user.id, deviceId, operationType: "UPDATE", entityType: "enrollment", entityId: enrollmentId, payload: { status: "ended", endDate, updatedAt: now } });
     });
   }
+
+  /** Move an active enrollment to another group while preserving its
+   * enrollment/debt-cycle identity. This is used for same-subject/teacher
+   * transfers so a second monthly debt cycle is never opened accidentally. */
+  static transferEnrollment(enrollmentId: string, targetGroupId: string): void {
+    const { centerId, user } = this.getActiveContext();
+    if (!PermissionService.hasPermission(user.permissions, "enrollments.create")) {
+      throw new ForbiddenError("Ù„ÙŠØ³ Ù„Ø¯ÙŠÙƒ ØµÙ„Ø§Ø­ÙŠØ© ØªØ­ÙˆÙŠÙ„ Ø§Ù„Ù…Ø¬Ù…ÙˆØ¹Ø©.");
+    }
+    const db = DatabaseService.getDb();
+    const enrollment = db.getFirstSync<any>(
+      `SELECT id, student_id as studentId, group_id as groupId, start_date as startDate, end_date as endDate, status, special_monthly_price as specialMonthlyPrice FROM student_group_enrollments WHERE center_id = ? AND id = ?`,
+      [centerId, enrollmentId],
+    );
+    const target = GroupRepository.findById(targetGroupId);
+    if (!enrollment || enrollment.status !== "active") throw new NotFoundError("Ø§Ù„Ø§Ø´ØªØ±Ø§Ùƒ ØºÙŠØ± Ù…ÙˆØ¬ÙˆØ¯.");
+    if (!target || target.status !== "active") throw new ValidationError("Ø§Ù„Ù…Ø¬Ù…ÙˆØ¹Ø© Ø§Ù„Ø¬Ø¯ÙŠØ¯Ø© ØºÙŠØ± Ù…ÙˆØ¬ÙˆØ¯Ø©.");
+    if (enrollment.groupId === targetGroupId) throw new ConflictError("Ø§Ù„Ø·Ø§Ù„Ø¨ Ù…Ø³Ø¬Ù„ Ø¨Ø§Ù„ÙØ¹Ù„ ÙÙŠ Ù‡Ø°Ù‡ Ø§Ù„Ù…Ø¬Ù…ÙˆØ¹Ø©.");
+    const duplicate = db.getFirstSync<{ id: string }>(
+      `SELECT id FROM student_group_enrollments WHERE center_id = ? AND student_id = ? AND group_id = ? AND status = 'active'`,
+      [centerId, enrollment.studentId, targetGroupId],
+    );
+    if (duplicate) throw new ConflictError("Ø§Ù„Ø·Ø§Ù„Ø¨ Ù…Ø³Ø¬Ù„ Ø¨Ø§Ù„ÙØ¹Ù„ ÙÙŠ Ø§Ù„Ù…Ø¬Ù…ÙˆØ¹Ø© Ø§Ù„Ø¬Ø¯ÙŠØ¯Ø©.");
+    const now = new Date().toISOString();
+    const operationId = `op-enr-transfer-${Date.now()}-${enrollmentId}`;
+    const deviceId = DeviceService.getDeviceIdSync();
+    DatabaseService.runInTransaction(() => {
+      db.runSync(`UPDATE student_group_enrollments SET group_id = ?, updated_at = ? WHERE center_id = ? AND id = ?`, [targetGroupId, now, centerId, enrollmentId]);
+      db.runSync(`UPDATE debt_cycles SET group_id = ?, updated_at = ? WHERE center_id = ? AND enrollment_id = ?`, [targetGroupId, now, centerId, enrollmentId]);
+      AuditService.recordEvent({ operationId, centerId, userId: user.id, deviceId, entityType: "enrollment", entityId: enrollmentId, action: "enrollment.transfer", payload: { studentId: enrollment.studentId, fromGroupId: enrollment.groupId, toGroupId: targetGroupId } });
+      SyncRepository.enqueueOperation({ operationId, centerId, userId: user.id, deviceId, operationType: "UPDATE", entityType: "enrollment", entityId: enrollmentId, payload: { studentId: enrollment.studentId, groupId: targetGroupId, startDate: enrollment.startDate, endDate: enrollment.endDate || null, status: enrollment.status, specialMonthlyPrice: enrollment.specialMonthlyPrice ?? null, updatedAt: now } });
+    });
+  }
 }

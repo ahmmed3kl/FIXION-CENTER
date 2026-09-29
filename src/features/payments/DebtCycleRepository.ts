@@ -399,7 +399,58 @@ export class DebtCycleRepository {
     }
 
     // Existing cycles for this enrollment
-    const existingCycles = this.getCyclesForEnrollment(enrollmentId);
+    let existingCycles = this.getCyclesForEnrollment(enrollmentId);
+
+    // Package-selected group enrollments are attendance/reporting records,
+    // not a second monthly billing ledger. A package has exactly one debt
+    // cycle for its full price, so suppress group cycles covered by the
+    // active package (including cycles created by older app versions).
+    const packageCoverage = db.getFirstSync<any>(
+      `SELECT sps.id as subscriptionId, sps.start_date as packageStartDate
+       FROM student_package_subscriptions sps
+       JOIN package_subjects ps
+         ON ps.center_id = sps.center_id AND ps.package_id = sps.package_id
+       JOIN groups covered_group
+         ON covered_group.center_id = sps.center_id AND covered_group.id = ?
+       LEFT JOIN package_subject_teacher_overrides selected
+         ON selected.center_id = sps.center_id
+        AND selected.subscription_id = sps.id
+        AND selected.subject_id = ps.subject_id
+       WHERE sps.center_id = ? AND sps.student_id = ? AND sps.status = 'active'
+         AND ps.subject_id = covered_group.subject_id
+         AND (ps.group_id IS NULL OR ps.group_id = covered_group.id)
+         AND COALESCE(selected.teacher_id, ps.default_teacher_id) = covered_group.teacher_id
+         AND (selected.id IS NULL OR selected.group_id IS NULL OR selected.group_id = covered_group.id)
+         AND (selected.id IS NOT NULL OR NOT EXISTS (
+           SELECT 1 FROM package_subject_teacher_overrides any_selection
+           WHERE any_selection.center_id = sps.center_id AND any_selection.subscription_id = sps.id
+         ))
+       ORDER BY sps.start_date DESC LIMIT 1`,
+      [enrollment.groupId, centerId, enrollment.studentId],
+    );
+    if (packageCoverage) {
+      const packageStart = normalizeDateOnly(packageCoverage.packageStartDate) || "";
+      const now = new Date().toISOString();
+      const deviceId = DeviceService.getDeviceIdSync();
+      for (const cycle of existingCycles.filter((item) =>
+        (item.status === "open" || item.status === "partial") &&
+        (!packageStart || (normalizeDateOnly(item.startDate) || "") >= packageStart),
+      )) {
+        const paymentCount = db.getFirstSync<{ count: number }>(
+          `SELECT COUNT(*) as count FROM payments WHERE center_id = ? AND debt_cycle_id = ? AND (is_reversed = 0 OR is_reversed IS NULL)`,
+          [centerId, cycle.id],
+        );
+        if (Number(paymentCount?.count || 0) > 0) continue;
+        db.runSync(`UPDATE debt_cycles SET cycle_price = 0, status = 'cancelled', updated_at = ? WHERE center_id = ? AND id = ?`, [now, centerId, cycle.id]);
+        SyncRepository.enqueueOperation({
+          operationId: `op-dc-package-suppress-${generateUUID()}`,
+          centerId, userId: user.id, deviceId, operationType: "UPDATE", entityType: "debt_cycle", entityId: cycle.id,
+          payload: { ...cycle, cyclePrice: 0, status: "cancelled", updatedAt: now },
+        });
+      }
+      existingCycles = this.getCyclesForEnrollment(enrollmentId);
+      return existingCycles;
+    }
 
     // Cancelled / inactive / ended enrollments cannot generate new cycles
     if (enrollment.status !== "active") {
@@ -590,11 +641,10 @@ export class DebtCycleRepository {
     // Existing cycles for this package subscription
     let existingCycles = this.getCyclesForPackageSubscription(subscriptionId);
 
-    // Cancelled / inactive subscriptions: if ended, cannot generate cycles past effective end date
-    if (
-      subscription.status !== "active" &&
-      (!subscription.endDate || subscription.startDate > subscription.endDate)
-    ) {
+    // Cancelled/inactive subscriptions never create a new billing cycle.
+    // Existing cycles remain readable and payable/reversible according to
+    // their own status, but generation must stop immediately.
+    if (subscription.status !== "active") {
       return existingCycles;
     }
 

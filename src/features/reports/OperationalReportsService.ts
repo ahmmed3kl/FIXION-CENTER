@@ -353,7 +353,8 @@ export class OperationalReportsService {
         [centerId, p.debt_cycle_id],
       );
       const pType = packagePayment ? "package" : (p.payment_type === "cash" ? "session" : p.payment_type);
-      if (pType === "monthly" || pType === "full" || pType === "package") monthlyTotal += amount;
+      if (pType === "package") packageTotal += amount;
+      else if (pType === "monthly" || pType === "full") monthlyTotal += amount;
       else if (pType === "partial") partialTotal += amount;
       else if (pType === "session") {
         const isExternal =
@@ -361,7 +362,7 @@ export class OperationalReportsService {
           (p.session_id && extAttSet.has(`${p.student_id}-${p.session_id}`));
         if (isExternal) externalMakeupTotal += amount;
         else sessionTotal += amount;
-      } else if (pType === "package") packageTotal += amount;
+      }
     }
 
     const totalCash =

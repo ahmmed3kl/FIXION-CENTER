@@ -121,6 +121,7 @@ export default function MainLayout() {
       <Tabs.Screen name="grades" options={{ href: null }} />
       <Tabs.Screen name="center-switch" options={{ href: null }} />
       <Tabs.Screen name="sync-debug" options={{ href: null }} />
+      <Tabs.Screen name="financial-reports" options={{ href: null }} />
     </Tabs>
   );
 }

@@ -314,10 +314,13 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({ vi
       // the start date; StudentRepository's generic groupIds path uses today.
       const student = StudentRepository.createStudent({ studentCode: cardCode.trim(), cardCode: cardCode.trim(), fullName: fullName.trim(), phone: phone.trim(), parentPhone: parentPhone.trim(), grade, notes: notes.trim(), groupIds: packageId ? selectedGroupIds : Array.from(new Set([...selectedGroupIds, ...packageGroups])) });
       if (packageId) {
+        // Create the package ledger before its attendance enrollments. This
+        // prevents each selected package group from opening an extra monthly
+        // debt cycle in addition to the single package cycle.
+        const subscription = await PackageSubscriptionRepository.subscribeStudent({ studentId: student.id, packageId, startDate: getLocalDateOnly(), selectedOptionIds: packageOptionIds, selectedTeacherIds: packageTeacherIds, selectedGroupIds: packageGroupIds });
         for (const groupId of Array.from(new Set(packageGroups))) {
           EnrollmentRepository.enrollStudent({ studentId: student.id, groupId, startDate: firstScheduledDate(groupId) });
         }
-        const subscription = await PackageSubscriptionRepository.subscribeStudent({ studentId: student.id, packageId, startDate: getLocalDateOnly(), selectedOptionIds: packageOptionIds, selectedTeacherIds: packageTeacherIds, selectedGroupIds: packageGroupIds });
         if (currentUser?.permissions?.includes("packages.manage")) {
           for (const option of selectedPackageOptions) {
             const teacherId = packageTeacherIds[option.id];
