@@ -233,6 +233,45 @@ function upsertLocalPackageOverride(db: any, override: any, centerId: string): v
 }
 
 /**
+ * Enrollments are naturally unique by center + student + group on the
+ * server. A reset can return the same row with a different id, so an id-only
+ * pull would create a duplicate local enrollment and break later repairs.
+ */
+function upsertLocalEnrollment(db: any, enrollment: any, centerId: string): void {
+  const studentId = enrollment.student_id || enrollment.studentId;
+  const groupId = enrollment.group_id || enrollment.groupId;
+  if (!studentId || !groupId) return;
+  const natural = db.getFirstSync(
+    `SELECT id FROM student_group_enrollments
+     WHERE center_id = ? AND student_id = ? AND group_id = ?`,
+    [centerId, studentId, groupId],
+  );
+  const id = natural?.id || enrollment.id || enrollment.enrollmentId;
+  if (!id) return;
+  const startDate = enrollment.start_date || enrollment.startDate || enrollment.joined_at || enrollment.joinedAt || getLocalDateOnly();
+  const endDate = enrollment.end_date || enrollment.endDate || enrollment.ended_at || enrollment.endedAt || null;
+  const status = enrollment.status === "withdrawn" ? "ended" : (enrollment.status || "active");
+  const price = enrollment.special_monthly_price ?? enrollment.specialMonthlyPrice ?? enrollment.price_override ?? enrollment.priceOverride ?? null;
+  const createdAt = enrollment.created_at || enrollment.createdAt || new Date().toISOString();
+  const updatedAt = enrollment.updated_at || enrollment.updatedAt || createdAt;
+  if (natural?.id) {
+    db.runSync(
+      `UPDATE student_group_enrollments
+          SET start_date=?, end_date=?, status=?, special_monthly_price=?, updated_at=?
+        WHERE center_id=? AND id=?`,
+      [startDate, endDate, status, price, updatedAt, centerId, natural.id],
+    );
+    return;
+  }
+  db.runSync(
+    `INSERT INTO student_group_enrollments
+       (id, center_id, student_id, group_id, start_date, end_date, status, special_monthly_price, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [id, centerId, studentId, groupId, startDate, endDate, status, price, createdAt, updatedAt],
+  );
+}
+
+/**
  * Sorts the outbox by its normal business priority while also honoring
  * foreign-key dependencies present in the same batch. This keeps the legacy
  * public priority values intact, but prevents payment/debt-cycle and
@@ -637,6 +676,13 @@ export class SyncRepository {
            OR last_error LIKE '%uq_notification_template%'
            OR last_error LIKE '%notification_templates%'
            OR last_error LIKE '%violates check constraint%'
+           OR (
+             entity_type IN ('enrollment', 'student_group_enrollment')
+             AND (
+               last_error LIKE '%uq_center_student_enrollment%'
+               OR last_error LIKE '%duplicate key%'
+             )
+           )
            OR (
              entity_type IN ('attendance', 'makeup')
              AND (last_error LIKE '%session%' OR last_error LIKE '%foreign key%')
@@ -1715,33 +1761,7 @@ export class SyncEngine {
       // Upsert Enrollments
       if (Array.isArray(data.enrollments)) {
         for (const enr of data.enrollments) {
-          db.runSync(
-            `INSERT INTO student_group_enrollments
-               (id, center_id, student_id, group_id, start_date, end_date, status, special_monthly_price, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT(id) DO UPDATE SET
-               student_id = excluded.student_id,
-               group_id = excluded.group_id,
-               start_date = excluded.start_date,
-               end_date = excluded.end_date,
-               status = excluded.status,
-               special_monthly_price = excluded.special_monthly_price,
-               updated_at = excluded.updated_at`,
-            [
-              enr.id,
-              enr.center_id || centerId,
-              enr.student_id || enr.studentId,
-              enr.group_id || enr.groupId,
-              enr.start_date ||
-                enr.joined_at ||
-                getLocalDateOnly(),
-              enr.end_date || enr.ended_at || null,
-              enr.status === "withdrawn" ? "ended" : (enr.status || "active"),
-              enr.special_monthly_price ?? enr.specialMonthlyPrice ?? enr.price_override ?? enr.priceOverride ?? null,
-              enr.created_at || new Date().toISOString(),
-              enr.updated_at || new Date().toISOString(),
-            ],
-          );
+          upsertLocalEnrollment(db, { ...enr, center_id: enr.center_id || centerId }, centerId);
         }
       }
 
@@ -2018,32 +2038,7 @@ export class SyncEngine {
           }
         } else if (entityType === "enrollment" || entityType === "student_group_enrollment") {
           const enrollment = data.enrollment || data;
-          const enrollmentId = enrollment.id || change.entityId;
-          db.runSync(
-            `INSERT INTO student_group_enrollments
-               (id, center_id, student_id, group_id, start_date, end_date, status, special_monthly_price, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT(id) DO UPDATE SET
-               student_id = excluded.student_id,
-               group_id = excluded.group_id,
-               start_date = excluded.start_date,
-               end_date = excluded.end_date,
-               status = excluded.status,
-               special_monthly_price = excluded.special_monthly_price,
-               updated_at = excluded.updated_at`,
-            [
-              enrollmentId,
-              centerId,
-              enrollment.student_id || enrollment.studentId,
-              enrollment.group_id || enrollment.groupId,
-              enrollment.start_date || enrollment.startDate || enrollment.joined_at || enrollment.joinedAt || getLocalDateOnly(),
-              enrollment.end_date || enrollment.endDate || enrollment.ended_at || enrollment.endedAt || null,
-              enrollment.status === "withdrawn" ? "ended" : (enrollment.status || "active"),
-              enrollment.special_monthly_price ?? enrollment.specialMonthlyPrice ?? enrollment.price_override ?? enrollment.priceOverride ?? null,
-              enrollment.created_at || enrollment.createdAt || new Date().toISOString(),
-              enrollment.updated_at || enrollment.updatedAt || new Date().toISOString(),
-            ],
-          );
+          upsertLocalEnrollment(db, { ...enrollment, id: enrollment.id || change.entityId }, centerId);
         } else if (entityType === "teacher_subject" || entityType === "teacher_subject_assigned") {
           const link = data.teacherSubject || data;
           const teacherId = link.teacher_id || link.teacherId;

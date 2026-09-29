@@ -11,6 +11,7 @@ import {
 import { PermissionService } from "../../core/permissions";
 import { SyncRepository } from "../../core/sync";
 import { StudentGroupEnrollment } from "../../shared/types";
+import { getLocalDateOnly } from "../../shared/utils/date";
 import { useAuthStore } from "../auth/useAuthStore";
 import { GroupRepository } from "../groups/GroupRepository";
 import { DebtCycleRepository } from "../payments/DebtCycleRepository";
@@ -242,6 +243,38 @@ export class EnrollmentRepository {
     if (!enrollment || enrollment.status !== "active") throw new NotFoundError("Ø§Ù„Ø§Ø´ØªØ±Ø§Ùƒ ØºÙŠØ± Ù…ÙˆØ¬ÙˆØ¯.");
     if (!target || target.status !== "active") throw new ValidationError("Ø§Ù„Ù…Ø¬Ù…ÙˆØ¹Ø© Ø§Ù„Ø¬Ø¯ÙŠØ¯Ø© ØºÙŠØ± Ù…ÙˆØ¬ÙˆØ¯Ø©.");
     if (enrollment.groupId === targetGroupId) throw new ConflictError("Ø§Ù„Ø·Ø§Ù„Ø¨ Ù…Ø³Ø¬Ù„ Ø¨Ø§Ù„ÙØ¹Ù„ ÙÙŠ Ù‡Ø°Ù‡ Ø§Ù„Ù…Ø¬Ù…ÙˆØ¹Ø©.");
+    // Moving an enrollment keeps its debt-cycle/payment history only when the
+    // instructional owner is unchanged. For a different teacher/subject,
+    // create a fresh enrollment (and therefore a fresh debt stream) instead of
+    // silently assigning the old teacher's balance to the new group.
+    const source = GroupRepository.findById(enrollment.groupId);
+    if (!source || source.teacherId !== target.teacherId || source.subjectId !== target.subjectId) {
+      const schedules = db.getAllSync<{ dayOfWeek: number }>(
+        `SELECT day_of_week as dayOfWeek FROM group_schedules
+         WHERE center_id = ? AND group_id = ? AND status = 'active'`,
+        [centerId, targetGroupId],
+      );
+      const today = new Date();
+      const offsets = schedules
+        .map((schedule) => (schedule.dayOfWeek - today.getDay() + 7) % 7)
+        .filter((offset) => Number.isInteger(offset));
+      const offset = offsets.length ? Math.min(...offsets) : 0;
+      const firstClass = new Date(today.getFullYear(), today.getMonth(), today.getDate() + offset);
+      const replacementStartDate = `${firstClass.getFullYear()}-${String(firstClass.getMonth() + 1).padStart(2, "0")}-${String(firstClass.getDate()).padStart(2, "0")}` || getLocalDateOnly();
+      this.enrollStudent({ studentId: enrollment.studentId, groupId: targetGroupId, startDate: replacementStartDate });
+      const now = new Date().toISOString();
+      const operationId = `op-enr-transfer-end-${Date.now()}-${enrollmentId}`;
+      const deviceId = DeviceService.getDeviceIdSync();
+      DatabaseService.runInTransaction(() => {
+        db.runSync(
+          `UPDATE student_group_enrollments SET status = 'ended', end_date = ?, updated_at = ? WHERE center_id = ? AND id = ?`,
+          [getLocalDateOnly(), now, centerId, enrollmentId],
+        );
+        AuditService.recordEvent({ operationId, centerId, userId: user.id, deviceId, entityType: "enrollment", entityId: enrollmentId, action: "enrollment.transfer_end", payload: { studentId: enrollment.studentId, fromGroupId: enrollment.groupId, toGroupId: targetGroupId } });
+        SyncRepository.enqueueOperation({ operationId, centerId, userId: user.id, deviceId, operationType: "UPDATE", entityType: "enrollment", entityId: enrollmentId, payload: { status: "ended", endDate: getLocalDateOnly(), updatedAt: now } });
+      });
+      return;
+    }
     const duplicate = db.getFirstSync<{ id: string }>(
       `SELECT id FROM student_group_enrollments WHERE center_id = ? AND student_id = ? AND group_id = ? AND status = 'active'`,
       [centerId, enrollment.studentId, targetGroupId],

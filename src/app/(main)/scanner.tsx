@@ -226,6 +226,10 @@ function ScannerContent() {
           try {
             setIsClosingSession(true);
             SessionClosingService.reopenSession(activeSessionId, "استكمال تسجيل الحضور");
+            // Reconcile the same session's expected roster after reopening.
+            // This never creates a new session or clears previous attendance,
+            // but it includes a student added while the session was closed.
+            AttendanceSessionService.activate(activeSessionId);
             setIsSessionClosed(false);
             setAttendanceSummary(AttendanceSessionService.getSummary(activeSessionId));
             refreshTodayData();

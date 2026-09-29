@@ -252,7 +252,11 @@ export default function StudentsScreen() {
     try {
       // Create the package first. Package billing is one ledger obligation;
       // the selected groups are attendance/reporting scopes only.
-      const subscription = await PackageSubscriptionRepository.subscribeStudent({ studentId: selectedStudent.id, packageId, startDate: getLocalDateOnly(), selectedOptionIds: packageOptionIds, selectedTeacherIds: packageTeacherIds, selectedGroupIds: packageGroupIds });
+      const packageStartDate = selectedOptions
+        .map((option) => packageGroupIds[option.id] ? firstScheduledDate(packageGroupIds[option.id]) : null)
+        .filter((value): value is string => Boolean(value))
+        .sort()[0] || getLocalDateOnly();
+      const subscription = await PackageSubscriptionRepository.subscribeStudent({ studentId: selectedStudent.id, packageId, startDate: packageStartDate, selectedOptionIds: packageOptionIds, selectedTeacherIds: packageTeacherIds, selectedGroupIds: packageGroupIds });
       for (const groupId of selectedOptions.map((option) => packageGroupIds[option.id]).filter(Boolean)) {
         if (!studentEnrollments.some((enrollment) => enrollment.groupId === groupId && enrollment.status === "active")) {
           EnrollmentRepository.enrollStudent({ studentId: selectedStudent.id, groupId, startDate: firstScheduledDate(groupId) });

@@ -266,7 +266,9 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({ vi
     for (let offset = 0; offset < 7; offset += 1) {
       const candidate = new Date(start);
       candidate.setDate(start.getDate() + offset);
-      if (groupSchedules.some((item) => item.dayOfWeek === candidate.getDay())) return candidate.toISOString().slice(0, 10);
+      if (groupSchedules.some((item) => item.dayOfWeek === candidate.getDay())) {
+        return `${candidate.getFullYear()}-${String(candidate.getMonth() + 1).padStart(2, "0")}-${String(candidate.getDate()).padStart(2, "0")}`;
+      }
     }
     return getLocalDateOnly();
   };
@@ -317,7 +319,8 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({ vi
         // Create the package ledger before its attendance enrollments. This
         // prevents each selected package group from opening an extra monthly
         // debt cycle in addition to the single package cycle.
-        const subscription = await PackageSubscriptionRepository.subscribeStudent({ studentId: student.id, packageId, startDate: getLocalDateOnly(), selectedOptionIds: packageOptionIds, selectedTeacherIds: packageTeacherIds, selectedGroupIds: packageGroupIds });
+        const packageStartDate = packageGroups.map((groupId) => firstScheduledDate(groupId)).sort()[0] || getLocalDateOnly();
+        const subscription = await PackageSubscriptionRepository.subscribeStudent({ studentId: student.id, packageId, startDate: packageStartDate, selectedOptionIds: packageOptionIds, selectedTeacherIds: packageTeacherIds, selectedGroupIds: packageGroupIds });
         for (const groupId of Array.from(new Set(packageGroups))) {
           EnrollmentRepository.enrollStudent({ studentId: student.id, groupId, startDate: firstScheduledDate(groupId) });
         }

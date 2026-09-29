@@ -1008,6 +1008,43 @@ class SyncProcessor {
         const priceOverride = enrollment.price_override ?? enrollment.priceOverride ?? enrollment.specialMonthlyPrice ?? previous?.price_override ?? null;
         const joinedAt = enrollment.start_date || enrollment.startDate || enrollment.joined_at || enrollment.joinedAt || previous?.joined_at || null;
         const endedAt = enrollment.end_date || enrollment.endDate || enrollment.ended_at || enrollment.endedAt || (status === "withdrawn" ? new Date().toISOString() : previous?.ended_at || null);
+
+        // A server-reset repair can carry the same student/group enrollment
+        // under a new local id. PostgreSQL enforces the natural key
+        // (center_id, student_id, group_id), so reconcile that row instead of
+        // turning an otherwise valid repair into a permanent conflict.
+        await client.query(
+          "SELECT pg_advisory_xact_lock(hashtext($1))",
+          [`enrollment:${centerId}:${studentId}:${groupId}`],
+        );
+        const naturalRes = await client.query(
+          `SELECT id FROM student_group_enrollments
+           WHERE center_id = $1 AND student_id = $2 AND group_id = $3
+           LIMIT 1`,
+          [centerId, studentId, groupId],
+        );
+        const naturalId = naturalRes.rows[0]?.id;
+        if (naturalId && naturalId !== enrollmentId) {
+          await client.query(
+            `UPDATE student_group_enrollments
+                SET price_override = $2,
+                    status = $3,
+                    joined_at = COALESCE($4::timestamptz, joined_at),
+                    ended_at = $5,
+                    updated_at = NOW()
+              WHERE center_id = $1 AND id = $6`,
+            [centerId, priceOverride, status, joinedAt, endedAt, naturalId],
+          );
+          // Pull consumers use the payload id when present. Returning the
+          // canonical id prevents another device from creating a duplicate
+          // local enrollment while preserving the original operation id.
+          if (payload.enrollment && typeof payload.enrollment === "object") {
+            payload.enrollment.id = naturalId;
+          } else if (payload && typeof payload === "object") {
+            payload.id = naturalId;
+          }
+          break;
+        }
         await client.query(
           `INSERT INTO student_group_enrollments
            (id, center_id, student_id, group_id, price_override, status, joined_at, ended_at, created_at, updated_at)

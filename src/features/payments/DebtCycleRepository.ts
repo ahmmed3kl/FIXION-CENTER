@@ -9,6 +9,7 @@ import {
 import { PermissionService } from "../../core/permissions";
 import { SyncRepository } from "../../core/sync";
 import { DebtCycle } from "../../shared/types";
+import { getLocalDateOnly } from "../../shared/utils/date";
 import { useAuthStore } from "../auth/useAuthStore";
 
 function generateUUID(): string {
@@ -457,7 +458,7 @@ export class DebtCycleRepository {
       return existingCycles;
     }
 
-    const cutoffDate = normalizeDateOnly(targetDate) || new Date().toISOString().slice(0, 10);
+    const cutoffDate = normalizeDateOnly(targetDate) || getLocalDateOnly();
     const enrollmentStartDate = normalizeDateOnly(enrollment.startDate);
     const enrollmentEndDate = normalizeDateOnly(enrollment.endDate);
     // A malformed legacy enrollment must not crash the student details screen.
@@ -648,7 +649,7 @@ export class DebtCycleRepository {
       return existingCycles;
     }
 
-    const cutoffDate = normalizeDateOnly(targetDate) || new Date().toISOString().slice(0, 10);
+    const cutoffDate = normalizeDateOnly(targetDate) || getLocalDateOnly();
     const subscriptionStartDate = normalizeDateOnly(subscription.startDate);
     const subscriptionEndDate = normalizeDateOnly(subscription.endDate);
     if (!subscriptionStartDate) return existingCycles;
