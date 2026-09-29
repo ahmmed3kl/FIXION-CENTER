@@ -213,6 +213,19 @@ export class EnrollmentRepository {
       throw new NotFoundError("سجل التسجيل غير موجود.");
     }
 
+    // Ending an enrollment must stop its outstanding group debt immediately.
+    // Keep paid cycles and the payment/audit history, but waive open/partial
+    // cycles so the student is not still shown as owing a group they left.
+    const cyclesToCancel = db.getAllSync<any>(
+      `SELECT id, student_id as studentId, enrollment_id as enrollmentId,
+              group_id as groupId, cycle_number as cycleNumber,
+              start_date as startDate, end_date as endDate,
+              cycle_price as cyclePrice, package_subscription_id as packageSubscriptionId,
+              package_id as packageId, cycle_type as cycleType
+       FROM debt_cycles
+       WHERE center_id = ? AND enrollment_id = ? AND status IN ('open', 'partial')`,
+      [centerId, enrollmentId],
+    );
     const now = new Date().toISOString();
     const deviceId = DeviceService.getDeviceIdSync();
     const operationId = `op-enr-end-${Date.now()}-${enrollmentId}`;
@@ -223,6 +236,33 @@ export class EnrollmentRepository {
       );
       AuditService.recordEvent({ operationId, centerId, userId: user.id, deviceId, entityType: "enrollment", entityId: enrollmentId, action: "enrollment.end", payload: { studentId: existing.studentId, groupId: existing.groupId, endDate } });
       SyncRepository.enqueueOperation({ operationId, centerId, userId: user.id, deviceId, operationType: "UPDATE", entityType: "enrollment", entityId: enrollmentId, payload: { status: "ended", endDate, updatedAt: now } });
+      for (const cycle of cyclesToCancel) {
+        const cycleOperationId = `op-dc-cancel-enrollment-${Date.now()}-${cycle.id}`;
+        db.runSync(
+          `UPDATE debt_cycles SET cycle_price = 0, status = 'cancelled', updated_at = ? WHERE center_id = ? AND id = ?`,
+          [now, centerId, cycle.id],
+        );
+        AuditService.recordEvent({
+          operationId: cycleOperationId,
+          centerId,
+          userId: user.id,
+          deviceId,
+          entityType: "debt_cycle",
+          entityId: cycle.id,
+          action: "debt_cycle.cancel_on_enrollment_end",
+          payload: { enrollmentId, groupId: existing.groupId, reason: "enrollment_ended" },
+        });
+        SyncRepository.enqueueOperation({
+          operationId: cycleOperationId,
+          centerId,
+          userId: user.id,
+          deviceId,
+          operationType: "UPDATE",
+          entityType: "debt_cycle",
+          entityId: cycle.id,
+          payload: { ...cycle, cyclePrice: 0, status: "cancelled", updatedAt: now },
+        });
+      }
     });
   }
 

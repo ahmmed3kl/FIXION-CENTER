@@ -113,6 +113,7 @@ export class DashboardService {
     let makeupCount = 0;
     let openSessions = 0;
     let closedSessions = 0;
+    const countedSessionIds = new Set<string>();
 
     for (const group of groups) {
       const session = db.getFirstSync<any>(
@@ -144,6 +145,9 @@ export class DashboardService {
       if (session?.status === "open") {
         expectedIds = Array.from(new Set([...expectedIds, ...rosterForDate]));
       }
+      // Defensive deduplication for legacy databases that may contain the
+      // same expected-student snapshot row more than once.
+      expectedIds = Array.from(new Set(expectedIds));
       // A student enrolled in two timetable slots for the same group is still
       // one expected student for the dashboard's daily headline. Attendance
       // details remain counted per concrete session below.
@@ -158,6 +162,11 @@ export class DashboardService {
       // Scheduled sessions are timetable rows only. Absence starts when the
       // operator explicitly opens the session; closing it does not erase data.
       if (!session || (session.status !== "open" && session.status !== "closed")) continue;
+      // A legacy session may have no schedule_id. The fallback lookup above
+      // can then find that same row for more than one timetable slot; count
+      // the concrete session once so dashboard attendance is never doubled.
+      if (countedSessionIds.has(String(session.id))) continue;
+      countedSessionIds.add(String(session.id));
       if (session.status === "open") openSessions += 1;
       if (session.status === "closed") closedSessions += 1;
       const attendance = db.getAllSync<any>(
