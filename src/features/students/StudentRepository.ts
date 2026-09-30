@@ -241,9 +241,14 @@ export class StudentRepository {
         });
     return filtered.map((row) => {
       const activeCard = StudentCardRepository.getActiveCardByStudentId(row.id);
+      const hasCardHistory = StudentCardRepository.getCardsByStudentId(row.id).length > 0;
       return {
         ...row,
-        cardCode: activeCard?.cardCode ?? row.cardCode,
+        // Never expose the legacy students.card_code value when card history
+        // exists but no card is active; that value may be the old/replaced
+        // card. It remains a fallback only for legacy students without any
+        // student_cards row at all.
+        cardCode: activeCard?.cardCode ?? (hasCardHistory ? "" : row.cardCode),
       };
     });
   }

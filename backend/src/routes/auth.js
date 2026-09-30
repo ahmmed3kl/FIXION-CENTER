@@ -4,6 +4,7 @@ const jwt = require("jsonwebtoken");
 const config = require("../config");
 const db = require("../db");
 const { AppError } = require("../middleware/errorHandler");
+const { authMiddleware } = require("../middleware/auth");
 
 const router = express.Router();
 
@@ -101,12 +102,15 @@ router.post("/login", async (req, res, next) => {
        ORDER BY uc.is_primary DESC, c.name ASC`,
       [user.id],
     );
-    let centerIds = centerMemberships.rows.length > 0
-      ? centerMemberships.rows.map((row) => row.center_id)
-      : [user.center_id];
-    let centers = centerMemberships.rows.length > 0
-      ? centerMemberships.rows.map((row) => ({ id: row.center_id, name: row.name, code: row.code }))
-      : [{ id: user.center_id, name: user.center_name, code: user.center_code }];
+    // The legacy users.center_id is also a valid membership. Older accounts
+    // may have a user_centers row for only some of their centers, which used
+    // to make the primary center disappear from the switcher.
+    const membershipCenters = centerMemberships.rows.map((row) => ({ id: row.center_id, name: row.name, code: row.code }));
+    if (!membershipCenters.some((center) => center.id === user.center_id)) {
+      membershipCenters.unshift({ id: user.center_id, name: user.center_name, code: user.center_code });
+    }
+    let centerIds = membershipCenters.map((center) => center.id);
+    let centers = membershipCenters;
     if (user.role === "admin" || user.role === "owner") {
       const allCenters = await db.query("SELECT id, name, code FROM centers WHERE status = 'active' ORDER BY name ASC");
       centers = allCenters.rows;
@@ -149,6 +153,35 @@ router.post("/login", async (req, res, next) => {
     });
   } catch (err) {
     next(err);
+  }
+});
+
+// Refresh the authenticated user's center memberships without requiring a
+// second password login. This is important when a platform admin assigns a
+// new center while the app still has a valid seven-day session token.
+router.get("/me", authMiddleware, async (req, res, next) => {
+  try {
+    const centersResult = await db.query(
+      "SELECT id, name, code FROM centers WHERE id = ANY($1::text[]) AND status = 'active' ORDER BY name ASC",
+      [req.user.centerIds || []],
+    );
+    const selected = centersResult.rows.find((center) => center.id === req.centerId) || centersResult.rows[0];
+    res.json({
+      user: {
+        id: req.user.id,
+        fullName: req.user.full_name,
+        email: req.user.email,
+        phone: req.user.phone,
+        role: req.user.role,
+        centerId: req.centerId,
+        centerName: selected?.name,
+        centerIds: centersResult.rows.map((center) => center.id),
+        centers: centersResult.rows,
+        permissions: req.user.permissions,
+      },
+    });
+  } catch (error) {
+    next(error);
   }
 });
 

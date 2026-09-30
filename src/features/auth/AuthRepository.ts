@@ -254,6 +254,45 @@ export class AuthRepository {
     return null;
   }
 
+  static async refreshSessionUser(): Promise<User | null> {
+    if (env.enableMockData) return null;
+    try {
+      const response = await ApiClient.getInstance().get<{
+        user: {
+          id: string;
+          fullName: string;
+          email: string;
+          phone: string;
+          role: any;
+          centerId: string;
+          centerIds?: string[];
+          centers?: Center[];
+          permissions?: any;
+        };
+      }>("/auth/me");
+      const data = response.data.user;
+      const user: User = {
+        id: data.id,
+        fullName: data.fullName,
+        email: data.email,
+        phone: data.phone,
+        role: data.role,
+        centerId: data.centerId,
+        centerIds: data.centerIds?.length ? data.centerIds : [data.centerId],
+        permissions: resolveUserPermissions(data),
+      };
+      const db = DatabaseService.getDb();
+      for (const center of data.centers || []) {
+        db.runSync("INSERT OR REPLACE INTO centers (id, name, code) VALUES (?, ?, ?)", [center.id, center.name, center.code]);
+      }
+      await SecureStorageService.setItem("user_session", JSON.stringify(user));
+      return user;
+    } catch {
+      // Offline startup must continue using the cached session and centers.
+      return null;
+    }
+  }
+
   static async logout(): Promise<void> {
     await SecureStorageService.clearSession();
   }

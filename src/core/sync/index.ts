@@ -2005,6 +2005,17 @@ export class SyncEngine {
                 centerId,
               ],
             );
+            // Keep the legacy student column from pointing at a replaced
+            // card. Readers that have not yet migrated to student_cards use
+            // this column, so leaving the old value here makes the old card
+            // appear in lists/search after a remote replacement.
+            if (studentId) {
+              db.runSync(
+                `UPDATE students SET card_code = NULL, updated_at = ?
+                 WHERE id = ? AND center_id = ? AND card_code = ?`,
+                [new Date().toISOString(), studentId, centerId, cardCode],
+              );
+            }
           } else {
             db.runSync(
               `UPDATE student_cards SET status = 'deactivated', deactivated_at = ?
@@ -2052,6 +2063,11 @@ export class SyncEngine {
               ],
             );
             }
+            db.runSync(
+              `UPDATE students SET card_code = ?, updated_at = ?
+               WHERE id = ? AND center_id = ?`,
+              [cardCode, new Date().toISOString(), studentId, centerId],
+            );
           }
         } else if (entityType === "enrollment" || entityType === "student_group_enrollment") {
           const enrollment = data.enrollment || data;

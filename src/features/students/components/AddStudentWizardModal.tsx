@@ -264,10 +264,17 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({ vi
   const firstScheduledDate = (groupId: string) => {
     const start = new Date(`${getLocalDateOnly()}T12:00:00`);
     const groupSchedules = schedules[groupId] || GroupScheduleRepository.getSchedulesForGroup(groupId);
-    for (let offset = 0; offset < 7; offset += 1) {
+    const now = new Date();
+    const currentMinutes = now.getHours() * 60 + now.getMinutes();
+    const parseMinutes = (value: string | undefined) => {
+      const [hours, minutes] = String(value || "00:00").split(":").map(Number);
+      return (Number.isFinite(hours) ? hours : 0) * 60 + (Number.isFinite(minutes) ? minutes : 0);
+    };
+    for (let offset = 0; offset <= 7; offset += 1) {
       const candidate = new Date(start);
       candidate.setDate(start.getDate() + offset);
-      if (groupSchedules.some((item) => item.dayOfWeek === candidate.getDay())) {
+      const daySchedules = groupSchedules.filter((item) => item.dayOfWeek === candidate.getDay());
+      if (daySchedules.length && (offset > 0 || daySchedules.some((item) => currentMinutes < parseMinutes(item.endTime || item.startTime)))) {
         return `${candidate.getFullYear()}-${String(candidate.getMonth() + 1).padStart(2, "0")}-${String(candidate.getDate()).padStart(2, "0")}`;
       }
     }
@@ -296,7 +303,9 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({ vi
   const validateForm = () => {
     const next: FieldErrors = {};
     if (packageId && selectedGroupIds.length) next.package = "Choose either a package or groups, not both.";
-    if (!packageId && selectedGroupIds.length === 0) next.package = "Choose at least one package or group.";
+    // Group/package enrollment is optional. A student may be created first
+    // and enrolled later from the profile once the academic placement is
+    // known; selected groups/packages are still validated when provided.
     const code = cardCode.trim();
     if (!code || !isNumericCode(code)) next.cardCode = !code ? "كود الطالب مطلوب." : ValidationMessages.code;
     if (!isValidName(fullName)) next.fullName = ValidationMessages.name;
@@ -315,7 +324,7 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({ vi
       const packageGroups = packageOptionIds.map((id) => packageGroupIds[id]).filter(Boolean);
       // Package groups are enrolled with their first real scheduled class as
       // the start date; StudentRepository's generic groupIds path uses today.
-      const student = StudentRepository.createStudent({ studentCode: cardCode.trim(), cardCode: cardCode.trim(), fullName: fullName.trim(), phone: phone.trim(), parentPhone: parentPhone.trim(), grade, notes: notes.trim(), groupIds: packageId ? selectedGroupIds : Array.from(new Set([...selectedGroupIds, ...packageGroups])) });
+      const student = StudentRepository.createStudent({ studentCode: cardCode.trim(), cardCode: cardCode.trim(), fullName: fullName.trim(), phone: phone.trim(), parentPhone: parentPhone.trim(), grade, notes: notes.trim(), groupIds: [] });
       if (packageId) {
         // Create the package ledger before its attendance enrollments. This
         // prevents each selected package group from opening an extra monthly
@@ -330,6 +339,10 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({ vi
             const teacherId = packageTeacherIds[option.id];
             if (teacherId && teacherId !== option.defaultTeacherId) await PackageSubscriptionRepository.setTeacherOverride({ subscriptionId: subscription.id, subjectId: option.subjectId, teacherId, groupId: packageGroupIds[option.id] });
           }
+        }
+      } else {
+        for (const groupId of selectedGroupIds) {
+          EnrollmentRepository.enrollStudent({ studentId: student.id, groupId, startDate: firstScheduledDate(groupId) });
         }
       }
       Alert.alert("تمت الإضافة", "تمت إضافة الطالب بنجاح.");

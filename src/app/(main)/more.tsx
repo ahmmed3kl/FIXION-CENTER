@@ -19,6 +19,7 @@ const items = [
   { label: "تقارير الغياب", caption: "تحليل حضور المجموعات", route: "/(main)/absence-reports", icon: "document-text-outline" as const, tint: "#ECFEFF" },
   { label: "التقارير", caption: "ملخصات الأداء والماليات", route: "/(main)/reports", icon: "bar-chart-outline" as const, tint: "#F0FDFA" },
   { label: "التقارير المالية", caption: "مديونية الطلاب حسب المدرس والمجموعة", route: "/(main)/financial-reports", icon: "wallet-outline" as const, tint: "#EFF6FF" },
+  { label: "ترحيل الرصيد الافتتاحي", caption: "بدء النظام ببيانات سنتر قائمة", route: "/(main)/opening-balance", icon: "swap-horizontal-outline" as const, tint: "#F5F3FF" },
 ];
 
 export default function MoreScreen() {

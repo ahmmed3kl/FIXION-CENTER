@@ -95,11 +95,23 @@ function groupScheduleLabel(groupId: string): string {
 }
 
 function firstScheduledDate(groupId: string): string {
-  const today = new Date();
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const schedules = GroupScheduleRepository.getSchedulesForGroup(groupId);
-  const nextDays = schedules.map((schedule) => (schedule.dayOfWeek - today.getDay() + 7) % 7);
-  const offset = nextDays.length ? Math.min(...nextDays) : 0;
-  const date = new Date(today.getFullYear(), today.getMonth(), today.getDate() + offset);
+  const currentMinutes = now.getHours() * 60 + now.getMinutes();
+  const parseMinutes = (value: string | undefined) => {
+    const [hours, minutes] = String(value || "00:00").split(":").map(Number);
+    return (Number.isFinite(hours) ? hours : 0) * 60 + (Number.isFinite(minutes) ? minutes : 0);
+  };
+  let offset = 0;
+  for (; offset <= 7; offset += 1) {
+    const candidateDay = (today.getDay() + offset) % 7;
+    const daySchedules = schedules.filter((schedule) => schedule.dayOfWeek === candidateDay);
+    if (!daySchedules.length) continue;
+    if (offset === 0 && !daySchedules.some((schedule) => currentMinutes < parseMinutes(schedule.endTime || schedule.startTime))) continue;
+    break;
+  }
+  const date = new Date(today.getFullYear(), today.getMonth(), today.getDate() + Math.min(offset, 7));
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 }
 
@@ -659,7 +671,9 @@ export default function StudentsScreen() {
           groupId: enrollGroupId,
           // The subscription starts on the first scheduled class, not on the
           // day the admin happens to create the enrollment.
-          startDate: enrollStartDate || firstScheduledDate(enrollGroupId),
+          startDate: enrollStartDate === getLocalDateOnly()
+            ? firstScheduledDate(enrollGroupId)
+            : (enrollStartDate || firstScheduledDate(enrollGroupId)),
           specialMonthlyPrice: enrollSpecialPrice
             ? parseFloat(enrollSpecialPrice)
             : undefined,

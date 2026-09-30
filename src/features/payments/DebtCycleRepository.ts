@@ -110,6 +110,91 @@ function getCycleStartForNumber(firstStartDate: string, cycleNumber: number): st
 }
 
 export class DebtCycleRepository {
+  /**
+   * Creates the current cycle when a center starts using the app mid-term.
+   *
+   * This is intentionally a normal debt cycle (rather than a mutable balance
+   * column), so all existing calculation, payment, reversal and reporting
+   * code continues to work. The caller can then record any amount already
+   * paid against this cycle as an ordinary payment event.
+   */
+  static async createOpeningCycle(params: {
+    studentId: string;
+    enrollmentId?: string;
+    packageSubscriptionId?: string;
+    packageId?: string;
+    groupId?: string;
+    cycleType: "monthly" | "package" | "per_session";
+    cycleNumber?: number;
+    periodStart: string;
+    periodEnd: string;
+    amountDue: number;
+    notes?: string;
+  }): Promise<DebtCycle> {
+    const { centerId, user } = this.getActiveContext();
+    if (!PermissionService.hasPermission(user.permissions, "payments.adjust")) {
+      throw new ForbiddenError("ليس لديك صلاحية ترحيل الرصيد الافتتاحي.");
+    }
+    const start = normalizeDateOnly(params.periodStart);
+    const end = normalizeDateOnly(params.periodEnd);
+    const amount = Number(params.amountDue);
+    if (!start || !end || end < start) throw new Error("فترة الاشتراك غير صحيحة.");
+    if (!Number.isFinite(amount) || amount < 0) throw new Error("قيمة المديونية غير صحيحة.");
+    if (!params.enrollmentId && !params.packageSubscriptionId) {
+      throw new Error("يجب اختيار اشتراك مجموعة أو اشتراك باقة.");
+    }
+    const db = DatabaseService.getDb();
+    const ownerId = params.enrollmentId || params.packageSubscriptionId!;
+    const cycleNumber = Math.max(1, Number(params.cycleNumber || 1));
+    const duplicate = db.getFirstSync<{ id: string }>(
+      `SELECT id FROM debt_cycles
+       WHERE center_id = ? AND COALESCE(enrollment_id, package_subscription_id) = ? AND cycle_number = ?`,
+      [centerId, ownerId, cycleNumber],
+    );
+    if (duplicate) throw new Error("يوجد رصيد افتتاحي مسجل لهذا الاشتراك بالفعل.");
+
+    const now = new Date().toISOString();
+    const cycleId = `dc-${generateUUID()}`;
+    const operationId = `op-dc-opening-${generateUUID()}`;
+    // SQLite's legacy schema requires enrollment_id. For package cycles the
+    // subscription id is retained locally; the server sync layer already
+    // normalizes this relation to NULL when no matching enrollment exists.
+    const localEnrollmentId = params.enrollmentId || params.packageSubscriptionId!;
+    const cycle: DebtCycle = {
+      id: cycleId,
+      centerId,
+      studentId: params.studentId,
+      enrollmentId: localEnrollmentId,
+      groupId: params.groupId || params.packageId,
+      packageSubscriptionId: params.packageSubscriptionId,
+      packageId: params.packageId,
+      cycleType: params.cycleType,
+      cycleNumber,
+      startDate: start,
+      endDate: end,
+      cyclePrice: amount,
+      status: "open",
+      createdAt: now,
+      updatedAt: now,
+    };
+    db.runSync(
+      `INSERT INTO debt_cycles
+       (id, center_id, student_id, enrollment_id, group_id, cycle_number, start_date, end_date, cycle_price, status, package_subscription_id, package_id, cycle_type, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?)`,
+      [cycleId, centerId, params.studentId, localEnrollmentId, cycle.groupId || null, cycleNumber, start, end, amount, params.packageSubscriptionId || null, params.packageId || null, params.cycleType, now, now],
+    );
+    const deviceId = DeviceService.getDeviceIdSync();
+    SyncRepository.enqueueOperation({
+      centerId, userId: user.id, deviceId, operationType: "debt_cycle.create", entityType: "debt_cycle", entityId: cycleId, operationId,
+      payload: { ...cycle, operationId, notes: params.notes || "opening_balance" },
+    });
+    AuditService.recordEvent({
+      operationId, centerId, userId: user.id, deviceId, entityType: "debt_cycle", entityId: cycleId,
+      action: "debt_cycle.opening_balance", payload: { ...params, cycleId, cycleNumber, periodStart: start, periodEnd: end, amountDue: amount },
+    });
+    return cycle;
+  }
+
   private static getFirstScheduledDate(groupId: string, startDate: string): string {
     const normalizedStartDate = normalizeDateOnly(startDate);
     if (!normalizedStartDate) return "";

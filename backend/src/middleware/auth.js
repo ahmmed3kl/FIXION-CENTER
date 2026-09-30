@@ -90,9 +90,12 @@ async function authMiddleware(req, res, next) {
        WHERE uc.user_id = $1`,
       [user.id],
     );
-    let allowedCenters = memberships.rows.length > 0
-      ? memberships.rows.filter((row) => row.center_status === "active").map((row) => row.center_id)
-      : [user.center_id];
+    const activeMembershipCenterIds = memberships.rows
+      .filter((row) => row.center_status === "active")
+      .map((row) => row.center_id);
+    // Keep the legacy primary center as an allowed center even when older
+    // data has not copied it into user_centers yet.
+    let allowedCenters = Array.from(new Set([user.center_id, ...activeMembershipCenterIds]));
     // Center manager/assistant accounts are single-center identities. Even if
     // stale membership rows or a forged x-center-id header exist, they cannot
     // switch tenant context like a platform/admin account.

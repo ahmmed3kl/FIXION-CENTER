@@ -30,7 +30,9 @@ export class StudentCardRepository {
       `SELECT id, center_id as centerId, student_id as studentId, card_code as cardCode,
               status, issued_at as issuedAt, deactivated_at as deactivatedAt, created_at as createdAt
        FROM student_cards
-       WHERE center_id = ? AND card_code = ? AND status = 'active'`,
+       WHERE center_id = ? AND card_code = ? AND status = 'active'
+       ORDER BY issued_at DESC, created_at DESC
+       LIMIT 1`,
       [centerId, normalizedCardCode],
     );
 
@@ -59,7 +61,9 @@ export class StudentCardRepository {
       `SELECT id, center_id as centerId, student_id as studentId, card_code as cardCode,
               status, issued_at as issuedAt, deactivated_at as deactivatedAt, created_at as createdAt
        FROM student_cards
-       WHERE center_id = ? AND student_id = ? AND status = 'active'`,
+       WHERE center_id = ? AND student_id = ? AND status = 'active'
+       ORDER BY issued_at DESC, created_at DESC
+       LIMIT 1`,
       [centerId, studentId],
     );
 
@@ -112,14 +116,19 @@ export class StudentCardRepository {
     const operationId = `op-card-issue-${Date.now()}-${cardId}`;
     let result!: StudentCard;
     DatabaseService.runInTransaction(() => {
-    // Deactivate any currently active cards for this student
-    const activeCurrent = this.getActiveCardByStudentId(studentId);
-    if (activeCurrent) {
+    // Deactivate every currently active card for this student. This also
+    // repairs legacy/synced databases that accidentally contain more than
+    // one active card, so the newly issued card is the only card shown and
+    // used for scans/search.
+    const activeCards = this.getCardsByStudentId(studentId)
+      .filter((card) => String(card.status).trim().toLowerCase() === "active");
+    const activeCurrent = activeCards[0] || null;
+    activeCards.forEach((card) => {
       db.runSync(
         `UPDATE student_cards SET status = 'inactive', deactivated_at = ? WHERE id = ?`,
-        [now, activeCurrent.id],
+        [now, card.id],
       );
-    }
+    });
 
     db.runSync(
       `INSERT INTO student_cards (id, center_id, student_id, card_code, status, issued_at, created_at)

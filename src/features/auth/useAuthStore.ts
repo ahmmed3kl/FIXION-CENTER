@@ -168,17 +168,19 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         return false;
       }
 
-      const centers = AuthRepository.getCentersForUser(session.user.centerIds);
+      const refreshedUser = await AuthRepository.refreshSessionUser();
+      const effectiveUser = refreshedUser || session.user;
+      const centers = AuthRepository.getCentersForUser(effectiveUser.centerIds);
       const savedCenterId =
         (await SecureStorageService.getItem("active_center_id")) ||
-        session.user.centerId ||
-        session.user.centerIds[0];
+        effectiveUser.centerId ||
+        effectiveUser.centerIds[0];
       let activeCenter =
         centers.find((c) => c.id === savedCenterId) || centers[0] || null;
 
-      const resolvedPermissions = resolveUserPermissions(session.user);
+      const resolvedPermissions = resolveUserPermissions(effectiveUser);
       const normalizedUser = {
-        ...session.user,
+        ...effectiveUser,
         permissions: resolvedPermissions,
       };
 
