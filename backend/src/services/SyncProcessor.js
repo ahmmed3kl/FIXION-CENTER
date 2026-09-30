@@ -709,6 +709,48 @@ class SyncProcessor {
         const sessionId = sessionExists.rows.length ? requestedSessionId : null;
         const paymentType = normalizePaymentType(pay.payment_type || pay.paymentType);
         const paymentDate = normalizeDateOnly(pay.payment_date || pay.paymentDate) || new Date().toISOString().slice(0, 10);
+        // A cancellation may reach the server before a payment that was
+        // collected earlier on another offline device. Keep that historical
+        // payment valid, but reject payments dated after the enrollment ended.
+        if (debtCycleId) {
+          const cycleState = await client.query(
+            `SELECT status, amount_due, enrollment_id, package_subscription_id
+               FROM debt_cycles
+              WHERE center_id = $1 AND id = $2`,
+            [centerId, debtCycleId],
+          );
+          const cycle = cycleState.rows[0];
+          if (cycle?.status === "cancelled") {
+            let boundaryDate = null;
+            if (cycle.enrollment_id) {
+              const enrollmentState = await client.query(
+                `SELECT ended_at::date AS end_date
+                   FROM student_group_enrollments
+                  WHERE center_id = $1 AND id = $2`,
+                [centerId, cycle.enrollment_id],
+              );
+              boundaryDate = enrollmentState.rows[0]?.end_date || null;
+            } else if (cycle.package_subscription_id) {
+              const subscriptionState = await client.query(
+                `SELECT end_date
+                   FROM student_package_subscriptions
+                  WHERE center_id = $1 AND id = $2`,
+                [centerId, cycle.package_subscription_id],
+              );
+              boundaryDate = subscriptionState.rows[0]?.end_date || null;
+            }
+            if (boundaryDate && paymentDate > String(boundaryDate).slice(0, 10)) {
+              throw new Error("PAYMENT_AFTER_ENROLLMENT_END");
+            }
+            await client.query(
+              `UPDATE debt_cycles
+                  SET amount_due = GREATEST(COALESCE(amount_due, 0), $3::numeric),
+                      updated_at = NOW()
+                WHERE center_id = $1 AND id = $2`,
+              [centerId, debtCycleId, Number(pay.amount) || 0],
+            );
+          }
+        }
         // Append-only ledger insert
         await client.query(
           `INSERT INTO payments 
@@ -1438,6 +1480,26 @@ class SyncProcessor {
           cycle.cycle_type || cycle.cycleType,
           Boolean(packageSubscriptionId),
         );
+        const normalizedCycleStatus = normalizeDebtCycleStatus(cycle.status);
+        const requestedCycleAmount = Number(
+          cycle.cycle_price ?? cycle.cyclePrice ?? cycle.amount_due ?? cycle.amountDue ?? 0,
+        );
+        // A cancellation arriving after another offline device's payment must
+        // waive only the unpaid remainder. Never overwrite the cycle amount
+        // with zero when the server already has an immutable payment ledger.
+        const amountForCycle = async (cycleId) => {
+          if (!cycleId || !["cancelled", "waived"].includes(normalizedCycleStatus)) {
+            return requestedCycleAmount;
+          }
+          const paid = await client.query(
+            `SELECT COALESCE(SUM(amount), 0) AS paid
+               FROM payments
+              WHERE center_id = $1 AND debt_cycle_id = $2
+                AND (is_reversed = FALSE OR is_reversed IS NULL)`,
+            [centerId, cycleId],
+          );
+          return Math.max(requestedCycleAmount, Number(paid.rows[0]?.paid || 0));
+        };
         // Reconcile by the business identity as well as the operation id.
         // Devices can generate different UUIDs for the same monthly/package
         // cycle while offline; inserting the second UUID would violate the
@@ -1454,6 +1516,7 @@ class SyncProcessor {
           );
           const naturalId = naturalRes.rows[0]?.id;
           if (naturalId && naturalId !== targetId) {
+            const effectiveAmount = await amountForCycle(naturalId);
             await client.query(
               `UPDATE debt_cycles
                   SET student_id=$2, enrollment_id=$3, group_id=$4,
@@ -1465,12 +1528,13 @@ class SyncProcessor {
               [centerId, studentId, enrollmentId, groupId, packageSubscriptionId, packageId,
                 cycleNumber, cycleType, cycle.start_date || cycle.startDate || cycle.period_start,
                 cycle.end_date || cycle.endDate || cycle.period_end,
-                Number(cycle.cycle_price ?? cycle.cyclePrice ?? cycle.amount_due ?? cycle.amountDue ?? 0),
-                normalizeDebtCycleStatus(cycle.status), cycle.notes || null, naturalId],
+                effectiveAmount,
+                normalizedCycleStatus, cycle.notes || null, naturalId],
             );
             break;
           }
         }
+        const effectiveAmount = await amountForCycle(targetId);
         await client.query(`INSERT INTO debt_cycles
           (id, center_id, student_id, enrollment_id, group_id, package_subscription_id, package_id, cycle_number, cycle_type, period_start, period_end, amount_due, status, notes, created_at, updated_at)
           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,NOW(),NOW())
@@ -1479,7 +1543,7 @@ class SyncProcessor {
             package_id=EXCLUDED.package_id, cycle_number=EXCLUDED.cycle_number, cycle_type=EXCLUDED.cycle_type,
             period_start=EXCLUDED.period_start, period_end=EXCLUDED.period_end, amount_due=EXCLUDED.amount_due,
             status=EXCLUDED.status, notes=EXCLUDED.notes, updated_at=NOW()`,
-          [targetId, centerId, studentId, enrollmentId, groupId, packageSubscriptionId, packageId, cycleNumber, cycleType, cycle.start_date || cycle.startDate || cycle.period_start, cycle.end_date || cycle.endDate || cycle.period_end, Number(cycle.cycle_price ?? cycle.cyclePrice ?? cycle.amount_due ?? cycle.amountDue ?? 0), normalizeDebtCycleStatus(cycle.status), cycle.notes || null]);
+          [targetId, centerId, studentId, enrollmentId, groupId, packageSubscriptionId, packageId, cycleNumber, cycleType, cycle.start_date || cycle.startDate || cycle.period_start, cycle.end_date || cycle.endDate || cycle.period_end, effectiveAmount, normalizedCycleStatus, cycle.notes || null]);
         break;
       }
 

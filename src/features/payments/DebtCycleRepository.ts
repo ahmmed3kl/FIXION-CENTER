@@ -522,16 +522,20 @@ export class DebtCycleRepository {
         (item.status === "open" || item.status === "partial") &&
         (!packageStart || (normalizeDateOnly(item.startDate) || "") >= packageStart),
       )) {
-        const paymentCount = db.getFirstSync<{ count: number }>(
-          `SELECT COUNT(*) as count FROM payments WHERE center_id = ? AND debt_cycle_id = ? AND (is_reversed = 0 OR is_reversed IS NULL)`,
+        const paidSum = db.getFirstSync<{ paid: number }>(
+          `SELECT COALESCE(SUM(amount), 0) as paid FROM payments
+            WHERE center_id = ? AND debt_cycle_id = ?
+              AND (is_reversed = 0 OR is_reversed IS NULL)`,
           [centerId, cycle.id],
         );
-        if (Number(paymentCount?.count || 0) > 0) continue;
-        db.runSync(`UPDATE debt_cycles SET cycle_price = 0, status = 'cancelled', updated_at = ? WHERE center_id = ? AND id = ?`, [now, centerId, cycle.id]);
+        const retainedCyclePrice = Math.max(0, Number(paidSum?.paid || 0));
+        // Package coverage suppresses the duplicate group obligation, but it
+        // must not hide a payment already linked to that legacy cycle.
+        db.runSync(`UPDATE debt_cycles SET cycle_price = ?, status = 'cancelled', updated_at = ? WHERE center_id = ? AND id = ?`, [retainedCyclePrice, now, centerId, cycle.id]);
         SyncRepository.enqueueOperation({
           operationId: `op-dc-package-suppress-${generateUUID()}`,
           centerId, userId: user.id, deviceId, operationType: "UPDATE", entityType: "debt_cycle", entityId: cycle.id,
-          payload: { ...cycle, cyclePrice: 0, status: "cancelled", updatedAt: now },
+          payload: { ...cycle, cyclePrice: retainedCyclePrice, status: "cancelled", updatedAt: now },
         });
       }
       existingCycles = this.getCyclesForEnrollment(enrollmentId);

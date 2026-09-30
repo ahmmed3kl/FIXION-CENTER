@@ -171,15 +171,18 @@ export class FinancialCalculationService {
 
     const enrichedCycles: DebtCycle[] = rawCycles.map((cycle) => {
       // A cancelled cycle is a historical waiver (for example, when an
-      // enrollment is ended). It must not consume carried-forward payments or
-      // be rewritten to "paid" merely because its price was zeroed.
+      // enrollment is ended). It must not create debt, but payments already
+      // linked to it still count in the financial history. Older devices
+      // zeroed cycle_price during cancellation, so derive the retained amount
+      // from the immutable payment ledger instead of hiding that payment.
       if (cycle.status === "cancelled") {
+        const retainedPaid = directPaymentsByCycle.get(cycle.id) || 0;
         return {
           ...cycle,
-          effectivePrice: 0,
-          effectiveDue: 0,
-          paidAmount: 0,
-          totalPaid: 0,
+          effectivePrice: retainedPaid,
+          effectiveDue: retainedPaid,
+          paidAmount: retainedPaid,
+          totalPaid: retainedPaid,
           remainingDebt: 0,
           status: "cancelled",
         };

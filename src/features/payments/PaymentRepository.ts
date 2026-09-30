@@ -190,10 +190,10 @@ export class PaymentRepository {
         params.subscriptionId
           ? `SELECT id FROM debt_cycles
              WHERE center_id = ? AND student_id = ?
-               AND package_subscription_id = ? AND status != 'paid'
+               AND package_subscription_id = ? AND status NOT IN ('paid', 'cancelled')
              ORDER BY start_date ASC`
           : `SELECT id FROM debt_cycles
-             WHERE center_id = ? AND student_id = ? AND status != 'paid'
+             WHERE center_id = ? AND student_id = ? AND status NOT IN ('paid', 'cancelled')
              ORDER BY start_date ASC`,
         params.subscriptionId
           ? [centerId, params.studentId, params.subscriptionId]
@@ -205,13 +205,33 @@ export class PaymentRepository {
     }
 
     if (assignedCycleId) {
-      const cycle = db.getFirstSync<{ id: string; studentId: string }>(
-        `SELECT id, student_id as studentId FROM debt_cycles
+      const cycle = db.getFirstSync<{ id: string; studentId: string; status: string; enrollmentId?: string; packageSubscriptionId?: string }>(
+        `SELECT id, student_id as studentId, status,
+                enrollment_id as enrollmentId,
+                package_subscription_id as packageSubscriptionId
+           FROM debt_cycles
          WHERE center_id = ? AND id = ?`,
         [centerId, assignedCycleId],
       );
       if (!cycle || cycle.studentId !== params.studentId) {
         throw new ValidationError("دورة المديونية لا تخص هذا الطالب.");
+      }
+      if (cycle.status === "cancelled") {
+        let endDate: string | null = null;
+        if (cycle.enrollmentId) {
+          endDate = db.getFirstSync<{ endDate: string | null }>(
+            `SELECT end_date as endDate FROM student_group_enrollments WHERE center_id = ? AND id = ?`,
+            [centerId, cycle.enrollmentId],
+          )?.endDate || null;
+        } else if (cycle.packageSubscriptionId) {
+          endDate = db.getFirstSync<{ endDate: string | null }>(
+            `SELECT end_date as endDate FROM student_package_subscriptions WHERE center_id = ? AND id = ?`,
+            [centerId, cycle.packageSubscriptionId],
+          )?.endDate || null;
+        }
+        if (endDate && paymentDate > endDate.slice(0, 10)) {
+          throw new ValidationError("Ù„Ø§ ÙŠÙ…ÙƒÙ† ØªØ³Ø¬ÙŠÙ„ Ø¯ÙØ¹ Ø¨Ø¹Ø¯ Ø¥Ù†Ù‡Ø§Ø¡ Ø§Ù„Ø§Ø´ØªØ±Ø§Ùƒ.");
+        }
       }
     }
 

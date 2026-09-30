@@ -238,9 +238,19 @@ export class EnrollmentRepository {
       SyncRepository.enqueueOperation({ operationId, centerId, userId: user.id, deviceId, operationType: "UPDATE", entityType: "enrollment", entityId: enrollmentId, payload: { status: "ended", endDate, updatedAt: now } });
       for (const cycle of cyclesToCancel) {
         const cycleOperationId = `op-dc-cancel-enrollment-${Date.now()}-${cycle.id}`;
+        // Waive only the unpaid remainder. Preserve money already collected
+        // on this cycle so a later sync cannot hide it from reports.
+        const paidRow = db.getFirstSync<{ paid: number }>(
+          `SELECT COALESCE(SUM(amount), 0) as paid
+             FROM payments
+            WHERE center_id = ? AND debt_cycle_id = ?
+              AND (is_reversed = 0 OR is_reversed IS NULL)`,
+          [centerId, cycle.id],
+        );
+        const retainedCyclePrice = Math.max(0, Number(paidRow?.paid || 0));
         db.runSync(
-          `UPDATE debt_cycles SET cycle_price = 0, status = 'cancelled', updated_at = ? WHERE center_id = ? AND id = ?`,
-          [now, centerId, cycle.id],
+          `UPDATE debt_cycles SET cycle_price = ?, status = 'cancelled', updated_at = ? WHERE center_id = ? AND id = ?`,
+          [retainedCyclePrice, now, centerId, cycle.id],
         );
         AuditService.recordEvent({
           operationId: cycleOperationId,
@@ -250,7 +260,7 @@ export class EnrollmentRepository {
           entityType: "debt_cycle",
           entityId: cycle.id,
           action: "debt_cycle.cancel_on_enrollment_end",
-          payload: { enrollmentId, groupId: existing.groupId, reason: "enrollment_ended" },
+          payload: { enrollmentId, groupId: existing.groupId, reason: "enrollment_ended", retainedPaidAmount: retainedCyclePrice },
         });
         SyncRepository.enqueueOperation({
           operationId: cycleOperationId,
@@ -260,7 +270,7 @@ export class EnrollmentRepository {
           operationType: "UPDATE",
           entityType: "debt_cycle",
           entityId: cycle.id,
-          payload: { ...cycle, cyclePrice: 0, status: "cancelled", updatedAt: now },
+          payload: { ...cycle, cyclePrice: retainedCyclePrice, status: "cancelled", updatedAt: now },
         });
       }
     });

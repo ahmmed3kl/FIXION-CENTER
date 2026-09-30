@@ -536,6 +536,7 @@ export const MIGRATIONS: Migration[] = [
           subscription_id TEXT NOT NULL,
           subject_id TEXT NOT NULL,
           teacher_id TEXT NOT NULL,
+          group_id TEXT,
           created_at TEXT NOT NULL,
           CONSTRAINT uq_pkg_override UNIQUE (center_id, subscription_id, subject_id)
         );
@@ -3144,6 +3145,7 @@ class InMemorySqliteMock implements SqlDatabase {
           subscriptionId: r.subscription_id,
           subjectId: r.subject_id,
           teacherId: r.teacher_id,
+          groupId: r.group_id ?? null,
           createdAt: r.created_at,
           teacherName: t ? t.name : "",
           // snake_case
@@ -3151,6 +3153,7 @@ class InMemorySqliteMock implements SqlDatabase {
           subscription_id: r.subscription_id,
           subject_id: r.subject_id,
           teacher_id: r.teacher_id,
+          group_id: r.group_id ?? null,
           created_at: r.created_at,
         };
       });
@@ -3753,6 +3756,13 @@ export class DatabaseService {
       "ALTER TABLE group_schedules ADD COLUMN status TEXT NOT NULL DEFAULT 'active';",
       "ALTER TABLE group_schedules ADD COLUMN created_at TEXT;",
       "ALTER TABLE group_schedules ADD COLUMN updated_at TEXT;",
+      // Package subscriptions can select a concrete group per subject/teacher.
+      // This is deliberately defensive (and runs on every startup): some
+      // devices were upgraded from a schema where migration 15 was recorded
+      // even though the ALTER itself did not complete. Without this guard,
+      // dashboard and student queries fail with `selected.group_id` missing.
+      "ALTER TABLE package_subject_teacher_overrides ADD COLUMN group_id TEXT;",
+      "CREATE INDEX IF NOT EXISTS idx_pkg_overrides_group ON package_subject_teacher_overrides(center_id, subscription_id, group_id);",
     ];
     for (const sql of defensiveStatements) {
       try {
