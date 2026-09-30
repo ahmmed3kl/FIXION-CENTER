@@ -4,19 +4,20 @@ import { useCallback, useState } from "react";
 import { Alert, FlatList, Modal, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { ApiClient } from "../../core/api";
-import { PermissionService } from "../../core/permissions";
+import { PermissionService, RolePermissions } from "../../core/permissions";
 import { Colors, Spacing, Typography, useTheme } from "../../core/theme";
 import { useAuthStore } from "../../features/auth/useAuthStore";
 import { AppButton, AppInput, EmptyState, StatusBadge } from "../../shared/components";
 
 type Account = { id: string; fullName: string; email: string; phone?: string | null; role: "manager" | "assistant"; status: string; permissions?: Record<string, boolean> };
-const PERMISSION_OPTIONS = [
+const LEGACY_PERMISSION_OPTIONS = [
   ["students.view", "عرض الطلاب"], ["students.create", "إضافة الطلاب"], ["students.edit", "تعديل الطلاب"],
   ["groups.view", "عرض المجموعات"], ["attendance.view", "عرض الحضور"], ["attendance.create", "تسجيل الحضور"],
   ["payments.view", "عرض المدفوعات"], ["payments.create", "تسجيل المدفوعات"], ["packages.view", "عرض الباقات"],
   ["packages.subscribe", "اشتراكات الباقات"], ["grades.view", "عرض الدرجات"], ["grades.manage", "إدارة الدرجات"],
   ["reports.view", "عرض التقارير"], ["notifications.view", "عرض الإشعارات"], ["notifications.send", "إرسال الإشعارات"],
 ] as const;
+const PERMISSION_OPTIONS = RolePermissions.admin.map((key) => [key, key] as const);
 export default function CenterAccountsScreen() {
   const router = useRouter(); const { colors } = useTheme(); const user = useAuthStore((state) => state.currentUser); const activeCenterId = useAuthStore((state) => state.activeCenterId); const centerContext = activeCenterId || user?.centerId || null; const [accounts, setAccounts] = useState<Account[]>([]); const [error, setError] = useState(""); const [open, setOpen] = useState(false); const [editing, setEditing] = useState<Account | null>(null); const [name, setName] = useState(""); const [email, setEmail] = useState(""); const [password, setPassword] = useState(""); const [role, setRole] = useState<"manager" | "assistant">("manager"); const [selectedPermissions, setSelectedPermissions] = useState<string[]>([]);
   const canManage = PermissionService.hasPermission(user?.permissions || [], "users.manage");

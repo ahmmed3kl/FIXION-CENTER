@@ -10,12 +10,18 @@ router.use(authMiddleware, requirePermission("users.manage"));
 const roles = new Set(["manager", "assistant"]);
 const safeFields = "id,center_id,full_name,email,phone,role,permissions,status,created_at,updated_at";
 const allowedPermissions = new Set([
-  "dashboard.view", "students.view", "students.create", "students.edit", "students.update", "students.delete", "students.restore", "students.profile.view",
+  "dashboard.view", "students.view", "students.create", "students.edit", "students.update", "students.deactivate", "students.delete", "students.restore", "students.profile.view", "students.cards.manage",
+  "teachers.view", "teachers.create", "teachers.update", "teachers.deactivate", "subjects.view", "subjects.create", "subjects.update", "subjects.deactivate", "subjects.teachers.manage",
   "groups.view", "groups.create", "groups.update", "groups.deactivate", "groups.students.view", "groups.schedule.manage",
-  "attendance.view", "attendance.create", "attendance.edit", "attendance.close", "attendance.makeup",
+  "grades.view", "grades.manage", "enrollments.view", "enrollments.create", "enrollments.update", "enrollments.end",
+  "sessions.view", "sessions.generate", "sessions.update", "sessions.cancel", "sessions.close", "sessions.reopen",
+  "attendance.view", "attendance.create", "attendance.edit", "attendance.close", "attendance.makeup", "attendance.external",
   "payments.view", "payments.create", "payments.edit", "payments.debt.view", "payments.reverse", "payments.adjust",
-  "packages.view", "packages.subscribe", "grades.view", "grades.manage", "reports.view", "reports.attendance.view", "reports.financial.view",
-  "notifications.view", "notifications.send", "notifications.templates.view", "notifications.templates.manage", "center.settings.view", "center.settings.manage", "devices.view", "sync.view", "sync.manage", "settings.view", "users.manage",
+  "packages.view", "packages.create", "packages.update", "packages.manage", "packages.subscribe",
+  "reports.view", "reports.attendance.view", "reports.financial.view",
+  "notifications.view", "notifications.send", "notifications.templates.update", "notifications.templates.view", "notifications.templates.manage",
+  "center.settings.view", "center.settings.manage", "devices.view", "sync.view", "sync.manage", "settings.view", "audit.view", "users.view", "users.manage",
+  "daily_closing.view", "daily_closing.close", "daily_closing.reopen",
 ]);
 function passwordValid(value) { return typeof value === "string" && value.length >= 12 && /[A-Za-z]/.test(value) && /\d/.test(value); }
 function safeUser(row) { return { id: row.id, centerId: row.center_id, fullName: row.full_name, email: row.email, phone: row.phone || null, role: row.role, permissions: typeof row.permissions === "string" ? JSON.parse(row.permissions || "[]") : (row.permissions || []), status: row.status, createdAt: row.created_at, updatedAt: row.updated_at }; }

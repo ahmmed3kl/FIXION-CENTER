@@ -129,6 +129,12 @@ export default function StudentsScreen() {
 
   const [students, setStudents] = useState<Student[]>([]);
   const [searchQuery, setSearchQuery] = useState("");
+  const [gradeFilter, setGradeFilter] = useState("");
+  const [filterOpen, setFilterOpen] = useState(false);
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedStudentIds, setSelectedStudentIds] = useState<string[]>([]);
+  const [bulkEnrollModalOpen, setBulkEnrollModalOpen] = useState(false);
+  const [bulkEnrollGroupId, setBulkEnrollGroupId] = useState("");
   const [cardScannerOpen, setCardScannerOpen] = useState(false);
   const [cardCameraPermission, requestCardCameraPermission] = useCameraPermissions();
   const [selectedStudent, setSelectedStudent] = useState<Student | null>(null);
@@ -737,13 +743,17 @@ export default function StudentsScreen() {
     );
   };
 
-  const filteredStudents = smartSearch(students, searchQuery, [
+  const searchedStudents = smartSearch(students, searchQuery, [
     { get: (s) => s.fullName, weight: 1.2 },
     { get: (s) => s.studentCode, weight: 1.1 },
     { get: (s) => s.cardCode, weight: 1.1 },
     { get: (s) => s.phone },
     { get: (s) => s.parentPhone },
   ]);
+  const filteredStudents = gradeFilter
+    ? searchedStudents.filter((student) => student.grade === gradeFilter)
+    : searchedStudents;
+  const gradeOptions = Array.from(new Set(students.map((student) => student.grade).filter(Boolean))).sort();
 
   const canCreate = PermissionService.hasPermission(
     permissions,
@@ -772,6 +782,8 @@ export default function StudentsScreen() {
         .filter(Boolean)
         .some((value) => String(value).toLocaleLowerCase().includes(query));
     });
+  const selectedGrades = new Set(students.filter((student) => selectedStudentIds.includes(student.id)).map((student) => student.grade));
+  const bulkEligibleGroups = eligibleEnrollmentGroups.filter((group) => selectedGrades.size === 0 || (selectedGrades.size === 1 && selectedGrades.has(group.grade)));
   const canDeactivate = PermissionService.hasPermission(
     permissions,
     "students.deactivate",
@@ -793,6 +805,43 @@ export default function StudentsScreen() {
     permissions,
     "payments.adjust",
   );
+
+  const toggleStudentSelection = (studentId: string) => {
+    setSelectedStudentIds((current) => current.includes(studentId)
+      ? current.filter((id) => id !== studentId)
+      : [...current, studentId]);
+  };
+
+  const openBulkEnrollment = () => {
+    if (!selectedStudentIds.length) {
+      Alert.alert("اختيار الطلاب", "حدد طالبًا واحدًا على الأقل أولًا.");
+      return;
+    }
+    setBulkEnrollGroupId("");
+    setBulkEnrollModalOpen(true);
+  };
+
+  const enrollSelectedStudents = () => {
+    if (!bulkEnrollGroupId) {
+      Alert.alert("المجموعة مطلوبة", "اختر المجموعة التي سيُسجّل بها الطلاب.");
+      return;
+    }
+    let completed = 0;
+    let skipped = 0;
+    for (const id of selectedStudentIds) {
+      try {
+        EnrollmentRepository.enrollStudent({ studentId: id, groupId: bulkEnrollGroupId, startDate: firstScheduledDate(bulkEnrollGroupId) });
+        completed += 1;
+      } catch {
+        skipped += 1;
+      }
+    }
+    setBulkEnrollModalOpen(false);
+    setSelectedStudentIds([]);
+    setSelectionMode(false);
+    loadData();
+    Alert.alert("تم التسجيل", `تم تسجيل ${completed} طالب${skipped ? `، وتخطّي ${skipped} (مسجلين بالفعل أو غير متاحين)` : ""}.`);
+  };
 
   const openEnrollModal = () => {
     setEnrollGroupId("");
@@ -828,6 +877,15 @@ export default function StudentsScreen() {
         )}
       </View>
 
+      <View style={styles.headerActions}>
+        <TouchableOpacity style={styles.headerIconButton} onPress={() => setFilterOpen((current) => !current)} accessibilityLabel="فلترة الطلاب">
+          <Ionicons name="filter-outline" size={20} color={Colors.primary} />
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.headerIconButton} onPress={() => { setSelectionMode((current) => !current); setSelectedStudentIds([]); }} accessibilityLabel="تحديد عدة طلاب">
+          <Ionicons name={selectionMode ? "close-outline" : "checkmark-circle-outline"} size={20} color={Colors.primary} />
+        </TouchableOpacity>
+      </View>
+
       <View style={styles.content}>
         <AppInput
           placeholder="ابحث بالاسم، كود الطالب، كود الكارت، أو الهاتف..."
@@ -841,6 +899,13 @@ export default function StudentsScreen() {
           <Text style={styles.cardSearchButtonText}>مسح كارت للبحث</Text>
         </TouchableOpacity>
 
+        {filterOpen && <View style={styles.filterPanel}>
+          <Text style={styles.filterTitle}>السنة الدراسية</Text>
+          <TouchableOpacity style={[styles.filterChip, !gradeFilter && styles.filterChipActive]} onPress={() => setGradeFilter("")}><Text style={[styles.filterChipText, !gradeFilter && styles.filterChipTextActive]}>الكل</Text></TouchableOpacity>
+          {gradeOptions.map((grade) => <TouchableOpacity key={grade} style={[styles.filterChip, gradeFilter === grade && styles.filterChipActive]} onPress={() => setGradeFilter(grade)}><Text style={[styles.filterChipText, gradeFilter === grade && styles.filterChipTextActive]}>{grade}</Text></TouchableOpacity>)}
+        </View>}
+        {selectionMode && <View style={styles.bulkToolbar}><Text style={styles.bulkCount}>تم تحديد {selectedStudentIds.length}</Text><TouchableOpacity style={styles.bulkButton} onPress={openBulkEnrollment}><Ionicons name="people-outline" size={17} color={Colors.white} /><Text style={styles.bulkButtonText}>تسجيل في مجموعة</Text></TouchableOpacity></View>}
+
         <FlatList
           data={filteredStudents}
           keyExtractor={(item) => item.id}
@@ -850,9 +915,10 @@ export default function StudentsScreen() {
           renderItem={({ item }) => (
             <TouchableOpacity
               activeOpacity={0.75}
-              onPress={() => openStudentDetails(item)}
+              onPress={() => selectionMode ? toggleStudentSelection(item.id) : openStudentDetails(item)}
             >
-              <AppCard style={styles.studentCard}>
+              <AppCard style={[styles.studentCard, selectedStudentIds.includes(item.id) && styles.studentCardSelected]}>
+                {selectionMode && <Ionicons name={selectedStudentIds.includes(item.id) ? "checkmark-circle" : "ellipse-outline"} size={24} color={selectedStudentIds.includes(item.id) ? Colors.primary : Colors.slate400} style={styles.selectionIcon} />}
                 <View style={styles.studentInfo}>
                   <Text style={styles.studentName}>{item.fullName}</Text>
                   <View style={styles.badgeRow}>
@@ -885,6 +951,17 @@ export default function StudentsScreen() {
           )}
         />
       </View>
+
+      <Modal visible={bulkEnrollModalOpen} transparent animationType="slide" onRequestClose={() => setBulkEnrollModalOpen(false)}>
+        <View style={styles.modalOverlay}><View style={styles.smallModalCard}>
+          <View style={styles.modalHeader}><Text style={styles.modalTitle}>تسجيل الطلاب في مجموعة</Text><TouchableOpacity onPress={() => setBulkEnrollModalOpen(false)}><Ionicons name="close" size={22} color={Colors.slate700} /></TouchableOpacity></View>
+          <Text style={styles.modalSubtitle}>سيتم إنشاء تسجيل ومديونية مستقلة لكل طالب من الطلاب المحددين ({selectedStudentIds.length}).</Text>
+          <ScrollView style={{ maxHeight: 300 }} contentContainerStyle={{ paddingVertical: 10 }}>
+            {bulkEligibleGroups.map((group) => <TouchableOpacity key={group.id} style={[styles.enrollChoice, bulkEnrollGroupId === group.id && styles.enrollChoiceActive]} onPress={() => setBulkEnrollGroupId(group.id)}><Text style={styles.groupPickHeader}>{group.name}</Text><Text style={styles.groupPickMeta}>{[group.subjectName, group.teacherName, group.grade].filter(Boolean).join(" · ")} · {groupScheduleLabel(group.id)}</Text></TouchableOpacity>)}
+          </ScrollView>
+          <View style={styles.modalFooter}><AppButton title="تسجيل الكل" onPress={enrollSelectedStudents} /></View>
+        </View></View>
+      </Modal>
 
       {/* 1. Add Student Guided Wizard Modal */}
       <AddStudentWizardModal
@@ -1901,6 +1978,18 @@ const createStyles = () => StyleSheet.create({
     fontSize: 13,
     fontWeight: "600",
   },
+  headerActions: { flexDirection: "row", alignItems: "center", gap: 7 },
+  headerIconButton: { width: 42, height: 42, borderRadius: 12, borderWidth: 1, borderColor: Colors.border, backgroundColor: Colors.primaryLight, alignItems: "center", justifyContent: "center" },
+  filterPanel: { flexDirection: "row-reverse", flexWrap: "wrap", alignItems: "center", gap: 7, padding: 10, borderRadius: 14, borderWidth: 1, borderColor: Colors.border, backgroundColor: Colors.slate50, marginBottom: Spacing.md },
+  filterTitle: { width: "100%", textAlign: "right", color: Colors.slate700, fontWeight: "900", fontSize: 12 },
+  filterChip: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 10, borderWidth: 1, borderColor: Colors.border, backgroundColor: Colors.white },
+  filterChipActive: { borderColor: Colors.primary, backgroundColor: Colors.primaryLight },
+  filterChipText: { color: Colors.slate600, fontSize: 12, fontWeight: "700" },
+  filterChipTextActive: { color: Colors.primaryDark },
+  bulkToolbar: { flexDirection: "row-reverse", alignItems: "center", justifyContent: "space-between", padding: 10, borderRadius: 14, backgroundColor: Colors.primaryLight, marginBottom: Spacing.md },
+  bulkCount: { color: Colors.primaryDark, fontWeight: "900", fontSize: 13 },
+  bulkButton: { flexDirection: "row-reverse", alignItems: "center", gap: 6, backgroundColor: Colors.primary, borderRadius: 10, paddingHorizontal: 11, paddingVertical: 9 },
+  bulkButtonText: { color: Colors.white, fontWeight: "800", fontSize: 12 },
   cardSearchButton: { minHeight: 44, borderRadius: 12, borderWidth: 1, borderColor: Colors.primary, backgroundColor: Colors.primaryLight, flexDirection: "row-reverse", alignItems: "center", justifyContent: "center", gap: 8, marginBottom: Spacing.md },
   cardSearchButtonText: { color: Colors.primaryDark, fontSize: 13, fontWeight: "800" },
   cardScannerOverlay: { flex: 1, backgroundColor: "rgba(15,23,42,0.72)", justifyContent: "center", padding: 20 },
@@ -1923,6 +2012,8 @@ const createStyles = () => StyleSheet.create({
     marginBottom: Spacing.sm,
     borderRadius: 18,
   },
+  studentCardSelected: { borderWidth: 2, borderColor: Colors.primary, backgroundColor: Colors.primaryLight + "30" },
+  selectionIcon: { marginRight: Spacing.sm },
   studentInfo: {
     flex: 1,
   },

@@ -209,6 +209,10 @@ class SyncProcessor {
     return db.withTransaction(async (client) => {
       const syncedOperationIds = [];
       const conflicts = [];
+      // Older offline clients could generate a random session id for the same
+      // group/schedule/date. Keep a per-batch alias so dependent attendance
+      // and payment operations follow the canonical server session.
+      const canonicalSessionIds = new Map();
       let maxServerSeq = 0;
 
       // Get current highest server sequence for the center
@@ -279,7 +283,14 @@ class SyncProcessor {
 
         await client.query("SAVEPOINT op_savepoint");
         try {
-          await SyncProcessor.assertFreshMutation(client, centerId, entityType, entityId, payload, operationType);
+          const normalizedPayload = typeof payload === "string" ? JSON.parse(payload || "{}") : { ...(payload || {}) };
+          const referencedSessionId = normalizedPayload.session_id || normalizedPayload.sessionId;
+          const canonicalSessionId = referencedSessionId && canonicalSessionIds.get(String(referencedSessionId));
+          if (canonicalSessionId) {
+            normalizedPayload.session_id = canonicalSessionId;
+            normalizedPayload.sessionId = canonicalSessionId;
+          }
+          await SyncProcessor.assertFreshMutation(client, centerId, entityType, entityId, normalizedPayload, operationType);
           // 3. Dispatch and apply domain mutation atomically
           await SyncProcessor.applyDomainMutation(client, {
             centerId,
@@ -289,10 +300,22 @@ class SyncProcessor {
             operationType,
             entityType,
             entityId,
-            payload:
-              typeof payload === "string" ? JSON.parse(payload) : payload,
+            payload: normalizedPayload,
             createdAt,
           });
+
+          if (canonicalSyncEntity(entityType) === "session") {
+            const session = normalizedPayload;
+            const natural = await client.query(
+              `SELECT id FROM sessions
+                 WHERE center_id = $1 AND group_id = $2
+                   AND COALESCE(schedule_id, '') = COALESCE($3, '')
+                   AND session_date = $4
+                 LIMIT 1`,
+              [centerId, session.group_id || session.groupId, session.schedule_id || session.scheduleId || null, normalizeDateOnly(session.session_date || session.sessionDate)],
+            );
+            if (natural.rows[0]?.id) canonicalSessionIds.set(String(entityId), String(natural.rows[0].id));
+          }
 
           // 4. Ingest operation into monotonic server ledger. For SMS
           // deliveries, publish the authoritative post-provider status so
@@ -452,6 +475,9 @@ class SyncProcessor {
       student: "students", teacher: "teachers", subject: "subjects",
       group: "groups", session: "sessions", enrollment: "student_group_enrollments",
       package: "packages", package_subscription: "student_package_subscriptions",
+      group_schedule: "group_schedules", student_card: "student_cards",
+      package_teacher_override: "package_subject_teacher_overrides",
+      grade_exam: "grade_exams", grade_score: "grade_scores",
       notification_template: "notification_templates",
     };
     const table = tableByType[entityType];
@@ -674,6 +700,19 @@ class SyncProcessor {
             operationId,
           ],
         );
+        // A second offline device may have recorded the same student in the
+        // same session.  The unique constraint keeps the first attendance,
+        // but silently marking the second operation as applied hides a real
+        // business conflict from the operator.  Replay of the same operation
+        // is already handled by the operation ledger before this point.
+        const existingAttendance = await client.query(
+          `SELECT operation_id FROM attendance
+             WHERE center_id = $1 AND session_id = $2 AND student_id = $3`,
+          [centerId, att.session_id || att.sessionId, att.student_id || att.studentId],
+        );
+        if (existingAttendance.rows[0] && existingAttendance.rows[0].operation_id !== operationId) {
+          throw new Error("ATTENDANCE_ALREADY_RECORDED: student already has attendance for this session.");
+        }
         break;
       }
 

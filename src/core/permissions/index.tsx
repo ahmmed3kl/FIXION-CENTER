@@ -185,6 +185,10 @@ const baseRolePermissions: Record<"admin" | "manager" | "secretary" | "accountan
 // prevents valid backend users from becoming permissionless when offline.
 export const RolePermissions: Record<UserRole, Permission[]> = {
   ...baseRolePermissions,
+  // A center manager is the operational administrator of that center. Keep
+  // the complete service catalog available offline; server-side center
+  // scoping still prevents access to another center.
+  manager: baseRolePermissions.admin,
   owner: baseRolePermissions.admin,
   assistant: baseRolePermissions.secretary,
 };
