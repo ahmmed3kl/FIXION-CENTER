@@ -122,6 +122,8 @@ const baseRolePermissions: Record<"admin" | "manager" | "secretary" | "accountan
     "reports.view",
     "reports.attendance.view",
     "reports.financial.view",
+    "users.view",
+    "users.manage",
     "settings.view",
     "devices.view",
     "sync.manage",

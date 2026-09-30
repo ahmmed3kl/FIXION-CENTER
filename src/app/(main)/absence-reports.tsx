@@ -192,7 +192,8 @@ function attendanceLabel(attendance: Attendance): string {
 export default function AbsenceReportsScreen() {
   const router = useRouter();
   const { colors } = useTheme();
-  styles = useMemo(() => createStyles(), [colors]);
+  // Styles are static for this screen; keep them module-scoped so render is
+  // free of global mutations.
   const services = useServiceVisibility();
   const currentUser = useAuthStore((state) => state.currentUser);
   const [month, setMonth] = useState(() => monthKey(new Date()));

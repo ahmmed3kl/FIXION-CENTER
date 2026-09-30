@@ -100,6 +100,107 @@ function normalizeOperationId(value) {
   return `op-${crypto.createHash("sha256").update(raw).digest("hex").slice(0, 61)}`;
 }
 
+// A push batch may contain a child operation created immediately after its
+// parent on the device. PostgreSQL correctly rejects the child while the
+// parent is still absent, so order the batch before opening savepoints. This
+// is intentionally server-side as well as client-side: older mobile builds
+// and repair batches must receive the same FK-safe ordering.
+const SYNC_ENTITY_ALIASES = {
+  student_group_enrollment: "enrollment",
+  session_payment: "payment",
+  makeup_attendance: "makeup",
+  attendance_marked: "attendance",
+};
+const SYNC_ENTITY_PRIORITY = {
+  teacher: 10,
+  subject: 10,
+  package: 15,
+  group: 20,
+  student: 30,
+  student_card: 35,
+  enrollment: 40,
+  group_schedule: 45,
+  package_subject: 50,
+  package_subscription: 55,
+  package_teacher_override: 60,
+  debt_cycle: 70,
+  session: 80,
+  attendance: 90,
+  makeup: 90,
+  payment: 100,
+  payment_reversal: 100,
+  debt_adjustment: 100,
+  advance_coverage: 90,
+};
+
+function canonicalSyncEntity(value) {
+  const raw = String(value || "").toLowerCase().replace(/_created$|_updated$|_deleted$/g, "");
+  return SYNC_ENTITY_ALIASES[raw] || raw;
+}
+
+function syncPayload(value) {
+  if (!value) return {};
+  if (typeof value === "object") return value;
+  try { return JSON.parse(value); } catch { return {}; }
+}
+
+function firstSyncValue(payload, ...keys) {
+  for (const key of keys) {
+    if (payload[key] !== undefined && payload[key] !== null && payload[key] !== "") return payload[key];
+  }
+  return undefined;
+}
+
+function orderSyncOperations(operations) {
+  const base = [...operations].sort((a, b) => {
+    const priorityA = SYNC_ENTITY_PRIORITY[canonicalSyncEntity(a.entityType)] ?? 500;
+    const priorityB = SYNC_ENTITY_PRIORITY[canonicalSyncEntity(b.entityType)] ?? 500;
+    return priorityA - priorityB || String(a.createdAt || "").localeCompare(String(b.createdAt || ""));
+  });
+  const byEntity = new Map(base.map((operation) => [
+    `${canonicalSyncEntity(operation.entityType)}:${String(operation.entityId || "")}`,
+    operation,
+  ]));
+  const dependencies = (operation) => {
+    const entity = canonicalSyncEntity(operation.entityType);
+    const payload = syncPayload(operation.payload);
+    const value = (...keys) => firstSyncValue(payload, ...keys);
+    const refs = [];
+    if (entity === "group") refs.push(["teacher", value("teacherId", "teacher_id")], ["subject", value("subjectId", "subject_id")]);
+    if (entity === "group_schedule") refs.push(["group", value("groupId", "group_id")]);
+    if (entity === "enrollment") refs.push(["student", value("studentId", "student_id")], ["group", value("groupId", "group_id")]);
+    if (entity === "session") {
+      refs.push(["group", value("groupId", "group_id")], ["teacher", value("teacherId", "teacher_id")], ["subject", value("subjectId", "subject_id")]);
+      const students = payload.expectedStudentIds || payload.expected_student_ids;
+      if (Array.isArray(students)) students.forEach((id) => refs.push(["student", id]));
+    }
+    if (entity === "attendance" || entity === "makeup" || entity === "advance_coverage") refs.push(["session", value("sessionId", "session_id", "advanceSessionId", "advance_session_id", "targetFutureSessionId", "target_future_session_id")], ["student", value("studentId", "student_id")]);
+    if (entity === "payment" || entity === "payment_reversal" || entity === "debt_adjustment") refs.push(["debt_cycle", value("debtCycleId", "debt_cycle_id")], ["session", value("sessionId", "session_id")], ["student", value("studentId", "student_id")]);
+    if (entity === "payment_reversal") refs.push(["payment", value("paymentId", "payment_id")]);
+    if (entity === "debt_cycle") refs.push(["enrollment", value("enrollmentId", "enrollment_id")], ["student", value("studentId", "student_id")], ["package_subscription", value("packageSubscriptionId", "package_subscription_id")]);
+    if (entity === "package_subscription") refs.push(["student", value("studentId", "student_id")], ["package", value("packageId", "package_id")]);
+    if (entity === "package_teacher_override") refs.push(["package_subscription", value("subscriptionId", "subscription_id")], ["teacher", value("teacherId", "teacher_id")], ["subject", value("subjectId", "subject_id")]);
+    return refs.filter(([, id]) => id !== undefined).map(([type, id]) => `${type}:${String(id)}`);
+  };
+  const visited = new Set();
+  const visiting = new Set();
+  const ordered = [];
+  const visit = (operation) => {
+    const key = String(operation.operationId || `${operation.entityType}:${operation.entityId}`);
+    if (visited.has(key) || visiting.has(key)) return;
+    visiting.add(key);
+    for (const dependency of dependencies(operation)) {
+      const parent = byEntity.get(dependency);
+      if (parent) visit(parent);
+    }
+    visiting.delete(key);
+    visited.add(key);
+    ordered.push(operation);
+  };
+  base.forEach(visit);
+  return ordered;
+}
+
 class SyncProcessor {
   /**
    * Processes a batch of sync operations inside a true ACID transaction.
@@ -117,7 +218,7 @@ class SyncProcessor {
       );
       maxServerSeq = parseInt(currentSeqRes.rows[0].max_seq, 10);
 
-      for (const op of operations) {
+      for (const op of orderSyncOperations(operations)) {
         const {
           operationId: rawOperationId,
           operationType,

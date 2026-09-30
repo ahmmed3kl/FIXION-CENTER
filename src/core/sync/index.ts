@@ -91,11 +91,23 @@ const REPAIR_DEPENDENCY_PRIORITY: Record<string, number> = {
   student_group_enrollment: 60,
   package_subscription: 65,
   package_teacher_override: 70,
+  debt_cycle: 75,
+  session: 80,
+  attendance: 90,
+  makeup: 90,
+  advance_coverage: 90,
+  payment: 100,
+  payment_reversal: 100,
+  debt_adjustment: 100,
 };
 
 function canonicalEntityType(entityType: string): string {
   const normalized = String(entityType || "").toLowerCase().replace(/_created$|_updated$/, "");
-  return normalized === "student_group_enrollment" ? "enrollment" : normalized;
+  if (normalized === "student_group_enrollment") return "enrollment";
+  if (normalized === "attendance_marked") return "attendance";
+  if (normalized === "makeup_attendance") return "makeup";
+  if (normalized === "session_payment") return "payment";
+  return normalized;
 }
 
 function parseOperationPayload(payload: unknown): any {
@@ -325,15 +337,16 @@ function orderOperationsByDependencies(rows: SyncOperation[]): SyncOperation[] {
       refs.push(["subject", value("subjectId", "subject_id")]);
     }
     if (entity === "group_schedule") refs.push(["group", value("groupId", "group_id")]);
-    if (entity === "attendance" || entity === "makeup") {
-      refs.push(["session", value("sessionId", "session_id")]);
+    if (entity === "attendance" || entity === "makeup" || entity === "advance_coverage") {
+      refs.push(["session", value("sessionId", "session_id", "advanceSessionId", "advance_session_id", "targetFutureSessionId", "target_future_session_id")]);
       refs.push(["student", value("studentId", "student_id")]);
     }
-    if (entity === "payment" || entity === "debt_adjustment") {
+    if (entity === "payment" || entity === "payment_reversal" || entity === "debt_adjustment") {
       refs.push(["debt_cycle", value("debtCycleId", "debt_cycle_id")]);
       refs.push(["session", value("sessionId", "session_id")]);
       refs.push(["student", value("studentId", "student_id")]);
     }
+    if (entity === "payment_reversal") refs.push(["payment", value("paymentId", "payment_id")]);
     if (entity === "debt_cycle") {
       refs.push(["enrollment", value("enrollmentId", "enrollment_id")]);
       refs.push(["student", value("studentId", "student_id")]);
@@ -379,6 +392,14 @@ function orderOperationsByDependencies(rows: SyncOperation[]): SyncOperation[] {
 
 function retryDelayMs(retryCount: number): number {
   return Math.min(1000 * Math.pow(2, Math.max(0, retryCount)), 60000);
+}
+
+// Missing parent rows are expected while a repair or an offline batch is
+// being replayed. Keep the operation pending with backoff so the next pass
+// can send the parent first; these are not permanent manual-review conflicts.
+function isRetryableDependencyConflict(reason: unknown): boolean {
+  const text = String(reason || "");
+  return /PAYMENT_DEBT_CYCLE_NOT_FOUND|PAYMENT_SESSION_NOT_FOUND|attendance_session_id_fkey|foreign key constraint|violates foreign key|session[^\n]*not found|debt[_ ]cycle[^\n]*not found/i.test(text);
 }
 
 export class SyncRepository {
@@ -2558,6 +2579,7 @@ export class SyncEngine {
     let syncedCount = 0;
     let errors = 0;
     let conflicts = 0;
+    let dependencyWaits = 0;
 
     try {
       // 3. Monotonic Cursor Check: Bootstrap if 0 OR if local teachers/groups are empty
@@ -2689,6 +2711,24 @@ export class SyncEngine {
             const operation = pendingOps.find(
               (item) => item.operationId === conflict.operationId,
             );
+            if (isRetryableDependencyConflict(conflict.reason)) {
+              SyncRepository.markAsFailed(
+                conflict.operationId,
+                `في انتظار مزامنة السجل المرتبط: ${conflict.reason}`,
+              );
+              dependencyWaits++;
+              Logger.warn("sync", "dependency_wait", {
+                centerId,
+                operationId: conflict.operationId,
+                entityType: conflict.entityType || operation?.entityType,
+                metadata: {
+                  entityId: conflict.entityId || operation?.entityId,
+                  reason: conflict.reason,
+                  retryable: true,
+                },
+              });
+              continue;
+            }
             Logger.warn("sync", "operation_conflict", {
               centerId,
               operationId: conflict.operationId,
@@ -2728,7 +2768,7 @@ export class SyncEngine {
       Logger.info("sync", "sync_completed", {
         centerId,
         durationMs,
-        metadata: { syncedCount, errors, conflicts },
+        metadata: { syncedCount, errors, conflicts, dependencyWaits },
       });
 
       return {

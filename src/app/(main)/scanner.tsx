@@ -117,6 +117,11 @@ function ScannerContent() {
   const [makeupNotice, setMakeupNotice] = useState<{ sourceGroupName?: string; teacherName?: string; originalAbsenceId?: string } | null>(null);
   const [isClosingSession, setIsClosingSession] = useState(false);
   const [isSessionClosed, setIsSessionClosed] = useState(false);
+  const [pendingAttendance, setPendingAttendance] = useState<{
+    student: Student;
+    session: Session;
+    makeup?: NonNullable<typeof makeupNotice>;
+  } | null>(null);
 
   // Quick Payment Modal
   const [showPaymentModal, setShowPaymentModal] = useState(false);
@@ -437,6 +442,7 @@ function ScannerContent() {
     const session = SessionRepository.findById(String(attendanceSessionId));
     const createdStudent = StudentRepository.findById(String(addedStudentId));
     if (!session || !createdStudent) return;
+    setPendingAttendance(null);
     setAttendanceStarted(true);
     setActiveSessionId(session.id);
     setIsSessionClosed(session.status === "closed");
@@ -453,20 +459,25 @@ function ScannerContent() {
     setMakeupNotice(makeup || null);
     setEligibleSessions([session]);
     setSelectedSessionId(session.id);
-    setIsAlreadyAttended(AttendanceRepository.isAlreadyAttended(session.id, createdStudent.id));
+    const alreadyAttended = AttendanceRepository.isAlreadyAttended(session.id, createdStudent.id);
+    setIsAlreadyAttended(alreadyAttended);
     if (!expected && !makeupEligibility.eligible) {
       Alert.alert("تعذر تسجيل الحضور", "الطالب أُضيف بنجاح لكنه ليس ضمن الجلسة الحالية ولا تنطبق عليه قاعدة الحضور التعويضي.");
       return;
     }
-    Alert.alert(
-      "تمت إضافة الطالب",
-      makeup ? "هل تريد تسجيل حضور الطالب تعويضياً في الجلسة الحالية؟" : "هل تريد تسجيل حضور الطالب في الجلسة الحالية؟",
-      [
-        { text: "ليس الآن", style: "cancel" },
-        { text: "تسجيل الحضور", onPress: () => { if (!AttendanceRepository.isAlreadyAttended(session.id, createdStudent.id) && session.status !== "closed") void recordAttendanceFor(createdStudent, session, makeup); } },
-      ],
-    );
+    if (!alreadyAttended && session.status !== "closed") {
+      setPendingAttendance({ student: createdStudent, session, makeup });
+    }
   }, [addedStudentId, attendanceSessionId]);
+
+  const confirmPendingAttendance = async () => {
+    if (!pendingAttendance) return;
+    const { student: added, session, makeup } = pendingAttendance;
+    setPendingAttendance(null);
+    if (!AttendanceRepository.isAlreadyAttended(session.id, added.id) && session.status !== "closed") {
+      await recordAttendanceFor(added, session, makeup);
+    }
+  };
 
   const handleRecordAttendance = async () => {
     if (!student || !selectedSessionId || isSessionClosed) return;
@@ -545,6 +556,21 @@ function ScannerContent() {
         </ScrollView>
       )}
       <Modal visible={showPaymentModal} transparent animationType="fade"><View style={styles.modalBackdrop}><View style={styles.modalContent}><Text style={styles.modalTitle}>تسجيل دفعة نقدية</Text><Text style={styles.modalSub}>{student?.fullName}</Text><AppInput label="المبلغ" keyboardType="numeric" value={paymentAmount} onChangeText={setPaymentAmount} /><View style={styles.modalButtonRow}><AppButton title="حفظ" onPress={handleConfirmQuickPayment} loading={isRecordingPayment} variant="success" style={{ flex: 1 }} /><AppButton title="إلغاء" variant="outline" onPress={() => setShowPaymentModal(false)} style={{ flex: 1 }} /></View></View></View></Modal>
+      <Modal visible={Boolean(pendingAttendance)} transparent animationType="slide" onRequestClose={() => setPendingAttendance(null)}>
+        <View style={styles.modalBackdrop}>
+          <View style={styles.confirmSheet}>
+            <View style={styles.confirmIcon}><Ionicons name="checkmark-circle-outline" size={30} color={Colors.primary} /></View>
+            <Text style={styles.modalTitle}>تمت إضافة الطالب بنجاح</Text>
+            <Text style={styles.modalSub}>{pendingAttendance?.student.fullName}</Text>
+            <Text style={styles.confirmQuestion}>{pendingAttendance?.makeup ? "هل تريد تسجيل حضور الطالب تعويضياً في الجلسة الحالية؟" : "هل تريد تسجيل حضور الطالب في الجلسة الحالية؟"}</Text>
+            <Text style={styles.confirmGroup}>{pendingAttendance?.session.groupName || currentGroupLabel}</Text>
+            <View style={styles.modalButtonRow}>
+              <AppButton title="تأكيد" onPress={() => void confirmPendingAttendance()} style={{ flex: 1 }} />
+              <AppButton title="إلغاء" variant="outline" onPress={() => setPendingAttendance(null)} style={{ flex: 1 }} />
+            </View>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 
@@ -1526,6 +1552,38 @@ const createStyles = () => StyleSheet.create({
     color: Colors.slate500,
     marginBottom: Spacing.md,
     textAlign: "right",
+  },
+  confirmSheet: {
+    backgroundColor: Colors.white,
+    borderRadius: BorderRadius.xl,
+    padding: Spacing.xl,
+    width: "100%",
+    maxWidth: 420,
+    ...Shadows.elevated,
+  },
+  confirmIcon: {
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    backgroundColor: Colors.primaryLight,
+    alignItems: "center",
+    justifyContent: "center",
+    alignSelf: "flex-end",
+    marginBottom: Spacing.sm,
+  },
+  confirmQuestion: {
+    color: Colors.slate700,
+    fontSize: 15,
+    lineHeight: 24,
+    textAlign: "right",
+    marginTop: Spacing.sm,
+  },
+  confirmGroup: {
+    color: Colors.primaryDark,
+    fontSize: 14,
+    fontWeight: "800",
+    textAlign: "right",
+    marginTop: Spacing.sm,
   },
   modalButtonRow: {
     flexDirection: "row",
