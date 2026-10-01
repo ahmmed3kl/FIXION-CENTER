@@ -86,17 +86,6 @@ export default function SyncDebugScreen() {
     }
   };
 
-  const clearConflicts = () => {
-    if (!activeCenter) return;
-    try {
-      SyncRepository.clearAllConflicts(activeCenter.id);
-      setLastResult("Cleared all conflicts successfully.");
-      load();
-    } catch (error: any) {
-      setLastResult(`Failed to clear: ${error?.message}`);
-    }
-  };
-
   if (!activeCenter) {
     return <SafeAreaView style={styles.safe}><Text style={styles.empty}>No active center.</Text></SafeAreaView>;
   }
@@ -120,16 +109,10 @@ export default function SyncDebugScreen() {
           <Text style={styles.connectionValue}>{ConnectivityService.getState()}</Text>
         </View>
 
-        <View style={{ flexDirection: "row", gap: 10 }}>
-          <TouchableOpacity style={[styles.syncButton, { flex: 1 }]} onPress={syncNow} disabled={refreshing}>
-            {refreshing ? <ActivityIndicator color={Colors.white} /> : <Ionicons name="sync-outline" size={20} color={Colors.white} />}
-            <Text style={styles.syncButtonText}>Sync now</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={[styles.syncButton, { flex: 1, backgroundColor: Colors.danger }]} onPress={clearConflicts} disabled={refreshing}>
-            <Ionicons name="trash-outline" size={20} color={Colors.white} />
-            <Text style={styles.syncButtonText}>Clear Conflicts</Text>
-          </TouchableOpacity>
-        </View>
+        <TouchableOpacity style={styles.syncButton} onPress={syncNow} disabled={refreshing}>
+          {refreshing ? <ActivityIndicator color={Colors.white} /> : <Ionicons name="sync-outline" size={20} color={Colors.white} />}
+          <Text style={styles.syncButtonText}>Sync now</Text>
+        </TouchableOpacity>
         {lastResult ? <Text style={styles.result}>{lastResult}</Text> : null}
         {loadError ? <Text style={styles.error} selectable>{loadError}</Text> : null}
 
