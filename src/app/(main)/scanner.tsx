@@ -38,8 +38,10 @@ import { SessionRepository } from "../../features/sessions/SessionRepository";
 import { SessionClosingService } from "../../features/sessions/SessionClosingService";
 import { ScannerService } from "../../features/scanner/ScannerService";
 import { StudentRepository } from "../../features/students/StudentRepository";
+import { StudentNoteRepository } from "../../features/students/StudentNoteRepository";
 import { useAuthStore } from "../../features/auth/useAuthStore";
 import { getLocalDateOnly } from "../../shared/utils/date";
+import { smartSearch } from "../../shared/utils/smartSearch";
 import {
     AppButton,
     AppCard,
@@ -122,6 +124,12 @@ function ScannerContent() {
     session: Session;
     makeup?: NonNullable<typeof makeupNotice>;
   } | null>(null);
+  const [allStudents, setAllStudents] = useState<Student[]>([]);
+  const [allStudentSearch, setAllStudentSearch] = useState("");
+  const [showAllStudentPicker, setShowAllStudentPicker] = useState(false);
+  const [showAttendanceNoteModal, setShowAttendanceNoteModal] = useState(false);
+  const [attendanceNoteText, setAttendanceNoteText] = useState("");
+  const [attendanceNotes, setAttendanceNotes] = useState<import("../../shared/types").StudentNote[]>([]);
 
   // Quick Payment Modal
   const [showPaymentModal, setShowPaymentModal] = useState(false);
@@ -141,6 +149,7 @@ function ScannerContent() {
       const sessions = AttendanceSessionService.getTodaySessions();
       setActiveSessionsByGroup(Object.fromEntries(sessions.map((session) => [`${session.groupId}:${session.scheduleId}`, session])));
       setAllGroups(GroupRepository.getAll());
+      setAllStudents(StudentRepository.getAllForAttendance());
     } catch (error) { setSearchError(getUserErrorMessage(error)); }
   }, []);
 
@@ -268,7 +277,7 @@ function ScannerContent() {
     ]);
   };
 
-  const lookupCard = async (rawCode: string) => {
+  const lookupCard = async (rawCode: string, forcedStudent?: Student, allowExternal = false) => {
     if (!attendanceStarted || !activeSessionId || isSessionClosed) { setSearchError(isSessionClosed ? "الجلسة مغلقة. أعد فتحها أولاً لاستكمال الحضور." : "اختر المجموعة وابدأ جلسة الحضور أولاً."); return; }
     const normalized = ScannerService.normalizeCardCode(rawCode);
     if (!normalized) {
@@ -280,7 +289,7 @@ function ScannerContent() {
     setIsProcessing(true);
 
     try {
-      const foundStudent = StudentRepository.findByCardCode(normalized);
+      const foundStudent = forcedStudent || StudentRepository.findByCardCode(normalized);
 
       if (!foundStudent) {
         setStudent(null);
@@ -308,7 +317,7 @@ function ScannerContent() {
 
       const expected = AttendanceSessionService.isExpected(activeSessionId, foundStudent.id);
       const makeupEligibility = expected ? { eligible: false } : AttendanceSessionService.getMakeupEligibility(activeSessionId, foundStudent.id);
-      if (!expected && !makeupEligibility.eligible) {
+      if (!expected && !makeupEligibility.eligible && !allowExternal) {
         setStudent(null);
         setSearchError("الطالب غير متوقع في مجموعة الحضور الحالية.");
         setIsProcessing(false);
@@ -336,12 +345,14 @@ function ScannerContent() {
         // A successful scan is the attendance action. Keep the write local
         // and enqueue it immediately; the existing sync layer handles the
         // online/offline delivery and idempotency.
-        if (!attended) {
-          await recordAttendanceFor(foundStudent, sessions[0], makeupEligibility.eligible ? {
+        if (!attended && makeupEligibility.eligible) {
+          setPendingAttendance({ student: foundStudent, session: sessions[0], makeup: {
             sourceGroupName: makeupEligibility.sourceGroupName,
             teacherName: makeupEligibility.teacherName,
             originalAbsenceId: makeupEligibility.originalAbsenceId,
-          } : undefined);
+          }});
+        } else if (!attended) {
+          await recordAttendanceFor(foundStudent, sessions[0], undefined, allowExternal);
         }
       } else if (sessions.length > 1) {
         setSelectedSessionId(null);
@@ -352,7 +363,7 @@ function ScannerContent() {
       if (paymentsEnabled && currentGroupId) {
         // Attendance is group-scoped, but the payment wallet is student-wide:
         // a package must be payable in full from any teacher's session.
-        const fin = PaymentRepository.getStudentFinancialStatus(foundStudent.id);
+        const fin = PaymentRepository.getStudentFinancialStatusForGroup(foundStudent.id, currentGroupId);
         setFinancialStatus(fin);
       } else {
         setFinancialStatus(null);
@@ -378,6 +389,41 @@ function ScannerContent() {
     lookupCard(data);
   };
 
+  const attendancePickerStudents = useMemo(() => smartSearch(
+    allStudents,
+    allStudentSearch,
+    [
+      { get: (item) => item.fullName, weight: 3 },
+      { get: (item) => item.phone },
+      { get: (item) => item.parentPhone },
+      { get: (item) => item.studentCode },
+      { get: (item) => item.cardCode },
+    ],
+  ), [allStudentSearch, allStudents]);
+
+  const openAttendanceNotes = async () => {
+    if (!student) return;
+    try {
+      setAttendanceNotes(await StudentNoteRepository.listForStudent(student.id));
+      setAttendanceNoteText("");
+      setShowAttendanceNoteModal(true);
+    } catch (error) {
+      Alert.alert(Strings.errorTitle, getUserErrorMessage(error));
+    }
+  };
+
+  const saveAttendanceNote = async () => {
+    if (!student || !attendanceNoteText.trim()) return;
+    try {
+      await StudentNoteRepository.create(student.id, attendanceNoteText);
+      setAttendanceNotes(await StudentNoteRepository.listForStudent(student.id));
+      setAttendanceNoteText("");
+      Alert.alert("ØªÙ… Ø§Ù„Ø­ÙØ¸", "ØªÙ… Ø¥Ø¶Ø§ÙØ© Ø§Ù„Ù…Ù„Ø§Ø­Ø¸Ø© Ù„Ù…Ù„Ù Ø§Ù„Ø·Ø§Ù„Ø¨.");
+    } catch (error) {
+      Alert.alert(Strings.errorTitle, getUserErrorMessage(error));
+    }
+  };
+
   const handleSelectSession = (sessionId: string) => {
     setSelectedSessionId(sessionId);
     if (student) {
@@ -389,7 +435,7 @@ function ScannerContent() {
     }
   };
 
-  const recordAttendanceFor = async (targetStudent: Student, session: Session, makeup?: typeof makeupNotice) => {
+  const recordAttendanceFor = async (targetStudent: Student, session: Session, makeup?: typeof makeupNotice, isExternal = false) => {
     setIsProcessing(true);
 
     try {
@@ -416,6 +462,7 @@ function ScannerContent() {
             status: lateCalc.status,
             isLate: lateCalc.isLate,
             attendanceType: "present",
+            isExternal,
           });
 
       setAttendanceResult(result);
@@ -519,7 +566,9 @@ function ScannerContent() {
       const currentGroupId = activeSessionId
         ? SessionRepository.findById(activeSessionId)?.groupId
         : undefined;
-      const updated = PaymentRepository.getStudentFinancialStatus(student.id);
+      const updated = currentGroupId
+        ? PaymentRepository.getStudentFinancialStatusForGroup(student.id, currentGroupId)
+        : PaymentRepository.getStudentFinancialStatus(student.id);
       setFinancialStatus(updated);
       setShowPaymentModal(false);
       setPaymentAmount("");
@@ -538,6 +587,8 @@ function ScannerContent() {
   return (
     <SafeAreaView style={styles.safeArea}>
       <View style={styles.rebuildHeader}>
+        {attendanceStarted ? <TouchableOpacity onPress={() => { setAllStudentSearch(""); setShowAllStudentPicker(true); }} style={styles.headerMenu}><Ionicons name="search-outline" size={21} color={Colors.primary} /></TouchableOpacity> : null}
+        {student ? <TouchableOpacity onPress={() => void openAttendanceNotes()} style={styles.headerMenu}><Ionicons name="create-outline" size={21} color={Colors.primary} /></TouchableOpacity> : null}
         <TouchableOpacity onPress={attendanceStarted ? handleBackToGroups : () => router.back()} style={styles.rebuildBack}><Ionicons name="chevron-forward" size={24} color={Colors.slate900} /></TouchableOpacity>
         <View style={styles.rebuildHeaderCopy}><Text style={styles.rebuildTitle}>{attendanceStarted ? "حضور الجلسة" : "جلسات الحضور"}</Text><Text style={styles.rebuildSubtitle}>{attendanceStarted ? currentGroupLabel : "اختر مجموعة لبدء تسجيل الحضور"}</Text></View>
         {attendanceStarted ? <TouchableOpacity onPress={isSessionClosed ? reopenCurrentSession : closeCurrentSession} style={styles.headerMenu}><Ionicons name={isSessionClosed ? "lock-open-outline" : "ellipsis-horizontal"} size={21} color={Colors.primary} /></TouchableOpacity> : null}
@@ -556,6 +607,8 @@ function ScannerContent() {
         </ScrollView>
       )}
       <Modal visible={showPaymentModal} transparent animationType="fade"><View style={styles.modalBackdrop}><View style={styles.modalContent}><Text style={styles.modalTitle}>تسجيل دفعة نقدية</Text><Text style={styles.modalSub}>{student?.fullName}</Text><AppInput label="المبلغ" keyboardType="numeric" value={paymentAmount} onChangeText={setPaymentAmount} /><View style={styles.modalButtonRow}><AppButton title="حفظ" onPress={handleConfirmQuickPayment} loading={isRecordingPayment} variant="success" style={{ flex: 1 }} /><AppButton title="إلغاء" variant="outline" onPress={() => setShowPaymentModal(false)} style={{ flex: 1 }} /></View></View></View></Modal>
+      <Modal visible={showAllStudentPicker} transparent animationType="slide" onRequestClose={() => setShowAllStudentPicker(false)}><View style={styles.modalBackdrop}><View style={styles.confirmSheet}><Text style={styles.modalTitle}>اختيار طالب للحضور</Text><AppInput value={allStudentSearch} onChangeText={setAllStudentSearch} placeholder="ابحث بالاسم أو الهاتف أو الكود" /><ScrollView style={{ maxHeight: 360 }}>{attendancePickerStudents.map((item) => <TouchableOpacity key={item.id} style={styles.rebuildGroupRow} onPress={() => { setShowAllStudentPicker(false); setManualCode(item.cardCode || item.studentCode || item.phone || ""); void lookupCard(item.cardCode || item.studentCode || item.phone || "", item, true); }}><View style={styles.rebuildGroupCopy}><Text style={styles.rebuildGroupName}>{item.fullName}</Text><Text style={styles.rebuildGroupMeta}>{[item.phone, item.studentCode || item.cardCode, item.grade].filter(Boolean).join(" · ")}</Text></View><Ionicons name="chevron-back" size={18} color={Colors.slate400} /></TouchableOpacity>)}</ScrollView><AppButton title="إلغاء" variant="outline" onPress={() => setShowAllStudentPicker(false)} /></View></View></Modal>
+      <Modal visible={showAttendanceNoteModal} transparent animationType="fade" onRequestClose={() => setShowAttendanceNoteModal(false)}><View style={styles.modalBackdrop}><View style={styles.modalContent}><Text style={styles.modalTitle}>إضافة ملاحظة</Text><Text style={styles.modalSub}>{student?.fullName}</Text><AppInput value={attendanceNoteText} onChangeText={setAttendanceNoteText} placeholder="اكتب ملاحظتك" multiline /><View style={styles.modalButtonRow}><AppButton title="حفظ" onPress={() => void saveAttendanceNote()} style={{ flex: 1 }} /><AppButton title="إلغاء" variant="outline" onPress={() => setShowAttendanceNoteModal(false)} style={{ flex: 1 }} /></View>{attendanceNotes.map((note) => <View key={note.id} style={styles.paymentHistoryRow}><Text style={styles.paymentHistoryType}>{note.text}</Text><Text style={styles.paymentHistoryMeta}>{note.createdByName || "حساب"}</Text></View>)}</View></View></Modal>
       <Modal visible={Boolean(pendingAttendance)} transparent animationType="slide" onRequestClose={() => setPendingAttendance(null)}>
         <View style={styles.modalBackdrop}>
           <View style={styles.confirmSheet}>

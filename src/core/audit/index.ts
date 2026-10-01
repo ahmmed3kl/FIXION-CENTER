@@ -73,4 +73,17 @@ export class AuditService {
       [centerId, limit],
     );
   }
+
+  static getEntityLogs(centerId: string, entityId: string, limit = 100): AuditLog[] {
+    const db = DatabaseService.getDb();
+    return db.getAllSync<AuditLog>(
+      `SELECT id, operation_id as operationId, center_id as centerId, user_id as userId,
+              device_id as deviceId, entity_type as entityType, entity_id as entityId,
+              action, timestamp, payload
+       FROM audit_logs
+       WHERE center_id = ? AND (entity_id = ? OR payload LIKE ?)
+       ORDER BY timestamp DESC LIMIT ?`,
+      [centerId, entityId, `%\"studentId\":\"${entityId}\"%`, limit],
+    );
+  }
 }

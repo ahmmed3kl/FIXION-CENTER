@@ -46,6 +46,7 @@ interface AddStudentWizardModalProps {
   visible: boolean;
   onClose: () => void;
   onStudentCreated: (student?: Student) => void;
+  keepOpenAfterCreate?: boolean;
 }
 
 type FieldErrors = {
@@ -89,7 +90,7 @@ const Section = ({
   </View>
 );
 
-export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({ visible, onClose, onStudentCreated }) => {
+export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({ visible, onClose, onStudentCreated, keepOpenAfterCreate = false }) => {
   const { colors } = useTheme();
   const { width, height } = useWindowDimensions();
   const isTablet = width >= 600;
@@ -197,6 +198,12 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({ vi
     setPhoneDuplicateWarning(false); setParentPhoneDuplicateWarning(false);
     setLevelFilter("all"); setSubjectFilter("all"); setTeacherFilter("all"); setTeacherSearch(""); setShowLevels(false); setShowSubjects(false); setShowTeachers(false); setSelectedGroupIds([]);
     setPackageId(""); setPackageOptionIds([]); setPackageTeacherIds({}); setPackageGroupIds({}); setPackageTeacherSearch(""); setSubmitting(false);
+  };
+
+  const resetStudentFields = () => {
+    setCameraActive(false); setTorchEnabled(false); setCardCode(""); setScanError(null);
+    setFullName(""); setPhone(""); setParentPhone(""); setNotes(""); setErrors({});
+    setPhoneDuplicateWarning(false); setParentPhoneDuplicateWarning(false); setSubmitting(false);
   };
 
   const close = () => {
@@ -351,7 +358,9 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({ vi
         }
       }
       Alert.alert("تمت الإضافة", "تمت إضافة الطالب بنجاح.");
-      resetForm(); onStudentCreated(student); onClose();
+      onStudentCreated(student);
+      if (keepOpenAfterCreate) resetStudentFields();
+      else { resetForm(); onClose(); }
     } catch (error: any) {
       Alert.alert("تعذر إضافة الطالب", error?.message || "حدث خطأ غير متوقع.");
     } finally { setSubmitting(false); }

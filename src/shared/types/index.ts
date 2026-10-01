@@ -124,6 +124,19 @@ export interface Student {
   updatedAt?: string | null;
 }
 
+export interface StudentNote {
+  id: string;
+  centerId: string;
+  studentId: string;
+  text: string;
+  createdAt: string;
+  updatedAt?: string | null;
+  createdBy: string;
+  createdByName?: string | null;
+  updatedBy?: string | null;
+  deletedAt?: string | null;
+}
+
 export interface Teacher {
   id: string;
   centerId: string;

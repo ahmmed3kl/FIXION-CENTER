@@ -28,7 +28,16 @@ export function parseLocalDateOnly(value: unknown): Date | null {
 
 export function formatLocalDate(value: unknown, fallback = "تاريخ غير متاح"): string {
   const date = parseLocalDateOnly(value);
-  return date
-    ? date.toLocaleDateString("ar-EG", { weekday: "long", day: "numeric", month: "short" })
-    : fallback;
+  if (!date) return fallback;
+  const weekday = date.toLocaleDateString("ar-EG", { weekday: "long" });
+  const day = String(date.getDate()).padStart(2, "0");
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const year = String(date.getFullYear()).slice(-2);
+  return `${weekday} ${day}/${month}/${year}`;
+}
+
+export function formatLocalDateTime(value: unknown, fallback = "تاريخ غير متاح"): string {
+  const date = value instanceof Date ? value : new Date(String(value || ""));
+  if (!Number.isFinite(date.getTime())) return fallback;
+  return `${formatLocalDate(getLocalDateOnly(date), fallback)} ${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
 }

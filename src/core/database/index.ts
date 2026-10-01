@@ -917,6 +917,27 @@ export const MIGRATIONS: Migration[] = [
       try { db.execSync("CREATE INDEX IF NOT EXISTS idx_students_deleted ON students(center_id, deleted_at);"); } catch {}
     },
   },
+  {
+    version: 18,
+    name: "student_notes",
+    up: (db: SqlDatabase) => {
+      db.execSync(`
+        CREATE TABLE IF NOT EXISTS student_notes (
+          id TEXT PRIMARY KEY,
+          center_id TEXT NOT NULL,
+          student_id TEXT NOT NULL,
+          note_text TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT,
+          created_by TEXT NOT NULL,
+          created_by_name TEXT,
+          updated_by TEXT,
+          deleted_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_student_notes_student ON student_notes(center_id, student_id, deleted_at, created_at);
+      `);
+    },
+  },
 ];
 
 // In-Memory SQLite Mock for Jest / Test environments
@@ -947,6 +968,7 @@ class InMemorySqliteMock implements SqlDatabase {
     this.tables.set("sync_operations", []);
     this.tables.set("sync_conflicts", []);
     this.tables.set("audit_logs", []);
+    this.tables.set("student_notes", []);
     this.tables.set("packages", []);
     this.tables.set("package_subjects", []);
     this.tables.set("student_package_subscriptions", []);
@@ -1355,6 +1377,15 @@ class InMemorySqliteMock implements SqlDatabase {
             if (params.length >= 2 && trimmed.includes("synced_at = ?")) {
               row.synced_at = params[0];
             }
+          }
+        } else if (tableName === "student_notes") {
+          const id = params[params.length - 1];
+          const row = list.find((r) => r.id === id && r.center_id === params[params.length - 2]);
+          if (row) {
+            if (trimmed.includes("deleted_at = ?")) row.deleted_at = params[0];
+            if (trimmed.includes("note_text = ?")) row.note_text = params[0];
+            if (trimmed.includes("updated_at = ?")) row.updated_at = trimmed.includes("note_text = ?") ? params[1] : params[1];
+            if (trimmed.includes("updated_by = ?")) row.updated_by = params[2];
           }
         } else if (tableName === "student_cards") {
           const id = params[params.length - 1];
@@ -2417,8 +2448,10 @@ class InMemorySqliteMock implements SqlDatabase {
     if (trimmed.includes("FROM audit_logs")) {
       const list = this.tables.get("audit_logs") || [];
       if (params.length >= 1) {
+        const entityFilter = trimmed.includes("entity_id = ?") && params.length >= 4 ? String(params[1]) : null;
         return list
           .filter((r) => r.center_id === params[0])
+          .filter((r) => !entityFilter || r.entity_id === entityFilter || String(r.payload || "").includes(entityFilter))
           .map((r) => ({
             id: r.id,
             operationId: r.operation_id,
@@ -2433,6 +2466,16 @@ class InMemorySqliteMock implements SqlDatabase {
           })) as T[];
       }
       return list as T[];
+    }
+
+    if (trimmed.includes("FROM student_notes")) {
+      const list = this.tables.get("student_notes") || [];
+      const centerId = params[0];
+      const studentId = params[1];
+      return list
+        .filter((r) => r.center_id === centerId && (!studentId || r.student_id === studentId) && !r.deleted_at)
+        .sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")))
+        .map((r) => ({ id: r.id, centerId: r.center_id, studentId: r.student_id, text: r.note_text, createdAt: r.created_at, updatedAt: r.updated_at, createdBy: r.created_by, createdByName: r.created_by_name, updatedBy: r.updated_by, deletedAt: r.deleted_at })) as T[];
     }
 
     if (trimmed.includes("FROM session_expected_students")) {

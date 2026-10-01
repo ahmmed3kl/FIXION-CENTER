@@ -1,3 +1,4 @@
+import { AuditService } from "../../core/audit";
 import { DatabaseService } from "../../core/database";
 import { DeviceService } from "../../core/device";
 import { ForbiddenError, UnauthorizedError, ValidationError } from "../../core/errors";
@@ -106,6 +107,7 @@ export class GradeBookRepository {
     DatabaseService.runInTransaction(() => {
       db.runSync(`INSERT INTO grade_exams (id, center_id, name, grade, group_id, max_score, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?)`, [id, centerId, cleanName, cleanGrade, groupId, maxScore, now, now]);
       SyncRepository.enqueueOperation({ operationId, centerId, userId: user.id, deviceId: DeviceService.getDeviceIdSync(), operationType: "CREATE", entityType: "grade_exam", entityId: id, payload: { ...exam, maxScore, groupId, createdAt: now, updatedAt: now } });
+      AuditService.recordEvent({ operationId, centerId, userId: user.id, deviceId: DeviceService.getDeviceIdSync(), entityType: "grade_exam", entityId: id, action: "grade.exam.create", payload: { name: cleanName, groupId, actorName: user.fullName } });
     });
     SyncEngine.syncCenterNow(centerId).catch(() => undefined);
     return exam;
@@ -128,6 +130,7 @@ export class GradeBookRepository {
     DatabaseService.runInTransaction(() => {
       db.runSync(`INSERT INTO grade_scores (id, center_id, exam_id, student_id, score, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(center_id, exam_id, student_id) DO UPDATE SET score = excluded.score, updated_at = excluded.updated_at`, [id, centerId, exam.id, studentId, score, result.createdAt, now]);
       SyncRepository.enqueueOperation({ operationId, centerId, userId: user.id, deviceId: DeviceService.getDeviceIdSync(), operationType: existing ? "UPDATE" : "CREATE", entityType: "grade_score", entityId: id, payload: { ...result, examId: exam.id, studentId, score, updatedAt: now } });
+      AuditService.recordEvent({ operationId, centerId, userId: user.id, deviceId: DeviceService.getDeviceIdSync(), entityType: "grade_score", entityId: id, action: "grade.score.save", payload: { examId: exam.id, studentId, score, actorName: user.fullName } });
     });
     SyncEngine.syncCenterNow(centerId).catch(() => undefined);
     return result;

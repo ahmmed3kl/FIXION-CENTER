@@ -199,6 +199,7 @@ export default function AbsenceReportsScreen() {
   const [month, setMonth] = useState(() => monthKey(new Date()));
   const [sessions, setSessions] = useState<AbsenceSessionSummary[]>([]);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
+  const [absenceSentBefore, setAbsenceSentBefore] = useState(false);
   const [report, setReport] = useState<AbsenceSessionReport | null>(null);
   const [search, setSearch] = useState("");
   const [tab, setTab] = useState<"absent" | "present" | "compensation">("absent");
@@ -249,6 +250,7 @@ export default function AbsenceReportsScreen() {
 
   const openSession = (sessionId: string) => {
     setSelectedSessionId(sessionId);
+    try { setAbsenceSentBefore(NotificationService.hasAbsenceNotification(sessionId)); } catch { setAbsenceSentBefore(false); }
     setReport(null);
     setSearch("");
     setTab("absent");
@@ -268,6 +270,10 @@ export default function AbsenceReportsScreen() {
   const filteredCompensation = useMemo(() => report ? report.compensation.filter(({ student }) => smartSearch([student], search, [{ get: (item) => item.fullName }, { get: (item) => item.studentCode }]).length) : [], [report, search]);
 
   const sendAll = async () => {
+    if (absenceSentBefore) {
+      const confirmed = await new Promise<boolean>((resolve) => Alert.alert("تم إرسال الغياب مسبقًا", "هل تريد إعادة الإرسال؟", [{ text: "إلغاء", style: "cancel", onPress: () => resolve(false) }, { text: "إرسال مرة أخرى", onPress: () => resolve(true) }]));
+      if (!confirmed) return;
+    }
     if (!report || !selectedSessionId) return;
     if (!services.isEnabled("notifications")) {
       Alert.alert("الإشعارات غير مفعلة", "فعّل خدمة الإشعارات لهذا المركز من إدارة المنصة.");
@@ -278,7 +284,8 @@ export default function AbsenceReportsScreen() {
       return;
     }
     try {
-      const events = NotificationService.notifyAbsentees({ sessionId: selectedSessionId, selectedStudentIds: report.absent.map((student) => student.id) });
+      const events = NotificationService.notifyAbsentees({ sessionId: selectedSessionId, selectedStudentIds: report.absent.map((student) => student.id), operationPrefix: `op-a-${selectedSessionId.slice(-8)}-${Date.now().toString(36).slice(-5)}` });
+      setAbsenceSentBefore(true);
       let sent = 0;
       for (const event of events) {
         const result = await NotificationService.sendPendingDeliveries(event.id);

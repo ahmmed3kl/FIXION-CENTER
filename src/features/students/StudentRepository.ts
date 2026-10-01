@@ -253,6 +253,27 @@ export class StudentRepository {
     });
   }
 
+  /** Students available to the attendance picker without requiring full student-list access. */
+  static getAllForAttendance(): Student[] {
+    const { centerId, user } = this.getActiveContext();
+    const canRead = PermissionService.hasPermission(user.permissions, "students.view") ||
+      PermissionService.hasPermission(user.permissions, "attendance.view") ||
+      PermissionService.hasPermission(user.permissions, "attendance.create");
+    if (!canRead) throw new ForbiddenError("Ù„ÙŠØ³ Ù„Ø¯ÙŠÙƒ ØµÙ„Ø§Ø­ÙŠØ© Ø¹Ø±Ø¶ Ø§Ù„Ø·Ù„Ø§Ø¨ Ù„Ù„Ø­Ø¶ÙˆØ±.");
+    const db = DatabaseService.getDb();
+    const rows = db.getAllSync<any>(
+      `SELECT id, center_id as centerId, student_code as studentCode, full_name as fullName,
+              card_code as cardCode, phone, parent_phone as parentPhone, grade, status,
+              student_type as studentType, notes, created_at as createdAt, updated_at as updatedAt
+       FROM students WHERE center_id = ? AND status = 'active' AND deleted_at IS NULL
+       ORDER BY full_name ASC`, [centerId],
+    );
+    return rows.map((row) => ({
+      ...row,
+      cardCode: StudentCardRepository.getActiveCardByStudentId(row.id)?.cardCode ?? row.cardCode ?? "",
+    }));
+  }
+
   static createStudent(dto: CreateStudentDTO): Student {
     const { centerId, user } = this.getActiveContext();
     if (!PermissionService.hasPermission(user.permissions, "students.create")) {
@@ -370,6 +391,7 @@ export class StudentRepository {
         fullName: dto.fullName.trim(),
         grade,
         groupIds: dto.groupIds || [],
+        actorName: user.fullName,
       },
     });
 
@@ -507,7 +529,7 @@ export class StudentRepository {
       entityType: "student",
       entityId: studentId,
       action: "student.update",
-      payload: { fullName, phone, grade },
+      payload: { fullName, phone, grade, actorName: user.fullName },
     });
 
     SyncRepository.enqueueOperation({
@@ -606,7 +628,7 @@ export class StudentRepository {
       entityType: "student",
       entityId: studentId,
       action: "student.delete",
-      payload: { studentId, deletedAt: now },
+      payload: { studentId, deletedAt: now, actorName: user.fullName },
     });
 
     SyncRepository.enqueueOperation({

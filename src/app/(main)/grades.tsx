@@ -8,6 +8,7 @@ import { GradeBookRepository, GradeExam, GradeScore } from "../../features/grade
 import { GroupScheduleRepository } from "../../features/groups/GroupScheduleRepository";
 import { NotificationService } from "../../features/notifications/NotificationService";
 import { Group, Student } from "../../shared/types";
+import { smartSearch } from "../../shared/utils/smartSearch";
 
 export default function GradesScreen() {
   const { colors } = useTheme();
@@ -24,6 +25,8 @@ export default function GradesScreen() {
   const [showExamForm, setShowExamForm] = useState(false);
   const [scoreMin, setScoreMin] = useState("");
   const [scoreMax, setScoreMax] = useState("");
+  const [studentSearch, setStudentSearch] = useState("");
+  const [sentExamIds, setSentExamIds] = useState<Record<string, boolean>>({});
   const scheduleLabel = (groupId: string) => GroupScheduleRepository.getSchedulesForGroup(groupId)
     .filter((schedule) => schedule.status !== "inactive")
     .sort((a, b) => a.dayOfWeek - b.dayOfWeek)
@@ -37,6 +40,9 @@ export default function GradesScreen() {
     const values: Record<string, string> = {};
     nextScores.forEach((row: GradeScore) => { values[`${row.examId}:${row.studentId}`] = row.score === null ? "" : String(row.score); });
     setStudents(nextStudents); setExams(nextExams); setScores(values);
+    const sent: Record<string, boolean> = {};
+    nextExams.forEach((exam) => { sent[exam.id] = nextStudents.some((student) => NotificationService.hasGradeNotification(exam.id, student.id)); });
+    setSentExamIds(sent);
   }, []);
 
   const load = useCallback(() => {
@@ -71,12 +77,14 @@ export default function GradesScreen() {
     try { GradeBookRepository.setScore(exam, student.id, value); }
     catch (error: any) { Alert.alert("درجة غير صحيحة", error?.message || "تعذر حفظ الدرجة."); }
   };
-  const visibleStudents = useMemo(() => students.filter((student) => {
+  const visibleStudents = useMemo(() => smartSearch(students, studentSearch, [
+    { get: (student) => student.fullName, weight: 3 }, { get: (student) => student.studentCode }, { get: (student) => student.cardCode }, { get: (student) => student.phone },
+  ]).filter((student) => {
     const min = scoreMin.trim() === "" ? null : Number(scoreMin); const max = scoreMax.trim() === "" ? null : Number(scoreMax);
     if (min === null && max === null) return true;
     const values = exams.map((exam) => Number(scores[`${exam.id}:${student.id}`])).filter((value) => Number.isFinite(value));
     return values.some((value) => (min === null || value >= min) && (max === null || value <= max));
-  }), [students, exams, scores, scoreMin, scoreMax]);
+  }), [students, exams, scores, scoreMin, scoreMax, studentSearch]);
   const gradeStats = useMemo(() => {
     const values = students.flatMap((student) => exams.map((exam) => Number(scores[`${exam.id}:${student.id}`])).filter((value) => Number.isFinite(value)));
     return { count: values.length, average: values.length ? (values.reduce((sum, value) => sum + value, 0) / values.length).toFixed(1) : "0" };
@@ -86,16 +94,23 @@ export default function GradesScreen() {
     const rows = students.map((student) => ({ student, value: scores[`${exam.id}:${student.id}`] })).filter((row) => row.value !== undefined && row.value !== "");
     if (!rows.length) return Alert.alert("لا توجد درجات", "سجل درجات هذا الامتحان أولاً.");
     try {
+      if (sentExamIds[exam.id]) {
+        const confirmed = await new Promise<boolean>((resolve) => Alert.alert("تم إرسال الدرجات مسبقًا", "هل تريد إعادة الإرسال؟", [{ text: "إلغاء", style: "cancel", onPress: () => resolve(false) }, { text: "إرسال مرة أخرى", onPress: () => resolve(true) }]));
+        if (!confirmed) return;
+      }
       for (const { student, value } of rows) {
-        const event = NotificationService.notifyGrades({ studentId: student.id, examName: exam.name, score: Number(value), maxScore: exam.maxScore, summary: `${exam.name}: ${value}/${exam.maxScore}` });
+        const event = NotificationService.notifyGrades({ operationId: `op-g-${exam.id.slice(-8)}-${student.id.slice(-8)}-${Date.now().toString(36).slice(-5)}`, studentId: student.id, examName: exam.name, score: Number(value), maxScore: exam.maxScore, summary: `${exam.name}: ${value}/${exam.maxScore}` });
         await NotificationService.sendPendingDeliveries(event.id);
       }
+      setSentExamIds((current) => ({ ...current, [exam.id]: true }));
       Alert.alert("تم تجهيز الرسائل", `تم تجهيز درجات ${exam.name} للإرسال لعدد ${rows.length} طالب.`);
     }
     catch (error: any) { Alert.alert("تعذر إرسال الدرجات", error?.message || "راجع صلاحية الإشعارات."); }
   };
 
   return <SafeAreaView style={styles.safe}><ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
+    {selectedGroup ? <View style={styles.filterCard}><Text style={styles.filterTitle}>بحث عن طالب</Text><TextInput style={[styles.filterInput, { width: "100%" }]} value={studentSearch} onChangeText={setStudentSearch} placeholder="ابحث بالاسم أو الكود أو الهاتف" placeholderTextColor={Colors.slate400} /></View> : null}
+    {Object.values(sentExamIds).some(Boolean) ? <Text style={styles.filterHint}>تم إرسال درجات امتحان مسبقًا — سيظهر تأكيد قبل إعادة الإرسال</Text> : null}
     <View style={styles.hero}><TouchableOpacity onPress={() => router.back()} style={styles.backButton}><Ionicons name="chevron-forward" size={22} color={Colors.slate900} /></TouchableOpacity><View style={styles.heroIcon}><Ionicons name="school-outline" size={30} color={Colors.primary} /></View><View style={styles.heroCopy}><Text style={styles.kicker}>الأداء الأكاديمي</Text><Text style={styles.title}>رصد الدرجات</Text><Text style={styles.subtitle}>سجّل درجات الامتحانات للمجموعة</Text></View></View>
     {!groupId ? <><View style={styles.sectionHeading}><View><Text style={styles.sectionTitle}>اختر المجموعة</Text><Text style={styles.sectionHint}>{groups.length} مجموعة نشطة</Text></View><Ionicons name="layers-outline" size={20} color={Colors.primary} /></View><ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.groupRow}>{groups.map((group) => <TouchableOpacity key={group.id} onPress={() => selectGroup(group)} style={[styles.groupCard, selectedGroup?.id === group.id && styles.groupCardActive]}><View style={[styles.groupBadge, selectedGroup?.id === group.id && styles.groupBadgeActive]}><Ionicons name="people-outline" size={16} color={selectedGroup?.id === group.id ? Colors.primary : Colors.slate500} /></View><Text style={[styles.groupChipText, selectedGroup?.id === group.id && styles.groupChipTextActive]} numberOfLines={1}>{group.name}</Text><Text style={[styles.groupGrade, selectedGroup?.id === group.id && styles.groupChipTextActive]} numberOfLines={1}>{group.grade}</Text><Text style={[styles.groupMeta, selectedGroup?.id === group.id && styles.groupChipTextActive]} numberOfLines={1}>{scheduleLabel(group.id)}</Text></TouchableOpacity>)}</ScrollView>{!groups.length ? <Text style={styles.empty}>لا توجد مجموعات نشطة.</Text> : null}</> : null}
     {selectedGroup ? <>

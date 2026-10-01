@@ -17,8 +17,9 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { formatCurrency, formatTimeArabic, Strings } from "../../core/localization";
-import { getLocalDateOnly } from "../../shared/utils/date";
+import { formatLocalDateTime, getLocalDateOnly } from "../../shared/utils/date";
 import { PermissionService } from "../../core/permissions";
+import { AuditService } from "../../core/audit";
 import { Colors, Spacing, Typography, useTheme } from "../../core/theme";
 import { useServiceVisibility } from "../../core/services/ServiceVisibilityContext";
 import { useAuthStore } from "../../features/auth/useAuthStore";
@@ -34,6 +35,7 @@ import { DebtAdjustmentRepository } from "../../features/payments/DebtAdjustment
 import { FinancialCalculationService } from "../../features/payments/FinancialCalculationService";
 import { PaymentRepository } from "../../features/payments/PaymentRepository";
 import { GradeBookRepository, GradeExam, GradeScore } from "../../features/grades/GradeBookRepository";
+import { StudentNoteRepository } from "../../features/students/StudentNoteRepository";
 import { NotificationService } from "../../features/notifications/NotificationService";
 import { StudentCardRepository } from "../../features/students/StudentCardRepository";
 import { StudentRepository } from "../../features/students/StudentRepository";
@@ -150,7 +152,11 @@ export default function StudentsScreen() {
   const [studentCards, setStudentCards] = useState<StudentCard[]>([]);
   const [studentSubscriptions, setStudentSubscriptions] = useState<StudentPackageSubscription[]>([]);
   const [studentAttendance, setStudentAttendance] = useState<Attendance[]>([]);
-  const [profileTab, setProfileTab] = useState<"groups" | "packages" | "attendance" | "payments" | "notes">("groups");
+  const [studentNotes, setStudentNotes] = useState<import("../../shared/types").StudentNote[]>([]);
+  const [studentAuditLogs, setStudentAuditLogs] = useState<import("../../shared/types").AuditLog[]>([]);
+  const [noteText, setNoteText] = useState("");
+  const [editingNoteId, setEditingNoteId] = useState<string | null>(null);
+  const [profileTab, setProfileTab] = useState<"groups" | "packages" | "attendance" | "payments" | "notes" | "activity">("groups");
   const [barcodeModalOpen, setBarcodeModalOpen] = useState(false);
   const [studentEnrollments, setStudentEnrollments] = useState<
     StudentGroupEnrollment[]
@@ -350,6 +356,10 @@ export default function StudentsScreen() {
     setStudentEnrollments([]);
     setStudentSubscriptions([]);
     setStudentAttendance([]);
+    setStudentNotes([]);
+    setStudentAuditLogs([]);
+    setNoteText("");
+    setEditingNoteId(null);
     setAttendanceSummaries([]);
     try {
       const cards = StudentCardRepository.getCardsByStudentId(student.id);
@@ -366,6 +376,8 @@ export default function StudentsScreen() {
       try {
         setStudentAttendance(AttendanceRepository.getStudentAttendance(student.id));
       } catch { setStudentAttendance([]); }
+      try { setStudentNotes(StudentNoteRepository.listForStudent(student.id)); } catch { setStudentNotes([]); }
+      try { setStudentAuditLogs(AuditService.getEntityLogs(activeCenterId || student.centerId, student.id)); } catch { setStudentAuditLogs([]); }
       try {
         setAttendanceSummaries(AttendanceRepository.getStudentGroupAttendanceSummaries(student.id));
       } catch {
@@ -380,6 +392,23 @@ export default function StudentsScreen() {
     } catch (e) {
       console.error(e);
     }
+  };
+
+  const saveStudentNote = () => {
+    if (!selectedStudent || !noteText.trim()) return Alert.alert("الملاحظة", "اكتب نص الملاحظة أولاً.");
+    try {
+      if (editingNoteId) StudentNoteRepository.update(editingNoteId, noteText);
+      else StudentNoteRepository.create(selectedStudent.id, noteText);
+      setStudentNotes(StudentNoteRepository.listForStudent(selectedStudent.id));
+      setNoteText(""); setEditingNoteId(null);
+    } catch (error: any) { Alert.alert("تعذر حفظ الملاحظة", error?.message || "حاول مرة أخرى."); }
+  };
+
+  const removeStudentNote = (noteId: string) => {
+    Alert.alert("حذف الملاحظة", "هل تريد حذف هذه الملاحظة؟", [
+      { text: "إلغاء", style: "cancel" },
+      { text: "حذف", style: "destructive", onPress: () => { try { StudentNoteRepository.remove(noteId); if (selectedStudent) setStudentNotes(StudentNoteRepository.listForStudent(selectedStudent.id)); } catch (error: any) { Alert.alert("تعذر الحذف", error?.message || "حاول مرة أخرى."); } } },
+    ]);
   };
 
   const openStudentEdit = () => {
@@ -1023,6 +1052,7 @@ export default function StudentsScreen() {
       {/* 1. Add Student Guided Wizard Modal */}
       <AddStudentWizardModal
         visible={isAddStudentOpen}
+        keepOpenAfterCreate={!attendanceSessionId}
         onClose={() => {
           setIsAddStudentOpen(false);
           if (attendanceSessionId && !returningToAttendanceAfterCreateRef.current) {
@@ -1085,6 +1115,7 @@ export default function StudentsScreen() {
                 {([
                   ["groups", "المجموعات", "people-outline"], ...(canViewPackages ? [["packages", "الباقات", "card-outline"] as const] : []), ...(canViewAttendance ? [["attendance", "الحضور والغياب", "calendar-outline"] as const] : []), ...(canViewPayments ? [["payments", "المدفوعات", "wallet-outline"] as const] : []), ["notes", "الملاحظات", "document-text-outline"],
                 ] as const).map(([key, label, icon]) => <TouchableOpacity key={key} style={[styles.profileTab, profileTab === key && styles.profileTabActive]} onPress={() => setProfileTab(key)}><Ionicons name={icon} size={16} color={profileTab === key ? Colors.primary : Colors.slate500} /><Text style={[styles.profileTabText, profileTab === key && styles.profileTabTextActive]}>{label}</Text></TouchableOpacity>)}
+                <TouchableOpacity key="activity" style={[styles.profileTab, profileTab === "activity" && styles.profileTabActive]} onPress={() => setProfileTab("activity")}><Ionicons name="time-outline" size={16} color={profileTab === "activity" ? Colors.primary : Colors.slate500} /><Text style={[styles.profileTabText, profileTab === "activity" && styles.profileTabTextActive]}>سجل النشاط</Text></TouchableOpacity>
               </ScrollView>
 
               {profileTab === "groups" && <View style={styles.profileSection}>
@@ -1102,6 +1133,12 @@ export default function StudentsScreen() {
               {profileTab === "payments" && canViewPayments && <View style={styles.profileSection}><View style={styles.profileSectionHeader}><View><Text style={styles.profileSectionTitle}>{Strings.financialStatusTitle}</Text><Text style={styles.profileSectionCaption}>الموقف المالي وسجل المدفوعات</Text></View>{canCreatePayment && <TouchableOpacity style={styles.profileInlineAction} onPress={() => { setPaymentAmount(""); setPaymentType("monthly"); setPaymentCycleId(""); setPaymentNotes(""); setIsPaymentModalOpen(true); }}><Ionicons name="add" size={18} color={Colors.primary} /><Text style={styles.profileInlineActionText}>تسجيل دفعة</Text></TouchableOpacity>}</View>{!financialStatus ? <View style={styles.profileEmpty}><Text style={styles.profileEmptyText}>تعذر تحميل بيانات المدفوعات.</Text></View> : <><View style={styles.profileFinanceSummary}><View><Text style={styles.profileFinanceLabel}>{Strings.totalDueLabel}</Text><Text style={styles.profileFinanceValue}>{formatCurrency(financialStatus.monthlyTotalDue)}</Text></View><View><Text style={styles.profileFinanceLabel}>{Strings.totalPaidLabel}</Text><Text style={[styles.profileFinanceValue, { color: Colors.successText }]}>{formatCurrency(financialStatus.monthlyTotalPaid)}</Text></View><View><Text style={styles.profileFinanceLabel}>{Strings.remainingBalanceLabel}</Text><Text style={[styles.profileFinanceValue, { color: Colors.dangerText }]}>{formatCurrency(financialStatus.monthlyRemainingDebt)}</Text></View></View>{financialStatus.sessionDebt && <View style={styles.profileSessionDebt}><Text style={styles.profileRowTitle}>مديونية الحصص الحالية</Text><Text style={styles.profileRowMeta}>{financialStatus.sessionDebt.periodStart} إلى {financialStatus.sessionDebt.periodEnd}</Text><Text style={styles.profileFinanceValue}>{formatCurrency(financialStatus.sessionDebt.currentDebt)}</Text></View>}<Text style={styles.profileSubsectionTitle}>{Strings.debtCyclesTitle}</Text>{financialStatus.cycles.length ? financialStatus.cycles.map((cycle) => <View key={cycle.id} style={styles.profilePaymentRow}><View style={styles.profileRowCopy}><Text style={styles.profileRowTitle}>{Strings.cycleNumberPrefix} {cycle.cycleNumber} · {cycle.groupName || "مجموعة"}</Text><Text style={styles.profileRowMeta}>{cycle.startDate} إلى {cycle.endDate} · المتبقي {formatCurrency(cycle.remainingDebt ?? 0)}</Text></View><View style={styles.profilePaymentActions}>{cycle.status === "paid" ? <StatusBadge text={Strings.cycleStatusPaid} type="success" /> : <StatusBadge text={cycle.status === "partial" ? Strings.cycleStatusPartial : Strings.cycleStatusOpen} type="warning" />}{canAdjustDebt && <TouchableOpacity onPress={() => { setTargetCycleForAdj(cycle); setAdjAmount(""); setAdjReason(""); setIsAdjModalOpen(true); }}><Ionicons name="create-outline" size={18} color={Colors.primary} /></TouchableOpacity>}</View></View>) : <Text style={styles.profileEmptyText}>لا توجد دورات مديونية مسجلة.</Text>}<Text style={styles.profileSubsectionTitle}>سجل المدفوعات النقدية</Text>{financialStatus.payments.length ? financialStatus.payments.map((payment) => <View key={payment.id} style={styles.profilePaymentRow}><View style={styles.profileRowCopy}><Text style={[styles.profileRowTitle, payment.isReversed && styles.strikeText]}>{formatCurrency(payment.amount)} · {payment.paymentType === "session" ? "حصة" : payment.paymentType === "monthly" ? "شهري" : "جزئي"}</Text><Text style={styles.profileRowMeta}>{payment.paymentDate || payment.createdAt.slice(0, 10)}{payment.notes ? ` · ${payment.notes}` : ""}</Text></View>{payment.isReversed ? <StatusBadge text={Strings.reversedBadge} type="danger" /> : canReversePayment ? <TouchableOpacity style={styles.reverseBtn} onPress={() => { setTargetPaymentForRev(payment); setRevReason(""); setIsRevModalOpen(true); }}><Text style={styles.reverseBtnText}>{Strings.reversePaymentButton}</Text></TouchableOpacity> : null}</View>) : <Text style={styles.profileEmptyText}>لا توجد مدفوعات مسجلة.</Text>}</>}</View>}
 
               {profileTab === "notes" && <View style={styles.profileSection}><View style={styles.profileSectionHeader}><View><Text style={styles.profileSectionTitle}>الملاحظات</Text><Text style={styles.profileSectionCaption}>ملاحظة الطالب المحفوظة في بياناته</Text></View>{canUpdateStudent && <TouchableOpacity style={styles.profileInlineAction} onPress={openStudentEdit}><Ionicons name="create-outline" size={17} color={Colors.primary} /><Text style={styles.profileInlineActionText}>{selectedStudent.notes ? "تعديل" : "إضافة"}</Text></TouchableOpacity>}</View>{selectedStudent.notes?.trim() ? <View style={styles.profileNoteCard}><Ionicons name="document-text-outline" size={18} color={Colors.primary} /><Text style={styles.profileNoteText}>{selectedStudent.notes}</Text></View> : <View style={styles.profileEmpty}><Ionicons name="document-text-outline" size={25} color={Colors.slate400} /><Text style={styles.profileEmptyTitle}>لا توجد ملاحظات بعد</Text><Text style={styles.profileEmptyText}>يمكنك إضافة ملاحظة ضمن بيانات الطالب.</Text></View>}</View>}
+              {profileTab === "activity" && <View style={styles.profileSection}>
+                {canUpdateStudent && <View style={styles.profileNoteCard}><AppInput value={noteText} onChangeText={setNoteText} placeholder="Ø£Ø¶Ù Ù…Ù„Ø§Ø­Ø¸Ø© Ø¬Ø¯ÙŠØ¯Ø©" multiline /><TouchableOpacity style={styles.profileInlineAction} onPress={() => void saveStudentNote()}><Ionicons name="save-outline" size={17} color={Colors.primary} /><Text style={styles.profileInlineActionText}>{editingNoteId ? "ØªØ­Ø¯ÙŠØ« Ø§Ù„Ù…Ù„Ø§Ø­Ø¸Ø©" : "Ø­ÙØ¸ Ø§Ù„Ù…Ù„Ø§Ø­Ø¸Ø©"}</Text></TouchableOpacity></View>}
+                {studentNotes.map((note) => <View key={note.id} style={styles.profilePaymentRow}><View style={styles.profileRowCopy}><Text style={styles.profileRowTitle}>{note.text}</Text><Text style={styles.profileRowMeta}>{note.createdByName || "Ø­Ø³Ø§Ø¨"} Â· {formatLocalDateTime(note.createdAt)}</Text></View><View style={styles.profilePaymentActions}><TouchableOpacity onPress={() => { setEditingNoteId(note.id); setNoteText(note.text); }}><Ionicons name="create-outline" size={18} color={Colors.primary} /></TouchableOpacity><TouchableOpacity onPress={() => void removeStudentNote(note.id)}><Ionicons name="trash-outline" size={18} color={Colors.danger} /></TouchableOpacity></View></View>)}
+                <View style={styles.profileSectionHeader}><View><Text style={styles.profileSectionTitle}>سجل النشاط</Text><Text style={styles.profileSectionCaption}>من أضاف الطالب أو عدّل بياناته أو سجّل دفعة أو حضورًا</Text></View></View>
+                {studentAuditLogs.length === 0 ? <Text style={styles.profileEmptyText}>لا يوجد نشاط مسجل لهذا الطالب.</Text> : studentAuditLogs.slice(0, 100).map((log) => { let payload: any = {}; try { payload = log.payload ? JSON.parse(log.payload) : {}; } catch {} return <View key={log.id} style={styles.profileHistoryRow}><View style={styles.profileHistoryIcon}><Ionicons name="time-outline" size={16} color={Colors.primary} /></View><View style={styles.profileRowCopy}><Text style={styles.profileRowTitle}>{log.action}</Text><Text style={styles.profileRowMeta}>{payload.actorName || (log.userId === currentUser?.id ? currentUser.fullName : `حساب ${log.userId}`)} · {formatLocalDateTime(log.timestamp)}</Text></View></View>; })}
+              </View>}
             </ScrollView>
           </SafeAreaView>
         </Modal>

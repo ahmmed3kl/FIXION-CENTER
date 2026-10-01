@@ -337,6 +337,7 @@ export class AttendanceRepository {
           payload: {
             sessionId: params.sessionId,
             amount: sessionPrice,
+            actorName: user.fullName,
           },
         });
       }
@@ -386,9 +387,11 @@ export class AttendanceRepository {
       action: "attendance.record",
       payload: {
         status: params.status,
+        studentId: params.studentId,
         isLate: params.isLate,
         attendanceType,
         isExternal: Boolean(params.isExternal),
+        actorName: user.fullName,
       },
     });
     });

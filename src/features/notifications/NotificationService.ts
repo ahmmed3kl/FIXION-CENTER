@@ -518,6 +518,24 @@ export class NotificationService {
     return events;
   }
 
+  static hasAbsenceNotification(sessionId: string): boolean {
+    const { centerId, user } = this.getActiveContext();
+    if (!PermissionService.hasPermission(user.permissions, "notifications.view") && !PermissionService.hasPermission(user.permissions, "notifications.send")) return false;
+    return Boolean(DatabaseService.getDb().getFirstSync<any>(
+      `SELECT id FROM notification_events WHERE center_id = ? AND session_id = ? AND event_type = 'absence' LIMIT 1`,
+      [centerId, sessionId],
+    ));
+  }
+
+  static hasGradeNotification(examId: string, studentId: string): boolean {
+    const { centerId, user } = this.getActiveContext();
+    if (!PermissionService.hasPermission(user.permissions, "notifications.view") && !PermissionService.hasPermission(user.permissions, "notifications.send")) return false;
+    return Boolean(DatabaseService.getDb().getFirstSync<any>(
+      `SELECT id FROM notification_events WHERE center_id = ? AND student_id = ? AND event_type = 'grades' AND operation_id LIKE ? LIMIT 1`,
+      [centerId, studentId, `op-g-${examId.slice(-8)}-${studentId.slice(-8)}-%`],
+    ));
+  }
+
   /** Sends the student's grade summary to the guardian using the SMS template. */
   static notifyGrades(params: {
     studentId: string;
