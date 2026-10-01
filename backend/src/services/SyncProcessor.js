@@ -517,7 +517,12 @@ class SyncProcessor {
           student.student_code || student.studentCode || existingStudent?.student_code || cardCode,
         ).trim();
         const status = student.status || existingStudent?.status || "active";
-        const cardWasProvided = Boolean(payload.card || !existingStudent);
+        // Card lifecycle is owned by the dedicated student_card operation.
+        // A student CREATE payload also contains a card for the initial
+        // bootstrap, but that payload can be retried long after the student
+        // has received a replacement card. Replaying it must never
+        // deactivate the current card and resurrect the old one.
+        const cardWasProvided = !existingStudent && Boolean(payload.card || cardCode);
 
         if (!studentId || (!cardCode && !existingStudent)) {
           throw new Error("Card code / Student code is required.");

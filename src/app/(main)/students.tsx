@@ -1,4 +1,4 @@
-import { Ionicons } from "@expo/vector-icons";
+﻿﻿import { Ionicons } from "@expo/vector-icons";
 import { useCameraPermissions } from "expo-camera";
 import { router, useLocalSearchParams } from "expo-router";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -697,6 +697,25 @@ export default function StudentsScreen() {
     ]);
   };
 
+  const handleReactivateCard = (cardId: string) => {
+    if (!selectedStudent) return;
+    Alert.alert("إعادة تفعيل البطاقة", "هل تريد إعادة تفعيل هذه البطاقة؟", [
+      { text: "إلغاء", style: "cancel" },
+      {
+        text: "نعم، إعادة التفعيل",
+        onPress: () => {
+          try {
+            StudentCardRepository.reactivateCard(cardId);
+            openStudentDetails(selectedStudent);
+            loadData();
+          } catch (e: any) {
+            Alert.alert("خطأ", e?.message || "فشل إعادة تفعيل البطاقة");
+          }
+        },
+      },
+    ]);
+  };
+
   const handleEnrollStudent = () => {
     if (!selectedStudent) return;
     if (!enrollGroupId) {
@@ -1108,7 +1127,7 @@ export default function StudentsScreen() {
                 <TouchableOpacity style={styles.profileCodeButton} onPress={() => setBarcodeModalOpen(true)}><Ionicons name="barcode-outline" size={20} color={Colors.white} /><Text style={styles.profileCodeButtonText}>عرض كود الطالب</Text></TouchableOpacity>
                 {canManageCards && <TouchableOpacity style={styles.profileManageCardButton} onPress={() => setIsCardModalOpen(true)}><Ionicons name="card-outline" size={19} color={Colors.primary} /><Text style={styles.profileManageCardText}>إدارة البطاقة</Text></TouchableOpacity>}
               </View>
-              {studentCards.length > 0 && <View style={styles.profileCardList}>{studentCards.map((card) => <View key={card.id} style={styles.profileCardRow}><View style={styles.profileRowCopy}><Text style={styles.profileRowTitle}>بطاقة {formatDisplayIdentifier(card.cardCode)}</Text><Text style={styles.profileRowMeta}>صدرت في {card.issuedAt.slice(0, 10)}</Text></View><StatusBadge text={card.status === "active" ? "نشطة" : "ملغاة"} type={card.status === "active" ? "success" : "neutral"} />{canManageCards && card.status === "active" && <TouchableOpacity accessibilityLabel="إلغاء البطاقة" onPress={() => handleDeactivateCard(card.id)}><Ionicons name="trash-outline" size={17} color={Colors.danger} /></TouchableOpacity>}</View>)}</View>}
+              {studentCards.length > 0 && <View style={styles.profileCardList}>{studentCards.map((card) => <View key={card.id} style={styles.profileCardRow}><View style={styles.profileRowCopy}><Text style={styles.profileRowTitle}>بطاقة {formatDisplayIdentifier(card.cardCode)}</Text><Text style={styles.profileRowMeta}>صدرت في {card.issuedAt.slice(0, 10)}</Text></View><StatusBadge text={card.status === "active" ? "نشطة" : "ملغاة"} type={card.status === "active" ? "success" : "neutral"} />{canManageCards && card.status === "active" && <TouchableOpacity accessibilityLabel="إلغاء البطاقة" onPress={() => handleDeactivateCard(card.id)}><Ionicons name="trash-outline" size={17} color={Colors.danger} /></TouchableOpacity>}{canManageCards && card.status !== "active" && <TouchableOpacity accessibilityLabel="إعادة تفعيل البطاقة" onPress={() => handleReactivateCard(card.id)} style={{ padding: 4 }}><Ionicons name="refresh-circle-outline" size={20} color={Colors.primary} /></TouchableOpacity>}</View>)}</View>}
               {canDeactivate && <TouchableOpacity style={styles.profileDeactivateButton} onPress={handleDeleteStudent}><Ionicons name="trash-outline" size={17} color={Colors.danger} /><Text style={styles.profileDeactivateText}>حذف الطالب</Text></TouchableOpacity>}
 
               <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.profileTabsScroller} contentContainerStyle={styles.profileTabs}>
@@ -1137,7 +1156,7 @@ export default function StudentsScreen() {
                 {canUpdateStudent && <View style={styles.profileNoteCard}><AppInput value={noteText} onChangeText={setNoteText} placeholder="Ø£Ø¶Ù Ù…Ù„Ø§Ø­Ø¸Ø© Ø¬Ø¯ÙŠØ¯Ø©" multiline /><TouchableOpacity style={styles.profileInlineAction} onPress={() => void saveStudentNote()}><Ionicons name="save-outline" size={17} color={Colors.primary} /><Text style={styles.profileInlineActionText}>{editingNoteId ? "ØªØ­Ø¯ÙŠØ« Ø§Ù„Ù…Ù„Ø§Ø­Ø¸Ø©" : "Ø­ÙØ¸ Ø§Ù„Ù…Ù„Ø§Ø­Ø¸Ø©"}</Text></TouchableOpacity></View>}
                 {studentNotes.map((note) => <View key={note.id} style={styles.profilePaymentRow}><View style={styles.profileRowCopy}><Text style={styles.profileRowTitle}>{note.text}</Text><Text style={styles.profileRowMeta}>{note.createdByName || "Ø­Ø³Ø§Ø¨"} Â· {formatLocalDateTime(note.createdAt)}</Text></View><View style={styles.profilePaymentActions}><TouchableOpacity onPress={() => { setEditingNoteId(note.id); setNoteText(note.text); }}><Ionicons name="create-outline" size={18} color={Colors.primary} /></TouchableOpacity><TouchableOpacity onPress={() => void removeStudentNote(note.id)}><Ionicons name="trash-outline" size={18} color={Colors.danger} /></TouchableOpacity></View></View>)}
                 <View style={styles.profileSectionHeader}><View><Text style={styles.profileSectionTitle}>سجل النشاط</Text><Text style={styles.profileSectionCaption}>من أضاف الطالب أو عدّل بياناته أو سجّل دفعة أو حضورًا</Text></View></View>
-                {studentAuditLogs.length === 0 ? <Text style={styles.profileEmptyText}>لا يوجد نشاط مسجل لهذا الطالب.</Text> : studentAuditLogs.slice(0, 100).map((log) => { let payload: any = {}; try { payload = log.payload ? JSON.parse(log.payload) : {}; } catch {} return <View key={log.id} style={styles.profileHistoryRow}><View style={styles.profileHistoryIcon}><Ionicons name="time-outline" size={16} color={Colors.primary} /></View><View style={styles.profileRowCopy}><Text style={styles.profileRowTitle}>{log.action}</Text><Text style={styles.profileRowMeta}>{payload.actorName || (log.userId === currentUser?.id ? currentUser.fullName : `حساب ${log.userId}`)} · {formatLocalDateTime(log.timestamp)}</Text></View></View>; })}
+                {studentAuditLogs.length === 0 ? <Text style={styles.profileEmptyText}>لا يوجد نشاط مسجل لهذا الطالب.</Text> : studentAuditLogs.slice(0, 100).map((log) => { let payload: any = {}; try { payload = log.payload ? JSON.parse(log.payload) : {}; } catch {} const actionLabels: Record<string, string> = { "student.create": "تم إضافة الطالب", "student.update": "تم تعديل بيانات الطالب", "student.deactivate": "تم تعطيل الطالب", "student.delete": "تم حذف الطالب", "student_card.issue": "تم إصدار بطاقة جديدة", "student_card.deactivate": "تم إلغاء تفعيل البطاقة", "student_card.reactivate": "تم إعادة تفعيل البطاقة", "attendance.record": "تم تسجيل الحضور", "attendance.makeup": "تم تسجيل تعويض", "payment.create": "تم تسجيل دفعة", "payment.delete": "تم حذف دفعة", "enrollment.create": "تم التسجيل في مجموعة", "enrollment.end": "تم إنهاء التسجيل", "enrollment.transfer": "تم تحويل المجموعة", "note.create": "تم إضافة ملاحظة", "note.update": "تم تعديل ملاحظة", "note.delete": "تم حذف ملاحظة" }; const actionLabel = actionLabels[log.action] || log.action; return <View key={log.id} style={styles.profileHistoryRow}><View style={styles.profileHistoryIcon}><Ionicons name="time-outline" size={16} color={Colors.primary} /></View><View style={styles.profileRowCopy}><Text style={styles.profileRowTitle}>{actionLabel}</Text><Text style={styles.profileRowMeta}>{payload.actorName || (log.userId === currentUser?.id ? currentUser?.fullName : `مستخدم`)} · {formatLocalDateTime(log.timestamp)}</Text></View></View>; })}
               </View>}
             </ScrollView>
           </SafeAreaView>

@@ -102,11 +102,14 @@ export class StudentCardRepository {
     const trimmedCard = cardCode.trim();
     const db = DatabaseService.getDb();
 
-    // Check if card code is already active in center
-    const existing = this.findByCardCodeAnywhere(trimmedCard);
-    if (existing) {
+    // Check if card code is currently active anywhere (only block ACTIVE cards)
+    const existingActive = db.getFirstSync<any>(
+      `SELECT id, student_id as studentId FROM student_cards WHERE card_code = ? AND status = 'active' LIMIT 1`,
+      [trimmedCard],
+    );
+    if (existingActive && existingActive.studentId !== studentId) {
       throw new ConflictError(
-        `البطاقة رقم (${trimmedCard}) مخصصة لطالب آخر بالفعل ومفعلة.`,
+        `البطاقة رقم (${trimmedCard}) مفعّلة لطالب آخر بالفعل.`,
       );
     }
 
@@ -216,6 +219,71 @@ export class StudentCardRepository {
       );
       AuditService.recordEvent({ operationId, centerId, userId: user.id, deviceId, entityType: "student_card", entityId: cardId, action: "student_card.deactivate", payload: { studentId: row.studentId, cardCode: row.cardCode } });
       SyncRepository.enqueueOperation({ operationId, centerId, userId: user.id, deviceId, operationType: "UPDATE", entityType: "student_card", entityId: cardId, payload: { status: "inactive", deactivatedAt: now } });
+    });
+  }
+
+  static reactivateCard(cardId: string): void {
+    const { centerId, user } = this.getActiveContext();
+    if (
+      !PermissionService.hasPermission(
+        user.permissions,
+        "students.cards.manage",
+      )
+    ) {
+      throw new ForbiddenError("ليس لديك صلاحية إعادة تفعيل بطاقة الطالب.");
+    }
+
+    const db = DatabaseService.getDb();
+    const row = db.getFirstSync<any>(
+      `SELECT id, student_id as studentId, card_code as cardCode, status FROM student_cards WHERE center_id = ? AND id = ?`,
+      [centerId, cardId],
+    );
+
+    if (!row) {
+      throw new NotFoundError("البطاقة غير موجودة.");
+    }
+
+    if (row.status === "active") {
+      throw new ConflictError("البطاقة مفعّلة بالفعل.");
+    }
+
+    // Check if the card code is currently active for another student
+    const existingActive = db.getFirstSync<any>(
+      `SELECT id, student_id as studentId FROM student_cards WHERE card_code = ? AND status = 'active' AND id != ? LIMIT 1`,
+      [row.cardCode, cardId],
+    );
+    if (existingActive) {
+      throw new ConflictError(
+        `كود البطاقة (${row.cardCode}) مستخدم حالياً لطالب آخر. قم بإلغاء تفعيله أولاً.`,
+      );
+    }
+
+    // Deactivate any other currently active cards for this student first
+    const activeCards = db.getAllSync<any>(
+      `SELECT id FROM student_cards WHERE center_id = ? AND student_id = ? AND status = 'active' AND id != ?`,
+      [centerId, row.studentId, cardId],
+    );
+    const now = new Date().toISOString();
+    const deviceId = DeviceService.getDeviceIdSync();
+    const operationId = `op-card-react-${Date.now()}-${cardId}`;
+    DatabaseService.runInTransaction(() => {
+      activeCards.forEach((c: any) => {
+        db.runSync(
+          `UPDATE student_cards SET status = 'inactive', deactivated_at = ? WHERE id = ?`,
+          [now, c.id],
+        );
+      });
+      db.runSync(
+        `UPDATE student_cards SET status = 'active', deactivated_at = NULL, issued_at = ? WHERE id = ?`,
+        [now, cardId],
+      );
+      // Keep students.card_code synchronized
+      db.runSync(
+        `UPDATE students SET card_code = ?, updated_at = ? WHERE id = ?`,
+        [row.cardCode, now, row.studentId],
+      );
+      AuditService.recordEvent({ operationId, centerId, userId: user.id, deviceId, entityType: "student_card", entityId: cardId, action: "student_card.reactivate", payload: { studentId: row.studentId, cardCode: row.cardCode } });
+      SyncRepository.enqueueOperation({ operationId, centerId, userId: user.id, deviceId, operationType: "UPDATE", entityType: "student_card", entityId: cardId, payload: { status: "active", deactivatedAt: null, issuedAt: now } });
     });
   }
 }
