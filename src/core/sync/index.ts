@@ -1005,6 +1005,20 @@ export class SyncRepository {
     );
   }
 
+  static clearAllConflicts(centerId: string): void {
+    const db = DatabaseService.getDb();
+    DatabaseService.runInTransaction(() => {
+      db.runSync(
+        `DELETE FROM sync_operations WHERE center_id = ? AND status = 'conflict'`,
+        [centerId]
+      );
+      db.runSync(
+        `DELETE FROM sync_conflicts WHERE center_id = ?`,
+        [centerId]
+      );
+    });
+  }
+
   /**
    * A process can be terminated after marking an operation as syncing but
    * before the server response is persisted. Such rows must be retryable on
