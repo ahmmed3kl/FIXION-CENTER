@@ -129,6 +129,7 @@ export default function MainLayout() {
       <Tabs.Screen name="sync-debug" options={{ href: null }} />
       <Tabs.Screen name="financial-reports" options={{ href: null }} />
       <Tabs.Screen name="opening-balance" options={{ href: null }} />
+      <Tabs.Screen name="debt-adjustments" options={{ href: null }} />
     </Tabs>
   );
 }

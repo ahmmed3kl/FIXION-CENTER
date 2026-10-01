@@ -905,6 +905,7 @@ export default function StudentsScreen() {
       }
       let completed = 0;
       let skipped = 0;
+      const skippedReasons: string[] = [];
       const selectedOptions = bulkPackageOptions.filter((option) => bulkPackageOptionIds.includes(option.id));
       const selectedGroups = selectedOptions.map((option) => bulkPackageGroupIds[option.id]).filter(Boolean);
       for (const id of selectedStudentIds) {
@@ -913,15 +914,18 @@ export default function StudentsScreen() {
           await PackageSubscriptionRepository.subscribeStudent({ studentId: id, packageId: bulkPackageId, startDate, selectedOptionIds: bulkPackageOptionIds, selectedTeacherIds: bulkPackageTeacherIds, selectedGroupIds: bulkPackageGroupIds });
           for (const groupId of Array.from(new Set(selectedGroups))) EnrollmentRepository.enrollStudent({ studentId: id, groupId, startDate: firstScheduledDate(groupId) });
           completed += 1;
-        } catch {
+        } catch (error: any) {
           skipped += 1;
+          const studentName = StudentRepository.findById(id)?.fullName || id;
+          skippedReasons.push(`${studentName}: ${error?.message || "سبب غير معروف"}`);
+          console.warn("Bulk package enrollment skipped", { studentId: id, error });
         }
       }
       setBulkEnrollModalOpen(false);
       setSelectedStudentIds([]);
       setSelectionMode(false);
       loadData();
-      Alert.alert("تم الاشتراك", `تم اشتراك ${completed} طالب${skipped ? `، وتخطّي ${skipped}` : ""}.`);
+      Alert.alert("تم الاشتراك", `تم اشتراك ${completed} طالب${skipped ? `، وتخطّي ${skipped}` : ""}.${skippedReasons.length ? `\n\n${skippedReasons.slice(0, 4).join("\n")}${skippedReasons.length > 4 ? "\n…" : ""}` : ""}`);
       return;
     }
     if (!bulkEnrollGroupId) {
@@ -930,19 +934,23 @@ export default function StudentsScreen() {
     }
     let completed = 0;
     let skipped = 0;
+    const skippedReasons: string[] = [];
     for (const id of selectedStudentIds) {
       try {
         EnrollmentRepository.enrollStudent({ studentId: id, groupId: bulkEnrollGroupId, startDate: firstScheduledDate(bulkEnrollGroupId) });
         completed += 1;
-      } catch {
+      } catch (error: any) {
         skipped += 1;
+        const studentName = StudentRepository.findById(id)?.fullName || id;
+        skippedReasons.push(`${studentName}: ${error?.message || "سبب غير معروف"}`);
+        console.warn("Bulk group enrollment skipped", { studentId: id, error });
       }
     }
     setBulkEnrollModalOpen(false);
     setSelectedStudentIds([]);
     setSelectionMode(false);
     loadData();
-    Alert.alert("تم التسجيل", `تم تسجيل ${completed} طالب${skipped ? `، وتخطّي ${skipped} (مسجلين بالفعل أو غير متاحين)` : ""}.`);
+    Alert.alert("تم التسجيل", `تم تسجيل ${completed} طالب${skipped ? `، وتخطّي ${skipped} (مسجلين بالفعل أو غير متاحين)` : ""}.${skippedReasons.length ? `\n\n${skippedReasons.slice(0, 4).join("\n")}${skippedReasons.length > 4 ? "\n…" : ""}` : ""}`);
   };
 
   const openEnrollModal = () => {
