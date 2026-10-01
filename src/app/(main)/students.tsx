@@ -910,9 +910,19 @@ export default function StudentsScreen() {
       const selectedGroups = selectedOptions.map((option) => bulkPackageGroupIds[option.id]).filter(Boolean);
       for (const id of selectedStudentIds) {
         try {
+          const existingPackage = PackageSubscriptionRepository.getSubscriptionsForStudent(id)
+            .some((subscription) => subscription.packageId === bulkPackageId && subscription.status === "active");
+          if (existingPackage) {
+            throw new Error("الطالب مشترك بالفعل في هذه الباقة.");
+          }
           const startDate = selectedGroups.map((groupId) => firstScheduledDate(groupId)).sort()[0] || getLocalDateOnly();
           await PackageSubscriptionRepository.subscribeStudent({ studentId: id, packageId: bulkPackageId, startDate, selectedOptionIds: bulkPackageOptionIds, selectedTeacherIds: bulkPackageTeacherIds, selectedGroupIds: bulkPackageGroupIds });
-          for (const groupId of Array.from(new Set(selectedGroups))) EnrollmentRepository.enrollStudent({ studentId: id, groupId, startDate: firstScheduledDate(groupId) });
+          const existingEnrollments = EnrollmentRepository.getActiveEnrollmentsForStudent(id);
+          for (const groupId of Array.from(new Set(selectedGroups))) {
+            if (!existingEnrollments.some((enrollment) => enrollment.groupId === groupId)) {
+              EnrollmentRepository.enrollStudent({ studentId: id, groupId, startDate: firstScheduledDate(groupId) });
+            }
+          }
           completed += 1;
         } catch (error: any) {
           skipped += 1;
