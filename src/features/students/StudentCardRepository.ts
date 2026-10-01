@@ -104,8 +104,8 @@ export class StudentCardRepository {
 
     // Check if card code is currently active anywhere (only block ACTIVE cards)
     const existingActive = db.getFirstSync<any>(
-      `SELECT id, student_id as studentId FROM student_cards WHERE card_code = ? AND status = 'active' LIMIT 1`,
-      [trimmedCard],
+      `SELECT id, student_id as studentId FROM student_cards WHERE center_id = ? AND card_code = ? AND status = 'active' LIMIT 1`,
+      [centerId, trimmedCard],
     );
     if (existingActive && existingActive.studentId !== studentId) {
       throw new ConflictError(
@@ -133,11 +133,22 @@ export class StudentCardRepository {
       );
     });
 
-    db.runSync(
-      `INSERT INTO student_cards (id, center_id, student_id, card_code, status, issued_at, created_at)
-       VALUES (?, ?, ?, ?, 'active', ?, ?)`,
-      [cardId, centerId, studentId, trimmedCard, now, now],
+    const reusableCard = db.getFirstSync<any>(
+      `SELECT id FROM student_cards WHERE center_id = ? AND card_code = ? LIMIT 1`,
+      [centerId, trimmedCard],
     );
+    if (reusableCard) {
+      db.runSync(
+        `UPDATE student_cards SET student_id = ?, status = 'active', issued_at = ?, deactivated_at = NULL WHERE id = ? AND center_id = ?`,
+        [studentId, now, reusableCard.id, centerId],
+      );
+    } else {
+      db.runSync(
+        `INSERT INTO student_cards (id, center_id, student_id, card_code, status, issued_at, created_at)
+         VALUES (?, ?, ?, ?, 'active', ?, ?)`,
+        [cardId, centerId, studentId, trimmedCard, now, now],
+      );
+    }
 
     // Keep students.card_code synchronized for legacy readers
     db.runSync(
@@ -151,7 +162,7 @@ export class StudentCardRepository {
       userId: user.id,
       deviceId,
       entityType: "student_card",
-      entityId: cardId,
+      entityId: reusableCard?.id || cardId,
       action: "student_card.issue",
       payload: {
         studentId,
@@ -165,14 +176,14 @@ export class StudentCardRepository {
       centerId,
       userId: user.id,
       deviceId,
-      operationType: "CREATE",
+      operationType: reusableCard ? "UPDATE" : "CREATE",
       entityType: "student_card",
-      entityId: cardId,
-      payload: { studentId, cardCode: trimmedCard, issuedAt: now },
+      entityId: reusableCard?.id || cardId,
+      payload: { id: reusableCard?.id || cardId, studentId, cardCode: trimmedCard, issuedAt: now, status: "active" },
     });
 
     result = {
-      id: cardId,
+      id: reusableCard?.id || cardId,
       centerId,
       studentId,
       cardCode: trimmedCard,

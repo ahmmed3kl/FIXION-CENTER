@@ -1146,7 +1146,7 @@ class SyncProcessor {
             [centerId, studentId, cardId],
           );
           const existingByCode = await client.query(
-            `SELECT id, student_id FROM student_cards
+            `SELECT id, student_id, status FROM student_cards
              WHERE center_id = $1 AND card_code = $2`,
             [centerId, cardCode],
           );
@@ -1154,9 +1154,15 @@ class SyncProcessor {
             // Student creation already persists this card. A follow-up
             // student_card operation for the same student is duplicate
             // delivery and must be idempotent, not a conflict.
-            if (existingByCode.rows[0].student_id !== studentId) {
+            if (existingByCode.rows[0].status === "active" && existingByCode.rows[0].student_id !== studentId) {
               throw new AppError("CARD_ALREADY_ASSIGNED", "Card is already assigned.", "الكارت مرتبط بطالب بالفعل ولا يمكن نقله.", 409);
             }
+            await client.query(
+              `UPDATE student_cards
+               SET student_id = $1, status = 'active', issued_at = NOW(), deactivated_at = NULL
+               WHERE id = $2 AND center_id = $3`,
+              [studentId, existingByCode.rows[0].id, centerId],
+            );
           } else {
             try {
               await client.query(
