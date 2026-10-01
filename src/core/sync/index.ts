@@ -1022,6 +1022,23 @@ export class SyncRepository {
     return result.changes ?? 0;
   }
 
+  /** Permission checks were tightened after some repair rows were queued.
+   * Reopen only those server-reset repairs so the new recovery rule can run;
+   * ordinary failed writes keep their normal retry limit. */
+  static requeuePermissionBlockedRepairs(centerId: string): number {
+    const db = DatabaseService.getDb();
+    const result = db.runSync(
+      `UPDATE sync_operations
+       SET status = 'pending', retry_count = 0, next_retry_at = NULL,
+           last_error = NULL
+       WHERE center_id = ? AND operation_type = 'REPAIR_AFTER_SERVER_RESET'
+         AND status IN ('failed', 'conflict')
+         AND (last_error LIKE '%Missing required permission%' OR last_error LIKE '%packages.manage%')`,
+      [centerId],
+    );
+    return result.changes ?? 0;
+  }
+
   /**
    * Monotonic Server Cursor Management:
    * Always uses monotonic sequence tokens (never client timestamps!).
@@ -2571,6 +2588,7 @@ export class SyncEngine {
 
     // Recover mutations left in `syncing` by a crashed or force-closed app.
     SyncRepository.recoverInterruptedOperations(centerId);
+    SyncRepository.requeuePermissionBlockedRepairs(centerId);
     // Retry old student/package conflicts that were caused by the server
     // validation/schema fixes. Without this, those records remain parked
     // forever because normal pending selection excludes `conflict` rows.

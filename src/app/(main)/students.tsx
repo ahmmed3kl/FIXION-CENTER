@@ -38,6 +38,7 @@ import { NotificationService } from "../../features/notifications/NotificationSe
 import { StudentCardRepository } from "../../features/students/StudentCardRepository";
 import { StudentRepository } from "../../features/students/StudentRepository";
 import { smartSearch } from "../../shared/utils/smartSearch";
+import { useResponsiveLayout } from "../../shared/utils/responsive";
 import { AddStudentWizardModal } from "../../features/students/components/AddStudentWizardModal";
 import {
     AppButton,
@@ -117,7 +118,8 @@ function firstScheduledDate(groupId: string): string {
 
 export default function StudentsScreen() {
   const { colors } = useTheme();
-  const styles = useMemo(() => createStyles(), [colors]);
+  const { width: screenWidth, height: screenHeight, gutter, isTablet, isLandscape } = useResponsiveLayout();
+  const styles = useMemo(() => createStyles(screenWidth, screenHeight, gutter, isTablet, isLandscape), [colors, screenWidth, screenHeight, gutter, isTablet, isLandscape]);
   const { studentId, add, attendanceSessionId } = useLocalSearchParams<{ studentId?: string; add?: string; attendanceSessionId?: string }>();
   const services = useServiceVisibility();
   const paymentsEnabled = services.isEnabled("payments");
@@ -135,6 +137,13 @@ export default function StudentsScreen() {
   const [selectedStudentIds, setSelectedStudentIds] = useState<string[]>([]);
   const [bulkEnrollModalOpen, setBulkEnrollModalOpen] = useState(false);
   const [bulkEnrollGroupId, setBulkEnrollGroupId] = useState("");
+  const [bulkEnrollmentMode, setBulkEnrollmentMode] = useState<"group" | "package">("group");
+  const [bulkSubjectId, setBulkSubjectId] = useState("");
+  const [bulkTeacherId, setBulkTeacherId] = useState("");
+  const [bulkPackageId, setBulkPackageId] = useState("");
+  const [bulkPackageOptionIds, setBulkPackageOptionIds] = useState<string[]>([]);
+  const [bulkPackageTeacherIds, setBulkPackageTeacherIds] = useState<Record<string, string>>({});
+  const [bulkPackageGroupIds, setBulkPackageGroupIds] = useState<Record<string, string>>({});
   const [cardScannerOpen, setCardScannerOpen] = useState(false);
   const [cardCameraPermission, requestCardCameraPermission] = useCameraPermissions();
   const [selectedStudent, setSelectedStudent] = useState<Student | null>(null);
@@ -784,6 +793,16 @@ export default function StudentsScreen() {
     });
   const selectedGrades = new Set(students.filter((student) => selectedStudentIds.includes(student.id)).map((student) => student.grade));
   const bulkEligibleGroups = eligibleEnrollmentGroups.filter((group) => selectedGrades.size === 0 || (selectedGrades.size === 1 && selectedGrades.has(group.grade)));
+  const bulkGrade = selectedGrades.size === 1 ? Array.from(selectedGrades)[0] : "";
+  const bulkSubjects = Array.from(new Set(bulkEligibleGroups.map((group) => group.subjectId))).map((id) => ({ id, name: bulkEligibleGroups.find((group) => group.subjectId === id)?.subjectName || "المادة" }));
+  const bulkTeachers = teachers.filter((teacher) => teacher.status !== "inactive" && bulkEligibleGroups.some((group) => group.subjectId === bulkSubjectId && group.teacherId === teacher.id));
+  const bulkVisibleGroups = bulkEligibleGroups.filter((group) => (!bulkSubjectId || group.subjectId === bulkSubjectId) && (!bulkTeacherId || group.teacherId === bulkTeacherId));
+  const bulkSelectedPackage = availablePackages.find((item) => item.id === bulkPackageId);
+  const bulkPackageOptions = bulkPackageId ? PackageRepository.getPackageSubjects(bulkPackageId) : [];
+  const bulkPackageGroupsForOption = (option: PackageSubject) => {
+    const teacherId = bulkPackageTeacherIds[option.id] || option.defaultTeacherId;
+    return availableGroups.filter((group) => group.status === "active" && (!bulkGrade || group.grade === bulkGrade) && group.subjectId === option.subjectId && group.teacherId === teacherId);
+  };
   const canDeactivate = PermissionService.hasPermission(
     permissions,
     "students.deactivate",
@@ -818,10 +837,45 @@ export default function StudentsScreen() {
       return;
     }
     setBulkEnrollGroupId("");
+    setBulkEnrollmentMode("group");
+    setBulkSubjectId("");
+    setBulkTeacherId("");
+    const firstPackage = availablePackages[0];
+    setBulkPackageId(firstPackage?.id || "");
+    const firstOptions = firstPackage ? PackageRepository.getPackageSubjects(firstPackage.id) : [];
+    setBulkPackageOptionIds([]);
+    setBulkPackageTeacherIds(Object.fromEntries(firstOptions.map((option) => [option.id, option.defaultTeacherId])));
+    setBulkPackageGroupIds({});
     setBulkEnrollModalOpen(true);
   };
 
-  const enrollSelectedStudents = () => {
+  const enrollSelectedStudents = async () => {
+    if (bulkEnrollmentMode === "package") {
+      if (!bulkPackageId || !bulkPackageOptionIds.length || bulkPackageOptionIds.some((id) => !bulkPackageGroupIds[id])) {
+        Alert.alert("بيانات الباقة ناقصة", "اختر الباقة، ثم مادة ومدرسًا ومجموعة لكل اختيار.");
+        return;
+      }
+      let completed = 0;
+      let skipped = 0;
+      const selectedOptions = bulkPackageOptions.filter((option) => bulkPackageOptionIds.includes(option.id));
+      const selectedGroups = selectedOptions.map((option) => bulkPackageGroupIds[option.id]).filter(Boolean);
+      for (const id of selectedStudentIds) {
+        try {
+          const startDate = selectedGroups.map((groupId) => firstScheduledDate(groupId)).sort()[0] || getLocalDateOnly();
+          await PackageSubscriptionRepository.subscribeStudent({ studentId: id, packageId: bulkPackageId, startDate, selectedOptionIds: bulkPackageOptionIds, selectedTeacherIds: bulkPackageTeacherIds, selectedGroupIds: bulkPackageGroupIds });
+          for (const groupId of Array.from(new Set(selectedGroups))) EnrollmentRepository.enrollStudent({ studentId: id, groupId, startDate: firstScheduledDate(groupId) });
+          completed += 1;
+        } catch {
+          skipped += 1;
+        }
+      }
+      setBulkEnrollModalOpen(false);
+      setSelectedStudentIds([]);
+      setSelectionMode(false);
+      loadData();
+      Alert.alert("تم الاشتراك", `تم اشتراك ${completed} طالب${skipped ? `، وتخطّي ${skipped}` : ""}.`);
+      return;
+    }
     if (!bulkEnrollGroupId) {
       Alert.alert("المجموعة مطلوبة", "اختر المجموعة التي سيُسجّل بها الطلاب.");
       return;
@@ -956,8 +1010,11 @@ export default function StudentsScreen() {
         <View style={styles.modalOverlay}><View style={styles.smallModalCard}>
           <View style={styles.modalHeader}><Text style={styles.modalTitle}>تسجيل الطلاب في مجموعة</Text><TouchableOpacity onPress={() => setBulkEnrollModalOpen(false)}><Ionicons name="close" size={22} color={Colors.slate700} /></TouchableOpacity></View>
           <Text style={styles.modalSubtitle}>سيتم إنشاء تسجيل ومديونية مستقلة لكل طالب من الطلاب المحددين ({selectedStudentIds.length}).</Text>
-          <ScrollView style={{ maxHeight: 300 }} contentContainerStyle={{ paddingVertical: 10 }}>
-            {bulkEligibleGroups.map((group) => <TouchableOpacity key={group.id} style={[styles.enrollChoice, bulkEnrollGroupId === group.id && styles.enrollChoiceActive]} onPress={() => setBulkEnrollGroupId(group.id)}><Text style={styles.groupPickHeader}>{group.name}</Text><Text style={styles.groupPickMeta}>{[group.subjectName, group.teacherName, group.grade].filter(Boolean).join(" · ")} · {groupScheduleLabel(group.id)}</Text></TouchableOpacity>)}
+          <View style={styles.bulkModeRow}><TouchableOpacity style={[styles.bulkModeChip, bulkEnrollmentMode === "group" && styles.bulkModeChipActive]} onPress={() => setBulkEnrollmentMode("group")}><Text style={[styles.bulkModeText, bulkEnrollmentMode === "group" && styles.bulkModeTextActive]}>مجموعة</Text></TouchableOpacity><TouchableOpacity style={[styles.bulkModeChip, bulkEnrollmentMode === "package" && styles.bulkModeChipActive]} onPress={() => setBulkEnrollmentMode("package")}><Text style={[styles.bulkModeText, bulkEnrollmentMode === "package" && styles.bulkModeTextActive]}>باقة</Text></TouchableOpacity></View>
+          <ScrollView style={{ maxHeight: 360 }} contentContainerStyle={{ paddingVertical: 10 }}>
+            {bulkEnrollmentMode === "group" && <><Text style={styles.bulkStepTitle}>المادة</Text><ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chipRow}><TouchableOpacity style={[styles.chip, !bulkSubjectId && styles.chipActive]} onPress={() => { setBulkSubjectId(""); setBulkTeacherId(""); }}><Text style={[styles.chipText, !bulkSubjectId && styles.chipTextActive]}>كل المواد</Text></TouchableOpacity>{bulkSubjects.map((subject) => <TouchableOpacity key={subject.id} style={[styles.chip, bulkSubjectId === subject.id && styles.chipActive]} onPress={() => { setBulkSubjectId(subject.id); setBulkTeacherId(""); }}><Text style={[styles.chipText, bulkSubjectId === subject.id && styles.chipTextActive]}>{subject.name}</Text></TouchableOpacity>)}</ScrollView><Text style={styles.bulkStepTitle}>المدرس</Text><ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chipRow}><TouchableOpacity style={[styles.chip, !bulkTeacherId && styles.chipActive]} onPress={() => setBulkTeacherId("")}><Text style={[styles.chipText, !bulkTeacherId && styles.chipTextActive]}>كل المدرسين</Text></TouchableOpacity>{bulkTeachers.map((teacher) => <TouchableOpacity key={teacher.id} style={[styles.chip, bulkTeacherId === teacher.id && styles.chipActive]} onPress={() => setBulkTeacherId(teacher.id)}><Text style={[styles.chipText, bulkTeacherId === teacher.id && styles.chipTextActive]}>{teacher.name}</Text></TouchableOpacity>)}</ScrollView></>}
+            {bulkEnrollmentMode === "group" && bulkVisibleGroups.map((group) => <TouchableOpacity key={group.id} style={[styles.enrollChoice, bulkEnrollGroupId === group.id && styles.enrollChoiceActive]} onPress={() => setBulkEnrollGroupId(group.id)}><Text style={styles.groupPickHeader}>{group.name}</Text><Text style={styles.groupPickMeta}>{[group.subjectName, group.teacherName, group.grade].filter(Boolean).join(" · ")} · {groupScheduleLabel(group.id)}</Text></TouchableOpacity>)}
+            {bulkEnrollmentMode === "package" && <><Text style={styles.bulkStepTitle}>الباقة</Text><ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chipRow}>{availablePackages.map((item) => <TouchableOpacity key={item.id} style={[styles.chip, bulkPackageId === item.id && styles.chipActive]} onPress={() => { setBulkPackageId(item.id); setBulkPackageOptionIds([]); setBulkPackageGroupIds({}); setBulkPackageTeacherIds(Object.fromEntries(PackageRepository.getPackageSubjects(item.id).map((option) => [option.id, option.defaultTeacherId]))); }}><Text style={[styles.chipText, bulkPackageId === item.id && styles.chipTextActive]}>{item.name}</Text></TouchableOpacity>)}</ScrollView>{bulkSelectedPackage && bulkPackageOptions.map((option) => { const chosen = bulkPackageOptionIds.includes(option.id); const teacherId = bulkPackageTeacherIds[option.id] || option.defaultTeacherId; const optionGroups = bulkPackageGroupsForOption(option); return <View key={option.id} style={styles.bulkPackageCard}><TouchableOpacity style={[styles.enrollChoice, chosen && styles.enrollChoiceActive]} onPress={() => setBulkPackageOptionIds((current) => chosen ? current.filter((id) => id !== option.id) : [...current, option.id])}><Text style={styles.groupPickHeader}>{chosen ? "✓ " : "□ "}{option.subjectName}</Text><Text style={styles.groupPickMeta}>مدرس الباقة: {teachers.find((teacher) => teacher.id === teacherId)?.name || option.defaultTeacherName || "غير محدد"}</Text></TouchableOpacity>{chosen && <><Text style={styles.bulkStepTitle}>مجموعات المدرس للمادة</Text>{optionGroups.map((group) => <TouchableOpacity key={group.id} style={[styles.enrollChoice, bulkPackageGroupIds[option.id] === group.id && styles.enrollChoiceActive]} onPress={() => setBulkPackageGroupIds((current) => ({ ...current, [option.id]: group.id }))}><Text style={styles.groupPickHeader}>{group.name}</Text><Text style={styles.groupPickMeta}>{[group.teacherName, group.grade].filter(Boolean).join(" · ")} · {groupScheduleLabel(group.id)}</Text></TouchableOpacity>)}</>}</View>; })}</>}
           </ScrollView>
           <View style={styles.modalFooter}><AppButton title="تسجيل الكل" onPress={enrollSelectedStudents} /></View>
         </View></View>
@@ -1938,7 +1995,7 @@ export default function StudentsScreen() {
   );
 }
 
-const createStyles = () => StyleSheet.create({
+const createStyles = (screenWidth = 390, screenHeight = 844, gutter = Spacing.lg, isTablet = false, isLandscape = false) => StyleSheet.create({
   safeArea: {
     flex: 1,
     backgroundColor: Colors.background,
@@ -1947,7 +2004,7 @@ const createStyles = () => StyleSheet.create({
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
-    paddingHorizontal: Spacing.lg,
+    paddingHorizontal: gutter,
     paddingVertical: Spacing.lg,
     backgroundColor: Colors.cardBackground,
     borderBottomWidth: 1,
@@ -1990,6 +2047,14 @@ const createStyles = () => StyleSheet.create({
   bulkCount: { color: Colors.primaryDark, fontWeight: "900", fontSize: 13 },
   bulkButton: { flexDirection: "row-reverse", alignItems: "center", gap: 6, backgroundColor: Colors.primary, borderRadius: 10, paddingHorizontal: 11, paddingVertical: 9 },
   bulkButtonText: { color: Colors.white, fontWeight: "800", fontSize: 12 },
+  bulkModeRow: { flexDirection: "row-reverse", gap: 8, marginTop: 10 },
+  bulkModeChip: { flex: 1, alignItems: "center", paddingVertical: 10, borderRadius: 10, borderWidth: 1, borderColor: Colors.border, backgroundColor: Colors.white },
+  bulkModeChipActive: { borderColor: Colors.primary, backgroundColor: Colors.primaryLight },
+  bulkModeText: { color: Colors.slate600, fontWeight: "800", fontSize: 13 },
+  bulkModeTextActive: { color: Colors.primaryDark },
+  bulkStepTitle: { color: Colors.slate700, textAlign: "right", fontSize: 12, fontWeight: "900", marginTop: 8, marginBottom: 5 },
+  chipRow: { flexDirection: "row-reverse", gap: 6, paddingVertical: 2 },
+  bulkPackageCard: { backgroundColor: Colors.slate50, borderRadius: 11, padding: 7, marginBottom: 7, borderWidth: 1, borderColor: Colors.slate200 },
   cardSearchButton: { minHeight: 44, borderRadius: 12, borderWidth: 1, borderColor: Colors.primary, backgroundColor: Colors.primaryLight, flexDirection: "row-reverse", alignItems: "center", justifyContent: "center", gap: 8, marginBottom: Spacing.md },
   cardSearchButtonText: { color: Colors.primaryDark, fontSize: 13, fontWeight: "800" },
   cardScannerOverlay: { flex: 1, backgroundColor: "rgba(15,23,42,0.72)", justifyContent: "center", padding: 20 },
@@ -2070,33 +2135,37 @@ const createStyles = () => StyleSheet.create({
     padding: Spacing.lg,
   },
   modalCard: {
-    width: "100%",
+    width: Math.min(isTablet ? 680 : 520, screenWidth - gutter * 2),
+    maxWidth: "100%",
     backgroundColor: Colors.white,
     borderRadius: 16,
     padding: Spacing.lg,
   },
   detailsModalCard: {
-    width: "100%",
+    width: Math.min(isTablet ? 720 : 560, screenWidth - gutter * 2),
+    maxWidth: "100%",
     backgroundColor: Colors.white,
     borderRadius: 16,
     padding: Spacing.lg,
     maxHeight: "85%",
   },
   smallModalCard: {
-    width: "100%",
+    width: Math.min(isTablet ? 620 : 500, screenWidth - gutter * 2),
+    maxWidth: "100%",
     backgroundColor: Colors.white,
     borderRadius: 16,
     padding: Spacing.lg,
   },
   packageModalCard: {
-    width: "100%",
+    width: Math.min(isTablet ? 760 : 600, screenWidth - gutter * 2),
+    maxWidth: "100%",
     maxHeight: "88%",
     backgroundColor: Colors.white,
     borderRadius: 18,
     padding: Spacing.md,
   },
   enrollChoice: { padding: 10, borderWidth: 1, borderColor: Colors.border, borderRadius: 8, marginBottom: 6, backgroundColor: Colors.white },
-  packageSubjectSection: { backgroundColor: Colors.slate50, borderRadius: 10, padding: 8, marginBottom: 7, borderWidth: 1, borderColor: Colors.slate200 }, packageSubjectSectionActive: { borderColor: Colors.primary, backgroundColor: Colors.primaryMuted }, packageGroupList: { gap: 8, paddingVertical: 3 }, packageGroupChoice: { width: 190, minHeight: 92, borderRadius: 13, padding: 10, backgroundColor: Colors.white, borderWidth: 1.5, borderColor: Colors.slate200 }, packageGroupChoiceActive: { borderColor: Colors.primary, backgroundColor: Colors.primaryLight }, packageGroupChoiceHeader: { flexDirection: "row-reverse", alignItems: "center", justifyContent: "space-between", gap: 5 }, packageGroupName: { flex: 1, color: Colors.slate900, fontSize: 13, fontWeight: "900", textAlign: "right" }, packageGroupTextActive: { color: Colors.primaryDark }, packageGroupMeta: { color: Colors.slate600, fontSize: 10, textAlign: "right", marginTop: 7 }, packageGroupSchedule: { color: Colors.primary, fontSize: 11, fontWeight: "800", textAlign: "right", marginTop: 5 },
+  packageSubjectSection: { backgroundColor: Colors.slate50, borderRadius: 10, padding: 8, marginBottom: 7, borderWidth: 1, borderColor: Colors.slate200 }, packageSubjectSectionActive: { borderColor: Colors.primary, backgroundColor: Colors.primaryMuted }, packageGroupList: { gap: 8, paddingVertical: 3 }, packageGroupChoice: { width: Math.max(160, Math.min(isTablet ? 250 : 220, (screenWidth - gutter * 2 - 32) * 0.72)), minHeight: 92, borderRadius: 13, padding: 10, backgroundColor: Colors.white, borderWidth: 1.5, borderColor: Colors.slate200 }, packageGroupChoiceActive: { borderColor: Colors.primary, backgroundColor: Colors.primaryLight }, packageGroupChoiceHeader: { flexDirection: "row-reverse", alignItems: "center", justifyContent: "space-between", gap: 5 }, packageGroupName: { flex: 1, color: Colors.slate900, fontSize: 13, fontWeight: "900", textAlign: "right" }, packageGroupTextActive: { color: Colors.primaryDark }, packageGroupMeta: { color: Colors.slate600, fontSize: 10, textAlign: "right", marginTop: 7 }, packageGroupSchedule: { color: Colors.primary, fontSize: 11, fontWeight: "800", textAlign: "right", marginTop: 5 },
   packageTeacherLabel: { fontSize: 12, fontWeight: "700", color: Colors.slate700, marginBottom: 6, textAlign: "right" },
   packageSelectionSummary: { fontSize: 12, color: Colors.primaryDark, fontWeight: "700", marginTop: 8, textAlign: "right" },
   chip: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8, backgroundColor: Colors.slate100, marginRight: 5 },

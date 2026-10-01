@@ -1,6 +1,6 @@
 import { Ionicons } from "@expo/vector-icons";
 import { Tabs } from "expo-router";
-import { StyleSheet, View } from "react-native";
+import { StyleSheet, View, useWindowDimensions } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Strings } from "../../core/localization";
 import { Colors, useTheme } from "../../core/theme";
@@ -8,6 +8,8 @@ import { Colors, useTheme } from "../../core/theme";
 export default function MainLayout() {
   const insets = useSafeAreaInsets();
   const { colors } = useTheme();
+  const { height, width } = useWindowDimensions();
+  const compactLandscape = width > height && height < 520;
   return (
     <Tabs
       backBehavior="history"
@@ -16,9 +18,9 @@ export default function MainLayout() {
         tabBarActiveTintColor: colors.primary,
         tabBarInactiveTintColor: colors.slate400,
         tabBarStyle: {
-          height: 64 + insets.bottom,
-          paddingBottom: 8 + insets.bottom,
-          paddingTop: 8,
+          height: (compactLandscape ? 52 : 64) + insets.bottom,
+          paddingBottom: (compactLandscape ? 4 : 8) + insets.bottom,
+          paddingTop: compactLandscape ? 3 : 8,
           backgroundColor: colors.cardBackground,
           borderTopColor: colors.border,
           borderTopWidth: 1,
@@ -29,11 +31,11 @@ export default function MainLayout() {
           shadowOffset: { width: 0, height: -4 },
         },
         tabBarLabelStyle: {
-          fontSize: 12,
+          fontSize: compactLandscape ? 10 : 12,
           fontWeight: "700",
           marginTop: 1,
         },
-        tabBarItemStyle: { minHeight: 48 },
+        tabBarItemStyle: { minHeight: compactLandscape ? 40 : 48 },
         tabBarHideOnKeyboard: true,
       }}
     >

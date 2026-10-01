@@ -336,6 +336,8 @@ const styles = StyleSheet.create({
   },
   buttonText: {
     ...Typography.bodyBold,
+    flexShrink: 1,
+    textAlign: "center",
   },
   inputContainer: {
     marginBottom: Spacing.md,

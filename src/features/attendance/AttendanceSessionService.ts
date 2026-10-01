@@ -191,6 +191,12 @@ export class AttendanceSessionService {
     const { activeCenterId, currentUser } = useAuthStore.getState();
     if (!activeCenterId || !currentUser) throw new ForbiddenError("يجب تسجيل الدخول أولاً.");
     const db = DatabaseService.getDb();
+    const stableId = stableSessionId(activeCenterId, groupId, scheduleId || "", date);
+    const byStableId = db.getFirstSync<any>(
+      "SELECT id, center_id as centerId, group_id as groupId, schedule_id as scheduleId, subject_id as subjectId, teacher_id as teacherId, session_price as sessionPrice, late_after_minutes as lateAfterMinutes, session_date as sessionDate, start_time as startTime, end_time as endTime, status, created_at as createdAt FROM sessions WHERE center_id = ? AND id = ?",
+      [activeCenterId, stableId],
+    );
+    if (byStableId) return byStableId as Session;
     // A group has one attendance session per calendar day. Reuse the same
     // record so reopening the scanner cannot duplicate attendance or payments.
     const existing = SessionRepository.getSessionsForDate(date)
@@ -253,6 +259,8 @@ export class AttendanceSessionService {
         (item) => item.groupId === group.id && item.status !== "cancelled" && (!scheduleId || item.scheduleId === scheduleId),
       );
       if (racedSession) return racedSession;
+      const inserted = db.getFirstSync<any>("SELECT id, center_id as centerId, group_id as groupId, schedule_id as scheduleId, subject_id as subjectId, teacher_id as teacherId, session_price as sessionPrice, late_after_minutes as lateAfterMinutes, session_date as sessionDate, start_time as startTime, end_time as endTime, status, created_at as createdAt FROM sessions WHERE center_id = ? AND id = ?", [activeCenterId, sessionId]);
+      if (inserted) return inserted as Session;
       throw error;
     }
     // A session is a dependency for every attendance record. Queue its sync

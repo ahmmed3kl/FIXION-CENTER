@@ -36,6 +36,11 @@ function requiredPermission(operation) {
 }
 
 function assertSyncPermission(req, operation) {
+  // A server-reset repair is a recovery of rows already stored on the device.
+  // It must not be blocked by the permissions of the assistant who happens
+  // to reconnect first (older devices can contain records created by another
+  // role). Normal CREATE/UPDATE operations remain permission checked below.
+  if (String(operation.operationType || operation.operation_type || "").toUpperCase() === "REPAIR_AFTER_SERVER_RESET") return;
   const permission = requiredPermission(operation);
   if (!permission || req.user.role === "admin" || req.user.role === "owner") return;
   const permissions = req.user.permissions || {};
