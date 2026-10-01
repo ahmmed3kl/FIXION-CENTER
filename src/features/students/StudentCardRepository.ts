@@ -218,7 +218,7 @@ export class StudentCardRepository {
         [now, cardId],
       );
       AuditService.recordEvent({ operationId, centerId, userId: user.id, deviceId, entityType: "student_card", entityId: cardId, action: "student_card.deactivate", payload: { studentId: row.studentId, cardCode: row.cardCode } });
-      SyncRepository.enqueueOperation({ operationId, centerId, userId: user.id, deviceId, operationType: "UPDATE", entityType: "student_card", entityId: cardId, payload: { status: "inactive", deactivatedAt: now } });
+      SyncRepository.enqueueOperation({ operationId, centerId, userId: user.id, deviceId, operationType: "UPDATE", entityType: "student_card", entityId: cardId, payload: { studentId: row.studentId, cardCode: row.cardCode, status: "inactive", deactivatedAt: now } });
     });
   }
 
@@ -283,7 +283,7 @@ export class StudentCardRepository {
         [row.cardCode, now, row.studentId],
       );
       AuditService.recordEvent({ operationId, centerId, userId: user.id, deviceId, entityType: "student_card", entityId: cardId, action: "student_card.reactivate", payload: { studentId: row.studentId, cardCode: row.cardCode } });
-      SyncRepository.enqueueOperation({ operationId, centerId, userId: user.id, deviceId, operationType: "UPDATE", entityType: "student_card", entityId: cardId, payload: { status: "active", deactivatedAt: null, issuedAt: now } });
+      SyncRepository.enqueueOperation({ operationId, centerId, userId: user.id, deviceId, operationType: "UPDATE", entityType: "student_card", entityId: cardId, payload: { studentId: row.studentId, cardCode: row.cardCode, status: "active", deactivatedAt: null, issuedAt: now } });
     });
   }
 }
