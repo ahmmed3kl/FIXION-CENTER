@@ -13,7 +13,6 @@ import { DeviceRepository, DeviceService } from "../device";
 import { DatabaseError } from "../errors";
 import { Logger } from "../logger";
 import { getLocalDateOnly } from "../../shared/utils/date";
-import { LocalDataEvents } from "../database/localDataEvents";
 
 export type SyncEngineState = "online" | "offline" | "syncing" | "error";
 
@@ -441,9 +440,7 @@ export class SyncRepository {
     if (params.operationId) {
       const existing = this.getByOperationId(params.operationId);
       if (existing) {
-        if (!DatabaseService.isInTransaction()) {
-          LocalDataEvents.emit({ centerId: params.centerId, entityType: params.entityType, entityId: params.entityId });
-        }
+        DatabaseService.notifyLocalChange({ centerId: params.centerId, entityType: params.entityType, entityId: params.entityId });
         return existing;
       }
     }
@@ -479,13 +476,7 @@ export class SyncRepository {
       // outbox row after their local write. Notify repository-driven screens
       // here so those writes become visible immediately as well. Writes that
       // are inside a transaction are emitted atomically on COMMIT instead.
-      if (!DatabaseService.isInTransaction()) {
-        LocalDataEvents.emit({
-          centerId: params.centerId,
-          entityType: params.entityType,
-          entityId: params.entityId,
-        });
-      }
+      DatabaseService.notifyLocalChange({ centerId: params.centerId, entityType: params.entityType, entityId: params.entityId });
 
       return {
         id,

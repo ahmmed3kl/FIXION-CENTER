@@ -3623,6 +3623,7 @@ class InMemorySqliteMock implements SqlDatabase {
 export class DatabaseService {
   private static db: SqlDatabase | null = null;
   private static transactionDepth = 0;
+  private static pendingLocalChanges: Array<{ centerId?: string; entityType?: string; entityId?: string }> = [];
   private static reinitializing = false;
 
   static getDb(): SqlDatabase {
@@ -3638,6 +3639,11 @@ export class DatabaseService {
 
   static isInTransaction(): boolean {
     return this.transactionDepth > 0;
+  }
+
+  static notifyLocalChange(change: { centerId?: string; entityType?: string; entityId?: string } = {}): void {
+    if (this.transactionDepth > 0) this.pendingLocalChanges.push(change);
+    else LocalDataEvents.emit(change);
   }
 
   /** Reopens a stale native SQLite handle after an Android prepare failure. */
@@ -3686,12 +3692,14 @@ export class DatabaseService {
     try {
       const result = callback(db);
       db.execSync("COMMIT;");
-      LocalDataEvents.emit();
+      const changes = this.pendingLocalChanges.splice(0);
+      changes.forEach((change) => LocalDataEvents.emit(change));
       return result;
     } catch (error) {
       try {
         db.execSync("ROLLBACK;");
       } catch {}
+      this.pendingLocalChanges.splice(0);
       throw error;
     } finally {
       this.transactionDepth = 0;
@@ -3720,10 +3728,12 @@ export class DatabaseService {
     try {
       const result = await callback(db);
       db.execSync("COMMIT;");
-      LocalDataEvents.emit();
+      const changes = this.pendingLocalChanges.splice(0);
+      changes.forEach((change) => LocalDataEvents.emit(change));
       return result;
     } catch (error) {
       try { db.execSync("ROLLBACK;"); } catch {}
+      this.pendingLocalChanges.splice(0);
       throw error;
     } finally { this.transactionDepth = 0; }
   }
