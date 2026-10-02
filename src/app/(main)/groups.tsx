@@ -1,6 +1,6 @@
 import { Ionicons } from "@expo/vector-icons";
 import { useFocusEffect, useRouter } from "expo-router";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Alert, FlatList, Modal, ScrollView, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Colors, Spacing, Typography, useTheme } from "../../core/theme";
@@ -11,10 +11,12 @@ import { TeacherRepository } from "../../features/teachers/TeacherRepository";
 import { Group } from "../../shared/types";
 import { AppButton, AppInput, EmptyState } from "../../shared/components";
 import { smartSearch } from "../../shared/utils/smartSearch";
+import { useLocalDataRevision } from "../../core/database/useLocalDataRevision";
 
 const DAYS = ["الأحد", "الإثنين", "الثلاثاء", "الأربعاء", "الخميس", "الجمعة", "السبت"];
 
 export default function GroupsScreen() {
+  const localDataRevision = useLocalDataRevision();
   const router = useRouter();
   const { colors } = useTheme();
   const [groups, setGroups] = useState<Group[]>([]);
@@ -29,6 +31,7 @@ export default function GroupsScreen() {
     try { setGroups(GroupRepository.getAll(true)); } catch { setGroups([]); }
   }, []);
   useFocusEffect(useCallback(() => { load(); }, [load]));
+  useEffect(() => { if (localDataRevision > 0) load(); }, [localDataRevision]);
 
   const visibleGroups = useMemo(() => smartSearch(groups, query, [
     { get: (group) => group.name, weight: 1.2 },

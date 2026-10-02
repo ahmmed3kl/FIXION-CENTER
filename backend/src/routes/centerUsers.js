@@ -40,7 +40,10 @@ function validateRole(role) { if (!roles.has(role)) throw new AppError("VALIDATI
 
 router.get("/", async (req, res, next) => {
   try {
-    const result = await db.query(`SELECT ${safeFields} FROM users WHERE center_id=$1 AND role IN ('manager','assistant') ORDER BY created_at DESC`, [req.centerId]);
+    const params = [req.centerId];
+    const selfFilter = req.user?.role === "manager" ? " AND id <> $2" : "";
+    if (selfFilter) params.push(req.user.id);
+    const result = await db.query(`SELECT ${safeFields} FROM users WHERE center_id=$1 AND role IN ('manager','assistant')${selfFilter} ORDER BY created_at DESC`, params);
     res.json({ items: result.rows.map(safeUser) });
   } catch (error) { next(error); }
 });
@@ -52,6 +55,7 @@ router.post("/", async (req, res, next) => {
     const role = String(req.body.role || "");
     if (fullName.length < 2 || !/^\S+@\S+\.\S+$/.test(email) || !passwordValid(req.body.password)) throw new AppError("VALIDATION_ERROR", "Invalid account fields.", "راجع الاسم والبريد وكلمة المرور.", 400);
     validateRole(role);
+    if (req.user?.role === "manager" && role !== "assistant") throw new AppError("FORBIDDEN", "Managers can only create assistant accounts.", "مدير السنتر يمكنه إضافة حسابات المساعدين فقط.", 403);
     const permissions = cleanPermissions(req.body.permissions);
     const hash = await bcrypt.hash(req.body.password, 12);
     const result = await db.query(`INSERT INTO users (id,center_id,full_name,email,phone,password_hash,role,permissions,status) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'active') RETURNING ${safeFields}`, [`user-${crypto.randomUUID()}`, req.centerId, fullName, email, req.body.phone || null, hash, role, JSON.stringify(permissions)]);
@@ -61,6 +65,7 @@ router.post("/", async (req, res, next) => {
 
 router.patch("/:userId", async (req, res, next) => {
   try {
+    if (req.user?.role === "manager" && req.params.userId === req.user.id) throw new AppError("FORBIDDEN", "Managers cannot edit their own account here.", "لا يمكن لمدير السنتر تعديل حسابه من هنا.", 403);
     const before = await db.query(`SELECT ${safeFields} FROM users WHERE center_id=$1 AND id=$2 AND role IN ('manager','assistant')`, [req.centerId, req.params.userId]);
     if (!before.rows[0]) throw new AppError("NOT_FOUND", "Account not found.", "الحساب غير موجود.", 404);
     const keys = [], values = [];
@@ -81,6 +86,7 @@ router.patch("/:userId", async (req, res, next) => {
 
 router.post("/:userId/:action", async (req, res, next) => {
   try {
+    if (req.user?.role === "manager" && req.params.userId === req.user.id) throw new AppError("FORBIDDEN", "Managers cannot change their own account status.", "لا يمكن لمدير السنتر تغيير حالة حسابه من هنا.", 403);
     if (!["activate", "deactivate"].includes(req.params.action)) throw new AppError("NOT_FOUND", "Action not found.", "الإجراء غير موجود.", 404);
     const status = req.params.action === "activate" ? "active" : "inactive";
     const result = await db.query(`UPDATE users SET status=$1,updated_at=NOW() WHERE center_id=$2 AND id=$3 AND role IN ('manager','assistant') RETURNING ${safeFields}`, [status, req.centerId, req.params.userId]);

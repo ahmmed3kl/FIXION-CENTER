@@ -1,4 +1,5 @@
 import { DatabaseService } from "../src/core/database";
+import { SyncRepository } from "../src/core/sync";
 import {
     ConflictError,
     ForbiddenError,
@@ -99,7 +100,7 @@ describe("Sprint 2 - FIXION Academic Core", () => {
       await useAuthStore.getState().selectCenter("center-1");
     });
 
-    it("replaces student card: deactivates previous card and issues new active card", () => {
+    it("replaces student card by editing only students.card_code", () => {
       const student = StudentRepository.findByStudentCode("210100");
       expect(student).not.toBeNull();
 
@@ -111,21 +112,39 @@ describe("Sprint 2 - FIXION Academic Core", () => {
       // Replace card with 00902
       const newCard = StudentCardRepository.replaceCard(student!.id, "00902");
       expect(newCard.cardCode).toBe("00902");
-      expect(newCard.status).toBe("active");
 
-      // Verify old card is now inactive
-      const oldCardLookedUp = StudentCardRepository.findByCardCode("00901");
-      expect(oldCardLookedUp).toBeNull(); // inactive cards are not returned by findByCardCode
+      // The old code is no longer the student's current code, while the
+      // historical student_cards rows are not changed by replacement.
+      expect(StudentRepository.findByCardCode("00901")).toBeNull();
+      expect(StudentRepository.findByCardCode("00902")?.id).toBe(student!.id);
+      expect(StudentRepository.findById(student!.id)?.cardCode).toBe("00902");
+      expect(StudentCardRepository.getActiveCardByStudentId(student!.id)?.cardCode).toBe("00901");
 
-      // Verify active card for student is 00902
-      const activeCard = StudentCardRepository.getActiveCardByStudentId(
-        student!.id,
-      );
-      expect(activeCard?.cardCode).toBe("00902");
-      expect(activeCard?.status).toBe("active");
+      const pending = SyncRepository.getPendingOperations("center-1", 100)
+        .filter((item) => item.entityId === student!.id);
+      const replacement = pending.find((item) => item.operationId.includes("student-card-edit"));
+      const replacementPayload = replacement ? JSON.parse(String(replacement.payload)) : null;
+      expect(replacement?.entityType).toBe("student");
+      expect(replacementPayload?.cardCodeChanged).toBe(true);
+      expect(pending.some((item) => item.entityType === "student_card" && JSON.parse(String(item.payload)).status === "inactive")).toBe(false);
     });
 
-    it("deactivates card properly", () => {
+    it("rejects replacing a card with a code owned by another student", () => {
+      const student = StudentRepository.findByStudentCode("210100");
+      const other = StudentRepository.createStudent({
+        studentCode: "210101",
+        cardCode: "00907",
+        fullName: "Another Student",
+        phone: "01022223333",
+        parentPhone: "01122223333",
+        grade: "Ø§Ù„ØµÙ Ø§Ù„Ø«Ø§Ù†ÙŠ Ø§Ù„Ø«Ø§Ù†ÙˆÙŠ",
+      });
+      expect(other.cardCode).toBe("00907");
+      expect(() => StudentCardRepository.replaceCard(student!.id, "00907")).toThrow(ConflictError);
+      expect(StudentRepository.findById(student!.id)?.cardCode).toBe("00902");
+    });
+
+    it("keeps student.card_code as the current scan identity", () => {
       const student = StudentRepository.findByStudentCode("210100");
       const activeCard = StudentCardRepository.getActiveCardByStudentId(
         student!.id,
@@ -139,8 +158,9 @@ describe("Sprint 2 - FIXION Academic Core", () => {
       );
       expect(afterDeact).toBeNull();
 
-      // Deactivated card must also not be returned by StudentRepository.findByCardCode
-      expect(StudentRepository.findByCardCode("00902")).toBeNull();
+      // Legacy card-history changes do not rewrite the student's current
+      // card_code; replacement is the only operation that changes it.
+      expect(StudentRepository.findByCardCode("00902")?.id).toBe(student!.id);
 
       // Restore active card for student
       StudentCardRepository.issueCard(student!.id, "00905");
@@ -447,7 +467,7 @@ describe("Sprint 2 - FIXION Academic Core", () => {
 
       // Enroll a new student today in the same group after session generation
       const newStudent = StudentRepository.createStudent({
-        studentCode: "210101",
+        studentCode: "210199",
         fullName: "طالب مسجل متأخر",
         phone: "01077776666",
         parentPhone: "01177776666",

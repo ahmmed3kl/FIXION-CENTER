@@ -16,13 +16,14 @@ import { Colors, Spacing, Typography, useTheme } from "../../core/theme";
 import { SyncEngine, SyncRepository } from "../../core/sync";
 import { useAuthStore } from "../../features/auth/useAuthStore";
 import type { SyncOperation } from "../../shared/types";
+import { formatLocalDateTime } from "../../shared/utils/date";
 
 const STATUS_LABELS: Record<string, string> = {
-  pending: "Pending",
-  syncing: "Syncing",
-  synced: "Synced",
-  failed: "Failed",
-  conflict: "Conflict",
+  pending: "في الانتظار",
+  syncing: "جارٍ الإرسال",
+  synced: "تمت المزامنة",
+  failed: "فشل الإرسال",
+  conflict: "تعارض يحتاج مراجعة",
 };
 
 const STATUS_COLORS: Record<string, string> = {
@@ -36,7 +37,7 @@ const STATUS_COLORS: Record<string, string> = {
 function formatDate(value?: string) {
   if (!value) return "-";
   try {
-    return new Date(value).toLocaleString();
+    return formatLocalDateTime(value);
   } catch {
     return value;
   }

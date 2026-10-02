@@ -135,6 +135,7 @@ function ScannerContent() {
   const [showPaymentModal, setShowPaymentModal] = useState(false);
   const [paymentAmount, setPaymentAmount] = useState("");
   const [paymentPurpose, setPaymentPurpose] = useState<"session" | "cycle">("session");
+  const [selectedPaymentCycleId, setSelectedPaymentCycleId] = useState<string | null>(null);
   const [paymentNotes, setPaymentNotes] = useState("");
   const [isRecordingPayment, setIsRecordingPayment] = useState(false);
   const [financialExpanded, setFinancialExpanded] = useState(false);
@@ -542,9 +543,13 @@ function ScannerContent() {
 
     setIsRecordingPayment(true);
     try {
-      const cycle = financialStatus?.cycles.find((item) => item.cycleType === "package" && (item.remainingDebt ?? 0) > 0)
-        || financialStatus?.cycles.find((item) => (item.remainingDebt ?? 0) > 0);
+      const cycle = financialStatus?.cycles.find((item) => item.id === selectedPaymentCycleId)
+        || (financialStatus?.cycles.length === 1 ? financialStatus.cycles[0] : undefined);
       const isCyclePayment = paymentPurpose === "cycle";
+      if (isCyclePayment && !cycle) {
+        Alert.alert("اختيار الدورة", "اختر المجموعة أو دورة المديونية التي ستُنسب إليها الدفعة.");
+        return;
+      }
       await PaymentRepository.recordPayment({
         studentId: student.id,
         // A cycle/package payment is intentionally not tied to the current
@@ -1049,6 +1054,7 @@ function ScannerContent() {
                     setPaymentPurpose(hasCycleBalance ? "cycle" : "session");
                     setPaymentAmount(String(hasCycleBalance ? financialStatus!.remainingBalance : (financialStatus!.currentPeriodDebt ?? 0)));
                     setPaymentNotes("");
+                    setSelectedPaymentCycleId(financialStatus!.cycles.length === 1 ? financialStatus!.cycles[0].id : null);
                     setShowPaymentModal(true);
                   }}
                   style={{ marginTop: Spacing.md }}
@@ -1099,6 +1105,8 @@ function ScannerContent() {
               ))}
             </View>
 
+            {paymentPurpose === "cycle" && (financialStatus?.cycles?.length || 0) > 1 ? <View style={styles.paymentCyclePicker}><Text style={styles.paymentCycleTitle}>اختر المجموعة أو الدورة</Text>{financialStatus?.cycles.filter((cycle) => (cycle.remainingDebt ?? 0) > 0).map((cycle) => <TouchableOpacity key={cycle.id} style={[styles.paymentCycleOption, selectedPaymentCycleId === cycle.id && styles.paymentCycleOptionActive]} onPress={() => { setSelectedPaymentCycleId(cycle.id); setPaymentAmount(String(cycle.remainingDebt ?? cycle.effectivePrice ?? cycle.cyclePrice ?? 0)); }}><Text style={styles.paymentCycleName}>{cycle.groupName || cycle.packageName || "دورة مديونية"}</Text><Text style={styles.paymentCycleAmount}>المتبقي: {formatCurrency(cycle.remainingDebt ?? 0)}</Text></TouchableOpacity>)}</View> : null}
+
             <AppInput
               label={Strings.paymentAmountLabel}
               keyboardType="numeric"
@@ -1137,6 +1145,12 @@ function ScannerContent() {
 }
 
 const createStyles = () => StyleSheet.create({
+  paymentCyclePicker: { marginBottom: Spacing.md, gap: Spacing.sm },
+  paymentCycleTitle: { color: Colors.slate800, fontWeight: "800", textAlign: "right" },
+  paymentCycleOption: { borderWidth: 1, borderColor: Colors.slate200, borderRadius: BorderRadius.md, padding: Spacing.sm, backgroundColor: Colors.white },
+  paymentCycleOptionActive: { borderColor: Colors.primary, backgroundColor: Colors.primaryMuted },
+  paymentCycleName: { color: Colors.slate800, fontWeight: "800", textAlign: "right" },
+  paymentCycleAmount: { color: Colors.slate500, fontSize: 12, marginTop: 3, textAlign: "right" },
   paymentPurposeRow: { flexDirection: "row", gap: Spacing.sm, marginBottom: Spacing.md },
   paymentPurposeButton: { flex: 1, borderWidth: 1, borderColor: Colors.slate200, borderRadius: BorderRadius.md, paddingVertical: 10, paddingHorizontal: 8, alignItems: "center", backgroundColor: Colors.white },
   paymentPurposeButtonActive: { borderColor: Colors.primary, backgroundColor: Colors.primaryMuted },

@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Alert, ScrollView, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { PermissionService, resolveUserPermissions } from "../../core/permissions";
+import { useLocalDataRevision } from "../../core/database/useLocalDataRevision";
 import { Colors, Spacing, Typography, useTheme } from "../../core/theme";
 import { useAuthStore } from "../../features/auth/useAuthStore";
 import { DebtAdjustmentRepository } from "../../features/payments/DebtAdjustmentRepository";
@@ -14,6 +15,7 @@ import { smartSearch } from "../../shared/utils/smartSearch";
 const money = (value: number) => `${Number(value || 0).toFixed(2)} ج.م`;
 
 export default function DebtAdjustmentsScreen() {
+  const localDataRevision = useLocalDataRevision();
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
   const currentUser = useAuthStore((state) => state.currentUser);
@@ -28,6 +30,7 @@ export default function DebtAdjustmentsScreen() {
     try { setStudents(StudentRepository.getAll(false)); } catch { setStudents([]); }
   }, []);
   useEffect(() => { loadStudents(); }, [loadStudents]);
+  useEffect(() => { if (localDataRevision > 0) loadStudents(); }, [localDataRevision]);
 
   const visible = useMemo(() => smartSearch(students, query, [
     { get: (item: any) => item.fullName, weight: 1.2 },

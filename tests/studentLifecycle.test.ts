@@ -2,6 +2,7 @@ import { AuditService } from "../src/core/audit";
 import { DatabaseService } from "../src/core/database";
 import { SyncRepository } from "../src/core/sync";
 import { useAuthStore } from "../src/features/auth/useAuthStore";
+import { StudentCardRepository } from "../src/features/students/StudentCardRepository";
 import { StudentRepository } from "../src/features/students/StudentRepository";
 
 describe("student archive and restore lifecycle", () => {
@@ -53,6 +54,16 @@ describe("student archive and restore lifecycle", () => {
     expect(restored).toMatchObject({ id: student.id, studentCode: "00882", cardCode: "00882", deletedAt: null, deletedBy: null });
     expect(StudentRepository.findById(student.id)).toMatchObject({ id: student.id, cardCode: "00882" });
     expect(StudentRepository.findByCardCode("00882")?.id).toBe(student.id);
+  });
+
+  it("keeps the authoritative student card_code when card history has no active row", () => {
+    const student = createStudent("00886");
+    const card = StudentCardRepository.getActiveCardByStudentId(student.id);
+    expect(card?.cardCode).toBe("00886");
+
+    StudentCardRepository.deactivateCard(card!.id);
+
+    expect(StudentRepository.getAll(true).find((item) => item.id === student.id)?.cardCode).toBe("00886");
   });
 
   it("writes delete and restore audit events with the authenticated actor", () => {

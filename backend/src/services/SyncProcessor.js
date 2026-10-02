@@ -522,7 +522,8 @@ class SyncProcessor {
         // bootstrap, but that payload can be retried long after the student
         // has received a replacement card. Replaying it must never
         // deactivate the current card and resurrect the old one.
-        const cardWasProvided = !existingStudent && Boolean(payload.card || cardCode);
+        const isCardCodeReplacement = payload.cardCodeChanged === true || payload.replaceCard === true;
+        const cardWasProvided = (!existingStudent && Boolean(payload.card || cardCode)) || isCardCodeReplacement;
 
         if (!studentId || (!cardCode && !existingStudent)) {
           throw new Error("Card code / Student code is required.");
@@ -612,7 +613,11 @@ class SyncProcessor {
 
         // 2. Insert Active Physical Card
         const cardId = payload.card?.id || `card-${studentId}`;
-        if (persistedCardCode && cardWasProvided) {
+        // A replacement is a direct edit of students.card_code. Do not
+        // create/deactivate student_cards rows for this operation: card
+        // history and cancellation semantics are intentionally not part of
+        // replacing the student's current code.
+        if (persistedCardCode && cardWasProvided && !isCardCodeReplacement) {
           await client.query(
             `UPDATE student_cards
              SET status = 'deactivated', deactivated_at = NOW()

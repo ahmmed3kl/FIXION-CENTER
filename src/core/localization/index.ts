@@ -120,7 +120,6 @@ export const Strings = {
   generateSessionsButton: "توليد الحصص",
   issueCardButton: "إصدار بطاقة",
   replaceCardButton: "استبدال البطاقة",
-  deactivateCardButton: "إلغاء البطاقة",
   enrollStudentButton: "تسجيل في مجموعة",
   endEnrollmentButton: "إنهاء الاشتراك",
 

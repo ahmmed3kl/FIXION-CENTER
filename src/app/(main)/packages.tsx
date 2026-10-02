@@ -10,10 +10,12 @@ import { PermissionService, resolveUserPermissions } from "../../core/permission
 import { Colors, Spacing, Typography, useTheme } from "../../core/theme";
 import { AppButton, AppCard, AppInput, EmptyState, StatusBadge } from "../../shared/components";
 import { useAuthStore } from "../../features/auth/useAuthStore";
+import { useLocalDataRevision } from "../../core/database/useLocalDataRevision";
 
 type OptionDraft = { teacherId: string; subjectId: string };
 
 export default function PackagesScreen() {
+  const localDataRevision = useLocalDataRevision();
   const router = useRouter();
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(), [colors]);
@@ -36,6 +38,7 @@ export default function PackagesScreen() {
   const load = () => { try { setPackages(PackageRepository.getPackages(true)); setTeachers(TeacherRepository.getAll()); } catch (e: any) { Alert.alert("خطأ", e?.message || "تعذر تحميل الباقات"); } };
   const activeCenterId = useAuthStore((s) => s.activeCenterId);
   useEffect(() => { load(); }, [activeCenterId]);
+  useEffect(() => { if (localDataRevision > 0) load(); }, [localDataRevision]);
   const reset = () => { setEditing(null); setName(""); setPrice(""); setMaxSelections("1"); setDescription(""); setOptions([]); };
   const beginEdit = (pkg: Package) => { setEditing(pkg); setName(pkg.name); setPrice(String(pkg.price)); setMaxSelections(String(pkg.maxSelections || 1)); setDescription(pkg.description || ""); setOptions(PackageRepository.getPackageSubjects(pkg.id).map((s) => ({ subjectId: s.subjectId, teacherId: s.defaultTeacherId }))); };
   const addOption = () => { const t = teachers[0]; const taught = t ? subjectsForTeacher(t.id) : []; const subjectId = taught[0]?.id || ""; setOptions((old) => [...old, { teacherId: t?.id || "", subjectId }]); };

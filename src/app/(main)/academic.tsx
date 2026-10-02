@@ -15,6 +15,7 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { getLocalDateOnly } from "../../shared/utils/date";
+import { useLocalDataRevision } from "../../core/database/useLocalDataRevision";
 import { Strings } from "../../core/localization";
 import {
     PermissionService,
@@ -59,6 +60,7 @@ const DAYS_OF_WEEK = [
 ];
 
 export default function AcademicScreen() {
+  const localDataRevision = useLocalDataRevision();
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(), [colors]);
   const router = useRouter();
@@ -240,6 +242,9 @@ export default function AcademicScreen() {
         .catch(() => {});
     }
   }, [activeCenterId]);
+  useEffect(() => {
+    if (localDataRevision > 0) loadData();
+  }, [localDataRevision]);
 
   // The weekday changes while the app can remain open overnight. Refresh the
   // "today's groups" filter whenever this screen becomes visible again.

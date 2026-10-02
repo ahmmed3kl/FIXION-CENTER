@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Alert, ScrollView, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { DatabaseService } from "../../core/database";
+import { useLocalDataRevision } from "../../core/database/useLocalDataRevision";
 import { Spacing, Typography, useTheme } from "../../core/theme";
 import { AppButton, AppCard, AppInput, EmptyState } from "../../shared/components";
 import { OpeningBalanceService } from "../../features/payments/OpeningBalanceService";
@@ -20,6 +21,7 @@ const addMonth = (value: string) => {
 };
 
 export default function OpeningBalanceScreen() {
+  const localDataRevision = useLocalDataRevision();
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
   const { activeCenterId, currentUser } = useAuthStore();
@@ -42,6 +44,7 @@ export default function OpeningBalanceScreen() {
   }, [activeCenterId]);
 
   useEffect(() => { loadStudents(); }, [loadStudents]);
+  useEffect(() => { if (localDataRevision > 0) loadStudents(); }, [localDataRevision]);
 
   const selectStudent = (student: any) => {
     const db = DatabaseService.getDb();

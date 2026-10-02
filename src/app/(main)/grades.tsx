@@ -1,6 +1,6 @@
 import { Ionicons } from "@expo/vector-icons";
 import { router, useFocusEffect, useLocalSearchParams } from "expo-router";
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Alert, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Colors, Spacing, Typography, useTheme } from "../../core/theme";
@@ -9,8 +9,10 @@ import { GroupScheduleRepository } from "../../features/groups/GroupScheduleRepo
 import { NotificationService } from "../../features/notifications/NotificationService";
 import { Group, Student } from "../../shared/types";
 import { smartSearch } from "../../shared/utils/smartSearch";
+import { useLocalDataRevision } from "../../core/database/useLocalDataRevision";
 
 export default function GradesScreen() {
+  const localDataRevision = useLocalDataRevision();
   const { colors } = useTheme();
   const { groupId } = useLocalSearchParams<{ groupId?: string }>();
   const styles = useMemo(() => createStyles(), [colors]);
@@ -59,6 +61,9 @@ export default function GradesScreen() {
   }, [loadGroup]);
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
+  useEffect(() => {
+    if (localDataRevision > 0) load();
+  }, [localDataRevision]);
   useFocusEffect(useCallback(() => {
     if (!groupId) return;
     try {
@@ -113,7 +118,7 @@ export default function GradesScreen() {
     {Object.values(sentExamIds).some(Boolean) ? <Text style={styles.filterHint}>تم إرسال درجات امتحان مسبقًا — سيظهر تأكيد قبل إعادة الإرسال</Text> : null}
     <View style={styles.hero}><TouchableOpacity onPress={() => router.back()} style={styles.backButton}><Ionicons name="chevron-forward" size={22} color={Colors.slate900} /></TouchableOpacity><View style={styles.heroIcon}><Ionicons name="school-outline" size={30} color={Colors.primary} /></View><View style={styles.heroCopy}><Text style={styles.kicker}>الأداء الأكاديمي</Text><Text style={styles.title}>رصد الدرجات</Text><Text style={styles.subtitle}>سجّل درجات الامتحانات للمجموعة</Text></View></View>
     {!groupId ? <><View style={styles.sectionHeading}><View><Text style={styles.sectionTitle}>اختر المجموعة</Text><Text style={styles.sectionHint}>{groups.length} مجموعة نشطة</Text></View><Ionicons name="layers-outline" size={20} color={Colors.primary} /></View><ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.groupRow}>{groups.map((group) => <TouchableOpacity key={group.id} onPress={() => selectGroup(group)} style={[styles.groupCard, selectedGroup?.id === group.id && styles.groupCardActive]}><View style={[styles.groupBadge, selectedGroup?.id === group.id && styles.groupBadgeActive]}><Ionicons name="people-outline" size={16} color={selectedGroup?.id === group.id ? Colors.primary : Colors.slate500} /></View><Text style={[styles.groupChipText, selectedGroup?.id === group.id && styles.groupChipTextActive]} numberOfLines={1}>{group.name}</Text><Text style={[styles.groupGrade, selectedGroup?.id === group.id && styles.groupChipTextActive]} numberOfLines={1}>{group.grade}</Text><Text style={[styles.groupMeta, selectedGroup?.id === group.id && styles.groupChipTextActive]} numberOfLines={1}>{scheduleLabel(group.id)}</Text></TouchableOpacity>)}</ScrollView>{!groups.length ? <Text style={styles.empty}>لا توجد مجموعات نشطة.</Text> : null}</> : null}
-    {selectedGroup ? <>
+    {selectedGroup ? <><View style={styles.progressPanel}><Text style={styles.progressTitle}>تقدم رصد الامتحانات</Text>{exams.map((exam) => { const recorded = students.filter((student) => { const value = scores[`${exam.id}:${student.id}`]; return value !== undefined && value !== "" && Number.isFinite(Number(value)); }).length; return <View key={`progress-${exam.id}`} style={styles.progressRow}><Text style={styles.progressExamName}>{exam.name}</Text><Text style={styles.progressText}>تم رصد {recorded} من {students.length} طالب</Text></View>; })}</View>
       <View style={styles.selectedHeader}><View style={styles.selectedIdentity}><View style={styles.selectedIcon}><Ionicons name="ribbon-outline" size={22} color={Colors.primary} /></View><View style={{ flex: 1 }}><Text style={styles.selectedTitle}>{selectedGroup.name}</Text><Text style={styles.selectedMeta}>{selectedGroup.teacherName || "—"} · {selectedGroup.subjectName || "—"} · {selectedGroup.grade} · {scheduleLabel(selectedGroup.id)}</Text></View></View><TouchableOpacity style={styles.addExamButton} onPress={() => setShowExamForm((value) => !value)}><Ionicons name={showExamForm ? "close" : "add"} size={18} color={Colors.white} /><Text style={styles.addExamText}>{showExamForm ? "إلغاء" : "امتحان جديد"}</Text></TouchableOpacity></View>
       {showExamForm ? <View style={styles.examForm}><Text style={styles.formLabel}>إضافة امتحان</Text><View style={styles.formFields}><TextInput style={styles.input} value={examName} onChangeText={setExamName} placeholder="اسم الامتحان" placeholderTextColor={Colors.slate400} textAlign="right" /><TextInput style={styles.scoreInput} value={maxScore} onChangeText={setMaxScore} keyboardType="decimal-pad" placeholder="النهائية" placeholderTextColor={Colors.slate400} textAlign="center" /><TouchableOpacity style={styles.saveExam} onPress={createExam}><Ionicons name="checkmark" size={17} color={Colors.white} /><Text style={styles.saveExamText}>حفظ</Text></TouchableOpacity></View></View> : null}
       <View style={styles.statsGrid}><View style={styles.statCard}><Text style={styles.statValue}>{students.length}</Text><Text style={styles.statLabel}>طلاب المجموعة</Text></View><View style={styles.statCard}><Text style={[styles.statValue, { color: Colors.successText }]}>{completion}%</Text><Text style={styles.statLabel}>نسبة الرصد</Text></View><View style={styles.statCard}><Text style={styles.statValue}>{gradeStats.average}</Text><Text style={styles.statLabel}>المتوسط</Text></View><View style={styles.statCard}><Text style={[styles.statValue, { color: Colors.accent }]}>{exams.length}</Text><Text style={styles.statLabel}>امتحانات</Text></View></View>
@@ -124,6 +129,11 @@ export default function GradesScreen() {
 }
 
 const createStyles = () => StyleSheet.create({
+  progressPanel: { backgroundColor: Colors.white, borderRadius: 16, borderWidth: 1, borderColor: Colors.border, padding: 13, gap: 8 },
+  progressTitle: { color: Colors.slate800, fontWeight: "900", textAlign: "right" },
+  progressRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", borderTopWidth: 1, borderTopColor: Colors.slate100, paddingTop: 7 },
+  progressExamName: { color: Colors.slate700, fontWeight: "700", flex: 1, textAlign: "right" },
+  progressText: { color: Colors.primary, fontSize: 11, fontWeight: "800", marginLeft: 8 },
   safe: { flex: 1, backgroundColor: Colors.background }, content: { padding: Spacing.lg, gap: Spacing.md, paddingBottom: 48 },
   hero: { flexDirection: "row", alignItems: "center", gap: 14, backgroundColor: Colors.primaryMuted, borderRadius: 22, padding: 18, borderWidth: 1, borderColor: Colors.primaryLight }, backButton: { width: 38, height: 38, borderRadius: 12, backgroundColor: Colors.white, alignItems: "center", justifyContent: "center" }, heroCopy: { flex: 1 }, heroIcon: { width: 58, height: 58, borderRadius: 18, alignItems: "center", justifyContent: "center", backgroundColor: Colors.white }, kicker: { color: Colors.primary, fontSize: 12, fontWeight: "800", textAlign: "right" }, title: { ...Typography.h1, color: Colors.slate900, textAlign: "right", marginTop: 2 }, subtitle: { color: Colors.slate600, fontSize: 12, textAlign: "right", marginTop: 4 },
   sectionHeading: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginTop: 4 }, sectionTitle: { ...Typography.h3, color: Colors.slate900, textAlign: "right" }, sectionHint: { color: Colors.slate500, fontSize: 11, textAlign: "right", marginTop: 2 }, groupRow: { gap: 10, paddingVertical: 2 }, groupCard: { width: 156, minHeight: 132, padding: 12, borderRadius: 16, backgroundColor: Colors.white, borderWidth: 1, borderColor: Colors.border }, groupCardActive: { backgroundColor: Colors.primary, borderColor: Colors.primary }, groupBadge: { width: 30, height: 30, borderRadius: 10, backgroundColor: Colors.slate100, alignItems: "center", justifyContent: "center", marginBottom: 9 }, groupBadgeActive: { backgroundColor: Colors.white }, groupChipText: { color: Colors.slate800, fontWeight: "800", textAlign: "right" }, groupGrade: { color: Colors.primary, fontSize: 11, fontWeight: "700", marginTop: 5, textAlign: "right" }, groupMeta: { color: Colors.slate500, fontSize: 10, marginTop: 3, textAlign: "right" }, groupChipTextActive: { color: Colors.white },

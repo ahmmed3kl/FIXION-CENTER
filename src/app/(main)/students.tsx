@@ -16,6 +16,7 @@ import {
     useWindowDimensions,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { useLocalDataRevision } from "../../core/database/useLocalDataRevision";
 import { formatCurrency, formatTimeArabic, Strings } from "../../core/localization";
 import { formatLocalDateTime, getLocalDateOnly } from "../../shared/utils/date";
 import { PermissionService } from "../../core/permissions";
@@ -56,7 +57,6 @@ import {
     Group,
     PaymentEvent,
     Student,
-    StudentCard,
     StudentPackageSubscription,
     StudentGroupEnrollment,
   StudentGroupAttendanceSummary,
@@ -119,6 +119,7 @@ function firstScheduledDate(groupId: string): string {
 }
 
 export default function StudentsScreen() {
+  const localDataRevision = useLocalDataRevision();
   const { colors } = useTheme();
   const { width: screenWidth, height: screenHeight, gutter, isTablet, isLandscape } = useResponsiveLayout();
   const styles = useMemo(() => createStyles(screenWidth, screenHeight, gutter, isTablet, isLandscape), [colors, screenWidth, screenHeight, gutter, isTablet, isLandscape]);
@@ -149,7 +150,6 @@ export default function StudentsScreen() {
   const [cardScannerOpen, setCardScannerOpen] = useState(false);
   const [cardCameraPermission, requestCardCameraPermission] = useCameraPermissions();
   const [selectedStudent, setSelectedStudent] = useState<Student | null>(null);
-  const [studentCards, setStudentCards] = useState<StudentCard[]>([]);
   const [studentSubscriptions, setStudentSubscriptions] = useState<StudentPackageSubscription[]>([]);
   const [studentAttendance, setStudentAttendance] = useState<Attendance[]>([]);
   const [studentNotes, setStudentNotes] = useState<import("../../shared/types").StudentNote[]>([]);
@@ -313,7 +313,6 @@ export default function StudentsScreen() {
     // The screen stays mounted while the user switches centers. Reload all
     // center-scoped lists so the previous center can never remain visible.
     setSelectedStudent(null);
-    setStudentCards([]);
     setStudentEnrollments([]);
     setFinancialStatus(null);
     setAttendanceSummaries([]);
@@ -329,6 +328,9 @@ export default function StudentsScreen() {
     }
     if (add === "1") setIsAddStudentOpen(true);
   }, [activeCenterId, studentId, add]);
+  useEffect(() => {
+    if (localDataRevision > 0) loadData();
+  }, [localDataRevision]);
 
   // Keep the profile payment form aligned with the attendance payment flow:
   // cycle payments start with the open month/package balance, while a session
@@ -352,7 +354,6 @@ export default function StudentsScreen() {
     if (selectedStudent?.id !== student.id) setProfileTab("groups");
     setSelectedStudent(student);
     setFinancialStatus(null);
-    setStudentCards([]);
     setStudentEnrollments([]);
     setStudentSubscriptions([]);
     setStudentAttendance([]);
@@ -362,8 +363,6 @@ export default function StudentsScreen() {
     setEditingNoteId(null);
     setAttendanceSummaries([]);
     try {
-      const cards = StudentCardRepository.getCardsByStudentId(student.id);
-      setStudentCards(cards);
       const enrollments = EnrollmentRepository.getActiveEnrollmentsForStudent(
         student.id,
       );
@@ -667,53 +666,15 @@ export default function StudentsScreen() {
 
     try {
       StudentCardRepository.replaceCard(selectedStudent.id, cardInput.trim());
-      Alert.alert("تم بنجاح", `تم ربط البطاقة (${cardInput.trim()}) بالطالب.`);
+      Alert.alert("تم بنجاح", `تم تحديث كود الكارت إلى (${cardInput.trim()}).`);
       setIsCardModalOpen(false);
       setCardInput("");
-      openStudentDetails(selectedStudent);
+      const updatedStudent = StudentRepository.findById(selectedStudent.id);
+      if (updatedStudent) openStudentDetails(updatedStudent);
       loadData();
     } catch (e: any) {
       Alert.alert("خطأ", e?.message || "فشل تحديث البطاقة");
     }
-  };
-
-  const handleDeactivateCard = (cardId: string) => {
-    if (!selectedStudent) return;
-    Alert.alert("تأكيد", "هل أنت متأكد من رغبتك في إلغاء تفعيل هذه البطاقة؟", [
-      { text: "إلغاء", style: "cancel" },
-      {
-        text: "نعم، إلغاء البطاقة",
-        style: "destructive",
-        onPress: () => {
-          try {
-            StudentCardRepository.deactivateCard(cardId);
-            openStudentDetails(selectedStudent);
-            loadData();
-          } catch (e: any) {
-            Alert.alert("خطأ", e?.message || "فشل إلغاء تفعيل البطاقة");
-          }
-        },
-      },
-    ]);
-  };
-
-  const handleReactivateCard = (cardId: string) => {
-    if (!selectedStudent) return;
-    Alert.alert("إعادة تفعيل البطاقة", "هل تريد إعادة تفعيل هذه البطاقة؟", [
-      { text: "إلغاء", style: "cancel" },
-      {
-        text: "نعم، إعادة التفعيل",
-        onPress: () => {
-          try {
-            StudentCardRepository.reactivateCard(cardId);
-            openStudentDetails(selectedStudent);
-            loadData();
-          } catch (e: any) {
-            Alert.alert("خطأ", e?.message || "فشل إعادة تفعيل البطاقة");
-          }
-        },
-      },
-    ]);
   };
 
   const handleEnrollStudent = () => {
@@ -1145,7 +1106,10 @@ export default function StudentsScreen() {
                 <TouchableOpacity style={styles.profileCodeButton} onPress={() => setBarcodeModalOpen(true)}><Ionicons name="barcode-outline" size={20} color={Colors.white} /><Text style={styles.profileCodeButtonText}>عرض كود الطالب</Text></TouchableOpacity>
                 {canManageCards && <TouchableOpacity style={styles.profileManageCardButton} onPress={() => setIsCardModalOpen(true)}><Ionicons name="card-outline" size={19} color={Colors.primary} /><Text style={styles.profileManageCardText}>إدارة البطاقة</Text></TouchableOpacity>}
               </View>
-              {studentCards.length > 0 && <View style={styles.profileCardList}>{studentCards.map((card) => <View key={card.id} style={styles.profileCardRow}><View style={styles.profileRowCopy}><Text style={styles.profileRowTitle}>بطاقة {formatDisplayIdentifier(card.cardCode)}</Text><Text style={styles.profileRowMeta}>صدرت في {card.issuedAt.slice(0, 10)}</Text></View><StatusBadge text={card.status === "active" ? "نشطة" : "ملغاة"} type={card.status === "active" ? "success" : "neutral"} />{canManageCards && card.status === "active" && <TouchableOpacity accessibilityLabel="إلغاء البطاقة" onPress={() => handleDeactivateCard(card.id)}><Ionicons name="trash-outline" size={17} color={Colors.danger} /></TouchableOpacity>}{canManageCards && card.status !== "active" && <TouchableOpacity accessibilityLabel="إعادة تفعيل البطاقة" onPress={() => handleReactivateCard(card.id)} style={{ padding: 4 }}><Ionicons name="refresh-circle-outline" size={20} color={Colors.primary} /></TouchableOpacity>}</View>)}</View>}
+              <View style={styles.profileCardList}>
+                <Text style={styles.profileRowTitle}>الكارت الحالي</Text>
+                <Text style={styles.profileRowMeta}>{selectedStudent.cardCode ? formatDisplayIdentifier(selectedStudent.cardCode) : "لا يوجد كارت حالي"}</Text>
+              </View>
               {canDeactivate && <TouchableOpacity style={styles.profileDeactivateButton} onPress={handleDeleteStudent}><Ionicons name="trash-outline" size={17} color={Colors.danger} /><Text style={styles.profileDeactivateText}>حذف الطالب</Text></TouchableOpacity>}
 
               <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.profileTabsScroller} contentContainerStyle={styles.profileTabs}>
@@ -1174,7 +1138,7 @@ export default function StudentsScreen() {
                 {canUpdateStudent && <View style={styles.profileNoteCard}><AppInput value={noteText} onChangeText={setNoteText} placeholder="Ø£Ø¶Ù Ù…Ù„Ø§Ø­Ø¸Ø© Ø¬Ø¯ÙŠØ¯Ø©" multiline /><TouchableOpacity style={styles.profileInlineAction} onPress={() => void saveStudentNote()}><Ionicons name="save-outline" size={17} color={Colors.primary} /><Text style={styles.profileInlineActionText}>{editingNoteId ? "ØªØ­Ø¯ÙŠØ« Ø§Ù„Ù…Ù„Ø§Ø­Ø¸Ø©" : "Ø­ÙØ¸ Ø§Ù„Ù…Ù„Ø§Ø­Ø¸Ø©"}</Text></TouchableOpacity></View>}
                 {studentNotes.map((note) => <View key={note.id} style={styles.profilePaymentRow}><View style={styles.profileRowCopy}><Text style={styles.profileRowTitle}>{note.text}</Text><Text style={styles.profileRowMeta}>{note.createdByName || "Ø­Ø³Ø§Ø¨"} Â· {formatLocalDateTime(note.createdAt)}</Text></View><View style={styles.profilePaymentActions}><TouchableOpacity onPress={() => { setEditingNoteId(note.id); setNoteText(note.text); }}><Ionicons name="create-outline" size={18} color={Colors.primary} /></TouchableOpacity><TouchableOpacity onPress={() => void removeStudentNote(note.id)}><Ionicons name="trash-outline" size={18} color={Colors.danger} /></TouchableOpacity></View></View>)}
                 <View style={styles.profileSectionHeader}><View><Text style={styles.profileSectionTitle}>سجل النشاط</Text><Text style={styles.profileSectionCaption}>من أضاف الطالب أو عدّل بياناته أو سجّل دفعة أو حضورًا</Text></View></View>
-                {studentAuditLogs.length === 0 ? <Text style={styles.profileEmptyText}>لا يوجد نشاط مسجل لهذا الطالب.</Text> : studentAuditLogs.slice(0, 100).map((log) => { let payload: any = {}; try { payload = log.payload ? JSON.parse(log.payload) : {}; } catch {} const actionLabels: Record<string, string> = { "student.create": "تم إضافة الطالب", "student.update": "تم تعديل بيانات الطالب", "student.deactivate": "تم تعطيل الطالب", "student.delete": "تم حذف الطالب", "student_card.issue": "تم إصدار بطاقة جديدة", "student_card.deactivate": "تم إلغاء تفعيل البطاقة", "student_card.reactivate": "تم إعادة تفعيل البطاقة", "attendance.record": "تم تسجيل الحضور", "attendance.makeup": "تم تسجيل تعويض", "payment.create": "تم تسجيل دفعة", "payment.delete": "تم حذف دفعة", "enrollment.create": "تم التسجيل في مجموعة", "enrollment.end": "تم إنهاء التسجيل", "enrollment.transfer": "تم تحويل المجموعة", "note.create": "تم إضافة ملاحظة", "note.update": "تم تعديل ملاحظة", "note.delete": "تم حذف ملاحظة" }; const actionLabel = actionLabels[log.action] || log.action; return <View key={log.id} style={styles.profileHistoryRow}><View style={styles.profileHistoryIcon}><Ionicons name="time-outline" size={16} color={Colors.primary} /></View><View style={styles.profileRowCopy}><Text style={styles.profileRowTitle}>{actionLabel}</Text><Text style={styles.profileRowMeta}>{payload.actorName || (log.userId === currentUser?.id ? currentUser?.fullName : `مستخدم`)} · {formatLocalDateTime(log.timestamp)}</Text></View></View>; })}
+                {studentAuditLogs.length === 0 ? <Text style={styles.profileEmptyText}>لا يوجد نشاط مسجل لهذا الطالب.</Text> : studentAuditLogs.slice(0, 100).map((log) => { let payload: any = {}; try { payload = log.payload ? JSON.parse(log.payload) : {}; } catch {} const actionLabels: Record<string, string> = { "student.create": "تم إضافة الطالب", "student.update": "تم تعديل بيانات الطالب", "student.card_code.updated": "تم تحديث كود الكارت", "student.deactivate": "تم تعطيل الطالب", "student.delete": "تم حذف الطالب", "student_card.issue": "تم إصدار بطاقة جديدة", "student_card.deactivate": "تم تحديث سجل بطاقة قديم", "student_card.reactivate": "تم تحديث سجل بطاقة قديم", "attendance.record": "تم تسجيل الحضور", "attendance.makeup": "تم تسجيل تعويض", "payment.create": "تم تسجيل دفعة", "payment.delete": "تم حذف دفعة", "enrollment.create": "تم التسجيل في مجموعة", "enrollment.end": "تم إنهاء التسجيل", "enrollment.transfer": "تم تحويل المجموعة", "note.create": "تم إضافة ملاحظة", "note.update": "تم تعديل ملاحظة", "note.delete": "تم حذف ملاحظة" }; const actionLabel = actionLabels[log.action] || log.action; return <View key={log.id} style={styles.profileHistoryRow}><View style={styles.profileHistoryIcon}><Ionicons name="time-outline" size={16} color={Colors.primary} /></View><View style={styles.profileRowCopy}><Text style={styles.profileRowTitle}>{actionLabel}</Text><Text style={styles.profileRowMeta}>{payload.actorName || (log.userId === currentUser?.id ? currentUser?.fullName : `مستخدم`)} · {formatLocalDateTime(log.timestamp)}</Text></View></View>; })}
               </View>}
             </ScrollView>
           </SafeAreaView>
@@ -1247,56 +1211,22 @@ export default function StudentsScreen() {
                       >
                         <Ionicons name="card" size={14} color={Colors.white} />
                         <Text style={styles.smallActionBtnText}>
-                          إصدار / استبدال
+                          استبدال الكارت
                         </Text>
                       </TouchableOpacity>
                     )}
                   </View>
 
-                  {studentCards.length === 0 ? (
-                    <Text style={styles.emptyText}>
-                      لم يتم إصدار بطاقة لهذا الطالب بعد.
-                    </Text>
-                  ) : (
-                    studentCards.map((card) => (
-                      <View key={card.id} style={styles.cardItemRow}>
-                        <View>
-                          <Text style={styles.cardItemCode}>
-                            كود الكارت: {formatDisplayIdentifier(card.cardCode)}
-                          </Text>
-                          <Text style={styles.cardItemMeta}>
-                            تاريخ الإصدار: {card.issuedAt.split("T")[0]}
-                          </Text>
-                        </View>
-                        <View
-                          style={{
-                            flexDirection: "row",
-                            alignItems: "center",
-                            gap: 8,
-                          }}
-                        >
-                          <StatusBadge
-                            text={card.status === "active" ? "نشطة" : "ملغاة"}
-                            type={
-                              card.status === "active" ? "success" : "neutral"
-                            }
-                          />
-                          {canManageCards && card.status === "active" && (
-                            <TouchableOpacity
-                              onPress={() => handleDeactivateCard(card.id)}
-                              style={styles.deactBtn}
-                            >
-                              <Ionicons
-                                name="trash-outline"
-                                size={16}
-                                color={Colors.danger}
-                              />
-                            </TouchableOpacity>
-                          )}
-                        </View>
-                      </View>
-                    ))
-                  )}
+                  <View style={styles.cardItemRow}>
+                    <View>
+                      <Text style={styles.cardItemCode}>
+                        كود الكارت الحالي: {selectedStudent.cardCode ? formatDisplayIdentifier(selectedStudent.cardCode) : "لا يوجد"}
+                      </Text>
+                      <Text style={styles.cardItemMeta}>
+                        استبدال الكود يعدل بطاقة الطالب الحالية فقط.
+                      </Text>
+                    </View>
+                  </View>
                 </View>
 
                 {/* Group Enrollments */}
@@ -1819,10 +1749,9 @@ export default function StudentsScreen() {
       <Modal visible={isCardModalOpen} animationType="slide" transparent>
         <View style={styles.modalOverlay}>
           <View style={styles.smallModalCard}>
-            <Text style={styles.modalTitle}>إصدار / استبدال كارت الطالب</Text>
+            <Text style={styles.modalTitle}>استبدال كارت الطالب</Text>
             <Text style={styles.fieldNote}>
-              سيتم تفعيل الكارت الجديد وإلغاء تفعيل أي كروت سابقة لهذا الطالب
-              تلقائياً.
+              سيتم تحديث كود الكارت الحالي للطالب مع الحفاظ على كل بياناته.
             </Text>
             <AppInput
               label="كود الكارت الجديد *"

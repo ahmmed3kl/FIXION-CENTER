@@ -30,7 +30,7 @@ import {
   NotificationEvent,
   NotificationTemplate,
 } from "../../shared/types";
-import { getLocalDateOnly } from "../../shared/utils/date";
+import { formatLocalDateTime, getLocalDateOnly } from "../../shared/utils/date";
 
 const DAYS_OF_WEEK = ["الأحد", "الإثنين", "الثلاثاء", "الأربعاء", "الخميس", "الجمعة", "السبت"];
 
@@ -276,7 +276,7 @@ export default function NotificationsScreen() {
                     </Text>
                   </View>
                   <Text style={styles.timestampText}>
-                    {new Date(item.createdAt).toLocaleString("ar-EG")}
+                    {formatLocalDateTime(item.createdAt)}
                   </Text>
                 </View>
 

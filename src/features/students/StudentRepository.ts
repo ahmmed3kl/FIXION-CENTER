@@ -57,39 +57,28 @@ export class StudentRepository {
   }
 
   static findByCardCode(normalizedCardCode: string): Student | null {
-    // Prefer the canonical card table. Older local databases (and devices
-    // restored after a server reset) can contain a valid student row whose
-    // student_cards row was not bootstrapped because that card operation was
-    // conflicted. Do not make attendance unusable in that case: fall back to
-    // the student's center-scoped card_code while the card row is repaired by
-    // the normal bootstrap/sync flow.
-    const card = StudentCardRepository.findByCardCode(normalizedCardCode);
-    if (card) {
-      const student = this.findByIdInternal(card.studentId, false);
-      if (!student || student.deletedAt) return null;
-
-      return {
-        ...student,
-        cardCode: card.cardCode,
-      };
-    }
-
     const { centerId } = this.getActiveContext();
     const db = DatabaseService.getDb();
-    const legacyStudent = db.getFirstSync<any>(
-      `SELECT s.id
-       FROM students s
-       LEFT JOIN student_cards linked_card
-         ON linked_card.student_id = s.id AND linked_card.card_code = ?
-       WHERE s.center_id = ? AND s.status = 'active' AND s.deleted_at IS NULL
-         AND (s.card_code = ? OR linked_card.id IS NOT NULL)
+    // The current student.card_code is the source of truth for scans. This
+    // prevents an old student_cards history row from identifying a student
+    // after a simple card-code replacement.
+    const currentStudent = db.getFirstSync<any>(
+      `SELECT id FROM students
+       WHERE center_id = ? AND card_code = ? AND status = 'active' AND deleted_at IS NULL
        LIMIT 1`,
-      [normalizedCardCode, centerId, normalizedCardCode],
+      [centerId, normalizedCardCode],
     );
-    if (!legacyStudent) return null;
+    if (currentStudent) return this.findByIdInternal(currentStudent.id, false);
 
-    const student = this.findByIdInternal(legacyStudent.id, false);
-    return student ? { ...student, cardCode: normalizedCardCode } : null;
+    // Legacy rows may have a missing students.card_code but a matching active
+    // card row. Keep that compatibility path only when the card row is still
+    // the student's current active identifier.
+    const card = StudentCardRepository.findByCardCode(normalizedCardCode);
+    if (!card) return null;
+    const student = this.findByIdInternal(card.studentId, false);
+    return student && student.cardCode === normalizedCardCode
+      ? { ...student, cardCode: normalizedCardCode }
+      : null;
   }
 
   static findByStudentCode(studentCode: string): Student | null {
@@ -110,7 +99,7 @@ export class StudentRepository {
     const activeCard = StudentCardRepository.getActiveCardByStudentId(row.id);
     return {
       ...row,
-      cardCode: activeCard?.cardCode ?? row.cardCode,
+      cardCode: row.cardCode || activeCard?.cardCode,
     };
   }
 
@@ -132,7 +121,7 @@ export class StudentRepository {
     const activeCard = StudentCardRepository.getActiveCardByStudentId(row.id);
     return {
       ...row,
-      cardCode: activeCard?.cardCode ?? row.cardCode,
+      cardCode: row.cardCode || activeCard?.cardCode,
     };
   }
 
@@ -168,7 +157,7 @@ export class StudentRepository {
     );
     return rows.map((row) => ({
       ...row,
-      cardCode: StudentCardRepository.getActiveCardByStudentId(row.id)?.cardCode ?? row.cardCode,
+      cardCode: row.cardCode || StudentCardRepository.getActiveCardByStudentId(row.id)?.cardCode,
     }));
   }
 
@@ -241,14 +230,12 @@ export class StudentRepository {
         });
     return filtered.map((row) => {
       const activeCard = StudentCardRepository.getActiveCardByStudentId(row.id);
-      const hasCardHistory = StudentCardRepository.getCardsByStudentId(row.id).length > 0;
       return {
         ...row,
-        // Never expose the legacy students.card_code value when card history
-        // exists but no card is active; that value may be the old/replaced
-        // card. It remains a fallback only for legacy students without any
-        // student_cards row at all.
-        cardCode: activeCard?.cardCode ?? (hasCardHistory ? "" : row.cardCode),
+        // The students.card_code column is still part of the authoritative
+        // student snapshot. If the card-history table is missing/stale on a
+        // device, do not discard a card code that arrived from PostgreSQL.
+        cardCode: row.cardCode || activeCard?.cardCode,
       };
     });
   }
@@ -270,7 +257,7 @@ export class StudentRepository {
     );
     return rows.map((row) => ({
       ...row,
-      cardCode: StudentCardRepository.getActiveCardByStudentId(row.id)?.cardCode ?? row.cardCode ?? "",
+      cardCode: row.cardCode || StudentCardRepository.getActiveCardByStudentId(row.id)?.cardCode || "",
     }));
   }
 

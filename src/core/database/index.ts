@@ -1,4 +1,5 @@
 import * as SQLite from "expo-sqlite";
+import { LocalDataEvents } from "./localDataEvents";
 
 export interface SqlDatabase {
   execSync(sql: string): void;
@@ -1405,7 +1406,21 @@ class InMemorySqliteMock implements SqlDatabase {
           const id = params[params.length - 1];
           const row = list.find((r) => r.id === id);
           if (row) {
-            if (trimmed.includes("deleted_at = NULL")) {
+            if (trimmed.includes("card_code = ?")) {
+              const nextCardCode = params[0];
+              const cardOwner = list.find((candidate) =>
+                candidate.id !== id &&
+                candidate.center_id === row.center_id &&
+                candidate.card_code === nextCardCode,
+              );
+              if (cardOwner) {
+                throw new Error(
+                  "UNIQUE constraint failed: students.center_id, students.card_code",
+                );
+              }
+              row.card_code = nextCardCode;
+              row.updated_at = params[1];
+            } else if (trimmed.includes("deleted_at = NULL")) {
               row.deleted_at = null;
               row.deleted_by = null;
               row.updated_at = params[0];
@@ -3621,6 +3636,10 @@ export class DatabaseService {
     this.db = mock;
   }
 
+  static isInTransaction(): boolean {
+    return this.transactionDepth > 0;
+  }
+
   /** Reopens a stale native SQLite handle after an Android prepare failure. */
   static reinitialize(): void {
     // Do not close the old handle while sync/database work may still be using
@@ -3667,6 +3686,7 @@ export class DatabaseService {
     try {
       const result = callback(db);
       db.execSync("COMMIT;");
+      LocalDataEvents.emit();
       return result;
     } catch (error) {
       try {
@@ -3700,6 +3720,7 @@ export class DatabaseService {
     try {
       const result = await callback(db);
       db.execSync("COMMIT;");
+      LocalDataEvents.emit();
       return result;
     } catch (error) {
       try { db.execSync("ROLLBACK;"); } catch {}

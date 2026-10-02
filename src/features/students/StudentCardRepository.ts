@@ -10,7 +10,7 @@ import {
 } from "../../core/errors";
 import { PermissionService } from "../../core/permissions";
 import { SyncRepository } from "../../core/sync";
-import { StudentCard } from "../../shared/types";
+import { Student, StudentCard } from "../../shared/types";
 import { useAuthStore } from "../auth/useAuthStore";
 
 export class StudentCardRepository {
@@ -36,7 +36,12 @@ export class StudentCardRepository {
       [centerId, normalizedCardCode],
     );
 
-    return row || null;
+    if (!row) return null;
+    const current = db.getFirstSync<{ cardCode: string }>(
+      "SELECT card_code as cardCode FROM students WHERE center_id = ? AND id = ?",
+      [centerId, row.studentId],
+    );
+    return current?.cardCode === row.cardCode ? row : null;
   }
 
   /** Physical card identifiers are unique across all centers. */
@@ -50,7 +55,12 @@ export class StudentCardRepository {
        LIMIT 1`,
       [cardCode.trim()],
     );
-    return row || null;
+    if (!row) return null;
+    const current = db.getFirstSync<{ cardCode: string }>(
+      "SELECT card_code as cardCode FROM students WHERE center_id = ? AND id = ?",
+      [row.centerId, row.studentId],
+    );
+    return current?.cardCode === row.cardCode ? row : null;
   }
 
   static getActiveCardByStudentId(studentId: string): StudentCard | null {
@@ -195,8 +205,86 @@ export class StudentCardRepository {
     return result;
   }
 
-  static replaceCard(studentId: string, newCardCode: string): StudentCard {
-    return this.issueCard(studentId, newCardCode);
+  static replaceCard(studentId: string, newCardCode: string): Student {
+    const { centerId, user } = this.getActiveContext();
+    if (!PermissionService.hasPermission(user.permissions, "students.cards.manage")) {
+      throw new ForbiddenError("Ù„ÙŠØ³ Ù„Ø¯ÙŠÙƒ ØµÙ„Ø§Ø­ÙŠØ© ØªØ¹Ø¯ÙŠÙ„ ÙƒÙˆØ¯ ÙƒØ§Ø±Øª Ø§Ù„Ø·Ø§Ù„Ø¨.");
+    }
+
+    const cardCode = String(newCardCode || "").trim();
+    if (!/^\d+$/.test(cardCode)) {
+      throw new ValidationError("ÙƒÙˆØ¯ Ø§Ù„ÙƒØ§Ø±Øª يجب أن يتكون من أرقام فقط.");
+    }
+
+    const db = DatabaseService.getDb();
+    const student = db.getFirstSync<any>(
+      `SELECT id, center_id as centerId, student_code as studentCode, full_name as fullName,
+              card_code as cardCode, phone, parent_phone as parentPhone, grade, status,
+              student_type as studentType, notes, deleted_at as deletedAt, deleted_by as deletedBy,
+              created_at as createdAt, updated_at as updatedAt
+       FROM students WHERE center_id = ? AND id = ?`,
+      [centerId, studentId],
+    );
+    if (!student) throw new NotFoundError("Ø§Ù„Ø·Ø§Ù„Ø¨ ØºÙŠØ± Ù…ÙˆØ¬ÙˆØ¯.");
+    if (student.deletedAt) throw new ConflictError("Ø§Ù„Ø·Ø§Ù„Ø¨ Ù…Ø­Ø°ÙˆÙ Ø¨Ø§Ù„ÙØ¹Ù„.");
+
+    const anotherStudent = db.getFirstSync<any>(
+      `SELECT id FROM students WHERE center_id = ? AND card_code = ? AND id <> ? LIMIT 1`,
+      [centerId, cardCode, studentId],
+    );
+    if (anotherStudent) {
+      throw new ConflictError(`ÙƒÙˆØ¯ Ø§Ù„ÙƒØ§Ø±Øª (${cardCode}) Ù…Ø±ØªØ¨Ø· Ø¨Ø·Ø§Ù„Ø¨ Ø¢Ø®Ø±.`);
+    }
+    const activeCardOwner = db.getFirstSync<any>(
+      `SELECT student_id as studentId FROM student_cards
+       WHERE center_id = ? AND card_code = ? AND status = 'active' AND student_id <> ? LIMIT 1`,
+      [centerId, cardCode, studentId],
+    );
+    if (activeCardOwner) {
+      throw new ConflictError(`ÙƒÙˆØ¯ Ø§Ù„ÙƒØ§Ø±Øª (${cardCode}) Ù…Ø±ØªØ¨Ø· Ø¨Ø·Ø§Ù„Ø¨ Ø¢Ø®Ø±.`);
+    }
+
+    const now = new Date().toISOString();
+    const operationId = `op-student-card-edit-${Date.now()}-${studentId}`;
+    DatabaseService.runInTransaction(() => {
+      // Replacement is a student-field edit. It intentionally does not
+      // touch student_cards history or create a cancellation/deactivation.
+      db.runSync(
+        `UPDATE students SET card_code = ?, updated_at = ? WHERE center_id = ? AND id = ?`,
+        [cardCode, now, centerId, studentId],
+      );
+      AuditService.recordEvent({
+        operationId,
+        centerId,
+        userId: user.id,
+        deviceId: DeviceService.getDeviceIdSync(),
+        entityType: "student",
+        entityId: studentId,
+        action: "student.card_code.updated",
+        payload: { previousCardCode: student.cardCode, cardCode },
+      });
+      SyncRepository.enqueueOperation({
+        operationId,
+        centerId,
+        userId: user.id,
+        deviceId: DeviceService.getDeviceIdSync(),
+        operationType: "UPDATE",
+        entityType: "student",
+        entityId: studentId,
+        payload: {
+          id: studentId,
+          studentId,
+          cardCode,
+          card_code: cardCode,
+          cardCodeChanged: true,
+          replaceCard: true,
+          updatedAt: now,
+          updated_at: now,
+        },
+      });
+    });
+
+    return { ...student, cardCode, updatedAt: now } as Student;
   }
 
   static deactivateCard(cardId: string): void {
