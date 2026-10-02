@@ -43,6 +43,7 @@ export class StudentNoteRepository {
       [id, centerId, studentId, text.trim(), now, user.id, user.fullName],
     );
     AuditService.recordEvent({ operationId, centerId, userId: user.id, deviceId: DeviceService.getDeviceIdSync(), entityType: "student_note", entityId: id, action: "student.note.create", payload: { studentId, text: text.trim(), actorName: user.fullName } });
+    DatabaseService.notifyLocalChange({ centerId, entityType: "student_note", entityId: id });
     return { id, centerId, studentId, text: text.trim(), createdAt: now, createdBy: user.id, createdByName: user.fullName };
   }
 
@@ -55,6 +56,7 @@ export class StudentNoteRepository {
     const now = new Date().toISOString();
     db.runSync("UPDATE student_notes SET note_text = ?, updated_at = ?, updated_by = ? WHERE center_id = ? AND id = ?", [text.trim(), now, user.id, centerId, noteId]);
     AuditService.recordEvent({ operationId: `op-snote-update-${noteId}-${Date.now()}`, centerId, userId: user.id, deviceId: DeviceService.getDeviceIdSync(), entityType: "student_note", entityId: noteId, action: "student.note.update", payload: { studentId: existing.student_id, text: text.trim(), actorName: user.fullName } });
+    DatabaseService.notifyLocalChange({ centerId, entityType: "student_note", entityId: noteId });
     return map({ ...existing, centerId, studentId: existing.student_id, text: text.trim(), updatedAt: now, updatedBy: user.id, createdByName: existing.created_by_name });
   }
 
@@ -66,5 +68,6 @@ export class StudentNoteRepository {
     const now = new Date().toISOString();
     db.runSync("UPDATE student_notes SET deleted_at = ?, updated_at = ?, updated_by = ? WHERE center_id = ? AND id = ?", [now, now, user.id, centerId, noteId]);
     AuditService.recordEvent({ operationId: `op-snote-delete-${noteId}-${Date.now()}`, centerId, userId: user.id, deviceId: DeviceService.getDeviceIdSync(), entityType: "student_note", entityId: noteId, action: "student.note.delete", payload: { studentId: existing.student_id, actorName: user.fullName } });
+    DatabaseService.notifyLocalChange({ centerId, entityType: "student_note", entityId: noteId });
   }
 }

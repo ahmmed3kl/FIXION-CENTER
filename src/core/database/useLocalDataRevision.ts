@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useSyncExternalStore } from "react";
 import { LocalDataEvents } from "./localDataEvents";
 
 /**
@@ -7,7 +7,5 @@ import { LocalDataEvents } from "./localDataEvents";
  * changes; no polling or navigation remount is involved.
  */
 export function useLocalDataRevision(): number {
-  const [revision, setRevision] = useState(0);
-  useEffect(() => LocalDataEvents.subscribe(() => setRevision((value) => value + 1)), []);
-  return revision;
+  return useSyncExternalStore(LocalDataEvents.subscribe, LocalDataEvents.getRevision, LocalDataEvents.getRevision);
 }
