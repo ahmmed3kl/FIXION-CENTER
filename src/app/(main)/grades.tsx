@@ -74,7 +74,14 @@ export default function GradesScreen() {
   const selectGroup = (group: Group) => { selectedGroupRef.current = group; setSelectedGroup(group); loadGroup(group); };
   const createExam = () => {
     if (!selectedGroup) return;
-    try { GradeBookRepository.createExam(examName, selectedGroup.id, selectedGroup.grade, Number(maxScore)); setExamName(""); setMaxScore("100"); setShowExamForm(false); loadGroup(selectedGroup); }
+    try {
+      const createdExam = GradeBookRepository.createExam(examName, selectedGroup.id, selectedGroup.grade, Number(maxScore));
+      // SQLite is the source of truth, but update the mounted screen from the
+      // mutation result immediately as well. This keeps the new exam visible
+      // even when the screen was opened before the local invalidation event.
+      setExams((current) => current.some((exam) => exam.id === createdExam.id) ? current : [...current, createdExam]);
+      setExamName(""); setMaxScore("100"); setShowExamForm(false); loadGroup(selectedGroup);
+    }
     catch (error: any) { Alert.alert("بيانات غير صحيحة", error?.message || "تعذر إضافة الامتحان."); }
   };
   const saveScore = (exam: GradeExam, student: Student, value: string) => {
