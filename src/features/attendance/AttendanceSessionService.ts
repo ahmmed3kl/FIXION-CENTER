@@ -475,8 +475,8 @@ export class AttendanceSessionService {
 
   static getSummary(sessionId: string): AttendanceSummary {
     const db = DatabaseService.getDb();
-    const session = db.getFirstSync<{ centerId: string }>(
-      "SELECT center_id as centerId FROM sessions WHERE id = ?",
+    const session = db.getFirstSync<{ centerId: string; groupId: string; subjectId?: string | null; teacherId?: string | null; sessionDate: string }>(
+      "SELECT center_id as centerId, group_id as groupId, subject_id as subjectId, teacher_id as teacherId, session_date as sessionDate FROM sessions WHERE id = ?",
       [sessionId],
     );
     if (!session) return { total: 0, present: 0, absent: 0, makeup: 0 };
@@ -488,6 +488,20 @@ export class AttendanceSessionService {
       .map((row: any) => row.studentId ?? row.student_id)
       .filter(Boolean)
       .map(String);
+    // Older sessions may contain package students that were eligible for the
+    // teacher/subject but never assigned to this exact group. Keep the counter
+    // group-scoped by validating the snapshot against the canonical roster.
+    const canonicalExpected = this.getExpectedStudentIdsForGroup(
+      { id: session.groupId, subjectId: session.subjectId, teacherId: session.teacherId } as Group,
+      session.groupId,
+      session.sessionDate,
+    );
+    if (normalizedExpected.length > 0) {
+      const canonicalIds = new Set(canonicalExpected.map(String));
+      normalizedExpected = normalizedExpected.filter((studentId) => canonicalIds.has(studentId));
+    } else {
+      normalizedExpected = canonicalExpected.map(String);
+    }
     const attendance = db.getAllSync<any>(
       "SELECT student_id as studentId, status, attendance_type as attendanceType FROM attendance WHERE center_id = ? AND session_id = ?",
       [session.centerId, sessionId],
