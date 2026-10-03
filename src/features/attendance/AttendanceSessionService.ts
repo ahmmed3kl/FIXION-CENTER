@@ -152,9 +152,9 @@ export class AttendanceSessionService {
        WHERE sps.center_id = ? AND sps.status = 'active'
          AND sps.start_date <= ? AND (sps.end_date IS NULL OR sps.end_date >= ?)
          AND ps.subject_id = ?
-         AND (ps.group_id IS NULL OR ps.group_id = ?)
+         AND (ps.group_id = ? OR selected.group_id = ?)
          AND COALESCE(selected.teacher_id, ps.default_teacher_id) = ?
-         AND (selected.id IS NULL OR selected.group_id IS NULL OR selected.group_id = ?)
+         AND (selected.id IS NULL OR selected.group_id = ?)
          AND (
            selected.id IS NOT NULL
            OR NOT EXISTS (
@@ -163,7 +163,7 @@ export class AttendanceSessionService {
                AND any_selection.subscription_id = sps.id
            )
          )`,
-      [activeCenterId, sessionDate, sessionDate, subjectId, groupId, teacherId, groupId],
+      [activeCenterId, sessionDate, sessionDate, subjectId, groupId, groupId, teacherId, groupId],
     );
     return rows.map((row) => String(row.studentId ?? row.student_id ?? "")).filter(Boolean);
   }
@@ -439,9 +439,9 @@ export class AttendanceSessionService {
        WHERE sps.center_id = ? AND sps.student_id = ? AND sps.status = 'active'
          AND sps.start_date <= ? AND (sps.end_date IS NULL OR sps.end_date >= ?)
          AND ps.subject_id = ?
-         AND (ps.group_id IS NULL OR ps.group_id = ?)
+         AND (ps.group_id = ? OR selected.group_id = ?)
          AND COALESCE(selected.teacher_id, ps.default_teacher_id) = ?
-       AND (selected.id IS NULL OR selected.group_id IS NULL OR selected.group_id = ?)
+       AND (selected.id IS NULL OR selected.group_id = ?)
          AND (
            selected.id IS NOT NULL
            OR NOT EXISTS (
@@ -457,6 +457,7 @@ export class AttendanceSessionService {
       session.sessionDate,
         session.sessionDate,
         session.subjectId,
+        session.groupId,
         session.groupId,
         session.teacherId,
         session.groupId,
