@@ -51,41 +51,54 @@ export class AttendanceSessionService {
     if (!session?.teacherId) return { eligible: false };
     const source = db.getFirstSync<any>(
       `SELECT g.id as groupId, g.name as groupName, s.id as originalSessionId
-       FROM student_group_enrollments e
-       JOIN groups g ON g.center_id = e.center_id AND g.id = e.group_id
-       LEFT JOIN teachers sourceTeacher ON sourceTeacher.center_id = g.center_id AND sourceTeacher.id = g.teacher_id
-       LEFT JOIN subjects sourceSubject ON sourceSubject.center_id = g.center_id AND sourceSubject.id = g.subject_id
-       JOIN sessions s ON s.center_id = e.center_id AND s.group_id = e.group_id
+       FROM sessions s
+       JOIN groups g ON g.center_id = s.center_id AND g.id = s.group_id
+       LEFT JOIN teachers sourceTeacher ON sourceTeacher.center_id = g.center_id AND sourceTeacher.id = COALESCE(s.teacher_id, g.teacher_id)
+       LEFT JOIN subjects sourceSubject ON sourceSubject.center_id = g.center_id AND sourceSubject.id = COALESCE(s.subject_id, g.subject_id)
+       WHERE s.center_id = ?
          AND (
            s.session_date < ?
            OR (s.session_date = ? AND COALESCE(s.start_time, '') < COALESCE(?, ''))
          )
          AND s.status <> 'cancelled'
-       LEFT JOIN session_expected_students ex ON ex.center_id = s.center_id
-         AND ex.session_id = s.id AND ex.student_id = e.student_id
-       LEFT JOIN attendance a ON a.center_id = s.center_id
-         AND a.session_id = s.id AND a.student_id = e.student_id
-       LEFT JOIN attendance makeup ON makeup.center_id = s.center_id
-         AND makeup.student_id = e.student_id
-         AND (makeup.original_absence_id = s.id
-              OR makeup.original_absence_id = ('absence-' || s.id || '-' || e.student_id))
-       WHERE e.center_id = ? AND e.student_id = ? AND e.status = 'active'
-         AND e.start_date <= s.session_date
-         AND (e.end_date IS NULL OR e.end_date >= s.session_date)
-         AND (g.teacher_id = ? OR LOWER(TRIM(sourceTeacher.name)) = LOWER(TRIM(?)))
+         AND (COALESCE(s.teacher_id, g.teacher_id) = ? OR LOWER(TRIM(sourceTeacher.name)) = LOWER(TRIM(?)))
          AND g.id <> ?
-         AND (g.subject_id = ? OR LOWER(TRIM(sourceSubject.name)) = LOWER(TRIM(?)))
-         -- A generated expected snapshot is preferred, but older/scheduled
-         -- sessions may not have one. In that case the active enrollment and
-         -- missing attendance still establish an absence eligible for makeup.
-         AND (ex.id IS NOT NULL OR NOT EXISTS (
-           SELECT 1 FROM session_expected_students any_ex
-           WHERE any_ex.center_id = s.center_id AND any_ex.session_id = s.id
-         ))
-         AND a.id IS NULL
-         AND makeup.id IS NULL
+         AND (COALESCE(s.subject_id, g.subject_id) = ? OR LOWER(TRIM(sourceSubject.name)) = LOWER(TRIM(?)))
+         -- A source session can come from a regular enrollment or a package
+         -- roster snapshot. This keeps package students eligible for makeup.
+         AND (
+           EXISTS (
+             SELECT 1 FROM session_expected_students expected
+             WHERE expected.center_id = s.center_id
+               AND expected.session_id = s.id
+               AND expected.student_id = ?
+           )
+           OR EXISTS (
+             SELECT 1 FROM student_group_enrollments e
+             WHERE e.center_id = s.center_id
+               AND e.group_id = s.group_id
+               AND e.student_id = ?
+               AND e.status IN ('active', 'ended')
+               AND e.start_date <= s.session_date
+               AND (e.end_date IS NULL OR e.end_date >= s.session_date)
+               AND NOT EXISTS (
+                 SELECT 1 FROM session_expected_students any_expected
+                 WHERE any_expected.center_id = s.center_id AND any_expected.session_id = s.id
+               )
+           )
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM attendance a
+           WHERE a.center_id = s.center_id AND a.session_id = s.id AND a.student_id = ?
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM attendance makeup
+           WHERE makeup.center_id = s.center_id AND makeup.student_id = ?
+             AND (makeup.original_absence_id = s.id
+                  OR makeup.original_absence_id = ('absence-' || s.id || '-' || ?))
+         )
        ORDER BY s.session_date DESC, s.start_time DESC LIMIT 1`,
-      [session.sessionDate, session.sessionDate, session.startTime, activeCenterId, studentId, session.teacherId, session.teacherName || "", session.groupId, session.subjectId, session.subjectName || ""],
+      [activeCenterId, session.sessionDate, session.sessionDate, session.startTime, session.teacherId, session.teacherName || "", session.groupId, session.subjectId, session.subjectName || "", studentId, studentId, studentId, studentId, studentId],
     );
     if (source) {
       return {
@@ -99,9 +112,8 @@ export class AttendanceSessionService {
       };
     }
 
-    // An active enrollment alone is not proof of a missed class. Without a
-    // concrete historical session there is no canonical absence id to link to,
-    // so do not show a makeup action that will inevitably fail validation.
+    // Without a concrete historical session there is no canonical absence id
+    // to link to, so do not show a makeup action that will fail validation.
     return { eligible: false };
   }
   static getTodayGroups(date = AttendanceSessionService.localDate()): Group[] {

@@ -58,6 +58,8 @@ export class AttendanceRepository {
     attendanceType?: AttendanceType;
     originalAbsenceId?: string;
     isExternal?: boolean;
+    /** Scanner flows must record payment separately after an explicit payment confirmation. */
+    suppressExternalPayment?: boolean;
     checkInTime?: string;
   }): Promise<Attendance> {
     const { centerId, user } = this.getActiveContext();
@@ -274,7 +276,7 @@ export class AttendanceRepository {
     }
 
     // 2. If external makeup/attendance, record cash session payment (NO monthly debt)
-    if (params.isExternal) {
+    if (params.isExternal && !params.suppressExternalPayment) {
       const session = db.getFirstSync<any>(
         `SELECT session_price as sessionPrice FROM sessions WHERE center_id = ? AND id = ?`,
         [centerId, params.sessionId],

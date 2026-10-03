@@ -472,6 +472,7 @@ function ScannerContent() {
             isLate: lateCalc.isLate,
             attendanceType: "present",
             isExternal,
+            suppressExternalPayment: isExternal,
           });
 
       setAttendanceResult(result);
@@ -533,6 +534,14 @@ function ScannerContent() {
     if (!AttendanceRepository.isAlreadyAttended(session.id, added.id) && session.status !== "closed") {
       await recordAttendanceFor(added, session, makeup, isExternal === true);
     }
+  };
+
+  const cancelPendingAttendance = () => {
+    setPendingAttendance(null);
+    setMakeupNotice(null);
+    setAttendanceResult(null);
+    setIsAlreadyAttended(false);
+    setFinancialStatus(null);
   };
 
   const handleRecordAttendance = async () => {
@@ -640,7 +649,7 @@ function ScannerContent() {
       <Modal visible={showPaymentModal} transparent animationType="fade" onRequestClose={() => setShowPaymentModal(false)}><View style={styles.modalBackdrop}><View style={styles.modalContent}><Text style={styles.modalTitle}>تسجيل دفعة نقدية</Text><Text style={styles.modalSub}>{student?.fullName}</Text><View style={styles.paymentPurposeRow}>{(["session", "cycle"] as const).map((purpose) => <TouchableOpacity key={purpose} style={[styles.paymentPurposeButton, paymentPurpose === purpose && styles.paymentPurposeButtonActive]} onPress={() => { setPaymentPurpose(purpose); setSelectedPaymentCycleId(null); if (purpose === "cycle") setPaymentAmount(String(financialStatus?.remainingBalance ?? 0)); else { const session = activeSessionId ? SessionRepository.findById(activeSessionId) : null; setPaymentAmount(String(Number(session?.sessionPrice || financialStatus?.currentPeriodDebt || 0))); } }}><Text style={[styles.paymentPurposeText, paymentPurpose === purpose && styles.paymentPurposeTextActive]}>{purpose === "session" ? "دفع الحصة" : "استكمال الشهر / الباقة"}</Text></TouchableOpacity>)}</View>{paymentPurpose === "cycle" && (financialStatus?.cycles?.filter((cycle) => (cycle.remainingDebt ?? 0) > 0).length || 0) > 1 ? <View style={styles.paymentCyclePicker}><Text style={styles.paymentCycleTitle}>اختر المجموعة أو الدورة</Text>{financialStatus?.cycles.filter((cycle) => (cycle.remainingDebt ?? 0) > 0).map((cycle) => <TouchableOpacity key={cycle.id} style={[styles.paymentCycleOption, selectedPaymentCycleId === cycle.id && styles.paymentCycleOptionActive]} onPress={() => { setSelectedPaymentCycleId(cycle.id); setPaymentAmount(String(cycle.remainingDebt ?? cycle.effectivePrice ?? cycle.cyclePrice ?? 0)); }}><Text style={styles.paymentCycleName}>{cycle.groupName || cycle.packageName || "دورة مديونية"}</Text><Text style={styles.paymentCycleAmount}>المتبقي: {formatCurrency(cycle.remainingDebt ?? 0)}</Text></TouchableOpacity>)}</View> : null}{paymentPurpose === "session" && (financialStatus?.cycles?.filter((cycle) => (cycle.remainingDebt ?? 0) > 0).length || 0) > 1 ? <View style={styles.paymentCyclePicker}><Text style={styles.paymentCycleTitle}>اختار الدورة التي ستخصم منها الدفعة</Text>{financialStatus?.cycles.filter((cycle) => (cycle.remainingDebt ?? 0) > 0).map((cycle) => <TouchableOpacity key={cycle.id} style={[styles.paymentCycleOption, selectedPaymentCycleId === cycle.id && styles.paymentCycleOptionActive]} onPress={() => setSelectedPaymentCycleId(cycle.id)}><Text style={styles.paymentCycleName}>{cycle.groupName || cycle.packageName || "دورة مديونية"}</Text><Text style={styles.paymentCycleAmount}>المتبقي: {formatCurrency(cycle.remainingDebt ?? 0)}</Text></TouchableOpacity>)}</View> : null}<AppInput label="المبلغ" keyboardType="numeric" value={paymentAmount} onChangeText={setPaymentAmount} /><AppInput label="ملاحظة الدفع (اختياري)" placeholder="مثال: استكمال باقي الشهر" value={paymentNotes} onChangeText={setPaymentNotes} multiline /><View style={styles.modalButtonRow}><AppButton title="حفظ" onPress={handleConfirmQuickPayment} loading={isRecordingPayment} variant="success" style={{ flex: 1 }} /><AppButton title="إلغاء" variant="outline" onPress={() => setShowPaymentModal(false)} style={{ flex: 1 }} /></View></View></View></Modal>
       <Modal visible={showAllStudentPicker} transparent animationType="slide" onRequestClose={() => setShowAllStudentPicker(false)}><View style={styles.modalBackdrop}><View style={styles.confirmSheet}><Text style={styles.modalTitle}>اختيار طالب للحضور</Text><AppInput value={allStudentSearch} onChangeText={setAllStudentSearch} placeholder="ابحث بالاسم أو الهاتف أو الكود" /><ScrollView style={{ maxHeight: 360 }}>{attendancePickerStudents.map((item) => <TouchableOpacity key={item.id} style={styles.rebuildGroupRow} onPress={() => { setShowAllStudentPicker(false); setManualCode(item.cardCode || item.studentCode || item.phone || ""); void lookupCard(item.cardCode || item.studentCode || item.phone || "", item, true); }}><View style={styles.rebuildGroupCopy}><Text style={styles.rebuildGroupName}>{item.fullName}</Text><Text style={styles.rebuildGroupMeta}>{[item.phone, item.studentCode || item.cardCode, item.grade].filter(Boolean).join(" · ")}</Text></View><Ionicons name="chevron-back" size={18} color={Colors.slate400} /></TouchableOpacity>)}</ScrollView><AppButton title="إلغاء" variant="outline" onPress={() => setShowAllStudentPicker(false)} /></View></View></Modal>
       <Modal visible={showAttendanceNoteModal} transparent animationType="fade" onRequestClose={() => setShowAttendanceNoteModal(false)}><View style={styles.modalBackdrop}><View style={styles.modalContent}><Text style={styles.modalTitle}>إضافة ملاحظة</Text><Text style={styles.modalSub}>{student?.fullName}</Text><AppInput value={attendanceNoteText} onChangeText={setAttendanceNoteText} placeholder="اكتب ملاحظتك" multiline /><View style={styles.modalButtonRow}><AppButton title="حفظ" onPress={() => void saveAttendanceNote()} style={{ flex: 1 }} /><AppButton title="إلغاء" variant="outline" onPress={() => setShowAttendanceNoteModal(false)} style={{ flex: 1 }} /></View>{attendanceNotes.map((note) => <View key={note.id} style={styles.paymentHistoryRow}><Text style={styles.paymentHistoryType}>{note.text}</Text><Text style={styles.paymentHistoryMeta}>{note.createdByName || "حساب"}</Text></View>)}</View></View></Modal>
-      <Modal visible={Boolean(pendingAttendance)} transparent animationType="slide" onRequestClose={() => setPendingAttendance(null)}>
+      <Modal visible={Boolean(pendingAttendance)} transparent animationType="slide" onRequestClose={cancelPendingAttendance}>
         <View style={styles.modalBackdrop}>
           <View style={styles.confirmSheet}>
             <View style={styles.confirmIcon}><Ionicons name="checkmark-circle-outline" size={30} color={Colors.primary} /></View>
@@ -650,7 +659,7 @@ function ScannerContent() {
             <Text style={styles.confirmGroup}>{pendingAttendance?.session.groupName || currentGroupLabel}</Text>
             <View style={styles.modalButtonRow}>
               <AppButton title="تأكيد" onPress={() => void confirmPendingAttendance()} style={{ flex: 1 }} />
-              <AppButton title="إلغاء" variant="outline" onPress={() => setPendingAttendance(null)} style={{ flex: 1 }} />
+              <AppButton title="إلغاء" variant="outline" onPress={cancelPendingAttendance} style={{ flex: 1 }} />
             </View>
           </View>
         </View>
