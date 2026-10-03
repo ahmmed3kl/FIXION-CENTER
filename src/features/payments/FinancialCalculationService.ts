@@ -85,13 +85,18 @@ export class FinancialCalculationService {
       [centerId, studentId],
     );
 
+    const rawPerSessionCycleIds = new Set(
+      rawCycles
+        .filter((cycle) => cycle.billingMode === "per_session" || cycle.cycleType === "per_session")
+        .map((cycle) => cycle.id),
+    );
     const payments: PaymentEvent[] = rawPayments.map((p) => {
       const storedType = p.paymentType === "cash" ? "session" : p.paymentType;
       // Older attendance builds could store a cash/session label while also
       // linking the payment to a debt cycle. The cycle link is authoritative:
       // such a payment reduces the monthly/package obligation, so expose it
       // as a partial ledger payment in profile/report views.
-      const pType = p.debtCycleId && storedType === "session" ? "partial" : storedType;
+      const pType = p.debtCycleId && storedType === "session" && !rawPerSessionCycleIds.has(p.debtCycleId) ? "partial" : storedType;
       const pMethod = p.paymentMethod || "cash";
       return {
         id: p.id,
@@ -142,15 +147,21 @@ export class FinancialCalculationService {
     // collected while an attendance session was open.  Only session-only
     // payments (no debt cycle) belong to the per-session ledger.  This keeps
     // the group financial card and the payment history in agreement.
+    const perSessionCycleIds = new Set(
+      rawCycles
+        .filter((cycle) => cycle.billingMode === "per_session" || cycle.cycleType === "per_session")
+        .map((cycle) => cycle.id),
+    );
     const activeMonthlyPayments = payments.filter(
       (p) =>
         !p.isReversed &&
+        (!p.debtCycleId || !perSessionCycleIds.has(p.debtCycleId)) &&
         (!!p.debtCycleId || (p.paymentType !== "session" && !p.sessionId)),
     );
     const activeSessionPayments = payments.filter(
       (p) =>
         !p.isReversed &&
-        !p.debtCycleId && (p.paymentType === "session" || !!p.sessionId),
+        ((!p.debtCycleId || perSessionCycleIds.has(p.debtCycleId)) && (p.paymentType === "session" || !!p.sessionId)),
     );
 
     // Track unassigned payments (payments without debtCycleId), and direct
@@ -170,6 +181,18 @@ export class FinancialCalculationService {
     }
 
     const enrichedCycles: DebtCycle[] = rawCycles.map((cycle) => {
+      if (perSessionCycleIds.has(cycle.id)) {
+        // A per-session period is settled by attended session charges. Its
+        // monthly snapshot is intentionally not another obligation.
+        return {
+          ...cycle,
+          effectivePrice: 0,
+          effectiveDue: 0,
+          paidAmount: 0,
+          totalPaid: 0,
+          remainingDebt: 0,
+        };
+      }
       // A cancelled cycle is a historical waiver (for example, when an
       // enrollment is ended). It must not create debt, but payments already
       // linked to it still count in the financial history. Older devices
@@ -281,18 +304,29 @@ export class FinancialCalculationService {
       enrichedCycles.length > 0
         ? groupRemainingDebt + packageRemainingDebt
         : Math.max(0, monthlyTotalDue - monthlyTotalPaid);
-    const totalRemainingDebt = monthlyRemainingDebt;
-    const totalDue = monthlyTotalDue;
-    const totalPaid = monthlyTotalPaid;
-    const remainingBalance = totalRemainingDebt;
-    const creditBalance = Math.max(0, unassignedPool);
-
     const sessionTotalPaid = activeSessionPayments.reduce(
+      (sum, p) => sum + p.amount,
+      0,
+    );
+    // Only payments linked to a per-session billing period are obligations
+    // in the canonical balance. A standalone session payment (for example an
+    // external/makeup payment or an old legacy row) remains in the session
+    // ledger but must not inflate the student's monthly/package balance.
+    const billableSessionPayments = activeSessionPayments.filter(
+      (p) => Boolean(p.debtCycleId && perSessionCycleIds.has(p.debtCycleId)),
+    );
+    const billableSessionTotalPaid = billableSessionPayments.reduce(
       (sum, p) => sum + p.amount,
       0,
     );
     const sessionPaymentsTotal = sessionTotalPaid;
     const sessionDebt = SessionDebtService.getCurrentMonthBreakdown(studentId, targetDate);
+    const perSessionDebt = sessionDebt.currentDebt;
+    const totalRemainingDebt = monthlyRemainingDebt + perSessionDebt;
+    const totalDue = monthlyTotalDue + billableSessionTotalPaid + perSessionDebt;
+    const totalPaid = monthlyTotalPaid + billableSessionTotalPaid;
+    const remainingBalance = totalRemainingDebt;
+    const creditBalance = Math.max(0, unassignedPool);
 
     const monthlyAdjustments = adjustments.reduce(
       (sum, a) => sum + (Number(a.adjustmentAmount) || 0),
@@ -398,12 +432,13 @@ export class FinancialCalculationService {
     const monthlyPayments = payments.filter(
       (payment) =>
         !payment.isReversed &&
+        (!payment.debtCycleId || !cycles.some((cycle) => cycle.id === payment.debtCycleId && (cycle.billingMode === "per_session" || cycle.cycleType === "per_session"))) &&
         (!!payment.debtCycleId || (payment.paymentType !== "session" && !payment.sessionId)),
     );
     const sessionPayments = payments.filter(
       (payment) =>
         !payment.isReversed &&
-        !payment.debtCycleId &&
+        (!payment.debtCycleId || cycles.some((cycle) => cycle.id === payment.debtCycleId && (cycle.billingMode === "per_session" || cycle.cycleType === "per_session"))) &&
         (payment.paymentType === "session" || !!payment.sessionId),
     );
     const packageCycles = cycles.filter((cycle) => cycle.cycleType === "package");
@@ -432,6 +467,14 @@ export class FinancialCalculationService {
       (sum, payment) => sum + Number(payment.amount || 0),
       0,
     );
+    const scopedPerSessionCycleIds = new Set(
+      cycles
+        .filter((cycle) => cycle.billingMode === "per_session" || cycle.cycleType === "per_session")
+        .map((cycle) => cycle.id),
+    );
+    const billableSessionTotalPaid = sessionPayments
+      .filter((payment) => Boolean(payment.debtCycleId && scopedPerSessionCycleIds.has(payment.debtCycleId)))
+      .reduce((sum, payment) => sum + Number(payment.amount || 0), 0);
     const sessionDebt = SessionDebtService.getCurrentMonthBreakdown(
       studentId,
       targetDate,
@@ -441,6 +484,7 @@ export class FinancialCalculationService {
       (sum, cycle) => sum + Number(cycle.remainingDebt ?? 0),
       0,
     );
+    const scopedRemainingDebt = monthlyRemainingDebt + sessionDebt.currentDebt;
     const subscriptions = full.subscriptions.filter(
       (subscription) => subscription.groupId === groupId,
     );
@@ -450,21 +494,21 @@ export class FinancialCalculationService {
 
     return {
       ...full,
-      totalDue: monthlyTotalDue,
-      totalPaid: monthlyTotalPaid,
-      remainingBalance: monthlyRemainingDebt,
+      totalDue: monthlyTotalDue + billableSessionTotalPaid + sessionDebt.currentDebt,
+      totalPaid: monthlyTotalPaid + billableSessionTotalPaid,
+      remainingBalance: scopedRemainingDebt,
       subscriptions,
       payments,
       monthlyTotalDue,
       monthlyTotalPaid,
       monthlyAdjustments,
       monthlyRemainingDebt,
-      totalRemainingDebt: monthlyRemainingDebt,
+      totalRemainingDebt: scopedRemainingDebt,
       sessionTotalPaid,
       sessionPaymentsTotal: sessionTotalPaid,
       groupMonthlyDue: monthlyGroupDue,
       groupMonthlyPaid: groupCycles.reduce((sum, cycle) => sum + Number(cycle.paidAmount ?? 0), 0),
-      groupRemainingDebt: groupCycles.reduce((sum, cycle) => sum + Number(cycle.remainingDebt ?? 0), 0),
+      groupRemainingDebt: groupCycles.reduce((sum, cycle) => sum + Number(cycle.remainingDebt ?? 0), 0) + sessionDebt.currentDebt,
       packageMonthlyDue: monthlyPackageDue,
       packageMonthlyPaid: packageCycles.reduce((sum, cycle) => sum + Number(cycle.paidAmount ?? 0), 0),
       packageRemainingDebt: packageCycles.reduce((sum, cycle) => sum + Number(cycle.remainingDebt ?? 0), 0),

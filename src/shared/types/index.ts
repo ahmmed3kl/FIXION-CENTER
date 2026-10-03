@@ -395,6 +395,12 @@ export interface DebtCycle {
   // "group" is retained for legacy local rows; new/synced rows use the
   // canonical server values.
   cycleType?: "monthly" | "group" | "per_session" | "package";
+  /**
+   * How this billing period is actually settled.  New group periods start
+   * as pending because the student's first payment determines whether the
+   * centre is charging the discounted monthly price or attended classes.
+   */
+  billingMode?: "pending" | "monthly" | "per_session" | "package";
   cycleNumber: number;
   startDate: string; // YYYY-MM-DD
   endDate: string; // YYYY-MM-DD

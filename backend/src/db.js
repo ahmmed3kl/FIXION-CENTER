@@ -304,7 +304,15 @@ async function ensureSchemaCompatibility() {
     ALTER TABLE debt_cycles
       ADD COLUMN IF NOT EXISTS group_id VARCHAR(64),
       ADD COLUMN IF NOT EXISTS package_id VARCHAR(64),
-      ADD COLUMN IF NOT EXISTS cycle_number INTEGER;
+      ADD COLUMN IF NOT EXISTS cycle_number INTEGER,
+      ADD COLUMN IF NOT EXISTS billing_mode VARCHAR(32) NOT NULL DEFAULT 'monthly';
+    UPDATE debt_cycles
+       SET billing_mode = CASE
+         WHEN cycle_type = 'package' THEN 'package'
+         WHEN cycle_type = 'per_session' THEN 'per_session'
+         ELSE COALESCE(NULLIF(billing_mode, ''), 'monthly')
+       END
+     WHERE billing_mode IS NULL OR billing_mode = '';
     WITH ranked AS (
       SELECT id,
              ROW_NUMBER() OVER (

@@ -169,6 +169,7 @@ export class DebtCycleRepository {
       packageSubscriptionId: params.packageSubscriptionId,
       packageId: params.packageId,
       cycleType: params.cycleType,
+      billingMode: params.cycleType === "package" ? "package" : params.cycleType === "per_session" ? "per_session" : "monthly",
       cycleNumber,
       startDate: start,
       endDate: end,
@@ -179,9 +180,9 @@ export class DebtCycleRepository {
     };
     db.runSync(
       `INSERT INTO debt_cycles
-       (id, center_id, student_id, enrollment_id, group_id, cycle_number, start_date, end_date, cycle_price, status, package_subscription_id, package_id, cycle_type, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?)`,
-      [cycleId, centerId, params.studentId, localEnrollmentId, cycle.groupId || null, cycleNumber, start, end, amount, params.packageSubscriptionId || null, params.packageId || null, params.cycleType, now, now],
+       (id, center_id, student_id, enrollment_id, group_id, cycle_number, start_date, end_date, cycle_price, status, package_subscription_id, package_id, cycle_type, billing_mode, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?)`,
+      [cycleId, centerId, params.studentId, localEnrollmentId, cycle.groupId || null, cycleNumber, start, end, amount, params.packageSubscriptionId || null, params.packageId || null, params.cycleType, cycle.billingMode, now, now],
     );
     const deviceId = DeviceService.getDeviceIdSync();
     SyncRepository.enqueueOperation({
@@ -353,6 +354,7 @@ export class DebtCycleRepository {
               c.package_subscription_id as packageSubscriptionId,
               c.package_id as packageId,
               c.cycle_type as cycleType,
+              c.billing_mode as billingMode,
               p.name as packageName,
               COALESCE(p.name, g.name) as groupName
        FROM debt_cycles c
@@ -382,6 +384,7 @@ export class DebtCycleRepository {
               c.package_subscription_id as packageSubscriptionId,
               c.package_id as packageId,
               c.cycle_type as cycleType,
+              c.billing_mode as billingMode,
               g.name as groupName
        FROM debt_cycles c
        LEFT JOIN groups g ON c.group_id = g.id
@@ -409,6 +412,7 @@ export class DebtCycleRepository {
               c.package_subscription_id as packageSubscriptionId,
               c.package_id as packageId,
               c.cycle_type as cycleType,
+              c.billing_mode as billingMode,
               p.name as packageName,
               p.name as groupName
        FROM debt_cycles c
@@ -437,6 +441,7 @@ export class DebtCycleRepository {
               c.package_subscription_id as packageSubscriptionId,
               c.package_id as packageId,
               c.cycle_type as cycleType,
+              c.billing_mode as billingMode,
               p.name as packageName,
               COALESCE(p.name, g.name) as groupName
        FROM debt_cycles c
@@ -617,8 +622,8 @@ export class DebtCycleRepository {
       let insertedCycle = { changes: 1 };
       try {
         insertedCycle = db.runSync(
-          `INSERT INTO debt_cycles (id, center_id, student_id, enrollment_id, group_id, cycle_number, start_date, end_date, cycle_price, status, cycle_type, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', 'monthly', ?)`,
+          `INSERT INTO debt_cycles (id, center_id, student_id, enrollment_id, group_id, cycle_number, start_date, end_date, cycle_price, status, cycle_type, billing_mode, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', 'monthly', 'pending', ?)`,
           [
             cycleId,
             centerId,
@@ -665,6 +670,7 @@ export class DebtCycleRepository {
           endDate: cycleEndDate,
           cyclePrice,
           cycleType: "monthly",
+          billingMode: "pending",
           status: "open",
           createdAt: now,
         },
@@ -810,8 +816,8 @@ export class DebtCycleRepository {
         let insertedCycle = { changes: 1 };
         try {
           insertedCycle = db.runSync(
-            `INSERT INTO debt_cycles (id, center_id, student_id, enrollment_id, group_id, cycle_number, start_date, end_date, cycle_price, status, package_subscription_id, package_id, cycle_type, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, 'package', ?)`,
+            `INSERT INTO debt_cycles (id, center_id, student_id, enrollment_id, group_id, cycle_number, start_date, end_date, cycle_price, status, package_subscription_id, package_id, cycle_type, billing_mode, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, 'package', 'package', ?)`,
             [cycleId, centerId, subscription.studentId, allocation.enrollmentId, allocation.groupId, nextCycleNum, nextStart, cycleEndDate, allocation.cyclePrice, subscription.id, subscription.packageId, now],
           );
         } catch (error) {
@@ -822,7 +828,7 @@ export class DebtCycleRepository {
 
         SyncRepository.enqueueOperation({
           centerId, userId: user.id, deviceId, operationType: "debt_cycle.create", entityType: "debt_cycle", entityId: cycleId,
-          payload: { id: cycleId, centerId, studentId: subscription.studentId, enrollmentId: allocation.enrollmentId, groupId: allocation.groupId, packageSubscriptionId: subscription.id, packageId: subscription.packageId, cycleType: "package", cycleNumber: nextCycleNum, startDate: nextStart, endDate: cycleEndDate, cyclePrice: allocation.cyclePrice, status: "open", createdAt: now },
+          payload: { id: cycleId, centerId, studentId: subscription.studentId, enrollmentId: allocation.enrollmentId, groupId: allocation.groupId, packageSubscriptionId: subscription.id, packageId: subscription.packageId, cycleType: "package", billingMode: "package", cycleNumber: nextCycleNum, startDate: nextStart, endDate: cycleEndDate, cyclePrice: allocation.cyclePrice, status: "open", createdAt: now },
           operationId,
         });
         AuditService.recordEvent({
@@ -908,7 +914,8 @@ export class DebtCycleRepository {
               group_id as groupId, cycle_number as cycleNumber,
               start_date as startDate, end_date as endDate,
               cycle_price as cyclePrice, package_subscription_id as packageSubscriptionId,
-              package_id as packageId, cycle_type as cycleType
+              package_id as packageId, cycle_type as cycleType,
+              billing_mode as billingMode
        FROM debt_cycles WHERE center_id = ? AND id = ?`,
       [centerId, cycleId],
     );
@@ -937,6 +944,7 @@ export class DebtCycleRepository {
         packageSubscriptionId: cycle.packageSubscriptionId,
         packageId: cycle.packageId,
         cycleType: cycle.cycleType,
+        billingMode: cycle.billingMode,
         cycleNumber: cycle.cycleNumber,
         startDate: cycle.startDate,
         endDate: cycle.endDate,
@@ -955,5 +963,54 @@ export class DebtCycleRepository {
       action: "debt_cycle.status_update",
       payload: { status },
     });
+  }
+
+  /** Selects the settlement policy for a group billing period. */
+  static setBillingMode(
+    cycleId: string,
+    billingMode: "monthly" | "per_session" | "package",
+  ): DebtCycle {
+    const { centerId, user } = this.getActiveContext();
+    const db = DatabaseService.getDb();
+    // Read directly here instead of getCycleById: the first payment may be
+    // recorded by an account that can create payments but cannot view all
+    // payment/debt records. Billing-mode selection must not require the
+    // broader payments.view permission.
+    const cycle = db.getFirstSync<any>(
+      `SELECT id, student_id as studentId, enrollment_id as enrollmentId,
+              group_id as groupId, package_subscription_id as packageSubscriptionId,
+              package_id as packageId, cycle_number as cycleNumber,
+              cycle_type as cycleType, billing_mode as billingMode,
+              start_date as startDate, end_date as endDate,
+              cycle_price as cyclePrice, status, created_at as createdAt,
+              updated_at as updatedAt
+       FROM debt_cycles WHERE center_id = ? AND id = ? LIMIT 1`,
+      [centerId, cycleId],
+    );
+    if (!cycle) throw new NotFoundError("دورة المديونية غير موجودة.");
+    if (cycle.cycleType === "package" && billingMode !== "package") {
+      throw new Error("مديونية الباقة لا تُحاسب بنظام الحصة.");
+    }
+    const nextCycleType = billingMode === "per_session"
+      ? "per_session"
+      : cycle.cycleType === "per_session" ? "monthly" : cycle.cycleType;
+    const now = new Date().toISOString();
+    db.runSync(
+      `UPDATE debt_cycles SET billing_mode = ?, cycle_type = CASE WHEN ? = 'per_session' THEN 'per_session' WHEN cycle_type = 'per_session' THEN 'monthly' ELSE cycle_type END, updated_at = ? WHERE center_id = ? AND id = ?`,
+      [billingMode, billingMode, now, centerId, cycleId],
+    );
+    const operationId = `op-dc-mode-${generateUUID()}`;
+    const deviceId = DeviceService.getDeviceIdSync();
+    SyncRepository.enqueueOperation({
+      operationId, centerId, userId: user.id, deviceId,
+      operationType: "UPDATE", entityType: "debt_cycle", entityId: cycleId,
+      payload: { ...cycle, billingMode, cycleType: nextCycleType, updatedAt: now },
+    });
+    AuditService.recordEvent({
+      operationId, centerId, userId: user.id, deviceId,
+      entityType: "debt_cycle", entityId: cycleId,
+      action: "debt_cycle.billing_mode_set", payload: { billingMode },
+    });
+    return { ...cycle, billingMode, cycleType: nextCycleType, updatedAt: now };
   }
 }

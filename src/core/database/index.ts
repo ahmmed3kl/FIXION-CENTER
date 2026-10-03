@@ -939,6 +939,29 @@ export const MIGRATIONS: Migration[] = [
       `);
     },
   },
+  {
+    version: 19,
+    name: "dynamic_billing_mode",
+    up: (db: SqlDatabase) => {
+      try {
+        db.execSync("ALTER TABLE debt_cycles ADD COLUMN billing_mode TEXT NOT NULL DEFAULT 'monthly';");
+      } catch {}
+      // Existing cycles already represented the monthly ledger.  Only new
+      // cycles use pending; package cycles remain one package-level ledger.
+      try {
+        db.execSync(`
+          UPDATE debt_cycles
+             SET billing_mode = CASE
+               WHEN cycle_type = 'package' THEN 'package'
+               WHEN cycle_type = 'per_session' THEN 'per_session'
+               ELSE 'monthly'
+             END
+           WHERE billing_mode IS NULL OR billing_mode = '';
+        `);
+      } catch {}
+      try { db.execSync("CREATE INDEX IF NOT EXISTS idx_debt_cycles_billing_mode ON debt_cycles(center_id, billing_mode, status);"); } catch {}
+    },
+  },
 ];
 
 // In-Memory SQLite Mock for Jest / Test environments
@@ -2709,6 +2732,7 @@ class InMemorySqliteMock implements SqlDatabase {
           packageSubscriptionId: r.package_subscription_id || null,
           packageId: r.package_id || null,
           cycleType: r.cycle_type || "group",
+          billingMode: r.billing_mode || null,
           // snake_case
           center_id: r.center_id,
           student_id: r.student_id,
@@ -2721,6 +2745,7 @@ class InMemorySqliteMock implements SqlDatabase {
           package_subscription_id: r.package_subscription_id,
           package_id: r.package_id,
           cycle_type: r.cycle_type,
+          billing_mode: r.billing_mode,
         };
       });
       if (

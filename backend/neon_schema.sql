@@ -276,6 +276,7 @@ CREATE TABLE IF NOT EXISTS debt_cycles (
     package_id VARCHAR(64),
     cycle_number INTEGER,
     cycle_type VARCHAR(32) NOT NULL CHECK (cycle_type IN ('monthly', 'per_session', 'package')),
+    billing_mode VARCHAR(32) NOT NULL DEFAULT 'monthly' CHECK (billing_mode IN ('pending', 'monthly', 'per_session', 'package')),
     period_start DATE NOT NULL,
     period_end DATE NOT NULL,
     amount_due NUMERIC(12, 2) NOT NULL CHECK (amount_due >= 0),

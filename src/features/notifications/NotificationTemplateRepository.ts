@@ -171,7 +171,7 @@ export class NotificationTemplateRepository {
 
     const db = DatabaseService.getDb();
     const rows = db.getAllSync<any>(
-      `SELECT id, center_id, event_type, channel FROM notification_templates WHERE center_id = ? AND id = ?`,
+      `SELECT id, center_id, event_type, channel, is_default FROM notification_templates WHERE center_id = ? AND id = ?`,
       [centerId, templateId],
     );
     if (rows.length === 0) {
@@ -203,7 +203,11 @@ export class NotificationTemplateRepository {
       operationType: "UPDATE",
       entityType: "notification_template",
       entityId: templateId,
-      payload: { id: templateId, eventType: rows[0].event_type, channel: rows[0].channel, templateBody: newBody.trim(), updatedBy: user.id, updatedAt: now },
+      // Keep the identity fields in the outbox payload.  The server has a
+      // natural unique key on (center,event,channel,is_default); omitting
+      // isDefault makes PostgreSQL treat an update as a new non-default row
+      // and can collide with the template primary key on retry.
+      payload: { id: templateId, eventType: rows[0].event_type, channel: rows[0].channel, templateBody: newBody.trim(), isDefault: Boolean(rows[0].is_default), updatedBy: user.id, updatedAt: now },
     });
 
     return this.getActiveTemplate(rows[0].event_type, rows[0].channel)!;

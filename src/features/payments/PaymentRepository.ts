@@ -19,6 +19,7 @@ import { isValidIsoDate } from "../../shared/utils/validation";
 import { getLocalDateOnly } from "../../shared/utils/date";
 import { useAuthStore } from "../auth/useAuthStore";
 import { FinancialCalculationService } from "./FinancialCalculationService";
+import { DebtCycleRepository } from "./DebtCycleRepository";
 
 function generateUUID(): string {
   return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
@@ -203,12 +204,48 @@ export class PaymentRepository {
         assignedCycleId = openCycles[0].id;
       }
     }
+    // A profile-level "pay a class" entry has no concrete session id. Keep
+    // it in the active per-session period so it can be allocated to the next
+    // attended class instead of disappearing as an unassigned cash event.
+    if (!assignedCycleId && normType === "session") {
+      const perSessionCycle = params.sessionId
+        ? db.getFirstSync<{ id: string; billingMode?: string; cycleType?: string; groupId?: string; sessionGroupId?: string }>(
+            `SELECT dc.id, dc.billing_mode as billingMode, dc.cycle_type as cycleType,
+                    dc.group_id as groupId, s.group_id as sessionGroupId
+               FROM debt_cycles dc
+               JOIN sessions s ON s.center_id = dc.center_id AND s.group_id = dc.group_id
+              WHERE dc.center_id = ? AND dc.student_id = ? AND s.id = ?
+                AND (dc.billing_mode IN ('per_session', 'pending') OR dc.cycle_type = 'per_session')
+                AND dc.status NOT IN ('cancelled', 'paid')
+                AND dc.start_date <= s.session_date AND dc.end_date >= s.session_date
+              ORDER BY dc.start_date DESC LIMIT 1`,
+            [centerId, params.studentId, params.sessionId],
+          )
+        : db.getFirstSync<{ id: string; billingMode?: string; cycleType?: string }>(
+            `SELECT id, billing_mode as billingMode, cycle_type as cycleType FROM debt_cycles
+              WHERE center_id = ? AND student_id = ?
+                AND (billing_mode = 'per_session' OR cycle_type = 'per_session')
+                AND status NOT IN ('cancelled', 'paid')
+              ORDER BY start_date DESC LIMIT 1`,
+            [centerId, params.studentId],
+          );
+      // Defensive check also protects the test/in-memory adapter, whose
+      // lightweight SQL matcher may return the first debt row for a complex
+      // predicate instead of applying the billing-mode filter.
+      const canUsePendingCycle = (perSessionCycle as any)?.billingMode === "pending"
+        && Boolean((perSessionCycle as any)?.groupId)
+        && String((perSessionCycle as any).groupId) === String((perSessionCycle as any).sessionGroupId);
+      if (perSessionCycle && (canUsePendingCycle || (perSessionCycle as any).billingMode === "per_session" || (perSessionCycle as any).cycleType === "per_session")) {
+        assignedCycleId = perSessionCycle.id;
+      }
+    }
 
     if (assignedCycleId) {
-      const cycle = db.getFirstSync<{ id: string; studentId: string; status: string; enrollmentId?: string; packageSubscriptionId?: string }>(
+      const cycle = db.getFirstSync<{ id: string; studentId: string; status: string; enrollmentId?: string; packageSubscriptionId?: string; billingMode?: string; cycleType?: string }>(
         `SELECT id, student_id as studentId, status,
                 enrollment_id as enrollmentId,
-                package_subscription_id as packageSubscriptionId
+                package_subscription_id as packageSubscriptionId,
+                billing_mode as billingMode, cycle_type as cycleType
            FROM debt_cycles
          WHERE center_id = ? AND id = ?`,
         [centerId, assignedCycleId],
@@ -245,6 +282,28 @@ export class PaymentRepository {
       }
     }
 
+    if (assignedCycleId) {
+      const cycle = db.getFirstSync<{ billingMode?: string; cycleType?: string }>(
+        `SELECT billing_mode as billingMode, cycle_type as cycleType
+           FROM debt_cycles WHERE center_id = ? AND id = ?`,
+        [centerId, assignedCycleId],
+      );
+      // The first settlement chooses the policy for this billing period. A
+      // session payment means pay-as-you-go; monthly/partial means the
+      // discounted monthly obligation. Never change a package cycle.
+      if (cycle?.billingMode === "pending") {
+        const selectedMode = cycle.cycleType === "package"
+          ? "package"
+          : normType === "session" ? "per_session" : "monthly";
+        DebtCycleRepository.setBillingMode(assignedCycleId, selectedMode);
+      } else if (cycle?.billingMode === "per_session" && normType !== "session" && cycle.cycleType !== "package") {
+        // An explicit monthly/partial settlement switches this period to the
+        // monthly plan. Earlier class payments remain immutable and become
+        // credit against the monthly cap.
+        DebtCycleRepository.setBillingMode(assignedCycleId, "monthly");
+      }
+    }
+
     const paymentEvent: PaymentEvent = {
       id: paymentId,
       operationId,
@@ -262,7 +321,6 @@ export class PaymentRepository {
       createdAt,
       userId: user.id,
     };
-
     DatabaseService.runInTransaction(() => {
       db.runSync(
         `INSERT INTO payments (id, operation_id, center_id, student_id, subscription_id, debt_cycle_id, session_id, amount, payment_type, payment_method, payment_date, notes, is_reversed, created_at, user_id)

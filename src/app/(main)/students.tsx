@@ -338,17 +338,20 @@ export default function StudentsScreen() {
   useEffect(() => {
     if (!isPaymentModalOpen || !financialStatus) return;
     if (paymentType !== "session") {
-      const openCycle = financialStatus.cycles
+      const openCycles = financialStatus.cycles
         .filter((cycle) => (cycle.remainingDebt ?? 0) > 0)
         .sort((a, b) => {
           const byStart = String(a.startDate).localeCompare(String(b.startDate));
           if (byStart !== 0) return byStart;
           return a.cycleType === "package" ? -1 : b.cycleType === "package" ? 1 : 0;
-        })[0];
+        });
+      const openCycle = openCycles.find((cycle) => cycle.id === paymentCycleId) || (openCycles.length === 1 ? openCycles[0] : undefined);
+      if (openCycles.length === 1 && paymentCycleId !== openCycles[0].id) setPaymentCycleId(openCycles[0].id);
+      if (openCycles.length !== 1 && paymentCycleId && !openCycles.some((cycle) => cycle.id === paymentCycleId)) setPaymentCycleId("");
       const balance = openCycle?.remainingDebt ?? financialStatus.monthlyRemainingDebt ?? 0;
-      if (!paymentAmount || Number(paymentAmount) === 0) setPaymentAmount(String(balance));
+      if (!paymentAmount || Number(paymentAmount) === 0) setPaymentAmount(openCycles.length > 1 && !paymentCycleId ? "" : String(balance));
     }
-  }, [isPaymentModalOpen, paymentType, financialStatus]);
+  }, [isPaymentModalOpen, paymentType, financialStatus, paymentCycleId]);
 
   const openStudentDetails = (student: Student) => {
     if (selectedStudent?.id !== student.id) setProfileTab("groups");
@@ -565,26 +568,32 @@ export default function StudentsScreen() {
       // operator explicitly selected a cycle. This keeps profile payments
       // consistent with the attendance payment flow and package-as-one-ledger
       // rule.
-      const cyclePayment = paymentType !== "session";
-      const openCycles = cyclePayment
-        ? (financialStatus?.cycles || [])
-            .filter((cycle) => (cycle.remainingDebt ?? 0) > 0)
-            .sort((a, b) => {
-              const byStart = String(a.startDate).localeCompare(String(b.startDate));
-              if (byStart !== 0) return byStart;
-              if (a.cycleType === b.cycleType) return 0;
-              return a.cycleType === "package" ? -1 : 1;
-            })
-        : [];
-      const selectedCycle = cyclePayment
-        ? (openCycles.find((cycle) => cycle.id === paymentCycleId) || openCycles[0])
-        : undefined;
+      // Profile payments use the same ledger as attendance. Even a payment
+      // labelled "session" must be linked to the student's open cycle when
+      // one exists, so it reduces the monthly/package cap instead of becoming
+      // an unrelated cash entry.
+      const openCycles = (financialStatus?.cycles || [])
+        .filter((cycle) => (cycle.remainingDebt ?? 0) > 0)
+        .sort((a, b) => {
+          const byStart = String(a.startDate).localeCompare(String(b.startDate));
+          if (byStart !== 0) return byStart;
+          if (a.cycleType === b.cycleType) return 0;
+          return a.cycleType === "package" ? -1 : 1;
+        });
+      const selectedCycle = openCycles.find((cycle) => cycle.id === paymentCycleId)
+        || (openCycles.length === 1 ? openCycles[0] : undefined);
+      if (openCycles.length > 1 && !selectedCycle) {
+        throw new Error("اختر دورة المديونية التي ستخصم منها الدفعة.");
+      }
+      const normalizedPaymentType = paymentType === "monthly" && selectedCycle && amountNum >= Number(selectedCycle.remainingDebt ?? 0)
+        ? "monthly"
+        : paymentType;
       await PaymentRepository.recordPayment({
         studentId: selectedStudent.id,
         amount: amountNum,
-        paymentType,
-        debtCycleId: cyclePayment ? selectedCycle?.id : undefined,
-        subscriptionId: cyclePayment ? selectedCycle?.packageSubscriptionId : undefined,
+        paymentType: normalizedPaymentType,
+        debtCycleId: selectedCycle?.id,
+        subscriptionId: selectedCycle?.packageSubscriptionId,
         notes: paymentNotes.trim() || undefined,
       });
       Alert.alert("تم بنجاح", Strings.paymentRecordedSuccess);
@@ -1878,14 +1887,16 @@ export default function StudentsScreen() {
                     ]}
                   >
                     {type === "monthly"
-                      ? "شهري"
+                      ? "استكمال الشهر / الباقة"
                       : type === "partial"
-                        ? "جزئي"
-                        : "حصة"}
+                        ? "مبلغ مخصص"
+                        : "دفع حصة"}
                   </Text>
                 </TouchableOpacity>
               ))}
             </View>
+
+            {(financialStatus?.cycles?.filter((cycle) => (cycle.remainingDebt ?? 0) > 0).length || 0) > 1 ? <View style={styles.paymentCyclePicker}><Text style={styles.paymentCycleTitle}>اختر دورة الشهر أو الباقة</Text>{financialStatus?.cycles.filter((cycle) => (cycle.remainingDebt ?? 0) > 0).map((cycle) => <TouchableOpacity key={cycle.id} style={[styles.paymentCycleOption, paymentCycleId === cycle.id && styles.paymentCycleOptionActive]} onPress={() => { setPaymentCycleId(cycle.id); if (paymentType !== "session") setPaymentAmount(String(cycle.remainingDebt ?? cycle.effectivePrice ?? cycle.cyclePrice ?? 0)); }}><Text style={styles.paymentCycleName}>{cycle.groupName || cycle.packageName || "دورة مديونية"}</Text><Text style={styles.paymentCycleAmount}>المتبقي: {formatCurrency(cycle.remainingDebt ?? 0)}</Text></TouchableOpacity>)}</View> : null}
 
             <AppInput
               label="ملاحظات (اختياري)"
@@ -2789,6 +2800,12 @@ const createStyles = (screenWidth = 390, screenHeight = 844, gutter = Spacing.lg
     fontWeight: "700",
     color: Colors.primary,
   },
+  paymentCyclePicker: { marginBottom: Spacing.md, gap: Spacing.sm },
+  paymentCycleTitle: { color: Colors.slate800, fontWeight: "800", textAlign: "right" },
+  paymentCycleOption: { borderWidth: 1, borderColor: Colors.slate200, borderRadius: 10, padding: 10, backgroundColor: Colors.white },
+  paymentCycleOptionActive: { borderColor: Colors.primary, backgroundColor: Colors.primaryLight + "30" },
+  paymentCycleName: { color: Colors.slate800, fontWeight: "800", textAlign: "right" },
+  paymentCycleAmount: { color: Colors.slate500, fontSize: 12, marginTop: 3, textAlign: "right" },
   profileScreen: { flex: 1, backgroundColor: Colors.background },
   profileTopBar: { minHeight: 54, paddingHorizontal: Spacing.md, flexDirection: "row-reverse", alignItems: "center", justifyContent: "space-between", borderBottomWidth: 1, borderBottomColor: Colors.border, backgroundColor: Colors.cardBackground },
   profileTopButton: { width: 40, height: 40, borderRadius: 13, alignItems: "center", justifyContent: "center", backgroundColor: Colors.primaryLight + "30" },

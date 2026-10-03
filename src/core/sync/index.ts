@@ -170,6 +170,8 @@ function upsertLocalDebtCycle(db: any, cycle: any, centerId: string): void {
     : ["session", "per_session", "persession", "per_class", "perclass"].includes(rawCycleType)
       ? "per_session"
       : "monthly";
+  const rawBillingMode = String(cycle.billing_mode || cycle.billingMode || "").trim().toLowerCase().replace(/[\s-]/g, "_");
+  const billingMode = cycleType === "package" ? "package" : ["per_session", "session", "perclass", "per_class"].includes(rawBillingMode) || cycleType === "per_session" ? "per_session" : ["pending"].includes(rawBillingMode) ? "pending" : "monthly";
 
   const natural = enrollmentId
     ? db.getFirstSync(
@@ -183,8 +185,8 @@ function upsertLocalDebtCycle(db: any, cycle: any, centerId: string): void {
   // that case so bootstrap remains idempotent.
   if (natural?.id) {
     db.runSync(
-      `UPDATE debt_cycles SET student_id=?, group_id=?, start_date=?, end_date=?, cycle_price=?, status=?, updated_at=?, package_subscription_id=?, cycle_type=? WHERE id=? AND center_id=?`,
-      [studentId, groupId, startDate, endDate, cyclePrice, status, updatedAt, packageSubscriptionId, cycleType, natural.id, cycleCenterId],
+      `UPDATE debt_cycles SET student_id=?, group_id=?, start_date=?, end_date=?, cycle_price=?, status=?, updated_at=?, package_subscription_id=?, cycle_type=?, billing_mode=? WHERE id=? AND center_id=?`,
+      [studentId, groupId, startDate, endDate, cyclePrice, status, updatedAt, packageSubscriptionId, cycleType, billingMode, natural.id, cycleCenterId],
     );
     return;
   }
@@ -193,8 +195,8 @@ function upsertLocalDebtCycle(db: any, cycle: any, centerId: string): void {
     `INSERT INTO debt_cycles
        (id, center_id, student_id, enrollment_id, group_id, cycle_number,
         start_date, end_date, cycle_price, status, created_at, updated_at,
-        package_subscription_id, cycle_type)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        package_subscription_id, cycle_type, billing_mode)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(center_id, enrollment_id, cycle_number) DO UPDATE SET
        student_id = excluded.student_id,
        group_id = excluded.group_id,
@@ -204,7 +206,8 @@ function upsertLocalDebtCycle(db: any, cycle: any, centerId: string): void {
        status = excluded.status,
        updated_at = excluded.updated_at,
        package_subscription_id = excluded.package_subscription_id,
-       cycle_type = excluded.cycle_type
+       cycle_type = excluded.cycle_type,
+       billing_mode = excluded.billing_mode
      ON CONFLICT(id) DO UPDATE SET
        student_id = excluded.student_id,
        enrollment_id = excluded.enrollment_id,
@@ -216,10 +219,11 @@ function upsertLocalDebtCycle(db: any, cycle: any, centerId: string): void {
        status = excluded.status,
        updated_at = excluded.updated_at,
        package_subscription_id = excluded.package_subscription_id,
-       cycle_type = excluded.cycle_type`,
+       cycle_type = excluded.cycle_type,
+       billing_mode = excluded.billing_mode`,
     [targetId, cycleCenterId, studentId, enrollmentId, groupId, cycleNumber,
       startDate, endDate, cyclePrice, status, createdAt, updatedAt,
-      packageSubscriptionId, cycleType],
+      packageSubscriptionId, cycleType, billingMode],
   );
 }
 
@@ -1407,7 +1411,7 @@ export class SyncEngine {
               start_date as startDate, end_date as endDate,
               cycle_price as cyclePrice, status,
               package_subscription_id as packageSubscriptionId,
-              cycle_type as cycleType, created_at as createdAt,
+              cycle_type as cycleType, billing_mode as billingMode, created_at as createdAt,
               updated_at as updatedAt
        FROM debt_cycles WHERE center_id = ?`,
       [centerId],

@@ -1535,6 +1535,12 @@ class SyncProcessor {
           cycle.cycle_type || cycle.cycleType,
           Boolean(packageSubscriptionId),
         );
+        const rawBillingMode = String(cycle.billing_mode || cycle.billingMode || "").trim().toLowerCase().replace(/[\s-]/g, "_");
+        const billingMode = cycleType === "package"
+          ? "package"
+          : ["per_session", "session", "perclass", "per_class"].includes(rawBillingMode) || cycleType === "per_session"
+            ? "per_session"
+            : rawBillingMode === "pending" ? "pending" : "monthly";
         const normalizedCycleStatus = normalizeDebtCycleStatus(cycle.status);
         const requestedCycleAmount = Number(
           cycle.cycle_price ?? cycle.cyclePrice ?? cycle.amount_due ?? cycle.amountDue ?? 0,
@@ -1576,12 +1582,12 @@ class SyncProcessor {
               `UPDATE debt_cycles
                   SET student_id=$2, enrollment_id=$3, group_id=$4,
                       package_subscription_id=$5, package_id=$6,
-                      cycle_number=$7, cycle_type=$8, period_start=$9,
-                      period_end=$10, amount_due=$11, status=$12,
-                      notes=$13, updated_at=NOW()
-                WHERE center_id=$1 AND id=$14`,
+                      cycle_number=$7, cycle_type=$8, billing_mode=$9, period_start=$10,
+                      period_end=$11, amount_due=$12, status=$13,
+                      notes=$14, updated_at=NOW()
+                WHERE center_id=$1 AND id=$15`,
               [centerId, studentId, enrollmentId, groupId, packageSubscriptionId, packageId,
-                cycleNumber, cycleType, cycle.start_date || cycle.startDate || cycle.period_start,
+                cycleNumber, cycleType, billingMode, cycle.start_date || cycle.startDate || cycle.period_start,
                 cycle.end_date || cycle.endDate || cycle.period_end,
                 effectiveAmount,
                 normalizedCycleStatus, cycle.notes || null, naturalId],
@@ -1591,14 +1597,14 @@ class SyncProcessor {
         }
         const effectiveAmount = await amountForCycle(targetId);
         await client.query(`INSERT INTO debt_cycles
-          (id, center_id, student_id, enrollment_id, group_id, package_subscription_id, package_id, cycle_number, cycle_type, period_start, period_end, amount_due, status, notes, created_at, updated_at)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,NOW(),NOW())
+          (id, center_id, student_id, enrollment_id, group_id, package_subscription_id, package_id, cycle_number, cycle_type, billing_mode, period_start, period_end, amount_due, status, notes, created_at, updated_at)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,NOW(),NOW())
           ON CONFLICT (id) DO UPDATE SET student_id=EXCLUDED.student_id, enrollment_id=EXCLUDED.enrollment_id,
             group_id=EXCLUDED.group_id, package_subscription_id=EXCLUDED.package_subscription_id,
             package_id=EXCLUDED.package_id, cycle_number=EXCLUDED.cycle_number, cycle_type=EXCLUDED.cycle_type,
-            period_start=EXCLUDED.period_start, period_end=EXCLUDED.period_end, amount_due=EXCLUDED.amount_due,
+            billing_mode=EXCLUDED.billing_mode, period_start=EXCLUDED.period_start, period_end=EXCLUDED.period_end, amount_due=EXCLUDED.amount_due,
             status=EXCLUDED.status, notes=EXCLUDED.notes, updated_at=NOW()`,
-          [targetId, centerId, studentId, enrollmentId, groupId, packageSubscriptionId, packageId, cycleNumber, cycleType, cycle.start_date || cycle.startDate || cycle.period_start, cycle.end_date || cycle.endDate || cycle.period_end, effectiveAmount, normalizedCycleStatus, cycle.notes || null]);
+          [targetId, centerId, studentId, enrollmentId, groupId, packageSubscriptionId, packageId, cycleNumber, cycleType, billingMode, cycle.start_date || cycle.startDate || cycle.period_start, cycle.end_date || cycle.endDate || cycle.period_end, effectiveAmount, normalizedCycleStatus, cycle.notes || null]);
         break;
       }
 
@@ -1650,6 +1656,35 @@ class SyncProcessor {
         const templateId = template.id || template.templateId || context.entityId;
         if (!templateId || !template.event_type && !template.eventType || !template.channel) {
           throw new Error("Notification template requires id, event type, and channel.");
+        }
+        // Updates created by older mobile builds did not include isDefault.
+        // Resolve the existing row by primary key first so those queued
+        // operations update the original template instead of attempting to
+        // insert the same id with is_default=false.
+        const existingTemplate = await client.query(
+          `SELECT event_type, channel, is_default, created_by
+             FROM notification_templates
+            WHERE center_id = $1 AND id = $2`,
+          [centerId, templateId],
+        );
+        if (existingTemplate.rows[0]) {
+          const existing = existingTemplate.rows[0];
+          await client.query(
+            `UPDATE notification_templates
+                SET event_type=$1, channel=$2, template_body=$3,
+                    is_default=$4, updated_by=$5, updated_at=NOW()
+              WHERE center_id=$6 AND id=$7`,
+            [
+              existing.event_type,
+              existing.channel,
+              template.template_body || template.templateBody || "",
+              template.is_default ?? template.isDefault ?? existing.is_default,
+              template.updated_by || template.updatedBy || userId,
+              centerId,
+              templateId,
+            ],
+          );
+          break;
         }
         await client.query(
           `INSERT INTO notification_templates

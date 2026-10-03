@@ -12,6 +12,7 @@ type PlannedSession = {
   sessionId?: string;
   attended: boolean;
   directlyPaid: number;
+  perSession: boolean;
 };
 
 const isoDate = (date: Date) => getLocalDateOnly(date);
@@ -55,6 +56,15 @@ export class SessionDebtService {
       (!enrollment.endDate || enrollment.endDate >= periodStart),
     );
     for (const enrollment of enrollments) {
+      const billingCycle = db.getFirstSync<any>(
+        `SELECT billing_mode as billingMode, cycle_type as cycleType
+           FROM debt_cycles
+          WHERE center_id = ? AND enrollment_id = ?
+            AND start_date <= ? AND end_date >= ?
+          ORDER BY cycle_number DESC LIMIT 1`,
+        [activeCenterId, enrollment.id, periodEnd, periodStart],
+      );
+      const isPerSession = billingCycle?.billingMode === "per_session" || billingCycle?.cycleType === "per_session";
       const group = db.getFirstSync<any>(
         `SELECT id, session_price as sessionPrice, monthly_price as monthlyPrice, default_fee as defaultFee
          FROM groups WHERE center_id = ? AND id = ?`,
@@ -74,7 +84,7 @@ export class SessionDebtService {
       }
       // Monthly price is spread over this month's actual scheduled meetings;
       // otherwise the configured session price is used directly.
-      const perSessionPrice = Number(group.monthlyPrice || 0) > 0
+      const perSessionPrice = !isPerSession && Number(group.monthlyPrice || 0) > 0
         ? Number(group.monthlyPrice) / Math.max(1, dates.length)
         : Number(group.sessionPrice || group.defaultFee || 0);
       for (const slot of dates) {
@@ -92,10 +102,16 @@ export class SessionDebtService {
         const directPayment = session ? Number(db.getFirstSync<any>(
           `SELECT COALESCE(SUM(amount), 0) as amount FROM payments
            WHERE center_id = ? AND student_id = ? AND session_id = ?
-             AND debt_cycle_id IS NULL AND is_reversed = 0`,
+             AND (debt_cycle_id IS NULL OR EXISTS (
+               SELECT 1 FROM debt_cycles dc
+                WHERE dc.center_id = payments.center_id
+                  AND dc.id = payments.debt_cycle_id
+                  AND (dc.billing_mode = 'per_session' OR dc.cycle_type = 'per_session')
+             ))
+             AND is_reversed = 0`,
           [activeCenterId, studentId, session.id],
         )?.amount || 0) : 0;
-        planned.push({ date, groupId: enrollment.groupId, scheduleId: slot.scheduleId, price: Math.max(0, perSessionPrice), sessionId: session?.id, attended: Boolean(attendance), directlyPaid: directPayment });
+        planned.push({ date, groupId: enrollment.groupId, scheduleId: slot.scheduleId, price: Math.max(0, perSessionPrice), sessionId: session?.id, attended: Boolean(attendance), directlyPaid: directPayment, perSession: isPerSession });
       }
     }
 
@@ -156,6 +172,12 @@ export class SessionDebtService {
     const monthlyPool = Number(db.getFirstSync<any>(
       `SELECT COALESCE(SUM(amount), 0) as amount FROM payments
        WHERE center_id = ? AND student_id = ? AND payment_date >= ? AND payment_date <= ?
+         AND (debt_cycle_id IS NULL OR NOT EXISTS (
+                SELECT 1 FROM debt_cycles dc
+                 WHERE dc.center_id = payments.center_id
+                   AND dc.id = payments.debt_cycle_id
+                   AND (dc.billing_mode = 'per_session' OR dc.cycle_type = 'per_session')
+              ))
          AND (debt_cycle_id IS NOT NULL
               OR (payment_type IN ('monthly','partial') AND session_id IS NULL))
          AND is_reversed = 0`,
@@ -163,6 +185,19 @@ export class SessionDebtService {
     )?.amount || 0);
 
     let pool = monthlyPool;
+    let perSessionPool = Number(db.getFirstSync<any>(
+      `SELECT COALESCE(SUM(amount), 0) as amount FROM payments
+       WHERE center_id = ? AND student_id = ? AND payment_date >= ? AND payment_date <= ?
+         AND session_id IS NULL AND is_reversed = 0
+         AND debt_cycle_id IS NOT NULL
+         AND EXISTS (
+           SELECT 1 FROM debt_cycles dc
+            WHERE dc.center_id = payments.center_id
+              AND dc.id = payments.debt_cycle_id
+              AND (dc.billing_mode = 'per_session' OR dc.cycle_type = 'per_session')
+         )`,
+      [activeCenterId, studentId, periodStart, periodEnd],
+    )?.amount || 0);
     let futureUnpaidSessions = 0;
     let futurePaidSessions = 0;
     let attendedPaidSessions = 0;
@@ -171,12 +206,23 @@ export class SessionDebtService {
     let sessionPriceTotal = 0;
     for (const item of planned) {
       sessionPriceTotal += item.price;
-      const allocated = Math.min(item.price, item.directlyPaid + Math.max(0, pool));
-      pool = Math.max(0, pool - Math.max(0, allocated - item.directlyPaid));
+      const remainingAfterDirect = Math.max(0, item.price - item.directlyPaid);
+      const perSessionAllocated = item.perSession && item.attended
+        ? Math.min(remainingAfterDirect, Math.max(0, perSessionPool))
+        : 0;
+      if (perSessionAllocated > 0) perSessionPool = Math.max(0, perSessionPool - perSessionAllocated);
+      const monthlyAllocated = item.perSession
+        ? 0
+        : Math.min(remainingAfterDirect, Math.max(0, pool));
+      const allocated = Math.min(item.price, item.directlyPaid + perSessionAllocated + monthlyAllocated);
+      if (monthlyAllocated > 0) pool = Math.max(0, pool - monthlyAllocated);
       const fullyPaid = item.price <= 0 || allocated >= item.price;
       if (item.attended) {
         if (fullyPaid) attendedPaidSessions += 1;
-        else { attendedUnpaidSessions += 1; currentDebt += Math.max(0, item.price - allocated); }
+        else {
+          attendedUnpaidSessions += 1;
+          if (item.perSession) currentDebt += Math.max(0, item.price - allocated);
+        }
       } else if (fullyPaid) {
         futurePaidSessions += 1;
       } else {

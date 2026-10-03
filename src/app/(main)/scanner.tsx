@@ -543,13 +543,21 @@ function ScannerContent() {
 
     setIsRecordingPayment(true);
     try {
-      const cycle = financialStatus?.cycles.find((item) => item.id === selectedPaymentCycleId)
-        || (financialStatus?.cycles.length === 1 ? financialStatus.cycles[0] : undefined);
+      const payableCycles = financialStatus?.cycles.filter((item) => (item.remainingDebt ?? 0) > 0) || [];
+      const cycle = payableCycles.find((item) => item.id === selectedPaymentCycleId)
+        || (payableCycles.length === 1 ? payableCycles[0] : undefined);
       const isCyclePayment = paymentPurpose === "cycle";
       if (isCyclePayment && !cycle) {
         Alert.alert("اختيار الدورة", "اختر المجموعة أو دورة المديونية التي ستُنسب إليها الدفعة.");
         return;
       }
+      if (!isCyclePayment && payableCycles.length > 1 && !cycle) {
+        Alert.alert("اختيار الدورة", "اختر المجموعة أو الباقة التي ستخصم منها الحصة.");
+        return;
+      }
+      const cyclePaymentType = isCyclePayment && cycle && amount >= Number(cycle.remainingDebt ?? 0)
+        ? "monthly"
+        : isCyclePayment ? "partial" : "session";
       await PaymentRepository.recordPayment({
         studentId: student.id,
         // A cycle/package payment is intentionally not tied to the current
@@ -557,7 +565,7 @@ function ScannerContent() {
         // teachers separately, while the ledger keeps one package balance.
         sessionId: isCyclePayment ? undefined : (activeSessionId || selectedSessionId || undefined),
         amount,
-        paymentType: isCyclePayment ? "partial" : "session",
+        paymentType: cyclePaymentType,
         // Keep every payment linked to the current obligation. The payment
         // purpose controls the session display, while the cycle link lets a
         // later "complete month/package" payment subtract the earlier
@@ -1054,7 +1062,8 @@ function ScannerContent() {
                     setPaymentPurpose(hasCycleBalance ? "cycle" : "session");
                     setPaymentAmount(String(hasCycleBalance ? financialStatus!.remainingBalance : (financialStatus!.currentPeriodDebt ?? 0)));
                     setPaymentNotes("");
-                    setSelectedPaymentCycleId(financialStatus!.cycles.length === 1 ? financialStatus!.cycles[0].id : null);
+                    const payableCycles = financialStatus!.cycles.filter((cycle) => (cycle.remainingDebt ?? 0) > 0);
+                    setSelectedPaymentCycleId(payableCycles.length === 1 ? payableCycles[0].id : null);
                     setShowPaymentModal(true);
                   }}
                   style={{ marginTop: Spacing.md }}
@@ -1106,6 +1115,8 @@ function ScannerContent() {
             </View>
 
             {paymentPurpose === "cycle" && (financialStatus?.cycles?.length || 0) > 1 ? <View style={styles.paymentCyclePicker}><Text style={styles.paymentCycleTitle}>اختر المجموعة أو الدورة</Text>{financialStatus?.cycles.filter((cycle) => (cycle.remainingDebt ?? 0) > 0).map((cycle) => <TouchableOpacity key={cycle.id} style={[styles.paymentCycleOption, selectedPaymentCycleId === cycle.id && styles.paymentCycleOptionActive]} onPress={() => { setSelectedPaymentCycleId(cycle.id); setPaymentAmount(String(cycle.remainingDebt ?? cycle.effectivePrice ?? cycle.cyclePrice ?? 0)); }}><Text style={styles.paymentCycleName}>{cycle.groupName || cycle.packageName || "دورة مديونية"}</Text><Text style={styles.paymentCycleAmount}>المتبقي: {formatCurrency(cycle.remainingDebt ?? 0)}</Text></TouchableOpacity>)}</View> : null}
+
+            {paymentPurpose === "session" && (financialStatus?.cycles?.filter((cycle) => (cycle.remainingDebt ?? 0) > 0).length || 0) > 1 ? <View style={styles.paymentCyclePicker}><Text style={styles.paymentCycleTitle}>اختار الدورة التي ستخصم منها الدفعة</Text>{financialStatus?.cycles.filter((cycle) => (cycle.remainingDebt ?? 0) > 0).map((cycle) => <TouchableOpacity key={cycle.id} style={[styles.paymentCycleOption, selectedPaymentCycleId === cycle.id && styles.paymentCycleOptionActive]} onPress={() => setSelectedPaymentCycleId(cycle.id)}><Text style={styles.paymentCycleName}>{cycle.groupName || cycle.packageName || "دورة مديونية"}</Text><Text style={styles.paymentCycleAmount}>المتبقي: {formatCurrency(cycle.remainingDebt ?? 0)}</Text></TouchableOpacity>)}</View> : null}
 
             <AppInput
               label={Strings.paymentAmountLabel}
