@@ -307,35 +307,37 @@ export class MakeupService {
     }
 
     // The next eligible session is strictly the FIRST candidate session
-    const firstCandidate = candidateSessions[0];
-
-    // Check if the student already attended this first candidate session
-    const attended = db.getFirstSync<any>(
-      `SELECT id FROM attendance WHERE center_id = ? AND session_id = ? AND student_id = ?`,
-      [centerId, firstCandidate.id, studentId],
-    );
-
-    if (attended || firstCandidate.status === "cancelled") {
-      // Already attended or used
-      return null;
+    // The first session for this teacher/subject is not necessarily a session
+    // the student attends (the teacher can have several groups). Skip those
+    // unrelated sessions instead of treating them as an expired opportunity;
+    // otherwise the scanner shows the makeup badge but recording it fails with
+    // the generic "invalid data" validation message.
+    for (const candidate of candidateSessions) {
+      const candidateHasSnapshot = db.getFirstSync<any>(
+        `SELECT 1 FROM session_expected_students WHERE center_id = ? AND session_id = ? LIMIT 1`,
+        [centerId, candidate.id],
+      );
+      const candidateExpected = AttendanceSessionService.isExpected(
+        candidate.id,
+        studentId,
+      );
+      const attended = db.getFirstSync<any>(
+        `SELECT id FROM attendance WHERE center_id = ? AND session_id = ? AND student_id = ?`,
+        [centerId, candidate.id, studentId],
+      );
+      if (attended) {
+        // Once the next session the student was expected in has been attended,
+        // the original absence has no remaining makeup opportunity.
+        // Legacy sessions have no snapshot, so an attended row is likewise the
+        // only evidence available and must consume the opportunity.
+        if (candidateExpected || !candidateHasSnapshot) return null;
+        continue;
+      }
+      if (!candidateExpected && candidateHasSnapshot) continue;
+      return candidate;
     }
 
-    const firstCandidateExpected = AttendanceSessionService.isExpected(
-      firstCandidate.id,
-      studentId,
-    );
-    const firstCandidateHasSnapshot = db.getFirstSync<any>(
-      `SELECT 1 FROM session_expected_students WHERE center_id = ? AND session_id = ? LIMIT 1`,
-      [centerId, firstCandidate.id],
-    );
-    if (
-      !firstCandidateExpected &&
-      firstCandidateHasSnapshot
-    ) {
-      return null;
-    }
-
-    return firstCandidate;
+    return null;
   }
 
   /**

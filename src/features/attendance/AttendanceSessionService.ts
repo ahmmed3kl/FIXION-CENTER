@@ -94,30 +94,10 @@ export class AttendanceSessionService {
       };
     }
 
-    // Fallback for centers that have an active enrollment but no historical
-    // expected-student snapshot/session yet. The teacher/group relationship is
-    // still authoritative for allowing a same-teacher makeup attendance.
-    const enrolledWithTeacher = db.getFirstSync<any>(
-      `SELECT g.id as groupId, g.name as groupName
-       FROM student_group_enrollments e
-       JOIN groups g ON g.center_id = e.center_id AND g.id = e.group_id
-       LEFT JOIN teachers sourceTeacher ON sourceTeacher.center_id = g.center_id AND sourceTeacher.id = g.teacher_id
-       LEFT JOIN subjects sourceSubject ON sourceSubject.center_id = g.center_id AND sourceSubject.id = g.subject_id
-       WHERE e.center_id = ? AND e.student_id = ? AND e.status = 'active'
-         AND (g.teacher_id = ? OR LOWER(TRIM(sourceTeacher.name)) = LOWER(TRIM(?))) AND g.id <> ?
-         AND (g.subject_id = ? OR LOWER(TRIM(sourceSubject.name)) = LOWER(TRIM(?)))
-       ORDER BY e.start_date DESC LIMIT 1`,
-      [activeCenterId, studentId, session.teacherId, session.teacherName || "", session.groupId, session.subjectId, session.subjectName || ""],
-    );
-    return enrolledWithTeacher
-      ? {
-          eligible: true,
-          sourceGroupId: enrolledWithTeacher.groupId,
-          sourceGroupName: enrolledWithTeacher.groupName,
-          teacherName: session.teacherName,
-          originalAbsenceId: sessionId,
-        }
-      : { eligible: false };
+    // An active enrollment alone is not proof of a missed class. Without a
+    // concrete historical session there is no canonical absence id to link to,
+    // so do not show a makeup action that will inevitably fail validation.
+    return { eligible: false };
   }
   static getTodayGroups(date = AttendanceSessionService.localDate()): Group[] {
     return GroupRepository.getGroupsForDay(new Date(`${date}T12:00:00`).getDay());
