@@ -69,7 +69,46 @@ export class GradeBookRepository {
 
   static getExams(groupId: string, grade: string): GradeExam[] {
     const { centerId } = this.context();
-    return DatabaseService.getDb().getAllSync<GradeExam>(
+    const db = DatabaseService.getDb();
+
+    // Recover exams created by the previous malformed INSERT, which stored
+    // "active" in max_score and the intended max score in status. The outbox
+    // payload contains the original, validated exam values, so repair only
+    // rows that exactly match that corruption pattern.
+    const malformed = db.getAllSync<{ id: string; status: string }>(
+      `SELECT id, status FROM grade_exams
+       WHERE center_id = ? AND grade = ? AND typeof(max_score) = 'text' AND max_score = 'active'
+         AND status != 'active' AND (group_id = ? OR group_id IS NULL)`,
+      [centerId, grade, groupId],
+    );
+    const repairs: Array<{ id: string; status: string; maxScore: number }> = [];
+    for (const row of malformed) {
+      const operation = db.getFirstSync<{ payload: string }>(
+        `SELECT payload FROM sync_operations
+         WHERE center_id = ? AND entity_type = 'grade_exam' AND entity_id = ?
+         ORDER BY created_at DESC LIMIT 1`,
+        [centerId, row.id],
+      );
+      if (!operation?.payload) continue;
+      try {
+        const payload = JSON.parse(operation.payload);
+        const maxScore = Number(payload.maxScore ?? payload.max_score);
+        if (Number.isFinite(maxScore) && maxScore > 0) repairs.push({ id: row.id, status: row.status, maxScore });
+      } catch {}
+    }
+    if (repairs.length) {
+      DatabaseService.runInTransaction(() => {
+        for (const repair of repairs) {
+          db.runSync(
+            `UPDATE grade_exams SET max_score = ?, status = 'active'
+             WHERE id = ? AND center_id = ? AND status = ? AND typeof(max_score) = 'text' AND max_score = 'active'`,
+            [repair.maxScore, repair.id, centerId, repair.status],
+          );
+        }
+      });
+    }
+
+    return db.getAllSync<GradeExam>(
       `SELECT id, center_id as centerId, name, grade, group_id as groupId, max_score as maxScore,
               status, created_at as createdAt, updated_at as updatedAt
        FROM grade_exams WHERE center_id = ? AND grade = ? AND status = 'active'
@@ -105,7 +144,7 @@ export class GradeBookRepository {
     const exam: GradeExam = { id, centerId, name: cleanName, grade: cleanGrade, groupId, maxScore, status: "active", createdAt: now, updatedAt: now };
     const db = DatabaseService.getDb();
     DatabaseService.runInTransaction(() => {
-      db.runSync(`INSERT INTO grade_exams (id, center_id, name, grade, group_id, max_score, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?)`, [id, centerId, cleanName, cleanGrade, groupId, maxScore, now, now]);
+      db.runSync(`INSERT INTO grade_exams (id, center_id, name, grade, group_id, max_score, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?)`, [id, centerId, cleanName, cleanGrade, groupId, maxScore, now, now]);
       SyncRepository.enqueueOperation({ operationId, centerId, userId: user.id, deviceId: DeviceService.getDeviceIdSync(), operationType: "CREATE", entityType: "grade_exam", entityId: id, payload: { ...exam, maxScore, groupId, createdAt: now, updatedAt: now } });
       AuditService.recordEvent({ operationId, centerId, userId: user.id, deviceId: DeviceService.getDeviceIdSync(), entityType: "grade_exam", entityId: id, action: "grade.exam.create", payload: { name: cleanName, groupId, actorName: user.fullName } });
     });

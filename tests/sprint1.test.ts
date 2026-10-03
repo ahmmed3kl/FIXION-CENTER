@@ -1,5 +1,6 @@
 import { AuditService } from "../src/core/audit";
 import { DatabaseService } from "../src/core/database";
+import { LocalDataEvents } from "../src/core/database/localDataEvents";
 import { ConflictError } from "../src/core/errors";
 import { PermissionService, RolePermissions } from "../src/core/permissions";
 import { SyncRepository } from "../src/core/sync";
@@ -138,21 +139,36 @@ describe("Sprint 1 - FIXION Mobile App Foundation & Complete Working Flow", () =
   describe("5. Offline Attendance Creation, Sync Queue & Audit Log", () => {
     it("records attendance in SQLite, queues sync operation, and records audit log", async () => {
       await useAuthStore.getState().selectCenter("center-1");
+      const localChanges: Array<{ centerId?: string; entityType?: string; entityId?: string }> = [];
+      const unsubscribe = LocalDataEvents.subscribe((change) => localChanges.push(change));
 
-      const attendance = await AttendanceRepository.recordAttendance({
-        studentId: "std-2",
-        sessionId: "sess-1",
-        status: "present",
-        isLate: false,
-        attendanceType: "present",
-        checkInTime: "14:05:00",
-      });
+      let attendance: Awaited<ReturnType<typeof AttendanceRepository.recordAttendance>>;
+      try {
+        attendance = await AttendanceRepository.recordAttendance({
+          studentId: "std-2",
+          sessionId: "sess-1",
+          status: "present",
+          isLate: false,
+          attendanceType: "present",
+          checkInTime: "2026-10-03T14:05:00.000Z",
+        });
+      } finally {
+        unsubscribe();
+      }
 
       expect(attendance).toBeDefined();
       expect(attendance.studentId).toBe("std-2");
       expect(attendance.sessionId).toBe("sess-1");
       expect(attendance.status).toBe("present");
       expect(attendance.operationId).toMatch(/^op-att-/);
+      expect(AttendanceRepository.getStudentAttendanceInSession("sess-1", "std-2")).toMatchObject({
+        id: attendance.id,
+        studentId: "std-2",
+        sessionId: "sess-1",
+        attendanceType: "present",
+        checkInTime: "2026-10-03T14:05:00.000Z",
+      });
+      expect(localChanges).toContainEqual({ entityType: "attendance", entityId: attendance.id, centerId: "center-1" });
 
       // Verify operation queued in sync_operations
       const pendingOps = SyncRepository.getPendingOperations("center-1");
@@ -202,6 +218,35 @@ describe("Sprint 1 - FIXION Mobile App Foundation & Complete Working Flow", () =
           isLate: false,
         }),
       ).rejects.toThrow(ConflictError);
+    });
+
+    it("rejects recording attendance for a student owned by another center", async () => {
+      await expect(AttendanceRepository.recordAttendance({
+        studentId: "std-4",
+        sessionId: "sess-1",
+        status: "present",
+        isLate: false,
+      })).rejects.toThrow(ConflictError);
+    });
+
+    it("rejects recording attendance before the session is active", async () => {
+      const db = DatabaseService.getDb();
+      const originalGetFirst = db.getFirstSync.bind(db);
+      const sessionLookup = jest.spyOn(db, "getFirstSync").mockImplementation(((sql: string, params: any[]) => {
+        if (sql.includes("SELECT status, deleted_at as deletedAt FROM students")) return { status: "active", deletedAt: null };
+        if (sql.includes("COALESCE(s.subject_id, g.subject_id) as subjectId")) return { id: "sess-1", status: "scheduled", groupId: "group-1", subjectId: "subj-1", teacherId: "teach-1", sessionDate: "2026-10-03", startTime: "09:00" };
+        return originalGetFirst(sql, params);
+      }) as any);
+      try {
+        await expect(AttendanceRepository.recordAttendance({
+          studentId: "std-1",
+          sessionId: "sess-1",
+          status: "present",
+          isLate: false,
+        })).rejects.toThrow(ConflictError);
+      } finally {
+        sessionLookup.mockRestore();
+      }
     });
   });
 

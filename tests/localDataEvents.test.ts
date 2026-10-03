@@ -22,4 +22,12 @@ describe("LocalDataEvents", () => {
     removeBroken();
     removeHealthy();
   });
+
+  it("supports entity-specific revisions without waking unrelated repository screens", () => {
+    const before = LocalDataEvents.getRevision(["student"]);
+    LocalDataEvents.emit({ entityType: "payment" });
+    expect(LocalDataEvents.getRevision(["student"])).toBe(before);
+    LocalDataEvents.emit({ entityType: "student" });
+    expect(LocalDataEvents.getRevision(["student"])).toBe(before + 1);
+  });
 });

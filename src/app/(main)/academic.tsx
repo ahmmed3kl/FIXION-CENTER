@@ -60,7 +60,7 @@ const DAYS_OF_WEEK = [
 ];
 
 export default function AcademicScreen() {
-  const localDataRevision = useLocalDataRevision();
+  const localDataRevision = useLocalDataRevision(["teacher", "subject", "group", "group_schedule"]);
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(), [colors]);
   const router = useRouter();

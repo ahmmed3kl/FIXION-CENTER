@@ -320,7 +320,7 @@ function ScannerContent() {
       }
 
       const expected = AttendanceSessionService.isExpected(activeSessionId, foundStudent.id);
-      const makeupEligibility = expected ? { eligible: false } : AttendanceSessionService.getMakeupEligibility(activeSessionId, foundStudent.id);
+      const makeupEligibility = expected ? { eligible: false } : MakeupService.getEligibilityForSession(activeSessionId, foundStudent.id);
       if (!expected && !makeupEligibility.eligible && !allowExternal) {
         setStudent(null);
         setSearchError("الطالب غير متوقع في مجموعة الحضور الحالية.");
@@ -514,7 +514,7 @@ function ScannerContent() {
     setStudent(createdStudent);
     setCurrentGroupLabel([session.groupName, session.subjectName, session.teacherName].filter(Boolean).join(" • "));
     const expected = AttendanceSessionService.isExpected(session.id, createdStudent.id);
-    const makeupEligibility = expected ? { eligible: false } : AttendanceSessionService.getMakeupEligibility(session.id, createdStudent.id);
+    const makeupEligibility = expected ? { eligible: false } : MakeupService.getEligibilityForSession(session.id, createdStudent.id);
     const makeup = makeupEligibility.eligible ? {
       sourceGroupName: makeupEligibility.sourceGroupName,
       teacherName: makeupEligibility.teacherName,

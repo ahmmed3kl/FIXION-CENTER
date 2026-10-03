@@ -21,7 +21,7 @@ const addMonth = (value: string) => {
 };
 
 export default function OpeningBalanceScreen() {
-  const localDataRevision = useLocalDataRevision();
+  const localDataRevision = useLocalDataRevision(["student", "opening_balance"]);
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
   const { activeCenterId, currentUser } = useAuthStore();

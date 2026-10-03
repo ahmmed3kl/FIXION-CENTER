@@ -15,7 +15,7 @@ import { useLocalDataRevision } from "../../core/database/useLocalDataRevision";
 type OptionDraft = { teacherId: string; subjectId: string };
 
 export default function PackagesScreen() {
-  const localDataRevision = useLocalDataRevision();
+  const localDataRevision = useLocalDataRevision(["package", "package_subject", "teacher", "subject"]);
   const router = useRouter();
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(), [colors]);

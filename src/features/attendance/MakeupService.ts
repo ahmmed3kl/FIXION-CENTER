@@ -30,6 +30,14 @@ function generateUUID(): string {
   });
 }
 
+export interface MakeupEligibility {
+  eligible: boolean;
+  sourceGroupId?: string;
+  sourceGroupName?: string;
+  teacherName?: string;
+  originalAbsenceId?: string;
+}
+
 export class MakeupService {
   private static getActiveContext() {
     const { activeCenterId, currentUser } = useAuthStore.getState();
@@ -341,6 +349,123 @@ export class MakeupService {
   }
 
   /**
+   * Returns eligibility only when the host session is the exact next eligible
+   * session accepted by recordMakeupAttendance. This keeps the confirmation
+   * screen and the final write on one rule and prevents false-positive prompts.
+   */
+  static getEligibilityForSession(sessionId: string, studentId: string): MakeupEligibility {
+    const { centerId } = this.getActiveContext();
+    const db = DatabaseService.getDb();
+    const host = db.getFirstSync<any>(
+      `SELECT s.id, s.group_id as groupId, s.session_date as sessionDate,
+              s.start_time as startTime, s.status,
+              COALESCE(s.subject_id, g.subject_id) as subjectId,
+              COALESCE(s.teacher_id, g.teacher_id) as teacherId,
+              t.name as teacherName
+       FROM sessions s
+       JOIN groups g ON g.center_id = s.center_id AND g.id = s.group_id
+       LEFT JOIN teachers t ON t.center_id = s.center_id
+         AND t.id = COALESCE(s.teacher_id, g.teacher_id)
+       WHERE s.center_id = ? AND s.id = ?`,
+      [centerId, sessionId],
+    );
+    if (!host || host.status !== "open" || !host.subjectId || !host.teacherId) {
+      return { eligible: false };
+    }
+
+    // Resolve candidate absences from the same local roster/session records
+    // used by attendance. Keep this query path simple (and SQLite-compatible)
+    // rather than relying on a multi-join query whose fallback adapter can
+    // return unrelated rows. A session is a source only if the student was in
+    // its immutable roster snapshot, or it predates snapshots and the student's
+    // enrollment covered that session date.
+    const sessions = db.getAllSync<Session>(
+      `SELECT s.id, s.center_id as centerId, s.group_id as groupId,
+              COALESCE(s.subject_id, g.subject_id) as subjectId,
+              COALESCE(s.teacher_id, g.teacher_id) as teacherId,
+              s.session_date as sessionDate, s.start_time as startTime,
+              s.end_time as endTime, s.status, g.name as groupName
+       FROM sessions s
+       JOIN groups g ON g.center_id = s.center_id AND g.id = s.group_id
+       WHERE s.center_id = ?`,
+      [centerId],
+    );
+    const expectedRows = db.getAllSync<any>(
+      `SELECT center_id as centerId, session_id as sessionId, student_id as studentId
+       FROM session_expected_students
+       WHERE center_id = ? AND student_id = ?`,
+      [centerId, studentId],
+    );
+    const enrollments = db.getAllSync<any>(
+      `SELECT center_id as centerId, student_id as studentId, group_id as groupId,
+              start_date as startDate, end_date as endDate, status
+       FROM student_group_enrollments
+       WHERE center_id = ? AND student_id = ? AND status = 'active'`,
+      [centerId, studentId],
+    );
+    const sourceSessions = sessions
+      .filter((source) => {
+        if (
+          source.centerId !== centerId ||
+          source.id === sessionId ||
+          source.groupId === host.groupId ||
+          source.status === "cancelled" ||
+          source.subjectId !== host.subjectId ||
+          source.teacherId !== host.teacherId ||
+          !(source.sessionDate < host.sessionDate ||
+            (source.sessionDate === host.sessionDate && source.startTime < host.startTime))
+        ) {
+          return false;
+        }
+        const hasSnapshot = expectedRows.some(
+          (row) => row.centerId === centerId && row.sessionId === source.id,
+        );
+        const expected = expectedRows.some(
+          (row) => row.centerId === centerId && row.sessionId === source.id && row.studentId === studentId,
+        );
+        if (hasSnapshot) return expected;
+        return enrollments.some((enrollment) =>
+          enrollment.centerId === centerId &&
+          enrollment.studentId === studentId &&
+          enrollment.groupId === source.groupId &&
+          enrollment.status === "active" &&
+          enrollment.startDate <= source.sessionDate &&
+          (!enrollment.endDate || enrollment.endDate >= source.sessionDate),
+        );
+      })
+      .sort((a, b) =>
+        b.sessionDate.localeCompare(a.sessionDate) || b.startTime.localeCompare(a.startTime),
+      );
+
+    for (const source of sourceSessions) {
+      const attendedOrCovered =
+        db.getFirstSync<any>(
+          `SELECT id FROM attendance WHERE center_id = ? AND session_id = ? AND student_id = ?`,
+          [centerId, source.id, studentId],
+        ) || this.isSessionCoveredInAdvance(studentId, source.id);
+      const alreadyMadeUp = db.getFirstSync<any>(
+        `SELECT id FROM attendance
+         WHERE center_id = ? AND student_id = ?
+           AND (original_absence_id = ? OR original_absence_id = ('absence-' || ? || '-' || ?))`,
+        [centerId, studentId, source.id, source.id, studentId],
+      );
+      if (attendedOrCovered || alreadyMadeUp) continue;
+
+      const nextEligible = this.getNextEligibleSession(studentId, source.id);
+      if (nextEligible?.id === sessionId) {
+        return {
+          eligible: true,
+          sourceGroupId: source.groupId,
+          sourceGroupName: source.groupName,
+          teacherName: host.teacherName,
+          originalAbsenceId: source.id,
+        };
+      }
+    }
+    return { eligible: false };
+  }
+
+  /**
    * Retrieves all active makeup opportunities for a student.
    */
   static getMakeupOpportunities(studentId: string): MakeupOpportunity[] {
@@ -414,6 +539,18 @@ export class MakeupService {
     isLate?: boolean;
     checkInTime?: string;
   }): Promise<Attendance> {
+    const existingAttendance = AttendanceRepository.getStudentAttendanceInSession(
+      params.sessionId,
+      params.studentId,
+    );
+    if (existingAttendance) {
+      throw new ConflictError(
+        existingAttendance.attendanceType === "makeup"
+          ? "تم تسجيل حضور الطالب كتعويض مسبقًا."
+          : "تم تسجيل حضور الطالب مسبقًا لهذه الحصة.",
+      );
+    }
+
     const nextEligible = this.getNextEligibleSession(
       params.studentId,
       params.originalAbsenceId,

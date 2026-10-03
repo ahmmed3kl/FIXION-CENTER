@@ -6,6 +6,7 @@ import {
 } from "../src/core/errors";
 import { AbsenceService } from "../src/features/attendance/AbsenceService";
 import { AttendanceRepository } from "../src/features/attendance/AttendanceRepository";
+import { AttendanceSessionService } from "../src/features/attendance/AttendanceSessionService";
 import { MakeupService } from "../src/features/attendance/MakeupService";
 import { useAuthStore } from "../src/features/auth/useAuthStore";
 import { EnrollmentRepository } from "../src/features/enrollments/EnrollmentRepository";
@@ -638,6 +639,10 @@ describe("Sprint 4 - FIXION Packages, Makeups & Unified Attendance/Financial Int
       });
 
       const db = DatabaseService.getDb();
+      db.runSync(
+        `INSERT INTO groups (id, center_id, name, teacher_id, subject_id, grade, default_fee, session_price, monthly_price, session_duration_minutes, late_after_minutes, status, created_at)
+         VALUES ('grp-host-makeup', 'center-1', 'مجموعة تعويض', 'teach-1', 'subj-1', 'الصف الثالث الثانوي', 100, 100, 100, 120, 15, 'active', '2026-09-20')`,
+      );
       // Missed Session: 2026-11-01 10:00 (subj-1, teach-1)
       db.runSync(
         `INSERT INTO sessions (id, center_id, group_id, subject_id, teacher_id, session_price, session_date, start_time, end_time, status, created_at)
@@ -648,17 +653,18 @@ describe("Sprint 4 - FIXION Packages, Makeups & Unified Attendance/Financial Int
          VALUES ('exp-missed-1', 'center-1', 'sess-missed-1', ?, '2026-09-20')`,
         [student.id],
       );
+      EnrollmentRepository.enrollStudent({ studentId: student.id, groupId: "grp-1", startDate: "2026-09-01" });
 
       // Next eligible session: 2026-11-08 10:00 (subj-1, teach-1)
       db.runSync(
         `INSERT INTO sessions (id, center_id, group_id, subject_id, teacher_id, session_price, session_date, start_time, end_time, status, created_at)
-         VALUES ('sess-next-elg', 'center-1', 'grp-1', 'subj-1', 'teach-1', 100, '2026-11-08', '10:00', '12:00', 'open', '2026-09-20')`,
+         VALUES ('sess-next-elg', 'center-1', 'grp-host-makeup', 'subj-1', 'teach-1', 100, '2026-11-08', '10:00', '12:00', 'open', '2026-09-20')`,
       );
 
       // Third session: 2026-11-15 10:00 (subj-1, teach-1)
       db.runSync(
         `INSERT INTO sessions (id, center_id, group_id, subject_id, teacher_id, session_price, session_date, start_time, end_time, status, created_at)
-         VALUES ('sess-third-elg', 'center-1', 'grp-1', 'subj-1', 'teach-1', 100, '2026-11-15', '10:00', '12:00', 'open', '2026-09-20')`,
+         VALUES ('sess-third-elg', 'center-1', 'grp-host-makeup', 'subj-1', 'teach-1', 100, '2026-11-15', '10:00', '12:00', 'open', '2026-09-20')`,
       );
     });
 
@@ -679,7 +685,19 @@ describe("Sprint 4 - FIXION Packages, Makeups & Unified Attendance/Financial Int
       expect(nextSession?.id).toBe("sess-next-elg");
     });
 
+    it("offers makeup confirmation only when the current session is the exact session accepted by the writer", () => {
+      expect(MakeupService.getEligibilityForSession("sess-next-elg", student.id)).toMatchObject({
+        eligible: true,
+        originalAbsenceId: "sess-missed-1",
+        sourceGroupId: "grp-1",
+      });
+    });
+
     it("records makeup attendance for the next eligible session linked to original absence", async () => {
+      const beforeSummary = AttendanceSessionService.getSummary("sess-next-elg");
+      const beforeEnrollmentGroups = EnrollmentRepository.getActiveEnrollmentsForStudent(student.id)
+        .map((enrollment) => enrollment.groupId)
+        .sort();
       const att = await MakeupService.recordMakeupAttendance({
         studentId: student.id,
         sessionId: "sess-next-elg",
@@ -689,10 +707,44 @@ describe("Sprint 4 - FIXION Packages, Makeups & Unified Attendance/Financial Int
       expect(att.attendanceType).toBe("makeup");
       expect(att.originalAbsenceId).toBe("sess-missed-1");
       expect(att.sessionId).toBe("sess-next-elg");
+      expect(AttendanceRepository.getStudentAttendanceInSession("sess-next-elg", student.id)).toMatchObject({
+        id: att.id,
+        studentId: student.id,
+        sessionId: "sess-next-elg",
+        attendanceType: "makeup",
+        originalAbsenceId: "sess-missed-1",
+      });
+      const afterSummary = AttendanceSessionService.getSummary("sess-next-elg");
+      expect(afterSummary).toEqual({
+        ...beforeSummary,
+        makeup: beforeSummary.makeup + 1,
+      });
+      expect(
+        EnrollmentRepository.getActiveEnrollmentsForStudent(student.id)
+          .map((enrollment) => enrollment.groupId)
+          .sort(),
+      ).toEqual(beforeEnrollmentGroups);
+
+      await expect(
+        MakeupService.recordMakeupAttendance({
+          studentId: student.id,
+          sessionId: "sess-next-elg",
+          originalAbsenceId: "sess-missed-1",
+        }),
+      ).rejects.toThrow(ConflictError);
+      expect(
+        DatabaseService.getDb().getAllSync<any>(
+          `SELECT id FROM attendance WHERE center_id = ? AND session_id = ? AND student_id = ?`,
+          ["center-1", "sess-next-elg", student.id],
+        ),
+      ).toHaveLength(1);
     });
 
     it("rejects recording makeup for a non-next session or once makeup opportunity is satisfied", async () => {
       // Since sess-next-elg is already attended as makeup for sess-missed-1, trying on sess-third-elg must fail
+      // The confirmation check must agree with the writer and not offer the
+      // old fallback that incorrectly used the host session as the absence.
+      expect(MakeupService.getEligibilityForSession("sess-third-elg", student.id).eligible).toBe(false);
       await expect(
         MakeupService.recordMakeupAttendance({
           studentId: student.id,

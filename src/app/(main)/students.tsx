@@ -119,7 +119,11 @@ function firstScheduledDate(groupId: string): string {
 }
 
 export default function StudentsScreen() {
-  const localDataRevision = useLocalDataRevision();
+  const localDataRevision = useLocalDataRevision([
+    "student", "student_card", "student_note", "group", "group_schedule", "teacher", "subject",
+    "enrollment", "package_subscription", "package_teacher_override", "payment", "debt_cycle",
+    "debt_adjustment", "opening_balance", "attendance", "grade_exam", "grade_score",
+  ]);
   const { colors } = useTheme();
   const { width: screenWidth, height: screenHeight, gutter, isTablet, isLandscape } = useResponsiveLayout();
   const styles = useMemo(() => createStyles(screenWidth, screenHeight, gutter, isTablet, isLandscape), [colors, screenWidth, screenHeight, gutter, isTablet, isLandscape]);

@@ -16,7 +16,7 @@ import { useLocalDataRevision } from "../../core/database/useLocalDataRevision";
 const DAYS = ["الأحد", "الإثنين", "الثلاثاء", "الأربعاء", "الخميس", "الجمعة", "السبت"];
 
 export default function GroupsScreen() {
-  const localDataRevision = useLocalDataRevision();
+  const localDataRevision = useLocalDataRevision(["group", "group_schedule", "teacher", "subject", "enrollment"]);
   const router = useRouter();
   const { colors } = useTheme();
   const [groups, setGroups] = useState<Group[]>([]);

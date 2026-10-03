@@ -12,7 +12,7 @@ import { smartSearch } from "../../shared/utils/smartSearch";
 import { useLocalDataRevision } from "../../core/database/useLocalDataRevision";
 
 export default function GradesScreen() {
-  const localDataRevision = useLocalDataRevision();
+  const localDataRevision = useLocalDataRevision(["grade_exam", "grade_score", "student", "enrollment", "group"]);
   const { colors } = useTheme();
   const { groupId } = useLocalSearchParams<{ groupId?: string }>();
   const styles = useMemo(() => createStyles(), [colors]);

@@ -15,7 +15,7 @@ import { smartSearch } from "../../shared/utils/smartSearch";
 const money = (value: number) => `${Number(value || 0).toFixed(2)} ج.م`;
 
 export default function DebtAdjustmentsScreen() {
-  const localDataRevision = useLocalDataRevision();
+  const localDataRevision = useLocalDataRevision(["student"]);
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
   const currentUser = useAuthStore((state) => state.currentUser);
