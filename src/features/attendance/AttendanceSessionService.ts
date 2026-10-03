@@ -36,6 +36,7 @@ export class AttendanceSessionService {
     const db = DatabaseService.getDb();
     const session = db.getFirstSync<any>(
       `SELECT s.group_id as groupId, s.session_date as sessionDate,
+              s.start_time as startTime,
               COALESCE(s.subject_id, g.subject_id) as subjectId,
               COALESCE(s.teacher_id, g.teacher_id) as teacherId,
               g.name as groupName, t.name as teacherName,
@@ -55,7 +56,11 @@ export class AttendanceSessionService {
        LEFT JOIN teachers sourceTeacher ON sourceTeacher.center_id = g.center_id AND sourceTeacher.id = g.teacher_id
        LEFT JOIN subjects sourceSubject ON sourceSubject.center_id = g.center_id AND sourceSubject.id = g.subject_id
        JOIN sessions s ON s.center_id = e.center_id AND s.group_id = e.group_id
-         AND s.session_date < ? AND s.status <> 'cancelled'
+         AND (
+           s.session_date < ?
+           OR (s.session_date = ? AND COALESCE(s.start_time, '') < COALESCE(?, ''))
+         )
+         AND s.status <> 'cancelled'
        LEFT JOIN session_expected_students ex ON ex.center_id = s.center_id
          AND ex.session_id = s.id AND ex.student_id = e.student_id
        LEFT JOIN attendance a ON a.center_id = s.center_id
@@ -80,7 +85,7 @@ export class AttendanceSessionService {
          AND a.id IS NULL
          AND makeup.id IS NULL
        ORDER BY s.session_date DESC, s.start_time DESC LIMIT 1`,
-      [session.sessionDate, activeCenterId, studentId, session.teacherId, session.teacherName || "", session.groupId, session.subjectId, session.subjectName || ""],
+      [session.sessionDate, session.sessionDate, session.startTime, activeCenterId, studentId, session.teacherId, session.teacherName || "", session.groupId, session.subjectId, session.subjectName || ""],
     );
     if (source) {
       return {

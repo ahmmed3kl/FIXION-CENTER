@@ -123,6 +123,7 @@ function ScannerContent() {
     student: Student;
     session: Session;
     makeup?: NonNullable<typeof makeupNotice>;
+    isExternal?: boolean;
   } | null>(null);
   const [allStudents, setAllStudents] = useState<Student[]>([]);
   const [allStudentSearch, setAllStudentSearch] = useState("");
@@ -352,8 +353,13 @@ function ScannerContent() {
             teacherName: makeupEligibility.teacherName,
             originalAbsenceId: makeupEligibility.originalAbsenceId,
           }});
+        } else if (!attended && !expected && allowExternal) {
+          // A student outside the current roster must never be auto-attended.
+          // Keep the external path behind the same confirmation sheet so it
+          // cannot create an attendance row or an automatic session payment.
+          setPendingAttendance({ student: foundStudent, session: sessions[0], isExternal: true });
         } else if (!attended) {
-          await recordAttendanceFor(foundStudent, sessions[0], undefined, allowExternal);
+          await recordAttendanceFor(foundStudent, sessions[0]);
         }
       } else if (sessions.length > 1) {
         setSelectedSessionId(null);
@@ -522,10 +528,10 @@ function ScannerContent() {
 
   const confirmPendingAttendance = async () => {
     if (!pendingAttendance) return;
-    const { student: added, session, makeup } = pendingAttendance;
+    const { student: added, session, makeup, isExternal } = pendingAttendance;
     setPendingAttendance(null);
     if (!AttendanceRepository.isAlreadyAttended(session.id, added.id) && session.status !== "closed") {
-      await recordAttendanceFor(added, session, makeup);
+      await recordAttendanceFor(added, session, makeup, isExternal === true);
     }
   };
 
@@ -638,9 +644,9 @@ function ScannerContent() {
         <View style={styles.modalBackdrop}>
           <View style={styles.confirmSheet}>
             <View style={styles.confirmIcon}><Ionicons name="checkmark-circle-outline" size={30} color={Colors.primary} /></View>
-            <Text style={styles.modalTitle}>تمت إضافة الطالب بنجاح</Text>
+            <Text style={styles.modalTitle}>تأكيد تسجيل الحضور</Text>
             <Text style={styles.modalSub}>{pendingAttendance?.student.fullName}</Text>
-            <Text style={styles.confirmQuestion}>{pendingAttendance?.makeup ? "هل تريد تسجيل حضور الطالب تعويضياً في الجلسة الحالية؟" : "هل تريد تسجيل حضور الطالب في الجلسة الحالية؟"}</Text>
+            <Text style={styles.confirmQuestion}>{pendingAttendance?.makeup ? "الطالب تعويضي. هل تريد تسجيل حضوره في الجلسة الحالية؟" : pendingAttendance?.isExternal ? "الطالب خارج المجموعة الحالية. هل تريد تسجيله كحضور خارجي؟" : "هل تريد تسجيل حضور الطالب في الجلسة الحالية؟"}</Text>
             <Text style={styles.confirmGroup}>{pendingAttendance?.session.groupName || currentGroupLabel}</Text>
             <View style={styles.modalButtonRow}>
               <AppButton title="تأكيد" onPress={() => void confirmPendingAttendance()} style={{ flex: 1 }} />
