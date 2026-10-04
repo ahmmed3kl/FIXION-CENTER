@@ -569,4 +569,67 @@ export class AttendanceSessionService {
     );
     return { total: counts.expected, present: counts.present, absent: counts.absent, makeup: counts.makeup };
   }
+
+  /**
+   * Checks if a student is enrolled with the same teacher/subject as the
+   * session's group but in a DIFFERENT group. This identifies "compensation"
+   * attendance where a student from Sunday's group attends Tuesday's group
+   * of the same teacher.
+   */
+  static isEnrolledWithSameTeacher(sessionId: string, studentId: string): {
+    enrolled: boolean;
+    sourceGroupName?: string;
+    teacherName?: string;
+  } {
+    const { activeCenterId } = useAuthStore.getState();
+    if (!activeCenterId) return { enrolled: false };
+    const db = DatabaseService.getDb();
+    const session = db.getFirstSync<any>(
+      `SELECT s.group_id as groupId,
+              COALESCE(s.teacher_id, g.teacher_id) as teacherId,
+              COALESCE(s.subject_id, g.subject_id) as subjectId,
+              t.name as teacherName
+       FROM sessions s
+       JOIN groups g ON g.center_id = s.center_id AND g.id = s.group_id
+       LEFT JOIN teachers t ON t.center_id = s.center_id
+         AND t.id = COALESCE(s.teacher_id, g.teacher_id)
+       WHERE s.center_id = ? AND s.id = ?`,
+      [activeCenterId, sessionId],
+    );
+    if (!session?.teacherId) return { enrolled: false };
+
+    const otherGroup = db.getFirstSync<any>(
+      `SELECT g.name as groupName
+       FROM student_group_enrollments e
+       JOIN groups g ON g.center_id = e.center_id AND g.id = e.group_id
+       WHERE e.center_id = ? AND e.student_id = ? AND e.status = 'active'
+         AND g.teacher_id = ?
+         AND g.subject_id = ?
+         AND g.id != ?
+         AND e.start_date <= date('now')
+         AND (e.end_date IS NULL OR e.end_date >= date('now'))
+       LIMIT 1`,
+      [activeCenterId, studentId, session.teacherId, session.subjectId, session.groupId],
+    );
+
+    return otherGroup
+      ? { enrolled: true, sourceGroupName: otherGroup.groupName, teacherName: session.teacherName }
+      : { enrolled: false };
+  }
+
+  /**
+   * Adds a compensation student to the session's expected roster so the
+   * attendance validation passes. Called only after the operator explicitly
+   * confirms compensation attendance.
+   */
+  static addCompensationStudent(sessionId: string, studentId: string): void {
+    const { activeCenterId } = useAuthStore.getState();
+    if (!activeCenterId) return;
+    const db = DatabaseService.getDb();
+    const now = new Date().toISOString();
+    db.runSync(
+      "INSERT OR IGNORE INTO session_expected_students (id, center_id, session_id, student_id, created_at) VALUES (?, ?, ?, ?, ?)",
+      [`exp-comp-${sessionId}-${studentId}`, activeCenterId, sessionId, studentId, now],
+    );
+  }
 }

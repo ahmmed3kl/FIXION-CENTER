@@ -292,10 +292,16 @@ export class PaymentRepository {
       // session payment means pay-as-you-go; monthly/partial means the
       // discounted monthly obligation. Never change a package cycle.
       if (cycle?.billingMode === "pending") {
-        const selectedMode = cycle.cycleType === "package"
-          ? "package"
-          : normType === "session" ? "per_session" : "monthly";
-        DebtCycleRepository.setBillingMode(assignedCycleId, selectedMode);
+        // A session payment does NOT lock in per-session billing for the
+        // entire period. It is recorded as an independent payment against the
+        // current obligation. Only an explicit monthly/partial payment selects
+        // the monthly plan; per-session mode requires a deliberate choice
+        // through the billing settings, not an implicit side-effect of a
+        // single session payment during attendance.
+        if (normType !== "session") {
+          const selectedMode = cycle.cycleType === "package" ? "package" : "monthly";
+          DebtCycleRepository.setBillingMode(assignedCycleId, selectedMode);
+        }
       } else if (cycle?.billingMode === "per_session" && normType !== "session" && cycle.cycleType !== "package") {
         // An explicit monthly/partial settlement switches this period to the
         // monthly plan. Earlier class payments remain immutable and become

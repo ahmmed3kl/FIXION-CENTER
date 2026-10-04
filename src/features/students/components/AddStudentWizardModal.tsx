@@ -1,4 +1,4 @@
-import { Ionicons as BaseIonicons } from "@expo/vector-icons";
+﻿import { Ionicons as BaseIonicons } from "@expo/vector-icons";
 import { useCameraPermissions } from "expo-camera";
 import React, { useEffect, useMemo, useState } from "react";
 import {
@@ -162,7 +162,7 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({ vi
     () => {
       const gradeTeacherIds = new Set(
         groups
-          .filter((group) => group.status === "active" && (!grade || group.grade === grade) && (subjectFilter === "all" || group.subjectId === subjectFilter))
+          .filter((group) => group.status === "active" && (!grade || group.grade === grade || group.grade === "كل الصفوف") && (subjectFilter === "all" || group.subjectId === subjectFilter))
           .map((group) => group.teacherId),
       );
       return smartSearch(
@@ -174,12 +174,12 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({ vi
     [teacherSearch, teachers, groups, grade, subjectFilter],
   );
   const visibleSubjects = useMemo(() => {
-    const ids = new Set(groups.filter((group) => group.status === "active" && (!grade || group.grade === grade)).map((group) => group.subjectId).filter(Boolean));
+    const ids = new Set(groups.filter((group) => group.status === "active" && (!grade || group.grade === grade || group.grade === "كل الصفوف")).map((group) => group.subjectId).filter(Boolean));
     return Array.from(ids).map((id) => ({ id, name: groups.find((group) => group.subjectId === id)?.subjectName || "المادة" }));
   }, [groups, grade]);
   const visibleGroups = useMemo(() => groups.filter((group) => {
     if (group.status !== "active") return false;
-    if (levelFilter !== "all" && group.grade !== levelFilter) return false;
+    if (levelFilter !== "all" && group.grade !== levelFilter && group.grade !== "كل الصفوف") return false;
     if (subjectFilter !== "all" && group.subjectId !== subjectFilter) return false;
     return teacherFilter === "all" || group.teacherId === teacherFilter;
   }), [groups, levelFilter, subjectFilter, teacherFilter]);
@@ -189,7 +189,7 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({ vi
   const selectedPackageOptions = currentPackageOptions.filter((option) => packageOptionIds.includes(option.id));
   const packageGroupsForOption = (option: PackageSubject) => {
     const teacherId = packageTeacherIds[option.id] || option.defaultTeacherId;
-    return groups.filter((group) => group.status === "active" && group.grade === grade && group.subjectId === option.subjectId && group.teacherId === teacherId);
+    return groups.filter((group) => group.status === "active" && (group.grade === grade || group.grade === "كل الصفوف") && group.subjectId === option.subjectId && group.teacherId === teacherId);
   };
 
   const resetForm = () => {

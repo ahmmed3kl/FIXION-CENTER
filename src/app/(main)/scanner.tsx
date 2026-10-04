@@ -1,4 +1,4 @@
-import { Ionicons } from "@expo/vector-icons";
+﻿import { Ionicons } from "@expo/vector-icons";
 import { CameraView, useCameraPermissions } from "expo-camera";
 import { router, useFocusEffect, useLocalSearchParams } from "expo-router";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -140,7 +140,7 @@ function ScannerContent() {
   const [selectedPaymentCycleId, setSelectedPaymentCycleId] = useState<string | null>(null);
   const [paymentNotes, setPaymentNotes] = useState("");
   const [isRecordingPayment, setIsRecordingPayment] = useState(false);
-  const [financialExpanded, setFinancialExpanded] = useState(false);
+  const [financialExpanded, setFinancialExpanded] = useState(true);
 
   const isScanningBlockedRef = useRef(false);
   const lastScannedRef = useRef<{ code: string; at: number } | null>(null);
@@ -303,6 +303,12 @@ function ScannerContent() {
       }
 
       setStudent(foundStudent);
+      // A lookup selects a new student. Never carry the previous student's
+      // recorded status into the new card; the attendance row is checked
+      // below for this exact session and student.
+      setAttendanceResult(null);
+      setIsAlreadyAttended(false);
+      setIsExternalAttendance(false);
       const currentSession = SessionRepository.findById(activeSessionId);
       const currentGroupId = currentSession?.groupId;
       setCurrentGroupLabel(
@@ -320,19 +326,36 @@ function ScannerContent() {
       }
 
       const expected = AttendanceSessionService.isExpected(activeSessionId, foundStudent.id);
-      const makeupEligibility = expected ? { eligible: false } : MakeupService.getEligibilityForSession(activeSessionId, foundStudent.id);
-      if (!expected && !makeupEligibility.eligible && !allowExternal) {
-        setStudent(null);
-        setSearchError("الطالب غير متوقع في مجموعة الحضور الحالية.");
-        setIsProcessing(false);
-        return;
+      const makeupEligibility = expected
+        ? { eligible: false }
+        : (() => {
+            const strict = MakeupService.getEligibilityForSession(activeSessionId, foundStudent.id);
+            return strict.eligible
+              ? strict
+              : AttendanceSessionService.getMakeupEligibility(activeSessionId, foundStudent.id);
+          })();
+      // A student outside the current group is only allowed when the same
+      // subject/teacher makeup rule returns a real source absence. The old
+      // allowExternal flag made a normal visitor recordable as "external".
+      let compensationNotice: typeof makeupNotice = null;
+      if (!expected && !makeupEligibility.eligible) {
+        const sameTeacher = AttendanceSessionService.isEnrolledWithSameTeacher(activeSessionId, foundStudent.id);
+        if (sameTeacher.enrolled) {
+          compensationNotice = { sourceGroupName: sameTeacher.sourceGroupName, teacherName: sameTeacher.teacherName };
+        } else {
+          setStudent(null);
+          setSearchError("الطالب غير مشترك مع مدرس هذه المجموعة، ولا توجد له حصة تعويضية مؤهلة.");
+          setIsProcessing(false);
+          return;
+        }
       }
 
-      const externalAttendance = !expected && !makeupEligibility.eligible;
-      setIsExternalAttendance(externalAttendance);
+      setIsExternalAttendance(false);
 
       if (makeupEligibility.eligible) {
         setMakeupNotice({ sourceGroupName: makeupEligibility.sourceGroupName, teacherName: makeupEligibility.teacherName, originalAbsenceId: makeupEligibility.originalAbsenceId });
+      } else if (compensationNotice) {
+        setMakeupNotice(compensationNotice);
       } else {
         setMakeupNotice(null);
       }
@@ -465,7 +488,14 @@ function ScannerContent() {
         session.lateAfterMinutes ?? 15,
       );
 
-      const result = makeup
+      // Compensation students (same teacher, different group, no specific
+      // absence) are added to the session roster before recording so the
+      // repository-level expected-student validation passes.
+      if (makeup && !makeup.originalAbsenceId) {
+        AttendanceSessionService.addCompensationStudent(session.id, targetStudent.id);
+      }
+
+      const result = (makeup && makeup.originalAbsenceId)
         ? await MakeupService.recordMakeupAttendance({
             studentId: targetStudent.id,
             sessionId: session.id,
@@ -578,15 +608,24 @@ function ScannerContent() {
     setIsRecordingPayment(true);
     try {
       const payableCycles = financialStatus?.cycles.filter((item) => (item.remainingDebt ?? 0) > 0) || [];
-      const cycle = payableCycles.find((item) => item.id === selectedPaymentCycleId)
-        || (payableCycles.length === 1 ? payableCycles[0] : undefined);
       const isCyclePayment = paymentPurpose === "cycle";
+      // A class payment must never be attached to a monthly/package cycle.
+      // Only a pending/per-session cycle belongs to the per-session ledger;
+      // otherwise the payment remains session-scoped and the monthly debt is
+      // untouched.
+      const sessionCycles = payableCycles.filter((item) =>
+        item.billingMode === "pending" ||
+        item.billingMode === "per_session" ||
+        item.cycleType === "per_session",
+      );
+      const cycle = (isCyclePayment ? payableCycles : sessionCycles).find((item) => item.id === selectedPaymentCycleId)
+        || ((isCyclePayment ? payableCycles : sessionCycles).length === 1 ? (isCyclePayment ? payableCycles : sessionCycles)[0] : undefined);
       if (isCyclePayment && !cycle) {
         Alert.alert("اختيار الدورة", "اختر المجموعة أو دورة المديونية التي ستُنسب إليها الدفعة.");
         return;
       }
-      if (!isCyclePayment && payableCycles.length > 1 && !cycle) {
-        Alert.alert("اختيار الدورة", "اختر المجموعة أو الباقة التي ستخصم منها الحصة.");
+      if (!isCyclePayment && sessionCycles.length > 1 && !cycle) {
+        Alert.alert("اختيار دورة الحصة", "اختر دورة الحصة التي ستُسجّل عليها الدفعة.");
         return;
       }
       const cyclePaymentType = isCyclePayment && cycle && amount >= Number(cycle.remainingDebt ?? 0)
@@ -650,7 +689,7 @@ function ScannerContent() {
           <View style={styles.rebuildScanPanel}><View style={styles.rebuildScanInput}><Ionicons name="search-outline" size={23} color={Colors.slate400} /><AppInput value={manualCode} onChangeText={setManualCode} placeholder="اكتب كود الطالب للبحث اليدوي" containerStyle={{ flex: 1, marginBottom: 0 }} /></View><TouchableOpacity style={styles.rebuildManualButton} onPress={() => lookupCard(manualCode, undefined, true)}><Text style={styles.rebuildManualText}>بحث بالكود</Text></TouchableOpacity>{isCameraActive ? <BarcodeScannerView onDetected={(data) => handleBarcodeScanned({ data })} onClose={() => { setIsTorchOn(false); setIsCameraActive(false); }} style={styles.rebuildCamera} /> : <TouchableOpacity style={styles.rebuildScanButton} onPress={() => { isScanningBlockedRef.current = false; lastScannedRef.current = null; setIsCameraActive(true); }}><Ionicons name="scan-outline" size={25} color={Colors.white} /><Text style={styles.rebuildScanButtonText}>مسح كود الطالب</Text></TouchableOpacity>}</View>
           {student ? <View style={styles.rebuildStudentCard}><View style={styles.rebuildStudentAvatar}><Ionicons name="person" size={34} color={Colors.primary} /></View><View style={styles.rebuildStudentCopy}><Text style={styles.rebuildStudentName}>{student.fullName}</Text><Text style={styles.rebuildStudentMeta}>كود الطالب: {student.cardCode || student.studentCode}</Text><Text style={styles.rebuildStudentMeta}>{[student.grade, currentGroupLabel].filter(Boolean).join(" · ")}</Text></View><View style={styles.rebuildStatus}><Ionicons name={attendanceResult?.isLate ? "time-outline" : "checkmark-circle"} size={22} color={attendanceResult?.isLate ? Colors.warningText : Colors.successText} /><Text style={styles.rebuildStatusText}>{attendanceResult?.isLate ? "متأخر" : attendanceResult ? "حاضر" : isAlreadyAttended ? "مسجل" : makeupNotice ? "تعويض مستحق" : isExternalAttendance ? "خارج المجموعة" : "جاهز للتسجيل"}</Text>{attendanceResult?.checkInTime ? <Text style={styles.rebuildTime}>{attendanceResult.checkInTime}</Text> : null}</View>{!attendanceResult && !isAlreadyAttended ? <AppButton title={makeupNotice ? "تسجيل حضور تعويضي" : isExternalAttendance ? "تسجيل حضور خارجي" : "تسجيل الحضور"} onPress={requestAttendanceConfirmation} loading={isProcessing} disabled={isSessionClosed} size="lg" /> : null}<View style={styles.rebuildActions}><TouchableOpacity style={styles.rebuildSecondaryAction} onPress={handleReset}><Ionicons name="refresh" size={20} color={Colors.primary} /><Text style={styles.rebuildActionText}>مسح طالب آخر</Text></TouchableOpacity><TouchableOpacity style={styles.rebuildSecondaryAction} onPress={() => router.push({ pathname: "/(main)/students", params: { add: "1", attendanceSessionId: activeSessionId } } as any)}><Ionicons name="person-add-outline" size={20} color={Colors.primary} /><Text style={styles.rebuildActionText}>إضافة طالب</Text></TouchableOpacity></View></View> : null}
           {student ? <View style={styles.rebuildNotesSection}><View style={styles.rebuildSectionHeader}><View><Text style={styles.rebuildSectionTitle}>ملاحظات الطالب</Text><Text style={styles.rebuildFinanceHint}>{student.notes?.trim() ? "ملاحظة محفوظة" : "لا توجد ملاحظات"}</Text></View><TouchableOpacity onPress={() => router.push({ pathname: "/(main)/students", params: { studentId: student.id } } as any)}><Text style={styles.rebuildLink}>+ إضافة ملاحظة</Text></TouchableOpacity></View>{student.notes?.trim() ? <View style={styles.rebuildNote}><Ionicons name="document-text-outline" size={19} color={Colors.primary} /><Text style={styles.rebuildNoteText}>{student.notes}</Text></View> : <Text style={styles.rebuildEmpty}>لا توجد ملاحظات لهذا الطالب</Text>}</View> : null}
-          {paymentsEnabled && student && financialStatus ? <View style={styles.rebuildFinance}><TouchableOpacity style={styles.rebuildSectionHeader} onPress={() => setFinancialExpanded((value) => !value)}><View><Text style={styles.rebuildSectionTitle}>الحالة المالية</Text><Text style={styles.rebuildFinanceHint}>المستحق · المدفوع · المتبقي</Text></View><Ionicons name={financialExpanded ? "chevron-up" : "chevron-down"} size={23} color={Colors.primary} /></TouchableOpacity><View style={styles.rebuildFinanceTiles}><View><Text style={styles.rebuildFinanceLabel}>المستحق</Text><Text style={styles.rebuildFinanceDue}>{formatCurrency(financialStatus.totalDue)}</Text></View><View><Text style={styles.rebuildFinanceLabel}>المدفوع</Text><Text style={styles.rebuildFinancePaid}>{formatCurrency(financialStatus.totalPaid)}</Text></View><View><Text style={styles.rebuildFinanceLabel}>المتبقي</Text><Text style={styles.rebuildFinanceRemaining}>{formatCurrency(financialStatus.remainingBalance)}</Text></View></View>{financialExpanded ? <><Text style={styles.paymentHistoryTitle}>سجل مدفوعات الطالب</Text>{financialStatus.payments.map((payment) => <View key={payment.id} style={styles.paymentHistoryRow}><Text style={styles.paymentHistoryAmount}>{formatCurrency(payment.amount)}</Text><Text style={styles.paymentHistoryType}>{payment.paymentType === "monthly" ? "دفعة شهرية" : payment.paymentType === "session" ? "دفعة حصة" : "دفعة جزئية"}</Text><Text style={styles.paymentHistoryMeta}>{payment.paymentDate || payment.createdAt.slice(0, 10)}</Text></View>)}<AppButton title="تسجيل دفعة" onPress={openQuickPaymentModal} size="lg" /></> : null}</View> : null}
+          {paymentsEnabled && student && financialStatus ? <View style={styles.rebuildFinance}><TouchableOpacity style={styles.rebuildSectionHeader} onPress={() => setFinancialExpanded((value) => !value)}><View><Text style={styles.rebuildSectionTitle}>الحالة المالية</Text><Text style={styles.rebuildFinanceHint}>المستحق · المدفوع · المتبقي</Text></View><Ionicons name={financialExpanded ? "chevron-up" : "chevron-down"} size={23} color={Colors.primary} /></TouchableOpacity><View style={styles.rebuildFinanceTiles}><View><Text style={styles.rebuildFinanceLabel}>المستحق</Text><Text style={styles.rebuildFinanceDue}>{formatCurrency(financialStatus.totalDue)}</Text></View><View><Text style={styles.rebuildFinanceLabel}>المدفوع</Text><Text style={styles.rebuildFinancePaid}>{formatCurrency(financialStatus.totalPaid)}</Text></View><View><Text style={styles.rebuildFinanceLabel}>المتبقي</Text><Text style={styles.rebuildFinanceRemaining}>{formatCurrency(financialStatus.remainingBalance)}</Text></View></View>{financialExpanded ? <><Text style={styles.paymentHistoryTitle}>سجل مدفوعات الطالب</Text>{financialStatus.payments.map((payment) => <View key={payment.id} style={styles.paymentHistoryRow}><Text style={styles.paymentHistoryAmount}>{formatCurrency(payment.amount)}</Text><Text style={styles.paymentHistoryType}>{payment.paymentType === "monthly" ? "دفعة شهرية" : payment.paymentType === "session" ? "دفعة حصة" : "دفعة جزئية"}</Text><Text style={styles.paymentHistoryMeta}>{payment.paymentDate || payment.createdAt.slice(0, 10)}</Text></View>)}</> : null}<AppButton title="تسجيل دفعة" onPress={openQuickPaymentModal} size="lg" /></View> : null}
         </ScrollView>
       )}
       <Modal visible={showPaymentModal} transparent animationType="fade" onRequestClose={() => setShowPaymentModal(false)}><View style={styles.modalBackdrop}><View style={styles.modalContent}><Text style={styles.modalTitle}>تسجيل دفعة نقدية</Text><Text style={styles.modalSub}>{student?.fullName}</Text><View style={styles.paymentPurposeRow}>{(["session", "cycle"] as const).map((purpose) => <TouchableOpacity key={purpose} style={[styles.paymentPurposeButton, paymentPurpose === purpose && styles.paymentPurposeButtonActive]} onPress={() => { setPaymentPurpose(purpose); setSelectedPaymentCycleId(null); if (purpose === "cycle") setPaymentAmount(String(financialStatus?.remainingBalance ?? 0)); else { const session = activeSessionId ? SessionRepository.findById(activeSessionId) : null; setPaymentAmount(String(Number(session?.sessionPrice || financialStatus?.currentPeriodDebt || 0))); } }}><Text style={[styles.paymentPurposeText, paymentPurpose === purpose && styles.paymentPurposeTextActive]}>{purpose === "session" ? "دفع الحصة" : "استكمال الشهر / الباقة"}</Text></TouchableOpacity>)}</View>{paymentPurpose === "cycle" && (financialStatus?.cycles?.filter((cycle) => (cycle.remainingDebt ?? 0) > 0).length || 0) > 1 ? <View style={styles.paymentCyclePicker}><Text style={styles.paymentCycleTitle}>اختر المجموعة أو الدورة</Text>{financialStatus?.cycles.filter((cycle) => (cycle.remainingDebt ?? 0) > 0).map((cycle) => <TouchableOpacity key={cycle.id} style={[styles.paymentCycleOption, selectedPaymentCycleId === cycle.id && styles.paymentCycleOptionActive]} onPress={() => { setSelectedPaymentCycleId(cycle.id); setPaymentAmount(String(cycle.remainingDebt ?? cycle.effectivePrice ?? cycle.cyclePrice ?? 0)); }}><Text style={styles.paymentCycleName}>{cycle.groupName || cycle.packageName || "دورة مديونية"}</Text><Text style={styles.paymentCycleAmount}>المتبقي: {formatCurrency(cycle.remainingDebt ?? 0)}</Text></TouchableOpacity>)}</View> : null}{paymentPurpose === "session" && (financialStatus?.cycles?.filter((cycle) => (cycle.remainingDebt ?? 0) > 0).length || 0) > 1 ? <View style={styles.paymentCyclePicker}><Text style={styles.paymentCycleTitle}>اختار الدورة التي ستخصم منها الدفعة</Text>{financialStatus?.cycles.filter((cycle) => (cycle.remainingDebt ?? 0) > 0).map((cycle) => <TouchableOpacity key={cycle.id} style={[styles.paymentCycleOption, selectedPaymentCycleId === cycle.id && styles.paymentCycleOptionActive]} onPress={() => setSelectedPaymentCycleId(cycle.id)}><Text style={styles.paymentCycleName}>{cycle.groupName || cycle.packageName || "دورة مديونية"}</Text><Text style={styles.paymentCycleAmount}>المتبقي: {formatCurrency(cycle.remainingDebt ?? 0)}</Text></TouchableOpacity>)}</View> : null}<AppInput label="المبلغ" keyboardType="numeric" value={paymentAmount} onChangeText={setPaymentAmount} /><AppInput label="ملاحظة الدفع (اختياري)" placeholder="مثال: استكمال باقي الشهر" value={paymentNotes} onChangeText={setPaymentNotes} multiline /><View style={styles.modalButtonRow}><AppButton title="حفظ" onPress={handleConfirmQuickPayment} loading={isRecordingPayment} variant="success" style={{ flex: 1 }} /><AppButton title="إلغاء" variant="outline" onPress={() => setShowPaymentModal(false)} style={{ flex: 1 }} /></View></View></View></Modal>

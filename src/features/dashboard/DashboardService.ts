@@ -169,11 +169,18 @@ export class DashboardService {
       countedSessionIds.add(String(session.id));
       if (session.status === "open") openSessions += 1;
       if (session.status === "closed") closedSessions += 1;
-      const attendance = db.getAllSync<any>(
+      const rawAttendance = db.getAllSync<any>(
         `SELECT student_id as studentId, status, attendance_type as attendanceType
          FROM attendance WHERE center_id = ? AND session_id = ?`,
         [centerId, session.id],
       );
+      // Normalize property names to handle SQLite drivers that may return
+      // snake_case despite aliases, matching the pattern in getSummary().
+      const attendance = rawAttendance.map((row: any) => ({
+        ...row,
+        studentId: String(row.studentId ?? row.student_id ?? ""),
+        attendanceType: row.attendanceType ?? row.attendance_type ?? "present",
+      }));
       const covered = db.getAllSync<any>(
         `SELECT student_id as studentId FROM advance_coverages
          WHERE center_id = ? AND target_future_session_id = ?`,

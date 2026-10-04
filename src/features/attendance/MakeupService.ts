@@ -544,11 +544,20 @@ export class MakeupService {
       );
     }
 
-    const nextEligible = this.getNextEligibleSession(
+    // Prefer the shared session-scoped eligibility query. It resolves legacy
+    // sessions whose teacher/subject snapshot columns are missing and keeps
+    // package students eligible when the source absence was real. Retain the
+    // older next-session check as a fallback for records created by older
+    // builds.
+    const sharedEligibility = AttendanceSessionService.getMakeupEligibility(
+      params.sessionId,
       params.studentId,
-      params.originalAbsenceId,
     );
-    if (!nextEligible || nextEligible.id !== params.sessionId) {
+    const nextEligible = sharedEligibility.eligible
+      ? { id: params.sessionId }
+      : this.getNextEligibleSession(params.studentId, params.originalAbsenceId);
+    if (!nextEligible || nextEligible.id !== params.sessionId ||
+        (sharedEligibility.eligible && sharedEligibility.originalAbsenceId !== params.originalAbsenceId)) {
       throw new ValidationError(
         "الحصة المحددة ليست الحصة التالية المؤهلة للتعويض أو انتهت صلاحية فرصة التعويض.",
       );
