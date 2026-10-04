@@ -2532,6 +2532,24 @@ class InMemorySqliteMock implements SqlDatabase {
         ).map((id) => ({ student_id: id }));
         return unique as T[];
       }
+      if (
+        params.length >= 2 &&
+        trimmed.includes("center_id = ?") &&
+        trimmed.includes("student_id = ?") &&
+        !trimmed.includes("session_id = ?")
+      ) {
+        return list
+          .filter((r) => r.center_id === params[0] && r.student_id === params[1])
+          .map((r) => ({
+            id: r.id,
+            centerId: r.center_id,
+            sessionId: r.session_id,
+            studentId: r.student_id,
+            center_id: r.center_id,
+            session_id: r.session_id,
+            student_id: r.student_id,
+          })) as T[];
+      }
       if (params.length >= 2) {
         return list
           .filter((r) => r.center_id === params[0] && r.session_id === params[1])

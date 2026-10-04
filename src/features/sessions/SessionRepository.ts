@@ -150,7 +150,6 @@ export class SessionRepository {
          ON packageSubject.center_id = packageSubscription.center_id
         AND packageSubject.package_id = packageSubscription.package_id
         AND packageSubject.subject_id = COALESCE(packageSession.subject_id, (SELECT subject_id FROM groups WHERE center_id = packageSession.center_id AND id = packageSession.group_id))
-        AND (packageSubject.group_id IS NULL OR packageSubject.group_id = packageSession.group_id)
        LEFT JOIN package_subject_teacher_overrides selectedPackageTeacher
          ON selectedPackageTeacher.center_id = packageSubscription.center_id
         AND selectedPackageTeacher.subscription_id = packageSubscription.id
@@ -159,8 +158,17 @@ export class SessionRepository {
          ON packageStudent.center_id = packageSubscription.center_id
         AND packageStudent.id = packageSubscription.student_id
        WHERE packageSession.center_id = ? AND packageSession.id = ?
+         AND (
+           packageSubject.group_id IS NULL
+           OR packageSubject.group_id = packageSession.group_id
+           OR selectedPackageTeacher.group_id = packageSession.group_id
+         )
          AND COALESCE(selectedPackageTeacher.teacher_id, packageSubject.default_teacher_id) =
              COALESCE(packageSession.teacher_id, (SELECT teacher_id FROM groups WHERE center_id = packageSession.center_id AND id = packageSession.group_id))
+         AND (
+           selectedPackageTeacher.id IS NULL
+           OR selectedPackageTeacher.group_id = packageSession.group_id
+         )
          AND (
            selectedPackageTeacher.id IS NOT NULL
            OR NOT EXISTS (

@@ -105,7 +105,7 @@ export class GradeBookRepository {
     const exam: GradeExam = { id, centerId, name: cleanName, grade: cleanGrade, groupId, maxScore, status: "active", createdAt: now, updatedAt: now };
     const db = DatabaseService.getDb();
     DatabaseService.runInTransaction(() => {
-      db.runSync(`INSERT INTO grade_exams (id, center_id, name, grade, group_id, max_score, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?)`, [id, centerId, cleanName, cleanGrade, groupId, maxScore, now, now]);
+      db.runSync(`INSERT INTO grade_exams (id, center_id, name, grade, group_id, max_score, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?)`, [id, centerId, cleanName, cleanGrade, groupId, maxScore, now, now]);
       SyncRepository.enqueueOperation({ operationId, centerId, userId: user.id, deviceId: DeviceService.getDeviceIdSync(), operationType: "CREATE", entityType: "grade_exam", entityId: id, payload: { ...exam, maxScore, groupId, createdAt: now, updatedAt: now } });
       AuditService.recordEvent({ operationId, centerId, userId: user.id, deviceId: DeviceService.getDeviceIdSync(), entityType: "grade_exam", entityId: id, action: "grade.exam.create", payload: { name: cleanName, groupId, actorName: user.fullName } });
     });

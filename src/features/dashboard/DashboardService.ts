@@ -88,14 +88,14 @@ export class DashboardService {
              ON selected.center_id = sps.center_id AND selected.subscription_id = sps.id AND selected.subject_id = ps.subject_id
            WHERE sps.center_id = ? AND sps.status = 'active'
              AND sps.start_date <= ? AND (sps.end_date IS NULL OR sps.end_date >= ?)
-             AND ps.subject_id = ? AND (ps.group_id IS NULL OR ps.group_id = ?)
+             AND ps.subject_id = ? AND (ps.group_id = ? OR selected.group_id = ?)
              AND COALESCE(selected.teacher_id, ps.default_teacher_id) = ?
-             AND (selected.id IS NULL OR selected.group_id IS NULL OR selected.group_id = ?)
+             AND (selected.id IS NULL OR selected.group_id = ?)
              AND (selected.id IS NOT NULL OR NOT EXISTS (
                SELECT 1 FROM package_subject_teacher_overrides any_selection
                WHERE any_selection.center_id = sps.center_id AND any_selection.subscription_id = sps.id
              ))`,
-          [centerId, dateStr, dateStr, subjectId, groupId, teacherId, groupId],
+          [centerId, dateStr, dateStr, subjectId, groupId, groupId, teacherId, groupId],
         );
         packageRows.forEach((row: any) => {
           const id = row.studentId ?? row.student_id;
@@ -180,9 +180,9 @@ export class DashboardService {
         [centerId, session.id],
       );
       const counts = calculateSessionAttendanceCounts(expectedIds, attendance, covered.map((row: any) => String(row.studentId)));
-      // Makeup is a successful attendance for the daily totals; the separate
-      // makeup counter preserves the compensation breakdown.
-      presentCount += counts.present;
+      // Keep present and late disjoint. Makeup is shown as its own count,
+      // outside the expected roster.
+      presentCount += Math.max(0, counts.present - counts.late) + counts.makeup;
       lateCount += counts.late;
       absentCount += counts.absent;
       makeupCount += counts.makeup;

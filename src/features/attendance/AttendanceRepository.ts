@@ -37,13 +37,29 @@ export class AttendanceRepository {
    * Strictly scopes query to the active authenticated center.
    */
   static isAlreadyAttended(sessionId: string, studentId: string): boolean {
+    return this.getStudentAttendanceInSession(sessionId, studentId) !== null;
+  }
+
+  static getStudentAttendanceInSession(sessionId: string, studentId: string): Attendance | null {
     const { centerId } = this.getActiveContext();
     const db = DatabaseService.getDb();
-    const existing = db.getFirstSync<any>(
-      "SELECT id FROM attendance WHERE center_id = ? AND session_id = ? AND student_id = ?",
+    const row = db.getFirstSync<any>(
+      `SELECT id, center_id as centerId, student_id as studentId,
+              session_id as sessionId, check_in_time as checkInTime,
+              status, is_late as isLate, attendance_type as attendanceType,
+              original_absence_id as originalAbsenceId,
+              is_external as isExternal, operation_id as operationId
+       FROM attendance
+       WHERE center_id = ? AND session_id = ? AND student_id = ?`,
       [centerId, sessionId, studentId],
     );
-    return !!existing;
+    if (!row) return null;
+    return {
+      ...row,
+      isLate: Boolean(row.isLate),
+      isExternal: Boolean(row.isExternal),
+      attendanceType: row.attendanceType || "present",
+    } as Attendance;
   }
 
   /**
@@ -86,6 +102,14 @@ export class AttendanceRepository {
 
     const db = DatabaseService.getDb();
 
+    const student = db.getFirstSync<{ status: string; deletedAt?: string | null }>(
+      "SELECT status, deleted_at as deletedAt FROM students WHERE center_id = ? AND id = ?",
+      [centerId, params.studentId],
+    );
+    if (!student || student.deletedAt || student.status === "deleted") {
+      throw new ConflictError("الطالب غير موجود أو تم حذفه من هذا المركز.");
+    }
+
     // Check session status
     const session = db.getFirstSync<any>(
       `SELECT s.id, s.status, s.group_id as groupId,
@@ -99,6 +123,9 @@ export class AttendanceRepository {
     );
     if (!session) {
       throw new ConflictError("الحصة غير موجودة في المركز الحالي.");
+    }
+    if (session.status !== "open") {
+      throw new ConflictError("ابدأ جلسة الحضور قبل تسجيل الطالب.");
     }
     if (session?.status === "closed") {
       throw new ConflictError("لا يمكن تسجيل الحضور في حصة مغلقة.");
@@ -396,6 +423,7 @@ export class AttendanceRepository {
         actorName: user.fullName,
       },
     });
+    DatabaseService.notifyLocalChange({ centerId, entityType: "attendance", entityId: attendanceId });
     });
 
     // Sync only after the transaction commits. Starting a sync from inside

@@ -405,9 +405,12 @@ export class FinancialCalculationService {
         AND selected.subject_id = ps.subject_id
        WHERE dc.center_id = ? AND dc.student_id = ? AND dc.cycle_type = 'package'
          AND ps.subject_id = scoped_group.subject_id
-         AND dc.group_id = scoped_group.id
-         AND (ps.group_id IS NULL OR ps.group_id = ?)
+         -- Package cycles use group_id for the package ledger key, not a
+         -- teaching group. Scope display via the selected package option.
+         AND dc.package_id = sps.package_id
+         AND (ps.group_id = ? OR selected.group_id = ?)
          AND COALESCE(selected.teacher_id, ps.default_teacher_id) = scoped_group.teacher_id
+         AND (selected.id IS NULL OR selected.group_id = ?)
          AND (
            selected.id IS NOT NULL
            OR NOT EXISTS (
@@ -416,7 +419,7 @@ export class FinancialCalculationService {
                AND any_selection.subscription_id = sps.id
            )
          )`,
-      [groupId, this.getActiveContext().centerId, studentId, groupId],
+      [groupId, this.getActiveContext().centerId, studentId, groupId, groupId, groupId],
     );
     const packageCycleIds = new Set(packageCycleRows.map((row) => row.id));
     const cycles = full.cycles.filter((cycle) => groupCycles.some((item) => item.id === cycle.id) || packageCycleIds.has(cycle.id));

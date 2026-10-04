@@ -23,8 +23,8 @@ import { NotificationTemplateRepository } from "../../features/notifications/Not
 import { StudentRepository } from "../../features/students/StudentRepository";
 import { Student, Group } from "../../shared/types";
 import { GroupRepository } from "../../features/groups/GroupRepository";
-import { EnrollmentRepository } from "../../features/enrollments/EnrollmentRepository";
 import { GroupScheduleRepository } from "../../features/groups/GroupScheduleRepository";
+import { AttendanceSessionService } from "../../features/attendance/AttendanceSessionService";
 import {
   NotificationDelivery,
   NotificationEvent,
@@ -154,25 +154,49 @@ export default function NotificationsScreen() {
   const sendDirectSms = async () => {
     if (!smsGroupId) return Alert.alert("تنبيه", "اختر المجموعة أولًا.");
     if (!smsMessage.trim()) return Alert.alert("تنبيه", "اكتب نص الرسالة أولًا.");
-    const enrollments = EnrollmentRepository.getActiveEnrollmentsForGroup(smsGroupId);
-    const targets = enrollments.map((enrollment) => students.find((student) => student.id === enrollment.studentId)).filter(Boolean) as Student[];
+    const selectedGroup = groups.find((group) => group.id === smsGroupId);
+    if (!selectedGroup) return Alert.alert("تنبيه", "المجموعة المختارة لم تعد متاحة.");
+    // Use the same roster calculation as attendance: package subscribers are
+    // expected in their selected group even when they have no ordinary
+    // student_group_enrollments row.
+    const expectedStudentIds = AttendanceSessionService.getExpectedStudentIdsForGroup(
+      selectedGroup,
+      selectedGroup.id,
+      getLocalDateOnly(),
+    );
+    const targets = Array.from(new Set(expectedStudentIds))
+      .map((studentId) => students.find((student) => student.id === studentId))
+      .filter(Boolean) as Student[];
     if (!targets.length) return Alert.alert("لا يوجد طلاب", "لا يوجد طلاب نشطون في هذه المجموعة.");
-    const sendableTargets = targets.filter((target) => (smsRecipient === "student" ? target.phone : (target.parentPhone || target.phone))?.trim());
+    // Respect the selected recipient. Do not silently send a parent-directed
+    // message to the student when the guardian number is missing.
+    const sendableTargets = targets.filter((target) =>
+      (smsRecipient === "student" ? target.phone : target.parentPhone)?.trim(),
+    );
     if (!sendableTargets.length) return Alert.alert("لا توجد أرقام", "لا يوجد أي رقم صالح للمستلمين في هذه المجموعة.");
     setSendingSms(true);
+    let queuedCount = 0;
     try {
       for (const target of sendableTargets) {
         const event = NotificationService.notifyCustomSms({ studentId: target.id, message: smsMessage, recipientType: smsRecipient });
         await NotificationService.sendPendingDeliveries(event.id);
+        queuedCount += 1;
       }
       setSmsMessage("");
       setSmsGroupId("");
       setSmsGroupSearch("");
       setActiveTab("history");
       loadData();
-      Alert.alert("تم تجهيز الرسائل", `تم تجهيز ${sendableTargets.length} رسالة وإضافتها إلى طابور SMS للمزامنة.`);
+      const missingRecipientCount = targets.length - sendableTargets.length;
+      Alert.alert(
+        "تم تجهيز الرسائل",
+        `تم تجهيز ${queuedCount} رسالة وإضافتها إلى طابور SMS للمزامنة.${missingRecipientCount ? `\nتم تخطي ${missingRecipientCount} طالبًا لعدم وجود رقم ${smsRecipient === "parent" ? "ولي أمر" : "طالب"}.` : ""}`,
+      );
     } catch (error: any) {
-      Alert.alert("تعذر إرسال الرسالة", error?.message || "حاول مرة أخرى.");
+      Alert.alert(
+        "تعذر إكمال تجهيز الرسائل",
+        `${queuedCount ? `تم تجهيز ${queuedCount} رسالة بالفعل. ` : ""}${error?.message || "حاول مرة أخرى."}`,
+      );
     } finally {
       setSendingSms(false);
     }
@@ -186,7 +210,12 @@ export default function NotificationsScreen() {
       .some((value) => String(value).toLocaleLowerCase().includes(query));
   }).slice(0, 30);
   const selectedSmsGroup = groups.find((group) => group.id === smsGroupId);
-  const smsGroupMemberCount = smsGroupId ? EnrollmentRepository.getActiveEnrollmentsForGroup(smsGroupId).length : 0;
+  const smsGroupMemberCount = useMemo(
+    () => selectedSmsGroup
+      ? AttendanceSessionService.getExpectedStudentIdsForGroup(selectedSmsGroup, selectedSmsGroup.id, getLocalDateOnly()).length
+      : 0,
+    [selectedSmsGroup, activeCenterId],
+  );
 
   return (
     <View style={styles.container}>

@@ -21,13 +21,17 @@ export function calculateSessionAttendanceCounts(
   const expectedIds = new Set(expectedStudentIds);
   const regularRows = attendance.filter((item) => item.attendanceType !== "makeup");
   const presentIds = new Set(
-    attendance
+    regularRows
       .filter((item) => (item.status === "present" || item.status === "late") && expectedIds.has(item.studentId))
       .map((item) => item.studentId),
   );
   const advancedIds = new Set(coveredInAdvanceIds.filter((id) => expectedIds.has(id)));
-  const absent = expectedStudentIds.filter((id) => !presentIds.has(id) && !advancedIds.has(id)).length;
-  const makeup = new Set(attendance.filter((item) => item.attendanceType === "makeup").map((item) => item.studentId)).size;
+  const makeupIds = new Set(attendance.filter((item) => item.attendanceType === "makeup").map((item) => item.studentId));
+  // A makeup attendance for a student on this session's roster satisfies
+  // that student's attendance. A visitor from another group is still counted
+  // separately and does not change this session's absence total.
+  const absent = expectedStudentIds.filter((id) => !presentIds.has(id) && !advancedIds.has(id) && !makeupIds.has(id)).length;
+  const makeup = makeupIds.size;
   const late = new Set(
     regularRows
       .filter((item) => item.status === "late" && expectedIds.has(item.studentId))

@@ -55,7 +55,7 @@ describe("Security & Data Integrity Audit Suite", () => {
       );
     });
 
-    it("secretary with malformed permissions (null or empty array) receives ONLY secretary permissions", () => {
+    it("secretary with null permissions receives role defaults, while an explicit empty array denies access", () => {
       const permsNull = resolveUserPermissions({
         role: "secretary",
         permissions: null,
@@ -67,8 +67,8 @@ describe("Security & Data Integrity Audit Suite", () => {
         role: "secretary",
         permissions: [],
       });
-      expect(permsEmpty).toEqual(RolePermissions.secretary);
-      expect(permsEmpty).not.toContain<Permission>("teachers.create");
+      expect(permsEmpty).toEqual([]);
+      expect(PermissionService.hasPermission(permsEmpty, "students.view")).toBe(false);
     });
 
     it("accountant with malformed/missing permissions receives ONLY accountant permissions, NEVER elevated to Admin", () => {

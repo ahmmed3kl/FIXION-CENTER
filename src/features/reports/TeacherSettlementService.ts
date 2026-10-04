@@ -124,14 +124,14 @@ export class TeacherSettlementService {
          ON selected.center_id = sps.center_id
         AND selected.subscription_id = sps.id
         AND selected.subject_id = ps.subject_id
-       JOIN student_group_enrollments e
-         ON e.center_id = sps.center_id AND e.student_id = sps.student_id
-        AND e.status = 'active'
        JOIN groups g
-         ON g.center_id = e.center_id AND g.id = e.group_id
+         ON g.center_id = sps.center_id
         AND g.subject_id = ps.subject_id
         AND g.teacher_id = COALESCE(selected.teacher_id, ps.default_teacher_id)
-        AND (selected.id IS NULL OR selected.group_id IS NULL OR selected.group_id = e.group_id)
+        AND (
+          (selected.id IS NOT NULL AND selected.group_id = g.id)
+          OR (selected.id IS NULL AND ps.group_id = g.id)
+        )
        JOIN teachers t ON t.center_id = g.center_id AND t.id = g.teacher_id
        WHERE p.center_id = ? AND p.is_reversed = 0
          AND p.payment_date >= ? AND p.payment_date <= ?

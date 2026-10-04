@@ -188,7 +188,7 @@ export const RolePermissions: Record<UserRole, Permission[]> = {
   // A center manager is the operational administrator of that center. Keep
   // the complete service catalog available offline; server-side center
   // scoping still prevents access to another center.
-  manager: baseRolePermissions.admin,
+  manager: baseRolePermissions.admin.filter((permission) => permission !== "payments.reverse"),
   owner: baseRolePermissions.admin,
   assistant: baseRolePermissions.secretary,
 };
@@ -211,10 +211,10 @@ const legacyPermissionAliases: Record<string, Permission[]> = {
 
 /**
  * Resolves user permissions strictly adhering to the Principle of Least Privilege:
- * 1. If user has a valid, non-empty Permission[] array, use it directly.
- * 2. If permissions are missing, empty, or malformed:
+ * 1. If permissions are an array, use it exactly, including explicit [].
+ * 2. If permissions are missing or malformed:
  *    - Falls back strictly to that SPECIFIC role's permissions (RolePermissions[role]).
- *    - NEVER elevates a non-admin role (secretary, accountant, manager) to admin.
+ *    - Applies role defaults only when permissions are absent or malformed.
  *    - Unknown or missing roles receive an empty array [] (zero permissions).
  */
 export function resolveUserPermissions(
@@ -222,8 +222,8 @@ export function resolveUserPermissions(
 ): Permission[] {
   if (!user) return [];
 
-  // 1. Valid non-empty array
-  if (Array.isArray(user.permissions) && user.permissions.length > 0) {
+  // 1. Explicit permission array; [] deliberately means no permissions.
+  if (Array.isArray(user.permissions)) {
     return user.permissions as Permission[];
   }
 

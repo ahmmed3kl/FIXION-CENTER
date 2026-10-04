@@ -20,6 +20,9 @@ import { StudentRepository } from "../src/features/students/StudentRepository";
 
 describe("Sprint 3 - FIXION Financial Core & Cash Payments", () => {
   beforeAll(async () => {
+    // These fixtures assert September/November billing boundaries. Keep the
+    // enrollment-time automatic generation deterministic across calendar dates.
+    jest.useFakeTimers().setSystemTime(new Date("2026-09-10T12:00:00.000Z"));
     // 1. Initialize SQLite schema & run all 3 migrations
     DatabaseService.init();
 

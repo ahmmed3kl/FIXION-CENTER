@@ -12,6 +12,9 @@ import { StudentRepository } from "../src/features/students/StudentRepository";
 
 describe("Sprint 1 - FIXION Mobile App Foundation & Complete Working Flow", () => {
   beforeAll(async () => {
+    // These fixtures are written against September 2026. Freeze the clock so
+    // monthly debt generation does not add later real-world billing cycles.
+    jest.useFakeTimers().setSystemTime(new Date("2026-09-10T12:00:00.000Z"));
     // Initialize SQLite Database schema and seed data
     DatabaseService.init();
 

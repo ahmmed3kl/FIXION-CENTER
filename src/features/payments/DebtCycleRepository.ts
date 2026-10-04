@@ -509,9 +509,9 @@ export class DebtCycleRepository {
         AND selected.subject_id = ps.subject_id
        WHERE sps.center_id = ? AND sps.student_id = ? AND sps.status = 'active'
          AND ps.subject_id = covered_group.subject_id
-         AND (ps.group_id IS NULL OR ps.group_id = covered_group.id)
+         AND (ps.group_id = covered_group.id OR selected.group_id = covered_group.id)
          AND COALESCE(selected.teacher_id, ps.default_teacher_id) = covered_group.teacher_id
-         AND (selected.id IS NULL OR selected.group_id IS NULL OR selected.group_id = covered_group.id)
+         AND (selected.id IS NULL OR selected.group_id = covered_group.id)
          AND (selected.id IS NOT NULL OR NOT EXISTS (
            SELECT 1 FROM package_subject_teacher_overrides any_selection
            WHERE any_selection.center_id = sps.center_id AND any_selection.subscription_id = sps.id

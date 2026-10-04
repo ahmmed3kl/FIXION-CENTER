@@ -216,7 +216,9 @@ export class NotificationService {
         channel === "sms"
           ? params.recipientType === "student"
             ? studentRow?.phone || ""
-            : studentRow?.parent_phone || studentRow?.phone || ""
+            : params.recipientType === "parent"
+              ? studentRow?.parent_phone || ""
+              : studentRow?.parent_phone || studentRow?.phone || ""
           : studentRow?.phone || "";
 
       const deliveryId = `ndlv-${generateUUID()}`;

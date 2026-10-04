@@ -239,6 +239,19 @@ export default function DashboardScreen() {
                 {Strings.absentAttendance}
               </Text>
             </View>
+            <View
+              style={[
+                styles.metricBox,
+                { backgroundColor: Colors.warningLight },
+              ]}
+            >
+              <Text style={[styles.metricNumber, { color: Colors.warningText }]}>
+                {formatNumber(summary?.makeupCount || 0)}
+              </Text>
+              <Text style={[styles.metricLabel, { color: Colors.warningText }]}>
+                تعويض
+              </Text>
+            </View>
           </View>
         </AppCard>
 

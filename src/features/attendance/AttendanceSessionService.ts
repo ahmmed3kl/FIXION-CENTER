@@ -488,19 +488,48 @@ export class AttendanceSessionService {
       .map((row: any) => row.studentId ?? row.student_id)
       .filter(Boolean)
       .map(String);
-    // Older sessions may contain package students that were eligible for the
-    // teacher/subject but never assigned to this exact group. Keep the counter
-    // group-scoped by validating the snapshot against the canonical roster.
-    const canonicalExpected = this.getExpectedStudentIdsForGroup(
-      { id: session.groupId, subjectId: session.subjectId, teacherId: session.teacherId } as Group,
-      session.groupId,
-      session.sessionDate,
-    );
-    if (normalizedExpected.length > 0) {
-      const canonicalIds = new Set(canonicalExpected.map(String));
-      normalizedExpected = normalizedExpected.filter((studentId) => canonicalIds.has(studentId));
-    } else {
-      normalizedExpected = canonicalExpected.map(String);
+    // The session snapshot is the historical roster. Ending an enrollment or
+    // package later must not remove students from a session already recorded.
+    if (normalizedExpected.length === 0) {
+      const historicalEnrollments = db.getAllSync<any>(
+        `SELECT student_id as studentId
+         FROM student_group_enrollments
+         WHERE center_id = ? AND group_id = ?
+           AND status IN ('active', 'ended')
+           AND start_date <= ? AND (end_date IS NULL OR end_date >= ?)`,
+        [session.centerId, session.groupId, session.sessionDate, session.sessionDate],
+      );
+      normalizedExpected = historicalEnrollments
+        .map((row: any) => String(row.studentId ?? row.student_id ?? ""))
+        .filter(Boolean);
+      const packageRows = db.getAllSync<any>(
+        `SELECT DISTINCT sps.student_id as studentId
+         FROM student_package_subscriptions sps
+         JOIN package_subjects ps
+           ON ps.center_id = sps.center_id AND ps.package_id = sps.package_id
+         JOIN groups scoped_group
+           ON scoped_group.center_id = sps.center_id AND scoped_group.id = ?
+         LEFT JOIN package_subject_teacher_overrides selected
+           ON selected.center_id = sps.center_id
+          AND selected.subscription_id = sps.id
+          AND selected.subject_id = ps.subject_id
+         WHERE sps.center_id = ? AND sps.status IN ('active', 'ended', 'cancelled')
+           AND sps.start_date <= ? AND (sps.end_date IS NULL OR sps.end_date >= ?)
+           AND ps.subject_id = COALESCE(?, scoped_group.subject_id)
+           AND (ps.group_id = scoped_group.id OR selected.group_id = scoped_group.id)
+           AND COALESCE(selected.teacher_id, ps.default_teacher_id) = COALESCE(?, scoped_group.teacher_id)
+           AND (selected.id IS NULL OR selected.group_id = scoped_group.id)
+           AND (selected.id IS NOT NULL OR NOT EXISTS (
+             SELECT 1 FROM package_subject_teacher_overrides any_selection
+             WHERE any_selection.center_id = sps.center_id
+               AND any_selection.subscription_id = sps.id
+           ))`,
+        [session.groupId, session.centerId, session.sessionDate, session.sessionDate, session.subjectId ?? null, session.teacherId ?? null],
+      );
+      normalizedExpected = Array.from(new Set([
+        ...normalizedExpected,
+        ...packageRows.map((row: any) => String(row.studentId ?? row.student_id ?? "")).filter(Boolean),
+      ]));
     }
     const attendance = db.getAllSync<any>(
       "SELECT student_id as studentId, status, attendance_type as attendanceType FROM attendance WHERE center_id = ? AND session_id = ?",

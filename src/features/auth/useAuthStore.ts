@@ -210,16 +210,14 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 }));
 
 // ─── Permissions safety patch ───────────────────────────────────────────────
-// Intercept state reads so currentUser.permissions is always a valid array,
-// even when the stored JSON was serialised without permissions (e.g. older
-// backend responses or SecureStorage migration issues).
+// Intercept state reads so missing/malformed permissions are normalized.
+// An explicitly empty array is preserved: it means this account has no access.
 const _origGetState = useAuthStore.getState.bind(useAuthStore);
 useAuthStore.getState = () => {
   const state = _origGetState();
   if (
     state.currentUser &&
-    (!Array.isArray(state.currentUser.permissions) ||
-      state.currentUser.permissions.length === 0)
+    !Array.isArray(state.currentUser.permissions)
   ) {
     const fallback = resolveUserPermissions(state.currentUser);
     return {

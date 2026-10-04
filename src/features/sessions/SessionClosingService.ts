@@ -99,63 +99,26 @@ export class SessionClosingService {
     const previousStatus = session.status;
     const now = new Date().toISOString();
 
-    // Update session status to closed
-    db.runSync(
-      `UPDATE sessions SET status = ?, updated_at = ? WHERE center_id = ? AND id = ?`,
-      ["closed", now, centerId, sessionId],
-    );
-
-    // Insert closing record
     const recordId = `scr-${generateUUID()}`;
-    db.runSync(
-      `INSERT INTO session_closing_records (id, operation_id, center_id, session_id, action, performed_by, performed_at, previous_status, new_status, total_attendance, total_session_payments, created_at)
-       VALUES (?, ?, ?, ?, 'close', ?, ?, ?, 'closed', ?, ?, ?)`,
-      [recordId, opId, centerId, sessionId, user.id, now, previousStatus, totalAttendance, totalSessionPayments, now],
-    );
-
     const deviceId = DeviceService.getDeviceIdSync();
-
-    SyncRepository.enqueueOperation({
-      centerId,
-      userId: user.id,
-      deviceId,
-      operationType: "update",
-      entityType: "session",
-      entityId: sessionId,
-      operationId: opId,
-      payload: { action: "close", sessionId, performedBy: user.id },
+    return DatabaseService.runInTransaction(() => {
+      db.runSync(
+        `UPDATE sessions SET status = ?, updated_at = ? WHERE center_id = ? AND id = ?`,
+        ["closed", now, centerId, sessionId],
+      );
+      db.runSync(
+        `INSERT INTO session_closing_records (id, operation_id, center_id, session_id, action, performed_by, performed_at, previous_status, new_status, total_attendance, total_session_payments, created_at)
+         VALUES (?, ?, ?, ?, 'close', ?, ?, ?, 'closed', ?, ?, ?)`,
+        [recordId, opId, centerId, sessionId, user.id, now, previousStatus, totalAttendance, totalSessionPayments, now],
+      );
+      SyncRepository.enqueueOperation({ centerId, userId: user.id, deviceId, operationType: "update", entityType: "session", entityId: sessionId, operationId: opId, payload: { action: "close", sessionId, performedBy: user.id } });
+      AuditService.recordEvent({ operationId: opId, centerId, userId: user.id, deviceId, entityType: "session", entityId: sessionId, action: "session_closed", payload: { sessionId, previousStatus, totalAttendance, totalSessionPayments } });
+      return {
+        id: recordId, operationId: opId, centerId, sessionId, action: "close" as const,
+        performedBy: user.id, performedAt: now, previousStatus, newStatus: "closed" as const,
+        totalAttendance, totalSessionPayments, createdAt: now,
+      };
     });
-
-    AuditService.recordEvent({
-      operationId: opId,
-      centerId,
-      userId: user.id,
-      deviceId,
-      entityType: "session",
-      entityId: sessionId,
-      action: "session_closed",
-      payload: {
-        sessionId,
-        previousStatus,
-        totalAttendance,
-        totalSessionPayments,
-      },
-    });
-
-    return {
-      id: recordId,
-      operationId: opId,
-      centerId,
-      sessionId,
-      action: "close",
-      performedBy: user.id,
-      performedAt: now,
-      previousStatus,
-      newStatus: "closed",
-      totalAttendance,
-      totalSessionPayments,
-      createdAt: now,
-    };
   }
 
   /**
@@ -194,57 +157,26 @@ export class SessionClosingService {
 
     const now = new Date().toISOString();
 
-    // Reopen session
-    db.runSync(
-      `UPDATE sessions SET status = 'open', updated_at = ? WHERE center_id = ? AND id = ?`,
-      [now, centerId, sessionId],
-    );
-
-    // Insert reopen record
     const recordId = `scr-${generateUUID()}`;
-    db.runSync(
-      `INSERT INTO session_closing_records (id, operation_id, center_id, session_id, action, reason, performed_by, performed_at, previous_status, new_status, created_at)
-       VALUES (?, ?, ?, ?, 'reopen', ?, ?, ?, 'closed', 'open', ?)`,
-      [recordId, opId, centerId, sessionId, reason.trim(), user.id, now, now],
-    );
-
     const deviceId = DeviceService.getDeviceIdSync();
-
-    SyncRepository.enqueueOperation({
-      centerId,
-      userId: user.id,
-      deviceId,
-      operationType: "update",
-      entityType: "session",
-      entityId: sessionId,
-      operationId: opId,
-      payload: { action: "reopen", sessionId, reason: reason.trim(), performedBy: user.id },
+    return DatabaseService.runInTransaction(() => {
+      db.runSync(
+        `UPDATE sessions SET status = 'open', updated_at = ? WHERE center_id = ? AND id = ?`,
+        [now, centerId, sessionId],
+      );
+      db.runSync(
+        `INSERT INTO session_closing_records (id, operation_id, center_id, session_id, action, reason, performed_by, performed_at, previous_status, new_status, created_at)
+         VALUES (?, ?, ?, ?, 'reopen', ?, ?, ?, 'closed', 'open', ?)`,
+        [recordId, opId, centerId, sessionId, reason.trim(), user.id, now, now],
+      );
+      SyncRepository.enqueueOperation({ centerId, userId: user.id, deviceId, operationType: "update", entityType: "session", entityId: sessionId, operationId: opId, payload: { action: "reopen", sessionId, reason: reason.trim(), performedBy: user.id } });
+      AuditService.recordEvent({ operationId: opId, centerId, userId: user.id, deviceId, entityType: "session", entityId: sessionId, action: "session_reopened", payload: { sessionId, reason: reason.trim() } });
+      return {
+        id: recordId, operationId: opId, centerId, sessionId, action: "reopen" as const,
+        reason: reason.trim(), performedBy: user.id, performedAt: now,
+        previousStatus: "closed" as const, newStatus: "open" as const, createdAt: now,
+      };
     });
-
-    AuditService.recordEvent({
-      operationId: opId,
-      centerId,
-      userId: user.id,
-      deviceId,
-      entityType: "session",
-      entityId: sessionId,
-      action: "session_reopened",
-      payload: { sessionId, reason: reason.trim() },
-    });
-
-    return {
-      id: recordId,
-      operationId: opId,
-      centerId,
-      sessionId,
-      action: "reopen",
-      reason: reason.trim(),
-      performedBy: user.id,
-      performedAt: now,
-      previousStatus: "closed",
-      newStatus: "open",
-      createdAt: now,
-    };
   }
 
   /**

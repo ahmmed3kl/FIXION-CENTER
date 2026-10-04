@@ -34,7 +34,9 @@ function cleanPermissions(value) {
     : value && typeof value === "object"
       ? Object.keys(value).filter((key) => value[key])
       : [];
-  return Object.fromEntries(Array.from(new Set(keys.filter((permission) => allowedPermissions.has(permission)))).map((permission) => [permission, true]));
+  const permissions = Object.fromEntries(Array.from(new Set(keys.filter((permission) => allowedPermissions.has(permission)))).map((permission) => [permission, true]));
+  // An intentional all-off account must not inherit role defaults.
+  return Object.keys(permissions).length ? permissions : { __explicit_empty__: true };
 }
 function validateRole(role) { if (!roles.has(role)) throw new AppError("VALIDATION_ERROR", "Invalid center account role.", "نوع الحساب يجب أن يكون مديرًا أو مساعدًا.", 400); }
 

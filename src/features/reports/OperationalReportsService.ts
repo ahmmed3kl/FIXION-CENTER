@@ -12,6 +12,7 @@ import {
 import { useAuthStore } from "../auth/useAuthStore";
 import { FinancialCalculationService } from "../payments/FinancialCalculationService";
 import { calculateSessionAttendanceCounts } from "../attendance/AttendanceCalculations";
+import { SessionRepository } from "../sessions/SessionRepository";
 
 export class OperationalReportsService {
   private static getActiveContext() {
@@ -83,14 +84,11 @@ export class OperationalReportsService {
       );
 
       if (expected.length === 0) {
-        const enrolled = db.getAllSync<any>(
-          `SELECT student_id
-           FROM student_group_enrollments
-           WHERE center_id = ? AND group_id = ? AND status = 'active'
-             AND start_date <= ? AND (end_date IS NULL OR end_date >= ?)`,
-          [centerId, s.group_id, s.session_date || dateStr, s.session_date || dateStr],
+        // Reuse session-level reconstruction so package-only subscribers are
+        // included in older sessions that predate expected-roster snapshots.
+        const ids = new Set<string>(
+          SessionRepository.getExpectedStudents(s.id).map((student) => String(student.id)),
         );
-        const ids = new Set<string>(enrolled.map((row) => String(row.student_id)));
         for (const row of attendanceRows) {
           if (row.attendanceType !== "makeup") ids.add(String(row.studentId));
         }

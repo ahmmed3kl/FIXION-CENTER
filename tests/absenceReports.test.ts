@@ -78,6 +78,15 @@ describe("absence report count aggregation", () => {
     expect(result).toMatchObject({ total: 3, present: [], absent: [student("a"), student("b"), student("c")], compensated: 2 });
   });
 
+  it("does not mark an expected student absent when their attendance is recorded as makeup", () => {
+    const result = calculateSessionAttendanceCounts(
+      ["a", "b", "c"],
+      [attendance("a", "present"), makeupAttendance("b")],
+    );
+
+    expect(result).toEqual({ expected: 3, present: 1, absent: 1, late: 0, makeup: 1 });
+  });
+
   it("counts late regular attendance as present while keeping makeup separate", () => {
     const result = calculateSessionAttendanceCounts(
       ["a", "b", "c"],
