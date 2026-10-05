@@ -1,5 +1,5 @@
-import { useRouter } from "expo-router";
-import { useEffect, useMemo, useState } from "react";
+import { useFocusEffect, useRouter } from "expo-router";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Alert, ScrollView, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { PackageRepository } from "../../features/packages/PackageRepository";
@@ -16,6 +16,8 @@ type OptionDraft = { teacherId: string; subjectId: string };
 
 export default function PackagesScreen() {
   const localDataRevision = useLocalDataRevision();
+  const lastLoadedRevisionRef = useRef(localDataRevision);
+  const hasInitialLoadedRef = useRef(false);
   const router = useRouter();
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(), [colors]);
@@ -35,10 +37,37 @@ export default function PackagesScreen() {
   const canCreate = PermissionService.hasPermission(permissions, "packages.create");
   const canUpdate = PermissionService.hasPermission(permissions, "packages.update");
   const subjectsForTeacher = (teacherId: string): Subject[] => { try { return TeacherSubjectRepository.getSubjectsForTeacher(teacherId); } catch { return []; } };
-  const load = () => { try { setPackages(PackageRepository.getPackages(true)); setTeachers(TeacherRepository.getAll()); } catch (e: any) { Alert.alert("خطأ", e?.message || "تعذر تحميل الباقات"); } };
+  const load = useCallback(() => {
+    try {
+      setPackages(PackageRepository.getPackages(true));
+      setTeachers(TeacherRepository.getAll());
+    } catch (e: any) {
+      Alert.alert("خطأ", e?.message || "تعذر تحميل الباقات");
+    }
+  }, []);
   const activeCenterId = useAuthStore((s) => s.activeCenterId);
-  useEffect(() => { load(); }, [activeCenterId]);
-  useEffect(() => { if (localDataRevision > 0) load(); }, [localDataRevision]);
+
+  useEffect(() => {
+    load();
+    hasInitialLoadedRef.current = true;
+    lastLoadedRevisionRef.current = localDataRevision;
+  }, [activeCenterId, load]);
+
+  useFocusEffect(
+    useCallback(() => {
+      if (hasInitialLoadedRef.current && lastLoadedRevisionRef.current !== localDataRevision) {
+        lastLoadedRevisionRef.current = localDataRevision;
+        load();
+      }
+    }, [localDataRevision, load]),
+  );
+
+  useEffect(() => {
+    if (localDataRevision > 0 && lastLoadedRevisionRef.current !== localDataRevision) {
+      lastLoadedRevisionRef.current = localDataRevision;
+      load();
+    }
+  }, [localDataRevision, load]);
   const reset = () => { setEditing(null); setName(""); setPrice(""); setMaxSelections("1"); setDescription(""); setOptions([]); };
   const beginEdit = (pkg: Package) => { setEditing(pkg); setName(pkg.name); setPrice(String(pkg.price)); setMaxSelections(String(pkg.maxSelections || 1)); setDescription(pkg.description || ""); setOptions(PackageRepository.getPackageSubjects(pkg.id).map((s) => ({ subjectId: s.subjectId, teacherId: s.defaultTeacherId }))); };
   const addOption = () => { const t = teachers[0]; const taught = t ? subjectsForTeacher(t.id) : []; const subjectId = taught[0]?.id || ""; setOptions((old) => [...old, { teacherId: t?.id || "", subjectId }]); };

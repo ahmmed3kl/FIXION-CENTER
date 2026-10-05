@@ -84,6 +84,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       const resolvedPermissions = resolveUserPermissions(user);
       const normalizedUser = { ...user, permissions: resolvedPermissions };
 
+      await SecureStorageService.setItem("user_session", JSON.stringify(normalizedUser));
+
       set({
         currentUser: normalizedUser,
         availableCenters: centers,
@@ -184,6 +186,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         permissions: resolvedPermissions,
       };
 
+      await SecureStorageService.setItem("user_session", JSON.stringify(normalizedUser));
+
       set({
         currentUser: normalizedUser,
         availableCenters: centers,
@@ -211,19 +215,26 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
 // ─── Permissions safety patch ───────────────────────────────────────────────
 // Intercept state reads so missing/malformed permissions are normalized.
-// An explicitly empty array is preserved: it means this account has no access.
+// For admin/owner, an empty array caused by the known restore bug is repaired.
+// For granular roles (manager, assistant, accountant, secretary), an explicit empty array
+// is strictly preserved (Principle of Least Privilege - zero privilege escalation).
 const _origGetState = useAuthStore.getState.bind(useAuthStore);
 useAuthStore.getState = () => {
   const state = _origGetState();
-  if (
-    state.currentUser &&
-    !Array.isArray(state.currentUser.permissions)
-  ) {
-    const fallback = resolveUserPermissions(state.currentUser);
-    return {
-      ...state,
-      currentUser: { ...state.currentUser, permissions: fallback },
-    };
+  if (state.currentUser) {
+    const isSuperUser =
+      state.currentUser.role === "admin" || state.currentUser.role === "owner";
+    const needsRepair =
+      !Array.isArray(state.currentUser.permissions) ||
+      (isSuperUser && state.currentUser.permissions.length === 0);
+
+    if (needsRepair) {
+      const fallback = resolveUserPermissions(state.currentUser);
+      return {
+        ...state,
+        currentUser: { ...state.currentUser, permissions: fallback },
+      };
+    }
   }
   return state;
 };

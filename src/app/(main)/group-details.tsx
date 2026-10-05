@@ -1,8 +1,9 @@
 import { Ionicons } from "@expo/vector-icons";
-import { useLocalSearchParams, useRouter } from "expo-router";
-import { useEffect, useMemo, useState } from "react";
+import { useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FlatList, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { useLocalDataRevision } from "../../core/database/useLocalDataRevision";
 import { Colors, Spacing, Typography, useTheme } from "../../core/theme";
 import { EnrollmentRepository } from "../../features/enrollments/EnrollmentRepository";
 import { GroupRepository } from "../../features/groups/GroupRepository";
@@ -19,12 +20,15 @@ export default function GroupDetailsScreen() {
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(), [colors]);
   const { groupId } = useLocalSearchParams<{ groupId?: string }>();
+  const localDataRevision = useLocalDataRevision();
+  const lastLoadedRevisionRef = useRef(localDataRevision);
+  const hasInitialLoadedRef = useRef(false);
   const [group, setGroup] = useState<Group | null>(null);
   const [students, setStudents] = useState<Student[]>([]);
   const [query, setQuery] = useState("");
   const [schedules, setSchedules] = useState<any[]>([]);
 
-  useEffect(() => {
+  const loadGroupData = useCallback(() => {
     if (!groupId) return;
     const loaded = GroupRepository.findById(String(groupId));
     setGroup(loaded);
@@ -34,6 +38,31 @@ export default function GroupDetailsScreen() {
     setStudents(StudentRepository.getAll().filter((student) => enrolledIds.has(student.id)));
     setSchedules(GroupScheduleRepository.getSchedulesForGroup(loaded.id));
   }, [groupId]);
+
+  // Initial load + reload when navigated to with a different groupId
+  useEffect(() => {
+    loadGroupData();
+    hasInitialLoadedRef.current = true;
+    lastLoadedRevisionRef.current = localDataRevision;
+  }, [groupId]);
+
+  // Refresh when returning from another screen (student enrollment, schedule edit, etc.)
+  useFocusEffect(
+    useCallback(() => {
+      if (hasInitialLoadedRef.current && lastLoadedRevisionRef.current !== localDataRevision) {
+        lastLoadedRevisionRef.current = localDataRevision;
+        loadGroupData();
+      }
+    }, [localDataRevision, loadGroupData]),
+  );
+
+  // React to local DB changes while this screen is visible
+  useEffect(() => {
+    if (localDataRevision > 0 && lastLoadedRevisionRef.current !== localDataRevision) {
+      lastLoadedRevisionRef.current = localDataRevision;
+      loadGroupData();
+    }
+  }, [localDataRevision, loadGroupData]);
 
   const filteredStudents = useMemo(() => smartSearch(students, query, [
     { get: (student) => student.fullName, weight: 1.2 },

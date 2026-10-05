@@ -22,4 +22,13 @@ describe("LocalDataEvents", () => {
     removeBroken();
     removeHealthy();
   });
+
+  it("monotonically increments getRevision on every emit", () => {
+    const initialRevision = LocalDataEvents.getRevision();
+    LocalDataEvents.emit({ entityType: "student", entityId: "s-1" });
+    expect(LocalDataEvents.getRevision()).toBe(initialRevision + 1);
+
+    LocalDataEvents.emit({ entityType: "attendance", entityId: "att-1" });
+    expect(LocalDataEvents.getRevision()).toBe(initialRevision + 2);
+  });
 });

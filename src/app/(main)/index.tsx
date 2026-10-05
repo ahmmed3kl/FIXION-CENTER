@@ -1,6 +1,6 @@
 import { Ionicons } from "@expo/vector-icons";
 import { useFocusEffect, useRouter } from "expo-router";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
     RefreshControl,
     ScrollView,
@@ -11,6 +11,7 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { ConnectivityService } from "../../core/connectivity";
+import { useLocalDataRevision } from "../../core/database/useLocalDataRevision";
 import { Strings, formatCurrency, formatNumber } from "../../core/localization";
 import { SyncEngine, SyncRepository } from "../../core/sync";
 import {
@@ -35,6 +36,9 @@ export default function DashboardScreen() {
   const router = useRouter();
   const { currentUser, activeCenter, activeCenterId, availableCenters } =
     useAuthStore();
+  const localDataRevision = useLocalDataRevision();
+  const lastLoadedRevisionRef = useRef(localDataRevision);
+  const hasInitialLoadedRef = useRef(false);
 
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
   const [syncStats, setSyncStats] = useState({ pending: 0, syncing: 0, synced: 0, failed: 0, conflict: 0, total: 0 });
@@ -61,18 +65,27 @@ export default function DashboardScreen() {
 
   useFocusEffect(
     useCallback(() => {
-      loadData();
-    }, [loadData]),
+      if (!hasInitialLoadedRef.current || lastLoadedRevisionRef.current !== localDataRevision) {
+        hasInitialLoadedRef.current = true;
+        lastLoadedRevisionRef.current = localDataRevision;
+        loadData();
+      }
+    }, [loadData, localDataRevision]),
   );
 
   useEffect(() => {
+    if (localDataRevision > 0 && lastLoadedRevisionRef.current !== localDataRevision) {
+      lastLoadedRevisionRef.current = localDataRevision;
+      loadData();
+    }
+  }, [localDataRevision, loadData]);
+
+  useEffect(() => {
     const unsubscribe = ConnectivityService.subscribe(setConnectivity);
-    const refreshTimer = setInterval(loadData, 2000);
     return () => {
       unsubscribe();
-      clearInterval(refreshTimer);
     };
-  }, [loadData]);
+  }, []);
 
   const onRefresh = async () => {
     setRefreshing(true);

@@ -69,7 +69,7 @@ export class SessionRepository {
   static getSessionsForMonth(month: string): Session[] {
     const { centerId, user } = this.getActiveContext();
     if (!PermissionService.hasAnyPermission(user.permissions, ["sessions.view", "reports.attendance.view", "reports.view"])) {
-      throw new ForbiddenError("Ù„ÙŠØ³ Ù„Ø¯ÙŠÙƒ ØµÙ„Ø§Ø­ÙŠØ© Ø¹Ø±Ø¶ Ø§Ù„Ø­ØµØµ.");
+      throw new ForbiddenError("ليس لديك صلاحية عرض الحصص.");
     }
     const db = DatabaseService.getDb();
     return db.getAllSync<Session>(
@@ -95,7 +95,7 @@ export class SessionRepository {
   static getExpectedStudents(sessionId: string): Student[] {
     const { centerId, user } = this.getActiveContext();
     if (!PermissionService.hasAnyPermission(user.permissions, ["attendance.view", "reports.attendance.view", "reports.view"])) {
-      throw new ForbiddenError("Ù„ÙŠØ³ Ù„Ø¯ÙŠÙƒ ØµÙ„Ø§Ø­ÙŠØ© Ø¹Ø±Ø¶ Ø¨ÙŠØ§Ù†Ø§Øª Ø§Ù„Ø­Ø¶ÙˆØ± ÙˆØ§Ù„ØºÙŠØ§Ø¨.");
+      throw new ForbiddenError("ليس لديك صلاحية عرض بيانات الحضور والغياب.");
     }
     const db = DatabaseService.getDb();
     const rows = db.getAllSync<Student>(

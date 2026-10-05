@@ -8,7 +8,7 @@ import {
     UnauthorizedError,
     ValidationError,
 } from "../../core/errors";
-import { PermissionService } from "../../core/permissions";
+import { PermissionService, resolveUserPermissions } from "../../core/permissions";
 import { SyncEngine, SyncRepository } from "../../core/sync";
 import { Student } from "../../shared/types";
 import { isEgyptianPhone, isNumericCode, isValidName, normalizeDigits, ValidationMessages } from "../../shared/utils/validation";
@@ -46,13 +46,8 @@ export class StudentRepository {
         "يجب تسجيل الدخول وتحديد المركز للوصول إلى بيانات الطلاب.",
       );
     }
-    // Normalize permissions — they may be missing/malformed after JSON.parse
-    const user = {
-      ...currentUser,
-      permissions: Array.isArray(currentUser.permissions)
-        ? currentUser.permissions
-        : [],
-    };
+    const permissions = resolveUserPermissions(currentUser);
+    const user = { ...currentUser, permissions };
     return { centerId: activeCenterId, user };
   }
 
@@ -137,7 +132,7 @@ export class StudentRepository {
   static findByIdForAttendanceReport(studentId: string): Student | null {
     const { user } = this.getActiveContext();
     if (!PermissionService.hasAnyPermission(user.permissions, ["attendance.view", "reports.attendance.view", "reports.view"])) {
-      throw new ForbiddenError("Ù„ÙŠØ³ Ù„Ø¯ÙŠÙƒ ØµÙ„Ø§Ø­ÙŠØ© Ø¹Ø±Ø¶ Ø¨ÙŠØ§Ù†Ø§Øª Ø§Ù„Ø­Ø¶ÙˆØ±.");
+      throw new ForbiddenError("ليس لديك صلاحية عرض بيانات الحضور.");
     }
     return this.findByIdInternal(studentId);
   }
@@ -145,7 +140,7 @@ export class StudentRepository {
   static getDeletedStudents(): Student[] {
     const { centerId, user } = this.getActiveContext();
     if (!PermissionService.hasPermission(user.permissions, "students.view")) {
-      throw new ForbiddenError("Ù„ÙŠØ³ Ù„Ø¯ÙŠÙƒ ØµÙ„Ø§Ø­ÙŠØ© Ø¹Ø±Ø¶ Ø¨ÙŠØ§Ù†Ø§Øª Ø§Ù„Ø·Ù„Ø§Ø¨.");
+      throw new ForbiddenError("ليس لديك صلاحية عرض بيانات الطلاب.");
     }
     const db = DatabaseService.getDb();
     const rows = db.getAllSync<any>(
@@ -246,7 +241,7 @@ export class StudentRepository {
     const canRead = PermissionService.hasPermission(user.permissions, "students.view") ||
       PermissionService.hasPermission(user.permissions, "attendance.view") ||
       PermissionService.hasPermission(user.permissions, "attendance.create");
-    if (!canRead) throw new ForbiddenError("Ù„ÙŠØ³ Ù„Ø¯ÙŠÙƒ ØµÙ„Ø§Ø­ÙŠØ© Ø¹Ø±Ø¶ Ø§Ù„Ø·Ù„Ø§Ø¨ Ù„Ù„Ø­Ø¶ÙˆØ±.");
+    if (!canRead) throw new ForbiddenError("ليس لديك صلاحية عرض الطلاب للحضور.");
     const db = DatabaseService.getDb();
     const rows = db.getAllSync<any>(
       `SELECT id, center_id as centerId, student_code as studentCode, full_name as fullName,
@@ -653,11 +648,11 @@ export class StudentRepository {
   static restoreDeletedStudent(studentId: string): Student {
     const { centerId, user } = this.getActiveContext();
     if (!PermissionService.hasPermission(user.permissions, "students.deactivate")) {
-      throw new ForbiddenError("Ù„ÙŠØ³ Ù„Ø¯ÙŠÙƒ ØµÙ„Ø§Ø­ÙŠØ© Ø§Ø³ØªØ±Ø¬Ø§Ø¹ Ø§Ù„Ø·Ø§Ù„Ø¨.");
+      throw new ForbiddenError("ليس لديك صلاحية استرجاع الطالب.");
     }
     const existing = this.findByIdInternal(studentId);
-    if (!existing) throw new NotFoundError("Ø§Ù„Ø·Ø§Ù„Ø¨ ØºÙŠØ± Ù…ÙˆØ¬ÙˆØ¯.");
-    if (!existing.deletedAt) throw new ConflictError("Ø§Ù„Ø·Ø§Ù„Ø¨ Ù…Ø³ØªØ±Ø¬Ø¹ Ø¨Ø§Ù„ÙØ¹Ù„.");
+    if (!existing) throw new NotFoundError("الطالب غير موجود.");
+    if (!existing.deletedAt) throw new ConflictError("الطالب مسترجع بالفعل.");
 
     const db = DatabaseService.getDb();
     const now = new Date().toISOString();

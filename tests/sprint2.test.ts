@@ -137,7 +137,7 @@ describe("Sprint 2 - FIXION Academic Core", () => {
         fullName: "Another Student",
         phone: "01022223333",
         parentPhone: "01122223333",
-        grade: "Ø§Ù„ØµÙ Ø§Ù„Ø«Ø§Ù†ÙŠ Ø§Ù„Ø«Ø§Ù†ÙˆÙŠ",
+        grade: "الصف الثاني الثانوي",
       });
       expect(other.cardCode).toBe("00907");
       expect(() => StudentCardRepository.replaceCard(student!.id, "00907")).toThrow(ConflictError);

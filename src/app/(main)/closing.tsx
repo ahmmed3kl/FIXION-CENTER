@@ -1,5 +1,6 @@
 import { Ionicons } from "@expo/vector-icons";
-import React, { useEffect, useMemo, useState } from "react";
+import { useFocusEffect } from "expo-router";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -12,6 +13,7 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
+import { useLocalDataRevision } from "../../core/database/useLocalDataRevision";
 import { PermissionGate } from "../../core/permissions";
 import { Colors, useTheme } from "../../core/theme";
 import { useAuthStore } from "../../features/auth/useAuthStore";
@@ -42,7 +44,11 @@ export default function ClosingScreen() {
   const [sessionReopenModal, setSessionReopenModal] = useState<string | null>(null);
   const [sessionReopenReason, setSessionReopenReason] = useState("");
 
-  const loadData = () => {
+  const localDataRevision = useLocalDataRevision();
+  const lastLoadedRevisionRef = useRef(localDataRevision);
+  const hasInitialLoadedRef = useRef(false);
+
+  const loadData = useCallback(() => {
     if (!activeCenterId) return;
     setLoading(true);
     try {
@@ -68,11 +74,29 @@ export default function ClosingScreen() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [activeCenterId, todayDate]);
 
   useEffect(() => {
     loadData();
-  }, [activeCenterId]);
+    hasInitialLoadedRef.current = true;
+    lastLoadedRevisionRef.current = localDataRevision;
+  }, [activeCenterId, loadData]);
+
+  useFocusEffect(
+    useCallback(() => {
+      if (hasInitialLoadedRef.current && lastLoadedRevisionRef.current !== localDataRevision) {
+        lastLoadedRevisionRef.current = localDataRevision;
+        loadData();
+      }
+    }, [localDataRevision, loadData]),
+  );
+
+  useEffect(() => {
+    if (localDataRevision > 0 && lastLoadedRevisionRef.current !== localDataRevision) {
+      lastLoadedRevisionRef.current = localDataRevision;
+      loadData();
+    }
+  }, [localDataRevision, loadData]);
 
   const handleCloseDaily = () => {
     Alert.alert(

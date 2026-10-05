@@ -1,7 +1,7 @@
-﻿﻿import { Ionicons } from "@expo/vector-icons";
+import { Ionicons } from "@expo/vector-icons";
 import { useCameraPermissions } from "expo-camera";
-import { router, useLocalSearchParams } from "expo-router";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { router, useFocusEffect, useLocalSearchParams } from "expo-router";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
     Alert,
     FlatList,
@@ -120,6 +120,8 @@ function firstScheduledDate(groupId: string): string {
 
 export default function StudentsScreen() {
   const localDataRevision = useLocalDataRevision();
+  const lastLoadedRevisionRef = useRef(localDataRevision);
+  const hasInitialLoadedRef = useRef(false);
   const { colors } = useTheme();
   const { width: screenWidth, height: screenHeight, gutter, isTablet, isLandscape } = useResponsiveLayout();
   const styles = useMemo(() => createStyles(screenWidth, screenHeight, gutter, isTablet, isLandscape), [colors, screenWidth, screenHeight, gutter, isTablet, isLandscape]);
@@ -327,9 +329,35 @@ export default function StudentsScreen() {
       if (requested) openStudentDetails(requested);
     }
     if (add === "1") setIsAddStudentOpen(true);
+    hasInitialLoadedRef.current = true;
+    lastLoadedRevisionRef.current = localDataRevision;
   }, [activeCenterId, studentId, add]);
+
+  // Refresh student list AND the active student profile (if open) when focus returns.
+  useFocusEffect(
+    useCallback(() => {
+      if (hasInitialLoadedRef.current && lastLoadedRevisionRef.current !== localDataRevision) {
+        lastLoadedRevisionRef.current = localDataRevision;
+        loadData();
+        if (selectedStudent) {
+          const refreshed = StudentRepository.findById(selectedStudent.id);
+          if (refreshed) openStudentDetails(refreshed);
+        }
+      }
+    }, [localDataRevision, selectedStudent]),
+  );
+
+  // React to local DB changes (attendance, enrollments, payments, etc.)
+  // Refreshes the student list AND the active student profile.
   useEffect(() => {
-    if (localDataRevision > 0) loadData();
+    if (localDataRevision > 0 && lastLoadedRevisionRef.current !== localDataRevision) {
+      lastLoadedRevisionRef.current = localDataRevision;
+      loadData();
+      if (selectedStudent) {
+        const refreshed = StudentRepository.findById(selectedStudent.id);
+        if (refreshed) openStudentDetails(refreshed);
+      }
+    }
   }, [localDataRevision]);
 
   // Keep the profile payment form aligned with the attendance payment flow:
@@ -1144,8 +1172,8 @@ export default function StudentsScreen() {
 
               {profileTab === "notes" && <View style={styles.profileSection}><View style={styles.profileSectionHeader}><View><Text style={styles.profileSectionTitle}>الملاحظات</Text><Text style={styles.profileSectionCaption}>ملاحظة الطالب المحفوظة في بياناته</Text></View>{canUpdateStudent && <TouchableOpacity style={styles.profileInlineAction} onPress={openStudentEdit}><Ionicons name="create-outline" size={17} color={Colors.primary} /><Text style={styles.profileInlineActionText}>{selectedStudent.notes ? "تعديل" : "إضافة"}</Text></TouchableOpacity>}</View>{selectedStudent.notes?.trim() ? <View style={styles.profileNoteCard}><Ionicons name="document-text-outline" size={18} color={Colors.primary} /><Text style={styles.profileNoteText}>{selectedStudent.notes}</Text></View> : <View style={styles.profileEmpty}><Ionicons name="document-text-outline" size={25} color={Colors.slate400} /><Text style={styles.profileEmptyTitle}>لا توجد ملاحظات بعد</Text><Text style={styles.profileEmptyText}>يمكنك إضافة ملاحظة ضمن بيانات الطالب.</Text></View>}</View>}
               {profileTab === "activity" && <View style={styles.profileSection}>
-                {canUpdateStudent && <View style={styles.profileNoteCard}><AppInput value={noteText} onChangeText={setNoteText} placeholder="Ø£Ø¶Ù Ù…Ù„Ø§Ø­Ø¸Ø© Ø¬Ø¯ÙŠØ¯Ø©" multiline /><TouchableOpacity style={styles.profileInlineAction} onPress={() => void saveStudentNote()}><Ionicons name="save-outline" size={17} color={Colors.primary} /><Text style={styles.profileInlineActionText}>{editingNoteId ? "ØªØ­Ø¯ÙŠØ« Ø§Ù„Ù…Ù„Ø§Ø­Ø¸Ø©" : "Ø­ÙØ¸ Ø§Ù„Ù…Ù„Ø§Ø­Ø¸Ø©"}</Text></TouchableOpacity></View>}
-                {studentNotes.map((note) => <View key={note.id} style={styles.profilePaymentRow}><View style={styles.profileRowCopy}><Text style={styles.profileRowTitle}>{note.text}</Text><Text style={styles.profileRowMeta}>{note.createdByName || "Ø­Ø³Ø§Ø¨"} Â· {formatLocalDateTime(note.createdAt)}</Text></View><View style={styles.profilePaymentActions}><TouchableOpacity onPress={() => { setEditingNoteId(note.id); setNoteText(note.text); }}><Ionicons name="create-outline" size={18} color={Colors.primary} /></TouchableOpacity><TouchableOpacity onPress={() => void removeStudentNote(note.id)}><Ionicons name="trash-outline" size={18} color={Colors.danger} /></TouchableOpacity></View></View>)}
+                {canUpdateStudent && <View style={styles.profileNoteCard}><AppInput value={noteText} onChangeText={setNoteText} placeholder="أضف ملاحظة جديدة" multiline /><TouchableOpacity style={styles.profileInlineAction} onPress={() => void saveStudentNote()}><Ionicons name="save-outline" size={17} color={Colors.primary} /><Text style={styles.profileInlineActionText}>{editingNoteId ? "تحديث الملاحظة" : "حفظ الملاحظة"}</Text></TouchableOpacity></View>}
+                {studentNotes.map((note) => <View key={note.id} style={styles.profilePaymentRow}><View style={styles.profileRowCopy}><Text style={styles.profileRowTitle}>{note.text}</Text><Text style={styles.profileRowMeta}>{note.createdByName || "حساب"} · {formatLocalDateTime(note.createdAt)}</Text></View><View style={styles.profilePaymentActions}><TouchableOpacity onPress={() => { setEditingNoteId(note.id); setNoteText(note.text); }}><Ionicons name="create-outline" size={18} color={Colors.primary} /></TouchableOpacity><TouchableOpacity onPress={() => void removeStudentNote(note.id)}><Ionicons name="trash-outline" size={18} color={Colors.danger} /></TouchableOpacity></View></View>)}
                 <View style={styles.profileSectionHeader}><View><Text style={styles.profileSectionTitle}>سجل النشاط</Text><Text style={styles.profileSectionCaption}>من أضاف الطالب أو عدّل بياناته أو سجّل دفعة أو حضورًا</Text></View></View>
                 {studentAuditLogs.length === 0 ? <Text style={styles.profileEmptyText}>لا يوجد نشاط مسجل لهذا الطالب.</Text> : studentAuditLogs.slice(0, 100).map((log) => { let payload: any = {}; try { payload = log.payload ? JSON.parse(log.payload) : {}; } catch {} const actionLabels: Record<string, string> = { "student.create": "تم إضافة الطالب", "student.update": "تم تعديل بيانات الطالب", "student.card_code.updated": "تم تحديث كود الكارت", "student.deactivate": "تم تعطيل الطالب", "student.delete": "تم حذف الطالب", "student_card.issue": "تم إصدار بطاقة جديدة", "student_card.deactivate": "تم تحديث سجل بطاقة قديم", "student_card.reactivate": "تم تحديث سجل بطاقة قديم", "attendance.record": "تم تسجيل الحضور", "attendance.makeup": "تم تسجيل تعويض", "payment.create": "تم تسجيل دفعة", "payment.delete": "تم حذف دفعة", "enrollment.create": "تم التسجيل في مجموعة", "enrollment.end": "تم إنهاء التسجيل", "enrollment.transfer": "تم تحويل المجموعة", "note.create": "تم إضافة ملاحظة", "note.update": "تم تعديل ملاحظة", "note.delete": "تم حذف ملاحظة" }; const actionLabel = actionLabels[log.action] || log.action; return <View key={log.id} style={styles.profileHistoryRow}><View style={styles.profileHistoryIcon}><Ionicons name="time-outline" size={16} color={Colors.primary} /></View><View style={styles.profileRowCopy}><Text style={styles.profileRowTitle}>{actionLabel}</Text><Text style={styles.profileRowMeta}>{payload.actorName || (log.userId === currentUser?.id ? currentUser?.fullName : `مستخدم`)} · {formatLocalDateTime(log.timestamp)}</Text></View></View>; })}
               </View>}

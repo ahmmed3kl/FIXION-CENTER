@@ -1,8 +1,9 @@
 import { Ionicons } from "@expo/vector-icons";
 import { router, useFocusEffect } from "expo-router";
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Alert, FlatList, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { useLocalDataRevision } from "../../core/database/useLocalDataRevision";
 import { PermissionService } from "../../core/permissions";
 import { Colors, Spacing, Typography, useTheme } from "../../core/theme";
 import { useAuthStore } from "../../features/auth/useAuthStore";
@@ -18,6 +19,9 @@ export default function DeletedStudentsScreen() {
   const permissions = currentUser?.permissions || [];
   const canView = PermissionService.hasPermission(permissions, "students.view");
   const canRestore = PermissionService.hasPermission(permissions, "students.deactivate");
+  const localDataRevision = useLocalDataRevision();
+  const lastLoadedRevisionRef = useRef(localDataRevision);
+  const hasInitialLoadedRef = useRef(false);
   const [students, setStudents] = useState<Student[]>([]);
   const [search, setSearch] = useState("");
   const [loadError, setLoadError] = useState("");
@@ -33,8 +37,19 @@ export default function DeletedStudentsScreen() {
   }, [canView]);
 
   useFocusEffect(useCallback(() => {
-    loadDeletedStudents();
-  }, [loadDeletedStudents]));
+    if (!hasInitialLoadedRef.current || lastLoadedRevisionRef.current !== localDataRevision) {
+      hasInitialLoadedRef.current = true;
+      lastLoadedRevisionRef.current = localDataRevision;
+      loadDeletedStudents();
+    }
+  }, [loadDeletedStudents, localDataRevision]));
+
+  useEffect(() => {
+    if (localDataRevision > 0 && lastLoadedRevisionRef.current !== localDataRevision) {
+      lastLoadedRevisionRef.current = localDataRevision;
+      loadDeletedStudents();
+    }
+  }, [localDataRevision, loadDeletedStudents]);
 
   const visibleStudents = search.trim()
     ? smartSearch(students, search, [

@@ -267,7 +267,7 @@ export class PaymentRepository {
           )?.endDate || null;
         }
         if (endDate && paymentDate > endDate.slice(0, 10)) {
-          throw new ValidationError("Ù„Ø§ ÙŠÙ…ÙƒÙ† ØªØ³Ø¬ÙŠÙ„ Ø¯ÙØ¹ Ø¨Ø¹Ø¯ Ø¥Ù†Ù‡Ø§Ø¡ Ø§Ù„Ø§Ø´ØªØ±Ø§Ùƒ.");
+          throw new ValidationError("لا يمكن تسجيل دفع بعد إنهاء الاشتراك.");
         }
       }
     }

@@ -30,6 +30,7 @@ yarn-error.*
 .vscode/
 .claude/
 .idea/
+.brud/
 
 # macOS
 .DS_Store

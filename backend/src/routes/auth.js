@@ -4,7 +4,7 @@ const jwt = require("jsonwebtoken");
 const config = require("../config");
 const db = require("../db");
 const { AppError } = require("../middleware/errorHandler");
-const { authMiddleware } = require("../middleware/auth");
+const { authMiddleware, resolveLivePermissions } = require("../middleware/auth");
 
 const router = express.Router();
 
@@ -130,10 +130,7 @@ router.post("/login", async (req, res, next) => {
       { expiresIn },
     );
 
-    const permissions =
-      typeof user.permissions === "string"
-        ? JSON.parse(user.permissions)
-        : user.permissions || {};
+    const permissions = resolveLivePermissions(user);
 
     return res.json({
       token,

@@ -282,7 +282,7 @@ export class EnrollmentRepository {
   static transferEnrollment(enrollmentId: string, targetGroupId: string): void {
     const { centerId, user } = this.getActiveContext();
     if (!PermissionService.hasPermission(user.permissions, "enrollments.create")) {
-      throw new ForbiddenError("Ù„ÙŠØ³ Ù„Ø¯ÙŠÙƒ ØµÙ„Ø§Ø­ÙŠØ© ØªØ­ÙˆÙŠÙ„ Ø§Ù„Ù…Ø¬Ù…ÙˆØ¹Ø©.");
+      throw new ForbiddenError("ليس لديك صلاحية تحويل المجموعة.");
     }
     const db = DatabaseService.getDb();
     const enrollment = db.getFirstSync<any>(
@@ -290,9 +290,9 @@ export class EnrollmentRepository {
       [centerId, enrollmentId],
     );
     const target = GroupRepository.findById(targetGroupId);
-    if (!enrollment || enrollment.status !== "active") throw new NotFoundError("Ø§Ù„Ø§Ø´ØªØ±Ø§Ùƒ ØºÙŠØ± Ù…ÙˆØ¬ÙˆØ¯.");
-    if (!target || target.status !== "active") throw new ValidationError("Ø§Ù„Ù…Ø¬Ù…ÙˆØ¹Ø© Ø§Ù„Ø¬Ø¯ÙŠØ¯Ø© ØºÙŠØ± Ù…ÙˆØ¬ÙˆØ¯Ø©.");
-    if (enrollment.groupId === targetGroupId) throw new ConflictError("Ø§Ù„Ø·Ø§Ù„Ø¨ Ù…Ø³Ø¬Ù„ Ø¨Ø§Ù„ÙØ¹Ù„ ÙÙŠ Ù‡Ø°Ù‡ Ø§Ù„Ù…Ø¬Ù…ÙˆØ¹Ø©.");
+    if (!enrollment || enrollment.status !== "active") throw new NotFoundError("الاشتراك غير موجود.");
+    if (!target || target.status !== "active") throw new ValidationError("المجموعة الجديدة غير موجودة.");
+    if (enrollment.groupId === targetGroupId) throw new ConflictError("الطالب مسجل بالفعل في هذه المجموعة.");
     // Moving an enrollment keeps its debt-cycle/payment history only when the
     // instructional owner is unchanged. For a different teacher/subject,
     // create a fresh enrollment (and therefore a fresh debt stream) instead of
@@ -329,7 +329,7 @@ export class EnrollmentRepository {
       `SELECT id FROM student_group_enrollments WHERE center_id = ? AND student_id = ? AND group_id = ? AND status = 'active'`,
       [centerId, enrollment.studentId, targetGroupId],
     );
-    if (duplicate) throw new ConflictError("Ø§Ù„Ø·Ø§Ù„Ø¨ Ù…Ø³Ø¬Ù„ Ø¨Ø§Ù„ÙØ¹Ù„ ÙÙŠ Ø§Ù„Ù…Ø¬Ù…ÙˆØ¹Ø© Ø§Ù„Ø¬Ø¯ÙŠØ¯Ø©.");
+    if (duplicate) throw new ConflictError("الطالب مسجل بالفعل في المجموعة الجديدة.");
     const now = new Date().toISOString();
     const operationId = `op-enr-transfer-${Date.now()}-${enrollmentId}`;
     const deviceId = DeviceService.getDeviceIdSync();

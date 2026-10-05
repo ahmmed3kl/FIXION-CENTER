@@ -300,7 +300,7 @@ export class GroupRepository {
        LIMIT 1`,
       [groupId, centerId, groupId, teacherId],
     );
-    if (scheduleConflict) throw new ConflictError(`Ø§Ù„Ù…Ø¯Ø±Ø³ Ù…Ø´ØºÙˆÙ„ Ù…Ø¹ ${scheduleConflict.groupName || "Ù…Ø¬Ù…ÙˆØ¹Ø© Ø£Ø®Ø±Ù‰"} (${scheduleConflict.startTime} - ${scheduleConflict.endTime}).`);
+    if (scheduleConflict) throw new ConflictError(`المدرس مشغول مع ${scheduleConflict.groupName || "مجموعة أخرى"} (${scheduleConflict.startTime} - ${scheduleConflict.endTime}).`);
     const now = new Date().toISOString();
     const name = dto.name !== undefined ? dto.name.trim() : existing.name;
     const grade = dto.grade !== undefined ? dto.grade.trim() : existing.grade;

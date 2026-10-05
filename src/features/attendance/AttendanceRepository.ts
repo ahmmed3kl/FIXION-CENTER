@@ -497,7 +497,7 @@ export class AttendanceRepository {
   ): StudentGroupAttendanceSummary[] {
     const { centerId, user } = this.getActiveContext();
     if (!PermissionService.hasAnyPermission(user.permissions, ["attendance.view", "reports.attendance.view", "reports.view"])) {
-      throw new ForbiddenError("Ù„ÙŠØ³ Ù„Ø¯ÙŠÙƒ ØµÙ„Ø§Ø­ÙŠØ© Ø¹Ø±Ø¶ Ø¨ÙŠØ§Ù†Ø§Øª Ø§Ù„Ø­Ø¶ÙˆØ±.");
+      throw new ForbiddenError("ليس لديك صلاحية عرض بيانات الحضور.");
     }
     const db = DatabaseService.getDb();
     const today = getLocalDateOnly();
@@ -546,7 +546,7 @@ export class AttendanceRepository {
       if (!summary) {
         summary = {
           groupId: row.groupId,
-          groupName: row.groupName || "Ù…Ø¬Ù…ÙˆØ¹Ø©",
+          groupName: row.groupName || "مجموعة",
           subjectName: row.subjectName || undefined,
           teacherName: row.teacherName || undefined,
           expectedSessions: 0,

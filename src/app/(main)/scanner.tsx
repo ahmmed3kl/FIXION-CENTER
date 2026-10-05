@@ -1,4 +1,4 @@
-﻿import { Ionicons } from "@expo/vector-icons";
+import { Ionicons } from "@expo/vector-icons";
 import { CameraView, useCameraPermissions } from "expo-camera";
 import { router, useFocusEffect, useLocalSearchParams } from "expo-router";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -13,6 +13,7 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { getUserErrorMessage } from "../../core/errors";
+import { useLocalDataRevision } from "../../core/database/useLocalDataRevision";
 import { PermissionService } from "../../core/permissions";
 import {
     Strings,
@@ -83,6 +84,9 @@ function ScannerContent() {
   const services = useServiceVisibility();
   const paymentsEnabled = services.isEnabled("payments");
   const currentUser = useAuthStore((state) => state.currentUser);
+  const localDataRevision = useLocalDataRevision();
+  const lastLoadedRevisionRef = useRef(localDataRevision);
+  const hasInitialLoadedRef = useRef(false);
   const { attendanceSessionId, addedStudentId } = useLocalSearchParams<{ attendanceSessionId?: string; addedStudentId?: string }>();
   const [permission, requestPermission] = useCameraPermissions();
   const [isCameraActive, setIsCameraActive] = useState(false);
@@ -156,14 +160,23 @@ function ScannerContent() {
     } catch (error) { setSearchError(getUserErrorMessage(error)); }
   }, []);
 
-  // Refresh when the screen becomes active. The old one-time mount load kept
-  // Friday's groups visible after midnight, while Saturday's schedules were
-  // never loaded until the app was fully restarted.
+  // Refresh when the screen becomes active. Deduplication ensures we don't
+  // double-load when focus and revision fire at the same time.
   useFocusEffect(useCallback(() => {
-    refreshTodayData();
-    const timer = setInterval(refreshTodayData, 60_000);
-    return () => clearInterval(timer);
-  }, [refreshTodayData]));
+    if (!hasInitialLoadedRef.current || lastLoadedRevisionRef.current !== localDataRevision) {
+      hasInitialLoadedRef.current = true;
+      lastLoadedRevisionRef.current = localDataRevision;
+      refreshTodayData();
+    }
+  }, [refreshTodayData, localDataRevision]));
+
+  // React to local data changes (attendance recorded on another screen, sync, etc.)
+  useEffect(() => {
+    if (localDataRevision > 0 && lastLoadedRevisionRef.current !== localDataRevision) {
+      lastLoadedRevisionRef.current = localDataRevision;
+      refreshTodayData();
+    }
+  }, [localDataRevision, refreshTodayData]);
 
   // Restore the exact session when returning from the existing Add Student flow
   // without creating a new session or changing the selected roster.
@@ -441,7 +454,7 @@ function ScannerContent() {
       await StudentNoteRepository.create(student.id, attendanceNoteText);
       setAttendanceNotes(await StudentNoteRepository.listForStudent(student.id));
       setAttendanceNoteText("");
-      Alert.alert("ØªÙ… Ø§Ù„Ø­ÙØ¸", "ØªÙ… Ø¥Ø¶Ø§ÙØ© Ø§Ù„Ù…Ù„Ø§Ø­Ø¸Ø© Ù„Ù…Ù„Ù Ø§Ù„Ø·Ø§Ù„Ø¨.");
+      Alert.alert("تم الحفظ", "تم إضافة الملاحظة لملف الطالب.");
     } catch (error) {
       Alert.alert(Strings.errorTitle, getUserErrorMessage(error));
     }

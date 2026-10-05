@@ -178,4 +178,5 @@ function requirePermission(permissionKey) {
 module.exports = {
   authMiddleware,
   requirePermission,
+  resolveLivePermissions,
 };

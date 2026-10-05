@@ -173,7 +173,7 @@ export class PackageSubscriptionRepository {
         const teacherId = params.selectedTeacherIds?.[optionId] || option.defaultTeacherId;
         const groupId = params.selectedGroupIds?.[optionId] || option.groupId || null;
         if (hasGroupSelection && !groupId) {
-          throw new ValidationError("ÙŠØ¬Ø¨ ØªØ­Ø¯ÙŠØ¯ Ù…Ø¬Ù…ÙˆØ¹Ø© Ù„ÙƒÙ„ Ù…Ø§Ø¯Ø© ÙÙŠ Ø§Ù„Ø¨Ø§Ù‚Ø©.");
+          throw new ValidationError("يجب تحديد مجموعة لكل مادة في الباقة.");
         }
         const selectedGroup = groupId && db.getFirstSync<any>(
           `SELECT id FROM groups
@@ -182,7 +182,7 @@ export class PackageSubscriptionRepository {
           [centerId, groupId, option.subjectId, teacherId, student.grade],
         );
         if (groupId && !selectedGroup) {
-          throw new ValidationError("Ø§Ù„Ù…Ø¬Ù…ÙˆØ¹Ø© Ø§Ù„Ù…Ø®ØªØ§Ø±Ø© Ù„Ø§ ØªØ·Ø§Ø¨Ù‚ Ø§Ù„Ù…Ø§Ø¯Ø© ÙˆØ§Ù„Ù…Ø¯Ø±Ø³ ÙˆØ§Ù„ØµÙ.");
+          throw new ValidationError("المجموعة المختارة لا تطابق المادة والمدرس والصف.");
         }
         if (teacherId !== option.defaultTeacherId && !PermissionService.hasPermission(user.permissions, "packages.manage")) {
           throw new ForbiddenError("لا تملك صلاحية تغيير مدرس مادة الباقة.");
@@ -448,7 +448,7 @@ export class PackageSubscriptionRepository {
            AND subject_id = ? AND teacher_id = ?`,
         [centerId, selectedGroupId, params.subjectId, params.teacherId],
       );
-      if (!selectedGroup) throw new ValidationError("Ø§Ù„Ù…Ø¬Ù…ÙˆØ¹Ø© Ø§Ù„Ù…Ø®ØªØ§Ø±Ø© Ù„Ø§ ØªØ·Ø§Ø¨Ù‚ Ø§Ù„Ù…Ø§Ø¯Ø© ÙˆØ§Ù„Ù…Ø¯Ø±Ø³.");
+      if (!selectedGroup) throw new ValidationError("المجموعة المختارة لا تطابق المادة والمدرس.");
     }
     // Remove existing override if any
     db.runSync(

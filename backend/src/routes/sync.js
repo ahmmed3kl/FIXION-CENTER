@@ -45,7 +45,7 @@ function assertSyncPermission(req, operation) {
   if (!permission || req.user.role === "admin" || req.user.role === "owner") return;
   const permissions = req.user.permissions || {};
   if (Array.isArray(permissions) ? permissions.includes(permission) : permissions[permission] === true) return;
-  throw new AppError("FORBIDDEN", `Missing required permission: ${permission}`, "Ù„ÙŠØ³ Ù„Ø¯ÙŠÙƒ Ø§Ù„ØµÙ„Ø§Ø­ÙŠØ© Ø§Ù„ÙƒØ§ÙÙŠØ© Ù„Ù…Ø²Ø§Ù…Ù†Ø© Ù‡Ø°Ù‡ Ø§Ù„Ø¹Ù…Ù„ÙŠØ©.", 403);
+  throw new AppError("FORBIDDEN", `Missing required permission: ${permission}`, "ليس لديك الصلاحية الكافية لمزامنة هذه العملية.", 403);
 }
 
 /**

@@ -13,6 +13,8 @@ import { useLocalDataRevision } from "../../core/database/useLocalDataRevision";
 
 export default function GradesScreen() {
   const localDataRevision = useLocalDataRevision();
+  const lastLoadedRevisionRef = useRef(localDataRevision);
+  const hasInitialLoadedRef = useRef(false);
   const { colors } = useTheme();
   const { groupId } = useLocalSearchParams<{ groupId?: string }>();
   const styles = useMemo(() => createStyles(), [colors]);
@@ -60,10 +62,22 @@ export default function GradesScreen() {
     } catch (error: any) { Alert.alert("خطأ", error?.message || "تعذر تحميل رصد الدرجات."); }
   }, [loadGroup]);
 
-  useFocusEffect(useCallback(() => { load(); }, [load]));
+  useFocusEffect(
+    useCallback(() => {
+      if (!hasInitialLoadedRef.current || lastLoadedRevisionRef.current !== localDataRevision) {
+        hasInitialLoadedRef.current = true;
+        lastLoadedRevisionRef.current = localDataRevision;
+        load();
+      }
+    }, [load, localDataRevision]),
+  );
+
   useEffect(() => {
-    if (localDataRevision > 0) load();
-  }, [localDataRevision]);
+    if (localDataRevision > 0 && lastLoadedRevisionRef.current !== localDataRevision) {
+      lastLoadedRevisionRef.current = localDataRevision;
+      load();
+    }
+  }, [localDataRevision, load]);
   useFocusEffect(useCallback(() => {
     if (!groupId) return;
     try {

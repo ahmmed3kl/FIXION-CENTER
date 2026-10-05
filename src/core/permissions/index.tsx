@@ -1,5 +1,6 @@
 import React from "react";
 import { Permission, UserRole } from "../../shared/types";
+export type { Permission, UserRole };
 
 const baseRolePermissions: Record<"admin" | "manager" | "secretary" | "accountant", Permission[]> = {
   admin: [
@@ -202,6 +203,10 @@ const legacyPermissionAliases: Record<string, Permission[]> = {
   can_manage_enrollments: ["enrollments.view", "enrollments.create", "enrollments.update", "enrollments.end"],
   can_mark_attendance: ["attendance.view", "attendance.create", "attendance.makeup"],
   can_manage_payments: ["payments.view", "payments.create", "payments.reverse", "payments.adjust"],
+  can_manage_financials: ["payments.view", "payments.create", "payments.reverse", "payments.adjust", "reports.financial.view"],
+  can_collect_payment: ["payments.view", "payments.create"],
+  can_view_reports: ["reports.view", "reports.attendance.view", "reports.financial.view"],
+  can_close_session: ["sessions.close", "sessions.reopen", "daily_closing.view", "daily_closing.close"],
   can_manage_packages: ["packages.view", "packages.create", "packages.update", "packages.manage", "packages.subscribe"],
   can_manage_reports: ["reports.view", "reports.attendance.view", "reports.financial.view"],
   can_manage_users: ["users.view", "users.manage"],
@@ -216,6 +221,17 @@ const legacyPermissionAliases: Record<string, Permission[]> = {
  *    - Falls back strictly to that SPECIFIC role's permissions (RolePermissions[role]).
  *    - Applies role defaults only when permissions are absent or malformed.
  *    - Unknown or missing roles receive an empty array [] (zero permissions).
+ * 1. Admin and Owner are authoritative tenant administrators:
+ *    - {"*": true} or ["*"] resolves to full administrative permissions (RolePermissions.admin).
+ *    - In addition, an admin/owner with an empty representation (due to DB empty object or
+ *      corrupted session-restore cache) resolves to RolePermissions.admin.
+ * 2. Granular operational roles (manager, assistant, secretary, accountant):
+ *    - Preserve their explicit permissions array or granular object flags strictly.
+ *    - An explicit empty array [] REMAINS [] (zero permissions) - NEVER elevated.
+ *    - If permissions are an object with specific keys, only those mapped keys are granted.
+ *    - If permissions are completely absent (undefined/null or empty {}), falls back to that
+ *      role's default permissions only when no explicit restriction exists.
+ * 3. Unknown role / malformed: NEVER elevate to Admin.
  */
 export function resolveUserPermissions(
   user?: { role?: string; permissions?: any } | null,
@@ -223,15 +239,39 @@ export function resolveUserPermissions(
   if (!user) return [];
 
   // 1. Explicit permission array; [] deliberately means no permissions.
+  const role = user.role as UserRole;
+  const isSuperUserRole = role === "admin" || role === "owner";
+
+  // 1. Array representation
   if (Array.isArray(user.permissions)) {
+    // If the array explicitly contains the wildcard "*", resolve to full admin permissions.
+    if (user.permissions.includes("*" as any)) {
+      return RolePermissions.admin;
+    }
+    // Authoritative admin/owner role fallback:
+    // If an admin or owner account has an empty array (due to the known session-restore bug
+    // that converted {"*": true} into []), restore their authoritative admin permissions.
+    if (isSuperUserRole && user.permissions.length === 0) {
+      return RolePermissions.admin;
+    }
+    // For all other roles (manager, assistant, secretary, accountant):
+    // Strict adherence to Principle of Least Privilege: NEVER elevate an empty array []
+    // or an explicitly limited array. Return the exact array contents.
     return user.permissions as Permission[];
   }
 
-  // The API historically returned an object of boolean legacy flags, while
-  // the mobile app uses canonical dotted permission names. Translate the
-  // object instead of silently discarding it and falling back to a broader
-  // role.
-  if (user.permissions && typeof user.permissions === "object" && !Array.isArray(user.permissions)) {
+  // 2. Object representation
+  if (user.permissions && typeof user.permissions === "object") {
+    // Wildcard superuser object representation {"*": true}
+    if (user.permissions["*"] === true || user.permissions["*"] === 1) {
+      return RolePermissions.admin;
+    }
+
+    // Explicit empty flag used by backend centerUsers ({ __explicit_empty__: true })
+    if (user.permissions.__explicit_empty__ === true) {
+      return [];
+    }
+
     const mapped = new Set<Permission>();
     for (const [key, enabled] of Object.entries(user.permissions)) {
       if (enabled !== true) continue;
@@ -241,18 +281,25 @@ export function resolveUserPermissions(
         mapped.add(key as Permission);
       }
     }
-    if (mapped.size > 0 || Object.keys(user.permissions).length > 0) {
+
+    // If valid mapped permissions were found, return them strictly without elevation.
+    if (mapped.size > 0) {
       return Array.from(mapped);
+    }
+
+    // If the object has keys but none mapped to valid permissions,
+    // do NOT fall back to broad role permissions if it wasn't admin/owner.
+    if (Object.keys(user.permissions).length > 0 && !isSuperUserRole) {
+      return [];
     }
   }
 
-  // 2. Strict role-based permissions fallback (Principle of Least Privilege)
-  const role = user.role as UserRole;
+  // 3. Strict role-based permissions fallback (when permissions are missing/absent or empty {} for admin/owner)
   if (role && RolePermissions[role]) {
     return RolePermissions[role];
   }
 
-  // 3. Unknown role / malformed: NEVER elevate to Admin.
+  // 4. Unknown role / malformed: NEVER elevate.
   return [];
 }
 
@@ -263,10 +310,10 @@ export class PermissionService {
   ): boolean {
     if (!userPermissions) return false;
     if (Array.isArray(userPermissions)) {
-      return userPermissions.includes(required);
+      return userPermissions.includes(required) || userPermissions.includes("*" as any);
     }
     if (typeof userPermissions === "object" && userPermissions !== null) {
-      return userPermissions[required] === true;
+      return userPermissions[required] === true || userPermissions["*"] === true;
     }
     return false;
   }
@@ -277,10 +324,10 @@ export class PermissionService {
   ): boolean {
     if (!userPermissions) return false;
     if (Array.isArray(userPermissions)) {
-      return required.some((p) => userPermissions.includes(p));
+      return userPermissions.includes("*" as any) || required.some((p) => userPermissions.includes(p));
     }
     if (typeof userPermissions === "object" && userPermissions !== null) {
-      return required.some((p) => userPermissions[p] === true);
+      return userPermissions["*"] === true || required.some((p) => userPermissions[p] === true);
     }
     return false;
   }
@@ -291,10 +338,10 @@ export class PermissionService {
   ): boolean {
     if (!userPermissions) return false;
     if (Array.isArray(userPermissions)) {
-      return required.every((p) => userPermissions.includes(p));
+      return userPermissions.includes("*" as any) || required.every((p) => userPermissions.includes(p));
     }
     if (typeof userPermissions === "object" && userPermissions !== null) {
-      return required.every((p) => userPermissions[p] === true);
+      return userPermissions["*"] === true || required.every((p) => userPermissions[p] === true);
     }
     return false;
   }

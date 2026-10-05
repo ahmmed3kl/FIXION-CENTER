@@ -245,7 +245,7 @@ export class GroupScheduleRepository {
            AND g.teacher_id=? AND NOT (? <= gs.start_time OR ? >= gs.end_time) LIMIT 1`,
         [centerId, scheduleId, existing.dayOfWeek, group.teacherId, existing.endTime, existing.startTime],
       );
-      if (overlap) throw new ConflictError(`ØªØ¹Ø§Ø±Ø¶ Ù…ÙˆØ§Ø¹ÙŠØ¯ Ø§Ù„Ù…Ø¯Ø±Ø³ Ù…Ø¹ ${overlap.groupName || "Ù…Ø¬Ù…ÙˆØ¹Ø© Ø£Ø®Ø±Ù‰"}.`);
+      if (overlap) throw new ConflictError(`تعارض مواعيد المدرس مع ${overlap.groupName || "مجموعة أخرى"}.`);
     }
     if (!existing) throw new NotFoundError("الموعد غير موجود.");
     const now = new Date().toISOString(); db.runSync("UPDATE group_schedules SET status='active', updated_at=? WHERE center_id=? AND id=?", [now, centerId, scheduleId]);

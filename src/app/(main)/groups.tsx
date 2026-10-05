@@ -1,6 +1,6 @@
 import { Ionicons } from "@expo/vector-icons";
 import { useFocusEffect, useRouter } from "expo-router";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Alert, FlatList, Modal, ScrollView, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Colors, Spacing, Typography, useTheme } from "../../core/theme";
@@ -17,6 +17,8 @@ const DAYS = ["الأحد", "الإثنين", "الثلاثاء", "الأربع�
 
 export default function GroupsScreen() {
   const localDataRevision = useLocalDataRevision();
+  const lastLoadedRevisionRef = useRef(localDataRevision);
+  const hasInitialLoadedRef = useRef(false);
   const router = useRouter();
   const { colors } = useTheme();
   const [groups, setGroups] = useState<Group[]>([]);
@@ -30,8 +32,23 @@ export default function GroupsScreen() {
   const load = useCallback(() => {
     try { setGroups(GroupRepository.getAll(true)); } catch { setGroups([]); }
   }, []);
-  useFocusEffect(useCallback(() => { load(); }, [load]));
-  useEffect(() => { if (localDataRevision > 0) load(); }, [localDataRevision]);
+
+  useFocusEffect(
+    useCallback(() => {
+      if (!hasInitialLoadedRef.current || lastLoadedRevisionRef.current !== localDataRevision) {
+        hasInitialLoadedRef.current = true;
+        lastLoadedRevisionRef.current = localDataRevision;
+        load();
+      }
+    }, [load, localDataRevision]),
+  );
+
+  useEffect(() => {
+    if (localDataRevision > 0 && lastLoadedRevisionRef.current !== localDataRevision) {
+      lastLoadedRevisionRef.current = localDataRevision;
+      load();
+    }
+  }, [localDataRevision, load]);
 
   const visibleGroups = useMemo(() => smartSearch(groups, query, [
     { get: (group) => group.name, weight: 1.2 },

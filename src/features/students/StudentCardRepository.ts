@@ -208,12 +208,12 @@ export class StudentCardRepository {
   static replaceCard(studentId: string, newCardCode: string): Student {
     const { centerId, user } = this.getActiveContext();
     if (!PermissionService.hasPermission(user.permissions, "students.cards.manage")) {
-      throw new ForbiddenError("Ù„ÙŠØ³ Ù„Ø¯ÙŠÙƒ ØµÙ„Ø§Ø­ÙŠØ© ØªØ¹Ø¯ÙŠÙ„ ÙƒÙˆØ¯ ÙƒØ§Ø±Øª Ø§Ù„Ø·Ø§Ù„Ø¨.");
+      throw new ForbiddenError("ليس لديك صلاحية تعديل كود كارت الطالب.");
     }
 
     const cardCode = String(newCardCode || "").trim();
     if (!/^\d+$/.test(cardCode)) {
-      throw new ValidationError("ÙƒÙˆØ¯ Ø§Ù„ÙƒØ§Ø±Øª يجب أن يتكون من أرقام فقط.");
+      throw new ValidationError("كود الكارت يجب أن يتكون من أرقام فقط.");
     }
 
     const db = DatabaseService.getDb();
@@ -225,15 +225,15 @@ export class StudentCardRepository {
        FROM students WHERE center_id = ? AND id = ?`,
       [centerId, studentId],
     );
-    if (!student) throw new NotFoundError("Ø§Ù„Ø·Ø§Ù„Ø¨ ØºÙŠØ± Ù…ÙˆØ¬ÙˆØ¯.");
-    if (student.deletedAt) throw new ConflictError("Ø§Ù„Ø·Ø§Ù„Ø¨ Ù…Ø­Ø°ÙˆÙ Ø¨Ø§Ù„ÙØ¹Ù„.");
+    if (!student) throw new NotFoundError("الطالب غير موجود.");
+    if (student.deletedAt) throw new ConflictError("الطالب محذوف بالفعل.");
 
     const anotherStudent = db.getFirstSync<any>(
       `SELECT id FROM students WHERE center_id = ? AND card_code = ? AND id <> ? LIMIT 1`,
       [centerId, cardCode, studentId],
     );
     if (anotherStudent) {
-      throw new ConflictError(`ÙƒÙˆØ¯ Ø§Ù„ÙƒØ§Ø±Øª (${cardCode}) Ù…Ø±ØªØ¨Ø· Ø¨Ø·Ø§Ù„Ø¨ Ø¢Ø®Ø±.`);
+      throw new ConflictError(`كود الكارت (${cardCode}) مرتبط بطالب آخر.`);
     }
     const activeCardOwner = db.getFirstSync<any>(
       `SELECT student_id as studentId FROM student_cards
@@ -241,7 +241,7 @@ export class StudentCardRepository {
       [centerId, cardCode, studentId],
     );
     if (activeCardOwner) {
-      throw new ConflictError(`ÙƒÙˆØ¯ Ø§Ù„ÙƒØ§Ø±Øª (${cardCode}) Ù…Ø±ØªØ¨Ø· Ø¨Ø·Ø§Ù„Ø¨ Ø¢Ø®Ø±.`);
+      throw new ConflictError(`كود الكارت (${cardCode}) مرتبط بطالب آخر.`);
     }
 
     const now = new Date().toISOString();
