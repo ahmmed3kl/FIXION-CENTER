@@ -45,6 +45,7 @@ export default function DashboardScreen() {
   const [connectivity, setConnectivity] =
     useState<ConnectivityState>("offline");
   const [refreshing, setRefreshing] = useState(false);
+  const [pendingWarningDismissed, setPendingWarningDismissed] = useState(false);
 
   const loadData = useCallback(() => {
     // The persisted center id is restored before the display object is
@@ -183,6 +184,35 @@ export default function DashboardScreen() {
             <Ionicons name="chevron-back" size={24} color={Colors.white} />
           </View>
         </TouchableOpacity>
+
+        {/* PENDING SYNC WARNING */}
+        {syncStats.pending > 0 && connectivity === "offline" && !pendingWarningDismissed && (
+          <View style={styles.warningBanner}>
+            <View style={styles.warningContent}>
+              <Ionicons name="warning" size={24} color="#F59E0B" />
+              <View style={styles.warningTextWrapper}>
+                <Text style={styles.warningTitle}>تحذير: بيانات غير متزامنة</Text>
+                <Text style={styles.warningText}>
+                  لديك {syncStats.pending} عملية معلقة لم تُرفع للخادم بعد.{"\n"}
+                  تأكد من الاتصال بالإنترنت قبل إلغاء تثبيت التطبيق أو عمل build جديد، وإلا ستفقد البيانات المحلية.
+                </Text>
+                <TouchableOpacity
+                  style={styles.warningSyncButton}
+                  onPress={handleSyncNow}
+                >
+                  <Ionicons name="sync" size={16} color={Colors.white} />
+                  <Text style={styles.warningSyncButtonText}>محاولة المزامنة الآن</Text>
+                </TouchableOpacity>
+              </View>
+              <TouchableOpacity
+                style={styles.warningDismiss}
+                onPress={() => setPendingWarningDismissed(true)}
+              >
+                <Ionicons name="close" size={20} color="#9CA3AF" />
+              </TouchableOpacity>
+            </View>
+          </View>
+        )}
 
         {/* TODAY SUMMARY CARD */}
         <View style={styles.sectionHeadingRow}>
@@ -501,5 +531,53 @@ const createStyles = () => StyleSheet.create({
     ...Typography.caption,
     color: Colors.slate500,
     marginTop: 2,
+  },
+  warningBanner: {
+    backgroundColor: "#FEF3C7",
+    borderRadius: BorderRadius.lg,
+    padding: Spacing.md,
+    marginBottom: Spacing.lg,
+    borderWidth: 1,
+    borderColor: "#FCD34D",
+  },
+  warningContent: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: Spacing.sm,
+  },
+  warningTextWrapper: {
+    flex: 1,
+  },
+  warningTitle: {
+    fontSize: 14,
+    fontWeight: "700",
+    color: "#92400E",
+    marginBottom: 4,
+    textAlign: "right",
+  },
+  warningText: {
+    fontSize: 12,
+    color: "#78350F",
+    lineHeight: 18,
+    textAlign: "right",
+  },
+  warningSyncButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    backgroundColor: "#F59E0B",
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: BorderRadius.md,
+    marginTop: Spacing.sm,
+    alignSelf: "flex-start",
+  },
+  warningSyncButtonText: {
+    fontSize: 12,
+    fontWeight: "700",
+    color: Colors.white,
+  },
+  warningDismiss: {
+    padding: 4,
   },
 });

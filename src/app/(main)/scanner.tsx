@@ -324,6 +324,15 @@ function ScannerContent() {
       setIsExternalAttendance(false);
       const currentSession = SessionRepository.findById(activeSessionId);
       const currentGroupId = currentSession?.groupId;
+      
+      console.log("[Scanner] Found student:", foundStudent.fullName, "ID:", foundStudent.id);
+      console.log("[Scanner] Active session:", activeSessionId);
+      console.log("[Scanner] Current session details:", {
+        groupId: currentSession?.groupId,
+        teacherId: currentSession?.teacherId,
+        subjectId: currentSession?.subjectId,
+        sessionDate: currentSession?.sessionDate,
+      });
       setCurrentGroupLabel(
         [currentSession?.groupName, currentSession?.subjectName, currentSession?.teacherName]
           .filter(Boolean)
@@ -339,6 +348,8 @@ function ScannerContent() {
       }
 
       const expected = AttendanceSessionService.isExpected(activeSessionId, foundStudent.id);
+      console.log("[Scanner] Student expected in session?", expected);
+      
       const makeupEligibility = expected
         ? { eligible: false }
         : (() => {
@@ -347,12 +358,18 @@ function ScannerContent() {
               ? strict
               : AttendanceSessionService.getMakeupEligibility(activeSessionId, foundStudent.id);
           })();
+      
+      console.log("[Scanner] Makeup eligibility:", makeupEligibility.eligible);
+      
       // A student outside the current group is only allowed when the same
       // subject/teacher makeup rule returns a real source absence. The old
       // allowExternal flag made a normal visitor recordable as "external".
       let compensationNotice: typeof makeupNotice = null;
       if (!expected && !makeupEligibility.eligible) {
+        console.log("[Scanner] Checking compensation eligibility...");
         const sameTeacher = AttendanceSessionService.isEnrolledWithSameTeacher(activeSessionId, foundStudent.id);
+        console.log("[Scanner] Compensation check result:", sameTeacher);
+        
         if (sameTeacher.enrolled) {
           compensationNotice = { sourceGroupName: sameTeacher.sourceGroupName, teacherName: sameTeacher.teacherName };
         } else {
@@ -520,7 +537,7 @@ function ScannerContent() {
             sessionId: session.id,
             status: lateCalc.status,
             isLate: lateCalc.isLate,
-            attendanceType: "present",
+            attendanceType: makeup ? "makeup" : "present",
             isExternal,
             suppressExternalPayment: isExternal,
           });
@@ -528,6 +545,14 @@ function ScannerContent() {
       setAttendanceResult(result);
       setIsAlreadyAttended(true);
       setAttendanceSummary(AttendanceSessionService.getSummary(session.id));
+      
+      console.log("[Scanner] Attendance recorded. Session details:", {
+        sessionId: session.id,
+        groupId: session.groupId,
+        sessionDate: session.sessionDate,
+        status: session.status,
+      });
+      
       setGroupAttendanceSummary(
         AttendanceRepository.getStudentGroupAttendanceSummaries(targetStudent.id)
           .find((summary) => summary.groupId === session.groupId) || null,

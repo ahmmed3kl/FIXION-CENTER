@@ -45,50 +45,131 @@ export class OperationalReportsService {
     }
 
     const db = DatabaseService.getDb();
+    const dayOfWeek = new Date(`${dateStr}T12:00:00`).getDay();
+
+    // Build expected roster from group schedules like the dashboard, even when
+    // no session has been opened yet for the timetable slot.
+    const scheduledGroups = db.getAllSync<any>(
+      `SELECT DISTINCT g.id as group_id, g.subject_id, g.teacher_id, gs.start_time, gs.end_time,
+              g.name as group_name, subj.name as subject_name, t.name as teacher_name
+       FROM groups g
+       JOIN group_schedules gs ON gs.center_id = g.center_id AND gs.group_id = g.id
+       LEFT JOIN subjects subj ON subj.center_id = g.center_id AND g.subject_id = subj.id
+       LEFT JOIN teachers t ON t.center_id = g.center_id AND g.teacher_id = t.id
+       WHERE g.center_id = ? AND g.status = 'active'
+         AND gs.day_of_week = ? AND gs.status = 'active'
+       ORDER BY gs.start_time ASC`,
+      [centerId, dayOfWeek],
+    );
 
     const loadedSessions = db.getAllSync<any>(
       `SELECT s.id, s.group_id, s.session_date, s.status, s.start_time, s.end_time,
               g.name as group_name, subj.name as subject_name, t.name as teacher_name
        FROM sessions s
-       JOIN groups g ON s.group_id = g.id
-       LEFT JOIN subjects subj ON COALESCE(s.subject_id, g.subject_id) = subj.id
-       LEFT JOIN teachers t ON COALESCE(s.teacher_id, g.teacher_id) = t.id
+       JOIN groups g ON g.center_id = s.center_id AND s.group_id = g.id
+       LEFT JOIN subjects subj ON subj.center_id = s.center_id AND COALESCE(s.subject_id, g.subject_id) = subj.id
+       LEFT JOIN teachers t ON t.center_id = s.center_id AND COALESCE(s.teacher_id, g.teacher_id) = t.id
        WHERE s.center_id = ? AND s.session_date = ? AND s.status <> 'cancelled'
        ORDER BY s.start_time ASC`,
       [centerId, dateStr],
     );
-    // A scheduled row is only timetable data. Operational attendance starts
-    // when the operator opens the session and remains reportable after the
-    // operator manually closes it.
-    const sessions = loadedSessions.filter(
-      (session: any) =>
-        session.status === "open" || session.status === "closed",
-    );
+
+    const sessionByGroup = new Map<string, any>();
+    for (const s of loadedSessions) {
+      if (s.status === "open" || s.status === "closed") {
+        sessionByGroup.set(s.group_id, s);
+      }
+    }
+
+    // Merge timetable slots with actual sessions so the report shows expected
+    // students even when the operator has not yet opened the session.
+    const sessions = scheduledGroups.map((group: any) => {
+      const existingSession = sessionByGroup.get(group.group_id);
+      if (existingSession) return existingSession;
+      return {
+        id: null,
+        group_id: group.group_id,
+        session_date: dateStr,
+        status: "scheduled",
+        start_time: group.start_time,
+        end_time: group.end_time,
+        group_name: group.group_name,
+        subject_name: group.subject_name,
+        teacher_name: group.teacher_name,
+      };
+    });
 
     const sessionReport = sessions.map((s: any) => {
-      let expected = db.getAllSync<any>(
-        `SELECT student_id FROM session_expected_students WHERE center_id = ? AND session_id = ?`,
-        [centerId, s.id],
-      );
-      const attendanceRows = db.getAllSync<any>(
-        `SELECT student_id as studentId, status, attendance_type as attendanceType FROM attendance WHERE center_id = ? AND session_id = ?`,
-        [centerId, s.id],
-      ).map((row: any) => ({
-        ...row,
-        studentId: row.studentId ?? row.student_id,
-        attendanceType: row.attendanceType ?? row.attendance_type,
-      }));
-      const coveredInAdvance = db.getAllSync<{ studentId: string }>(
-        `SELECT student_id as studentId FROM advance_coverages WHERE center_id = ? AND target_future_session_id = ?`,
-        [centerId, s.id],
-      );
+      let expected: any[] = [];
+      let attendanceRows: any[] = [];
+      let coveredInAdvance: { studentId: string }[] = [];
+
+      // Scheduled slots without an open session still show expected students
+      // from enrollments, but have no attendance rows yet.
+      if (s.id) {
+        expected = db.getAllSync<any>(
+          `SELECT student_id FROM session_expected_students WHERE center_id = ? AND session_id = ?`,
+          [centerId, s.id],
+        );
+        attendanceRows = db.getAllSync<any>(
+          `SELECT student_id as studentId, status, attendance_type as attendanceType FROM attendance WHERE center_id = ? AND session_id = ?`,
+          [centerId, s.id],
+        ).map((row: any) => ({
+          ...row,
+          studentId: row.studentId ?? row.student_id,
+          attendanceType: row.attendanceType ?? row.attendance_type,
+        }));
+        coveredInAdvance = db.getAllSync<{ studentId: string }>(
+          `SELECT student_id as studentId FROM advance_coverages WHERE center_id = ? AND target_future_session_id = ?`,
+          [centerId, s.id],
+        );
+      }
 
       if (expected.length === 0) {
         // Reuse session-level reconstruction so package-only subscribers are
         // included in older sessions that predate expected-roster snapshots.
+        // For scheduled slots without a session, build expected from enrollments.
         const ids = new Set<string>(
-          SessionRepository.getExpectedStudents(s.id).map((student) => String(student.id)),
+          s.id
+            ? SessionRepository.getExpectedStudents(s.id).map((student) => String(student.id))
+            : [],
         );
+        if (ids.size === 0) {
+          // Build expected from active enrollments for the scheduled group.
+          const enrolled = db.getAllSync<{ studentId: string }>(
+            `SELECT student_id as studentId FROM student_group_enrollments
+             WHERE center_id = ? AND group_id = ? AND status = 'active'
+               AND start_date <= ? AND (end_date IS NULL OR end_date >= ?)`,
+            [centerId, s.group_id, dateStr, dateStr],
+          );
+          enrolled.forEach((row) => ids.add(String(row.studentId)));
+          // Include package subscribers for this subject/teacher/group.
+          const groupInfo = db.getFirstSync<{ subjectId?: string; teacherId?: string }>(
+            `SELECT subject_id as subjectId, teacher_id as teacherId FROM groups WHERE center_id = ? AND id = ?`,
+            [centerId, s.group_id],
+          );
+          if (groupInfo?.subjectId && groupInfo?.teacherId) {
+            const packageRows = db.getAllSync<{ studentId: string }>(
+              `SELECT DISTINCT sps.student_id as studentId
+               FROM student_package_subscriptions sps
+               JOIN package_subjects ps ON ps.center_id = sps.center_id AND ps.package_id = sps.package_id
+               LEFT JOIN package_subject_teacher_overrides selected
+                 ON selected.center_id = sps.center_id AND selected.subscription_id = sps.id AND selected.subject_id = ps.subject_id
+               WHERE sps.center_id = ? AND sps.status = 'active'
+                 AND sps.start_date <= ? AND (sps.end_date IS NULL OR sps.end_date >= ?)
+                 AND ps.subject_id = ?
+                 AND (ps.group_id = ? OR selected.group_id = ?)
+                 AND COALESCE(selected.teacher_id, ps.default_teacher_id) = ?
+                 AND (selected.id IS NULL OR selected.group_id = ?)
+                 AND (selected.id IS NOT NULL OR NOT EXISTS (
+                   SELECT 1 FROM package_subject_teacher_overrides any_selection
+                   WHERE any_selection.center_id = sps.center_id AND any_selection.subscription_id = sps.id
+                 ))`,
+              [centerId, dateStr, dateStr, groupInfo.subjectId, s.group_id, s.group_id, groupInfo.teacherId, s.group_id],
+            );
+            packageRows.forEach((row) => ids.add(String(row.studentId)));
+          }
+        }
         for (const row of attendanceRows) {
           if (row.attendanceType !== "makeup") ids.add(String(row.studentId));
         }
@@ -111,7 +192,7 @@ export class OperationalReportsService {
           : 0;
 
       return {
-        sessionId: s.id,
+        sessionId: s.id || `scheduled-${s.group_id}`,
         groupName: s.group_name || "",
         subjectName: s.subject_name || "",
         teacherName: s.teacher_name || "",
@@ -187,8 +268,8 @@ export class OperationalReportsService {
       `SELECT DISTINCT s.id, s.session_date, s.start_time, s.end_time,
               g.name as group_name, subj.name as subject_name
        FROM sessions s
-       JOIN groups g ON s.group_id = g.id
-       LEFT JOIN subjects subj ON COALESCE(s.subject_id, g.subject_id) = subj.id
+       JOIN groups g ON g.center_id = s.center_id AND s.group_id = g.id
+       LEFT JOIN subjects subj ON subj.center_id = s.center_id AND COALESCE(s.subject_id, g.subject_id) = subj.id
        LEFT JOIN session_expected_students ses
          ON ses.center_id = s.center_id AND ses.session_id = s.id AND ses.student_id = ?
        LEFT JOIN student_group_enrollments enr
@@ -317,7 +398,7 @@ export class OperationalReportsService {
     const allPaymentsForDate = db.getAllSync<any>(
       `SELECT id, student_id, amount, payment_type, payment_method, session_id, debt_cycle_id, notes, is_reversed, created_at, payment_date
        FROM payments
-       WHERE center_id = ? AND (payment_date = ? OR (payment_date IS NULL AND created_at LIKE ?))
+       WHERE center_id = ? AND (payment_date = ? OR payment_date LIKE ? OR (payment_date IS NULL AND created_at LIKE ?))
          AND (is_reversed = 0 OR is_reversed IS NULL)`,
       [centerId, businessDate, `${businessDate}%`],
     );

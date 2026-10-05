@@ -115,21 +115,35 @@ export class DashboardService {
     let closedSessions = 0;
     const countedSessionIds = new Set<string>();
 
+    console.log("[Dashboard] Processing", groups.length, "scheduled groups for date:", dateStr);
+    
+    // Debug: check all sessions for today
+    const allTodaySessions = db.getAllSync<any>(
+      `SELECT id, group_id as groupId, status, session_date as sessionDate
+       FROM sessions WHERE center_id = ? 
+       AND (session_date = ? OR session_date LIKE ? || '%')`,
+      [centerId, dateStr, dateStr],
+    );
+    console.log("[Dashboard] All sessions for date:", dateStr, "Count:", allTodaySessions.length, "Sessions:", allTodaySessions);
+
     for (const group of groups) {
       const session = db.getFirstSync<any>(
         `SELECT id, status, subject_id as subjectId, teacher_id as teacherId
-         FROM sessions WHERE center_id = ? AND group_id = ? AND session_date = ?
+         FROM sessions WHERE center_id = ? AND group_id = ? 
+         AND (session_date = ? OR session_date LIKE ? || '%')
            AND (schedule_id = ? OR (schedule_id IS NULL AND NOT EXISTS (
              SELECT 1 FROM sessions exact_session
              WHERE exact_session.center_id = sessions.center_id
                AND exact_session.group_id = sessions.group_id
-               AND exact_session.session_date = sessions.session_date
+               AND (exact_session.session_date = ? OR exact_session.session_date LIKE ? || '%')
                AND exact_session.schedule_id = ?
            )))
            AND status <> 'cancelled'
          ORDER BY CASE WHEN schedule_id = ? THEN 0 ELSE 1 END, created_at ASC LIMIT 1`,
-        [centerId, group.id, dateStr, group.scheduleId, group.scheduleId, group.scheduleId],
+        [centerId, group.id, dateStr, dateStr, group.scheduleId, dateStr, dateStr, group.scheduleId, group.scheduleId],
       );
+      
+      console.log("[Dashboard] Group:", group.id, "Session:", session?.id, "Status:", session?.status);
       let expectedIds = session
         ? db.getAllSync<any>(
             `SELECT student_id as studentId FROM session_expected_students
@@ -187,6 +201,16 @@ export class DashboardService {
         [centerId, session.id],
       );
       const counts = calculateSessionAttendanceCounts(expectedIds, attendance, covered.map((row: any) => String(row.studentId)));
+      
+      console.log("[Dashboard] Session counts:", {
+        sessionId: session.id,
+        expected: counts.expected,
+        present: counts.present,
+        late: counts.late,
+        absent: counts.absent,
+        makeup: counts.makeup,
+      });
+      
       // Keep present and late disjoint. Makeup is shown as its own count,
       // outside the expected roster.
       presentCount += Math.max(0, counts.present - counts.late) + counts.makeup;
@@ -202,6 +226,18 @@ export class DashboardService {
       [centerId, dateStr, `${dateStr}%`, `${dateStr}%`],
     );
     const todayCollections = paymentRows.reduce((sum: number, row: any) => sum + (Number(row.amount) || 0), 0);
+    
+    console.log("[Dashboard] Final summary:", {
+      expectedCount,
+      presentCount,
+      lateCount,
+      absentCount,
+      makeupCount,
+      totalSessions: groups.length,
+      openSessions,
+      closedSessions,
+    });
+    
     return { expectedCount, presentCount, lateCount, absentCount, makeupCount, totalSessions: groups.length, openSessions, closedSessions, todayCollections };
   }
 }

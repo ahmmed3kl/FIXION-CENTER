@@ -421,6 +421,37 @@ export class SyncRepository {
   }
 
   /**
+   * Gets count of pending sync operations for a center.
+   * This is used to warn users before operations that might lose unsynced data.
+   */
+  static getPendingOperationsCount(centerId?: string): number {
+    const db = DatabaseService.getDb();
+    const query = centerId
+      ? `SELECT COUNT(*) as count FROM sync_operations WHERE center_id = ? AND status IN ('pending', 'failed')`
+      : `SELECT COUNT(*) as count FROM sync_operations WHERE status IN ('pending', 'failed')`;
+    const params = centerId ? [centerId] : [];
+    const result = db.getFirstSync<{ count: number }>(query, params);
+    return result?.count || 0;
+  }
+
+  /**
+   * Gets summary of pending operations by entity type.
+   * Useful for showing users what data is waiting to sync.
+   */
+  static getPendingOperationsSummary(centerId?: string): Array<{ entityType: string; count: number }> {
+    const db = DatabaseService.getDb();
+    const query = centerId
+      ? `SELECT entity_type as entityType, COUNT(*) as count FROM sync_operations
+         WHERE center_id = ? AND status IN ('pending', 'failed')
+         GROUP BY entity_type ORDER BY count DESC`
+      : `SELECT entity_type as entityType, COUNT(*) as count FROM sync_operations
+         WHERE status IN ('pending', 'failed')
+         GROUP BY entity_type ORDER BY count DESC`;
+    const params = centerId ? [centerId] : [];
+    return db.getAllSync<{ entityType: string; count: number }>(query, params);
+  }
+
+  /**
    * Enqueues an operation into the persistent queue.
    * Asserts device is active and preserves idempotency.
    */

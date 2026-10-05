@@ -3796,20 +3796,26 @@ export class DatabaseService {
             nativeDb.execSync("PRAGMA foreign_keys = ON;");
             nativeDb.execSync("PRAGMA journal_mode = WAL;");
             this.db = nativeDb as unknown as SqlDatabase;
+            console.log("[DatabaseService] Successfully opened persistent SQLite database: fixion_local.db");
             break;
           } catch (error) {
             lastNativeError = error;
             nativeDb = null;
+            console.warn(`[DatabaseService] SQLite open attempt ${attempt + 1} failed:`, error);
           }
         }
         if (!this.db) throw lastNativeError || new Error("SQLite could not be initialized");
       } else {
+        console.warn("[DatabaseService] No native SQLite available, using in-memory database");
         this.db = new InMemorySqliteMock();
       }
 
       this.runMigrations();
       this.seedData();
       this.ensureAcademicSchema();
+      
+      // Validate data integrity after initialization
+      this.validateDataIntegrity();
     } catch (e: any) {
       // Falling back to an in-memory database in a real APK makes all local
       // sessions, attendance, and payments appear to vanish on the next
@@ -3824,6 +3830,38 @@ export class DatabaseService {
       this.runMigrations();
       this.seedData();
       this.ensureAcademicSchema();
+    }
+  }
+  
+  /**
+   * Validates data integrity after initialization to detect potential data loss
+   * and log diagnostic information for debugging build/reset issues.
+   */
+  static validateDataIntegrity(): void {
+    try {
+      const db = this.getDb();
+      const tables = [
+        { name: "sessions", critical: true },
+        { name: "attendance", critical: true },
+        { name: "payments", critical: true },
+        { name: "students", critical: false },
+        { name: "groups", critical: false },
+      ];
+      
+      for (const table of tables) {
+        const count = db.getFirstSync<{ count: number }>(
+          `SELECT COUNT(*) as count FROM ${table.name}`,
+        );
+        console.log(`[DatabaseService] Table ${table.name}: ${count?.count || 0} rows`);
+        
+        if (table.critical && (count?.count || 0) === 0) {
+          console.warn(
+            `[DatabaseService] Critical table ${table.name} is empty. This may indicate data loss after build.`
+          );
+        }
+      }
+    } catch (error) {
+      console.error("[DatabaseService] Data integrity validation failed:", error);
     }
   }
 
@@ -4459,3 +4497,5 @@ export class DatabaseService {
     );
   }
 }
+
+export { LocalDataEvents } from "./localDataEvents";

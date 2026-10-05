@@ -1,5 +1,5 @@
 import { AuditService } from "../../core/audit";
-import { DatabaseService } from "../../core/database";
+import { DatabaseService, LocalDataEvents } from "../../core/database";
 import { DeviceService } from "../../core/device";
 import {
     ConflictError,
@@ -135,10 +135,8 @@ export class AttendanceRepository {
     }
 
     let canonicalOriginalAbsenceId = params.originalAbsenceId;
-    if (params.attendanceType === "makeup") {
-      if (!params.originalAbsenceId) {
-        throw new ConflictError("يجب تحديد الحصة الأصلية للتعويض.");
-      }
+    if (params.attendanceType === "makeup" && params.originalAbsenceId) {
+      // Strict makeup validation: requires a real historical absence session
       const legacyPrefix = "absence-";
       const legacySuffix = `-${params.studentId}`;
       if (
@@ -169,72 +167,72 @@ export class AttendanceRepository {
       } else if (source.status === "cancelled") {
         throw new ConflictError("الحصة الأصلية للتعويض غير موجودة.");
       } else {
-      const isAfter =
-        session.sessionDate > source.sessionDate ||
-        (session.sessionDate === source.sessionDate &&
-          session.startTime > source.startTime);
-      if (!isAfter || session.subjectId !== source.subjectId || session.teacherId !== source.teacherId) {
-        throw new ConflictError("التعويض يجب أن يكون في الحصة التالية لنفس المادة والمدرس.");
-      }
+        const isAfter =
+          session.sessionDate > source.sessionDate ||
+          (session.sessionDate === source.sessionDate &&
+            session.startTime > source.startTime);
+        if (!isAfter || session.subjectId !== source.subjectId || session.teacherId !== source.teacherId) {
+          throw new ConflictError("التعويض يجب أن يكون في الحصة التالية لنفس المادة والمدرس.");
+        }
 
-      const sourceExpected = db.getFirstSync<any>(
-        `SELECT 1 FROM session_expected_students WHERE center_id = ? AND session_id = ? AND student_id = ?`,
-        [centerId, source.id, params.studentId],
-      );
-      const sourceHasSnapshot = db.getFirstSync<any>(
-        `SELECT 1 FROM session_expected_students WHERE center_id = ? AND session_id = ? LIMIT 1`,
-        [centerId, source.id],
-      );
-      const legacyEnrollment = db.getFirstSync<any>(
-        `SELECT 1 FROM student_group_enrollments
-         WHERE center_id = ? AND group_id = ? AND student_id = ? AND status = 'active'
-           AND start_date <= ? AND (end_date IS NULL OR end_date >= ?)
-         LIMIT 1`,
-        [centerId, source.groupId, params.studentId, source.sessionDate, source.sessionDate],
-      );
-      if (!sourceExpected && (sourceHasSnapshot || !legacyEnrollment)) {
-        throw new ConflictError("الطالب غير متوقع في الحصة الأصلية.");
-      }
-      if (db.getFirstSync<any>(
-        `SELECT id FROM attendance WHERE center_id = ? AND session_id = ? AND student_id = ?`,
-        [centerId, source.id, params.studentId],
-      )) {
-        throw new ConflictError("لا يمكن تعويض حصة حضرها الطالب بالفعل.");
-      }
-      if (db.getFirstSync<any>(
-        `SELECT id FROM attendance
-         WHERE center_id = ? AND student_id = ?
-           AND (original_absence_id = ? OR original_absence_id = ?)`,
-        [centerId, params.studentId, canonicalOriginalAbsenceId, params.originalAbsenceId],
-      )) {
-        throw new ConflictError("تم تسجيل تعويض لهذا الغياب مسبقًا.");
-      }
-      const earlierSession = db.getFirstSync<any>(
-        `SELECT s.id
-         FROM sessions s
-         JOIN groups g ON g.center_id = s.center_id AND g.id = s.group_id
-         WHERE s.center_id = ?
-           AND COALESCE(s.subject_id, g.subject_id) = ?
-           AND COALESCE(s.teacher_id, g.teacher_id) = ?
-           AND s.status <> 'cancelled'
-           AND (s.session_date > ? OR (s.session_date = ? AND s.start_time > ?))
-           AND (s.session_date < ? OR (s.session_date = ? AND s.start_time < ?))
-         ORDER BY s.session_date ASC, s.start_time ASC LIMIT 1`,
-        [
-          centerId,
-          source.subjectId,
-          source.teacherId,
-          source.sessionDate,
-          source.sessionDate,
-          source.startTime,
-          session.sessionDate,
-          session.sessionDate,
-          session.startTime,
-        ],
-      );
-      if (earlierSession) {
-        throw new ConflictError("لا يمكن تعويض غير الحصة التالية المؤهلة.");
-      }
+        const sourceExpected = db.getFirstSync<any>(
+          `SELECT 1 FROM session_expected_students WHERE center_id = ? AND session_id = ? AND student_id = ?`,
+          [centerId, source.id, params.studentId],
+        );
+        const sourceHasSnapshot = db.getFirstSync<any>(
+          `SELECT 1 FROM session_expected_students WHERE center_id = ? AND session_id = ? LIMIT 1`,
+          [centerId, source.id],
+        );
+        const legacyEnrollment = db.getFirstSync<any>(
+          `SELECT 1 FROM student_group_enrollments
+           WHERE center_id = ? AND group_id = ? AND student_id = ? AND status = 'active'
+             AND start_date <= ? AND (end_date IS NULL OR end_date >= ?)
+           LIMIT 1`,
+          [centerId, source.groupId, params.studentId, source.sessionDate, source.sessionDate],
+        );
+        if (!sourceExpected && (sourceHasSnapshot || !legacyEnrollment)) {
+          throw new ConflictError("الطالب غير متوقع في الحصة الأصلية.");
+        }
+        if (db.getFirstSync<any>(
+          `SELECT id FROM attendance WHERE center_id = ? AND session_id = ? AND student_id = ?`,
+          [centerId, source.id, params.studentId],
+        )) {
+          throw new ConflictError("لا يمكن تعويض حصة حضرها الطالب بالفعل.");
+        }
+        if (db.getFirstSync<any>(
+          `SELECT id FROM attendance
+           WHERE center_id = ? AND student_id = ?
+             AND (original_absence_id = ? OR original_absence_id = ?)`,
+          [centerId, params.studentId, canonicalOriginalAbsenceId, params.originalAbsenceId],
+        )) {
+          throw new ConflictError("تم تسجيل تعويض لهذا الغياب مسبقًا.");
+        }
+        const earlierSession = db.getFirstSync<any>(
+          `SELECT s.id
+           FROM sessions s
+           JOIN groups g ON g.center_id = s.center_id AND g.id = s.group_id
+           WHERE s.center_id = ?
+             AND COALESCE(s.subject_id, g.subject_id) = ?
+             AND COALESCE(s.teacher_id, g.teacher_id) = ?
+             AND s.status <> 'cancelled'
+             AND (s.session_date > ? OR (s.session_date = ? AND s.start_time > ?))
+             AND (s.session_date < ? OR (s.session_date = ? AND s.start_time < ?))
+           ORDER BY s.session_date ASC, s.start_time ASC LIMIT 1`,
+          [
+            centerId,
+            source.subjectId,
+            source.teacherId,
+            source.sessionDate,
+            source.sessionDate,
+            source.startTime,
+            session.sessionDate,
+            session.sessionDate,
+            session.startTime,
+          ],
+        );
+        if (earlierSession) {
+          throw new ConflictError("لا يمكن تعويض غير الحصة التالية المؤهلة.");
+        }
       }
     }
 
@@ -432,6 +430,9 @@ export class AttendanceRepository {
     SyncEngine.syncCenterNow(centerId).catch((e) => {
       console.warn("Background auto-sync attendance notice:", e);
     });
+
+    // Notify dashboard and other screens that attendance data has changed
+    LocalDataEvents.emit({ centerId, entityType: "attendance", entityId: attendanceId });
 
     return attendanceRecord;
   }

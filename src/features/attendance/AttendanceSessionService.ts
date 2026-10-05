@@ -582,10 +582,13 @@ export class AttendanceSessionService {
     teacherName?: string;
   } {
     const { activeCenterId } = useAuthStore.getState();
-    if (!activeCenterId) return { enrolled: false };
+    if (!activeCenterId) {
+      console.log("[isEnrolledWithSameTeacher] No active center");
+      return { enrolled: false };
+    }
     const db = DatabaseService.getDb();
     const session = db.getFirstSync<any>(
-      `SELECT s.group_id as groupId,
+      `SELECT s.group_id as groupId, s.session_date as sessionDate,
               COALESCE(s.teacher_id, g.teacher_id) as teacherId,
               COALESCE(s.subject_id, g.subject_id) as subjectId,
               t.name as teacherName
@@ -596,21 +599,75 @@ export class AttendanceSessionService {
        WHERE s.center_id = ? AND s.id = ?`,
       [activeCenterId, sessionId],
     );
-    if (!session?.teacherId) return { enrolled: false };
+    if (!session?.teacherId) {
+      console.log("[isEnrolledWithSameTeacher] Session not found or no teacher:", session);
+      return { enrolled: false };
+    }
+
+    console.log("[isEnrolledWithSameTeacher] Checking student:", studentId, "for session:", {
+      groupId: session.groupId,
+      teacherId: session.teacherId,
+      subjectId: session.subjectId,
+      sessionDate: session.sessionDate,
+    });
+
+    const queryParams = [
+      activeCenterId, 
+      studentId, 
+      session.teacherId, 
+      session.teacherId, 
+      session.subjectId, 
+      session.subjectId, 
+      session.subjectId, 
+      session.groupId, 
+      session.sessionDate, 
+      session.sessionDate
+    ];
+    
+    console.log("[isEnrolledWithSameTeacher] Query parameters:", {
+      centerId: activeCenterId,
+      studentId: studentId,
+      teacherId: session.teacherId,
+      subjectId: session.subjectId,
+      excludeGroupId: session.groupId,
+      sessionDate: session.sessionDate,
+    });
+
+    // First, let's check what enrollments exist for this student
+    console.log("[isEnrolledWithSameTeacher] About to query all enrollments...");
+    
+    let allEnrollments;
+    try {
+      allEnrollments = db.getAllSync<any>(
+        `SELECT e.id, e.group_id, e.status, e.start_date, e.end_date,
+                g.name as groupName, g.teacher_id, g.subject_id
+         FROM student_group_enrollments e
+         JOIN groups g ON g.center_id = e.center_id AND g.id = e.group_id
+         WHERE e.center_id = ? AND e.student_id = ?`,
+        [activeCenterId, studentId],
+      );
+      console.log("[isEnrolledWithSameTeacher] All enrollments for student:", allEnrollments);
+      console.log("[isEnrolledWithSameTeacher] Number of enrollments:", allEnrollments?.length || 0);
+    } catch (error) {
+      console.log("[isEnrolledWithSameTeacher] Error querying enrollments:", error);
+      allEnrollments = [];
+    }
 
     const otherGroup = db.getFirstSync<any>(
-      `SELECT g.name as groupName
+      `SELECT g.name as groupName, g.id as groupId, g.teacher_id, g.subject_id,
+              e.status, e.start_date, e.end_date
        FROM student_group_enrollments e
        JOIN groups g ON g.center_id = e.center_id AND g.id = e.group_id
-       WHERE e.center_id = ? AND e.student_id = ? AND e.status = 'active'
+       WHERE e.center_id = ? 
+         AND e.student_id = ? 
+         AND e.status = 'active'
          AND g.teacher_id = ?
-         AND g.subject_id = ?
          AND g.id != ?
-         AND e.start_date <= date('now')
-         AND (e.end_date IS NULL OR e.end_date >= date('now'))
        LIMIT 1`,
-      [activeCenterId, studentId, session.teacherId, session.subjectId, session.groupId],
+      [activeCenterId, studentId, session.teacherId, session.groupId],
     );
+
+    console.log("[isEnrolledWithSameTeacher] Found other group:", otherGroup);
 
     return otherGroup
       ? { enrolled: true, sourceGroupName: otherGroup.groupName, teacherName: session.teacherName }
