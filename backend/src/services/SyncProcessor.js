@@ -224,6 +224,28 @@ class SyncProcessor {
     );
   }
 
+  static async resolveDebtCycleAlias(client, centerId, debtCycleId) {
+    const canonicalCycle = await client.query(
+      "SELECT id FROM debt_cycles WHERE center_id = $1 AND id = $2",
+      [centerId, debtCycleId],
+    );
+    if (canonicalCycle.rows[0]?.id) return String(canonicalCycle.rows[0].id);
+
+    const alias = await client.query(
+      `SELECT payload->>'canonicalDebtCycleId' AS canonical_id
+         FROM server_sync_operations
+        WHERE center_id = $1
+          AND entity_type = 'debt_cycle'
+          AND payload->>'aliasedDebtCycleId' = $2
+        ORDER BY server_seq DESC
+        LIMIT 1`,
+      [centerId, debtCycleId],
+    );
+    return alias.rows[0]?.canonical_id
+      ? String(alias.rows[0].canonical_id)
+      : null;
+  }
+
   /**
    * Processes a batch of sync operations inside a true ACID transaction.
    */
@@ -236,6 +258,7 @@ class SyncProcessor {
       // group/schedule/date. Keep a per-batch alias so dependent attendance
       // and payment operations follow the canonical server session.
       const canonicalSessionIds = new Map();
+      const canonicalDebtCycleIds = new Map();
       let maxServerSeq = 0;
 
       // Get current highest server sequence for the center
@@ -313,9 +336,23 @@ class SyncProcessor {
             normalizedPayload.session_id = canonicalSessionId;
             normalizedPayload.sessionId = canonicalSessionId;
           }
+          if (canonicalSyncEntity(entityType) === "payment") {
+            const payment = normalizedPayload.payment || normalizedPayload;
+            const requestedDebtCycleId = payment.debt_cycle_id || payment.debtCycleId;
+            if (requestedDebtCycleId) {
+              const canonicalDebtCycleId =
+                canonicalDebtCycleIds.get(String(requestedDebtCycleId)) ||
+                await SyncProcessor.resolveDebtCycleAlias(client, centerId, String(requestedDebtCycleId));
+              if (canonicalDebtCycleId) {
+                payment.debt_cycle_id = canonicalDebtCycleId;
+                payment.debtCycleId = canonicalDebtCycleId;
+                if (normalizedPayload.payment) normalizedPayload.payment = payment;
+              }
+            }
+          }
           await SyncProcessor.assertFreshMutation(client, centerId, canonicalSyncEntity(entityType), entityId, normalizedPayload, operationType);
           // 3. Dispatch and apply domain mutation atomically
-          await SyncProcessor.applyDomainMutation(client, {
+          const mutationContext = {
             centerId,
             userId,
             deviceId,
@@ -325,7 +362,18 @@ class SyncProcessor {
             entityId,
             payload: normalizedPayload,
             createdAt,
-          });
+          };
+          await SyncProcessor.applyDomainMutation(client, mutationContext);
+          const ledgerEntityId = mutationContext.canonicalEntityId || entityId;
+          if (
+            canonicalSyncEntity(entityType) === "debt_cycle" &&
+            mutationContext.aliasedDebtCycleId
+          ) {
+            canonicalDebtCycleIds.set(
+              String(mutationContext.aliasedDebtCycleId),
+              String(mutationContext.canonicalEntityId),
+            );
+          }
 
           if (canonicalSyncEntity(entityType) === "session") {
             const session = normalizedPayload;
@@ -376,19 +424,34 @@ class SyncProcessor {
             }
           } else if (canonicalEntity === "debt_cycle") {
             const row = await client.query(
-              `SELECT server_revision FROM debt_cycles
+              `SELECT * FROM debt_cycles
                 WHERE center_id = $1 AND id = $2`,
-              [centerId, entityId],
+              [centerId, ledgerEntityId],
             );
             if (row.rows[0]) {
               const serverRevision = Number(row.rows[0].server_revision);
-              ledgerPayload = {
-                ...(normalizedPayload || {}),
-                serverRevision,
-                ...(normalizedPayload?.debtCycle
-                  ? { debtCycle: { ...normalizedPayload.debtCycle, serverRevision } }
-                  : {}),
-              };
+              if (mutationContext.aliasedDebtCycleId) {
+                const canonicalCycle = {
+                  ...row.rows[0],
+                  id: ledgerEntityId,
+                  serverRevision,
+                };
+                ledgerPayload = {
+                  ...(normalizedPayload || {}),
+                  id: ledgerEntityId,
+                  canonicalDebtCycleId: ledgerEntityId,
+                  aliasedDebtCycleId: mutationContext.aliasedDebtCycleId,
+                  debtCycle: canonicalCycle,
+                };
+              } else {
+                ledgerPayload = {
+                  ...(normalizedPayload || {}),
+                  serverRevision,
+                  ...(normalizedPayload?.debtCycle
+                    ? { debtCycle: { ...normalizedPayload.debtCycle, serverRevision } }
+                    : {}),
+                };
+              }
             }
           } else if (canonicalEntity === "payment") {
             const cycleId = normalizedPayload?.debt_cycle_id || normalizedPayload?.debtCycleId;
@@ -413,7 +476,7 @@ class SyncProcessor {
               deviceId,
               operationType || entityType || "mutation",
               entityType || "unknown",
-              entityId || operationId,
+              ledgerEntityId || operationId,
               JSON.stringify(ledgerPayload),
               createdAt || new Date().toISOString(),
             ],
@@ -1705,22 +1768,36 @@ class SyncProcessor {
           );
           return Math.max(requestedCycleAmount, Number(paid.rows[0]?.paid || 0));
         };
-        // Reconcile by the business identity as well as the operation id.
-        // Devices can generate different UUIDs for the same monthly/package
-        // cycle while offline; inserting the second UUID would violate the
-        // natural unique index and leave the operation stuck in conflict.
+        // Reconcile by business identity as well as operation id. A reset
+        // repair may contain a locally-created duplicate ID for a cycle that
+        // already exists remotely. Accept that repair as an alias, but keep
+        // the existing financial row authoritative.
         const naturalOwner = enrollmentId || packageSubscriptionId;
         if (naturalOwner && cycleNumber !== null && cycleNumber !== undefined) {
           const naturalRes = await client.query(
-            `SELECT id FROM debt_cycles
+            `SELECT id, student_id FROM debt_cycles
              WHERE center_id = $1
                AND COALESCE(enrollment_id, package_subscription_id) = $2
                AND cycle_number = $3
              LIMIT 1`,
             [centerId, naturalOwner, cycleNumber],
           );
-          const naturalId = naturalRes.rows[0]?.id;
+          const naturalCycle = naturalRes.rows[0];
+          const naturalId = naturalCycle?.id;
           if (naturalId && naturalId !== targetId) {
+            if (
+              String(operationType || "").toUpperCase() === "REPAIR_AFTER_SERVER_RESET" &&
+              String(naturalCycle.student_id) === String(studentId)
+            ) {
+              context.canonicalEntityId = String(naturalId);
+              context.aliasedDebtCycleId = String(targetId);
+              if (payload.debtCycle && typeof payload.debtCycle === "object") {
+                payload.debtCycle.id = String(naturalId);
+              } else {
+                payload.id = String(naturalId);
+              }
+              break;
+            }
             throw new Error("DEBT_CYCLE_NATURAL_KEY_CONFLICT: this billing cycle already exists under another id.");
           }
         }

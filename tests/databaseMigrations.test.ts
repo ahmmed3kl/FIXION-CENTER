@@ -184,4 +184,42 @@ describe("SQLite migration ordering and upgrades", () => {
       "PRAGMA user_version",
     )?.user_version).toBe(21);
   });
+
+  it("repairs missing sync metadata when the migration ledger already marks it applied", () => {
+    const database = new SqliteCliDatabase(path.join(tempDirectory, "missing-sync-metadata.sqlite"));
+    DatabaseService.runMigrations(database);
+    database.runSync(
+      "INSERT INTO centers (id, name, code) VALUES (?, ?, ?)",
+      ["keep-center", "Keep Center", "KEEP"],
+    );
+    database.execSync("DROP TABLE sync_metadata;");
+
+    expect(() => database.getFirstSync(
+      "SELECT center_id FROM sync_metadata WHERE center_id = ?",
+      "center-reset-1",
+    )).toThrow();
+
+    DatabaseService.ensureSyncMetadataSchema(database);
+    DatabaseService.ensureSyncMetadataSchema(database);
+    database.runSync(
+      `INSERT INTO sync_metadata (center_id, last_error, updated_at)
+       VALUES (?, ?, ?)`,
+      ["center-reset-1", "test error", "2026-10-06T00:00:00.000Z"],
+    );
+
+    expect(database.getFirstSync<{ name: string }>(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='sync_metadata'",
+    )?.name).toBe("sync_metadata");
+    expect(database.getFirstSync<{ last_error: string }>(
+      "SELECT last_error FROM sync_metadata WHERE center_id = ?",
+      "center-reset-1",
+    )?.last_error).toBe("test error");
+    expect(database.getFirstSync<{ name: string }>(
+      "SELECT name FROM centers WHERE id = ?",
+      "keep-center",
+    )?.name).toBe("Keep Center");
+    expect(database.getFirstSync<{ user_version: number }>(
+      "PRAGMA user_version",
+    )?.user_version).toBe(21);
+  });
 });

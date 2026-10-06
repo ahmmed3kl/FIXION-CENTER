@@ -3880,6 +3880,7 @@ export class DatabaseService {
       }
 
       this.runMigrations();
+      this.ensureSyncMetadataSchema();
       this.seedData();
       this.ensureAcademicSchema();
       
@@ -3897,9 +3898,31 @@ export class DatabaseService {
       console.warn("Database initialization fallback to in-memory:", e?.message);
       this.db = new InMemorySqliteMock();
       this.runMigrations();
+      this.ensureSyncMetadataSchema();
       this.seedData();
       this.ensureAcademicSchema();
     }
+  }
+
+  /**
+   * Repairs the sync metadata table if an older or partially upgraded local
+   * database records its migration as applied but is missing the table.
+   */
+  static ensureSyncMetadataSchema(database?: SqlDatabase): void {
+    const db = database || this.getDb();
+    db.execSync(`
+      CREATE TABLE IF NOT EXISTS sync_metadata (
+        center_id TEXT PRIMARY KEY,
+        last_bootstrap TEXT,
+        last_full_sync TEXT,
+        bootstrap_count INTEGER NOT NULL DEFAULT 0,
+        total_syncs INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_sync_metadata_bootstrap
+        ON sync_metadata(center_id, last_bootstrap);
+    `);
   }
   
   /**

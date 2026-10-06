@@ -740,6 +740,7 @@ export class SyncRepository {
            OR last_error LIKE '%debt_cycles_%'
            OR last_error LIKE '%payments_debt_cycle_id_fkey%'
            OR last_error LIKE '%PAYMENT_DEBT_CYCLE_NOT_FOUND%'
+           OR last_error LIKE '%DEBT_CYCLE_NATURAL_KEY_CONFLICT%'
            OR last_error LIKE '%PAYMENT_SESSION_NOT_FOUND%'
            OR last_error LIKE '%uq_notification_template%'
            OR last_error LIKE '%notification_templates%'
@@ -1159,6 +1160,7 @@ export class SyncRepository {
    */
   static getLastBootstrapTime(centerId: string): string | null {
     const db = DatabaseService.getDb();
+    DatabaseService.ensureSyncMetadataSchema(db);
     try {
       const row = db.getFirstSync<{ last_bootstrap?: string }>(
         `SELECT last_bootstrap FROM sync_metadata WHERE center_id = ?`,
@@ -1175,6 +1177,7 @@ export class SyncRepository {
    */
   static setLastBootstrapTime(centerId: string): void {
     const db = DatabaseService.getDb();
+    DatabaseService.ensureSyncMetadataSchema(db);
     const now = new Date().toISOString();
     const existing = db.getFirstSync<any>(
       `SELECT center_id FROM sync_metadata WHERE center_id = ?`,
@@ -1204,6 +1207,7 @@ export class SyncRepository {
    */
   static getLastFullSyncTime(centerId: string): string | null {
     const db = DatabaseService.getDb();
+    DatabaseService.ensureSyncMetadataSchema(db);
     try {
       const row = db.getFirstSync<{ last_full_sync?: string }>(
         `SELECT last_full_sync FROM sync_metadata WHERE center_id = ?`,
@@ -1220,6 +1224,7 @@ export class SyncRepository {
    */
   static setLastFullSyncTime(centerId: string): void {
     const db = DatabaseService.getDb();
+    DatabaseService.ensureSyncMetadataSchema(db);
     const now = new Date().toISOString();
     const existing = db.getFirstSync<any>(
       `SELECT center_id FROM sync_metadata WHERE center_id = ?`,
@@ -1249,6 +1254,7 @@ export class SyncRepository {
    */
   static recordSyncError(centerId: string, error: string): void {
     const db = DatabaseService.getDb();
+    DatabaseService.ensureSyncMetadataSchema(db);
     const now = new Date().toISOString();
     const existing = db.getFirstSync<any>(
       `SELECT center_id FROM sync_metadata WHERE center_id = ?`,

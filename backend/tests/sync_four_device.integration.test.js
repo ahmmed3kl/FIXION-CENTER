@@ -764,6 +764,87 @@ function debtCycleUpdate(operationId, revision, updates) {
   };
 }
 
+async function verifyDebtCycleAliasRecovery(clients) {
+  const aliasEnrollmentId = `sync-it-cycle-owner-${runId}`;
+  const canonicalCycleId = `sync-it-cycle-canonical-${runId}`;
+  const aliasCycleId = `sync-it-cycle-alias-${runId}`;
+  await db.query(
+    `INSERT INTO student_group_enrollments
+       (id, center_id, student_id, group_id, status)
+     VALUES ($1, $2, $3, $4, 'active')`,
+    [
+      aliasEnrollmentId,
+      centerId,
+      `sync-it-att-student-${runId}`,
+      `sync-it-group-${runId}`,
+    ],
+  );
+  const cyclePayload = (id) => ({
+    id,
+    studentId: `sync-it-att-student-${runId}`,
+    enrollmentId: aliasEnrollmentId,
+    groupId: `sync-it-group-${runId}`,
+    cycleNumber: 77,
+    cycleType: "monthly",
+    billingMode: "monthly",
+    startDate: new Date().toISOString().slice(0, 10),
+    endDate: new Date(Date.now() + 29 * 86400000).toISOString().slice(0, 10),
+    cyclePrice: 500,
+    status: "open",
+  });
+  const canonicalCreate = await clients[0].enqueue({
+    operationId: uniqueOperation("cycle-canonical-create"),
+    operationType: "debt_cycle.create",
+    entityType: "debt_cycle",
+    entityId: canonicalCycleId,
+    payload: cyclePayload(canonicalCycleId),
+  });
+  assert.ok((await clients[0].push()).syncedOperationIds.includes(canonicalCreate.operationId));
+
+  const duplicateRepair = await clients[1].enqueue({
+    operationId: uniqueOperation("cycle-alias-repair"),
+    operationType: "REPAIR_AFTER_SERVER_RESET",
+    entityType: "debt_cycle",
+    entityId: aliasCycleId,
+    payload: cyclePayload(aliasCycleId),
+  });
+  const repairResponse = await clients[1].push();
+  assert.ok(repairResponse.syncedOperationIds.includes(duplicateRepair.operationId));
+  assert.ok(!repairResponse.conflicts.some(
+    (item) => item.operationId === duplicateRepair.operationId,
+  ));
+
+  const aliasedPayment = paymentOperation(
+    uniqueOperation("payment-through-cycle-alias"),
+    `sync-it-payment-alias-${runId}`,
+    `sync-it-att-student-${runId}`,
+    125,
+  );
+  aliasedPayment.payload.debtCycleId = aliasCycleId;
+  const queuedAliasedPayment = await clients[2].enqueue(aliasedPayment);
+  assert.ok((await clients[2].push()).syncedOperationIds.includes(queuedAliasedPayment.operationId));
+  const canonicalCycleRows = await db.query(
+    `SELECT id FROM debt_cycles
+      WHERE center_id=$1 AND enrollment_id=$2 AND cycle_number=77`,
+    [centerId, aliasEnrollmentId],
+  );
+  assert.deepStrictEqual(canonicalCycleRows.rows.map((row) => row.id), [canonicalCycleId]);
+  const aliasPaymentRow = await db.query(
+    "SELECT debt_cycle_id FROM payments WHERE center_id=$1 AND id=$2",
+    [centerId, `sync-it-payment-alias-${runId}`],
+  );
+  assert.strictEqual(aliasPaymentRow.rows[0].debt_cycle_id, canonicalCycleId);
+  const aliasLedgerRow = await db.query(
+    `SELECT entity_id, payload->>'aliasedDebtCycleId' AS alias_id
+       FROM server_sync_operations
+      WHERE center_id=$1 AND operation_id=$2`,
+    [centerId, duplicateRepair.operationId],
+  );
+  assert.strictEqual(aliasLedgerRow.rows[0].entity_id, canonicalCycleId);
+  assert.strictEqual(aliasLedgerRow.rows[0].alias_id, aliasCycleId);
+  console.log("   PASS: reset repair alias and a later payment both use the canonical debt cycle");
+}
+
 async function waitForSequenceAfter(previousValue, timeoutMs = 10000) {
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
@@ -970,6 +1051,11 @@ async function runTests() {
   });
 
   try {
+    if (process.env.SYNC_TEST_FOCUS === "debt-cycle-alias") {
+      await verifyDebtCycleAliasRecovery(clients);
+      return;
+    }
+
     console.log("1. Four separate SQLite databases and dedicated logins");
     assert.strictEqual(new Set(clients.map((client) => client.filename)).size, 4);
     assert.strictEqual(new Set(clients.map((client) => client.deviceId)).size, 4);
@@ -1457,7 +1543,10 @@ async function runTests() {
     assert.strictEqual(Number(finalCycle.rows[0].server_revision), baseRevision + 2);
     console.log("   PASS: stale debt-cycle revision conflicts; pull refresh and new revision retry succeed");
 
-    console.log("11. Final committed ledger visibility and cursor invariants");
+    console.log("11. Reset repair aliases duplicate debt cycles and routes later payments to the canonical cycle");
+    await verifyDebtCycleAliasRecovery(clients);
+
+    console.log("12. Final committed ledger visibility and cursor invariants");
     for (const client of clients.slice(0, 4)) {
       const applied = client.rows("applied_operations");
       const sequences = applied.map((row) => Number(row.sequence_number));
