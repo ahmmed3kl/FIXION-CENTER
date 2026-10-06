@@ -747,6 +747,24 @@ export const MIGRATIONS: Migration[] = [
   },
   {
     version: 7,
+    name: "add_sync_metadata_table",
+    up: (db: SqlDatabase) => {
+      db.execSync(`
+        CREATE TABLE IF NOT EXISTS sync_metadata (
+          center_id TEXT PRIMARY KEY,
+          last_bootstrap TEXT,
+          last_full_sync TEXT,
+          bootstrap_count INTEGER NOT NULL DEFAULT 0,
+          total_syncs INTEGER NOT NULL DEFAULT 0,
+          last_error TEXT,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_sync_metadata_bootstrap ON sync_metadata(center_id, last_bootstrap);
+      `);
+    },
+  },
+  {
+    version: 8,
     name: "sync_retry_and_conflict_review",
     up: (db: SqlDatabase) => {
       // Retry scheduling survives process restarts and keeps a failed

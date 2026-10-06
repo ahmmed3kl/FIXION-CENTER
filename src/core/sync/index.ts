@@ -546,6 +546,8 @@ export class SyncRepository {
     limit?: number,
   ): SyncOperation[] {
     const db = DatabaseService.getDb();
+    const MAX_AUTO_RETRY_COUNT = 20;
+    
     const rows = db.getAllSync<SyncOperation>(
       `SELECT id, operation_id as operationId, center_id as centerId, user_id as userId, device_id as deviceId,
               operation_type as operationType, entity_type as entityType, entity_id as entityId,
@@ -554,10 +556,10 @@ export class SyncRepository {
        FROM sync_operations
        WHERE center_id = ? AND (
          status = 'pending' OR
-         (status = 'failed' AND retry_count < 10 AND
+         (status = 'failed' AND retry_count < ? AND
           (next_retry_at IS NULL OR next_retry_at <= ?))
        )`,
-      [centerId, new Date().toISOString()],
+      [centerId, MAX_AUTO_RETRY_COUNT, new Date().toISOString()],
     );
 
     // Sort by business priority and then move any same-batch parent operation
@@ -1149,6 +1151,121 @@ export class SyncRepository {
     }
   }
 
+  /**
+   * Get last bootstrap time for a center (used to avoid bootstrapping on every app restart)
+   */
+  static getLastBootstrapTime(centerId: string): string | null {
+    const db = DatabaseService.getDb();
+    try {
+      const row = db.getFirstSync<{ last_bootstrap?: string }>(
+        `SELECT last_bootstrap FROM sync_metadata WHERE center_id = ?`,
+        [centerId],
+      );
+      return row?.last_bootstrap || null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Update bootstrap timestamp to avoid unnecessary bootstraps
+   */
+  static setLastBootstrapTime(centerId: string): void {
+    const db = DatabaseService.getDb();
+    const now = new Date().toISOString();
+    const existing = db.getFirstSync<any>(
+      `SELECT center_id FROM sync_metadata WHERE center_id = ?`,
+      [centerId],
+    );
+    
+    if (existing) {
+      db.runSync(
+        `UPDATE sync_metadata 
+         SET last_bootstrap = ?, 
+             bootstrap_count = bootstrap_count + 1,
+             updated_at = ? 
+         WHERE center_id = ?`,
+        [now, now, centerId],
+      );
+    } else {
+      db.runSync(
+        `INSERT INTO sync_metadata (center_id, last_bootstrap, bootstrap_count, total_syncs, updated_at)
+         VALUES (?, ?, 1, 0, ?)`,
+        [centerId, now, now],
+      );
+    }
+  }
+
+  /**
+   * Get last full sync time for a center
+   */
+  static getLastFullSyncTime(centerId: string): string | null {
+    const db = DatabaseService.getDb();
+    try {
+      const row = db.getFirstSync<{ last_full_sync?: string }>(
+        `SELECT last_full_sync FROM sync_metadata WHERE center_id = ?`,
+        [centerId],
+      );
+      return row?.last_full_sync || null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Update full sync timestamp and increment counter
+   */
+  static setLastFullSyncTime(centerId: string): void {
+    const db = DatabaseService.getDb();
+    const now = new Date().toISOString();
+    const existing = db.getFirstSync<any>(
+      `SELECT center_id FROM sync_metadata WHERE center_id = ?`,
+      [centerId],
+    );
+    
+    if (existing) {
+      db.runSync(
+        `UPDATE sync_metadata 
+         SET last_full_sync = ?, 
+             total_syncs = total_syncs + 1,
+             updated_at = ? 
+         WHERE center_id = ?`,
+        [now, now, centerId],
+      );
+    } else {
+      db.runSync(
+        `INSERT INTO sync_metadata (center_id, last_full_sync, total_syncs, bootstrap_count, updated_at)
+         VALUES (?, ?, 1, 0, ?)`,
+        [centerId, now, now],
+      );
+    }
+  }
+
+  /**
+   * Record sync error in metadata
+   */
+  static recordSyncError(centerId: string, error: string): void {
+    const db = DatabaseService.getDb();
+    const now = new Date().toISOString();
+    const existing = db.getFirstSync<any>(
+      `SELECT center_id FROM sync_metadata WHERE center_id = ?`,
+      [centerId],
+    );
+    
+    if (existing) {
+      db.runSync(
+        `UPDATE sync_metadata SET last_error = ?, updated_at = ? WHERE center_id = ?`,
+        [error, now, centerId],
+      );
+    } else {
+      db.runSync(
+        `INSERT INTO sync_metadata (center_id, last_error, total_syncs, bootstrap_count, updated_at)
+         VALUES (?, ?, 0, 0, ?)`,
+        [centerId, error, now],
+      );
+    }
+  }
+
   /** Resolve a stale local session with the same natural key as a server row. */
   static reconcileSessionNaturalKey(
     db: any,
@@ -1206,7 +1323,6 @@ export class SyncRepository {
 }
 
 export class SyncEngine {
-  private static bootstrapCompletedCenters = new Set<string>();
   private static adapter: ISyncApiAdapter = env.enableMockData
     ? new MockSyncApiAdapter()
     : new HttpSyncApiAdapter();
@@ -1215,6 +1331,13 @@ export class SyncEngine {
   private static readonly syncLocks = new Map<string, Promise<void>>();
   /** SQLite is a single native connection; serialize pipelines across centers too. */
   private static databaseSyncLock: Promise<void> | null = null;
+  private static lastSyncAttempt = new Map<string, number>();
+  
+  // Constants for sync behavior
+  private static readonly MIN_SYNC_INTERVAL_MS = 5000;
+  private static readonly MAX_PULL_BATCHES_PER_SYNC = 10;
+  private static readonly MAX_SYNC_DURATION_MS = 30_000;
+  private static readonly BOOTSTRAP_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
   static setAdapter(adapter: ISyncApiAdapter): void {
     this.adapter = adapter;
@@ -1500,6 +1623,9 @@ export class SyncEngine {
    * Authoritative Bootstrap: Pulls full center data from Neon and populates local SQLite.
    */
   static async bootstrapCenter(centerId: string): Promise<void> {
+    Logger.info("sync", "bootstrap_started", { centerId });
+    const bootstrapStartTime = Date.now();
+    
     try {
       const data = await this.adapter.bootstrapCenter(centerId);
       const serverResetGeneration = Number(data.resetGeneration || 0);
@@ -1986,8 +2112,28 @@ export class SyncEngine {
       SyncRepository.requeueEntitiesMissingFromServer(centerId, data);
       });
       this.queueLocalRecordsMissingFromSnapshot(centerId, data);
-    } catch (bootstrapErr) {
-      console.warn("Bootstrap center error:", bootstrapErr);
+      
+      // Update bootstrap timestamp
+      SyncRepository.setLastBootstrapTime(centerId);
+      
+      const durationMs = Date.now() - bootstrapStartTime;
+      Logger.info("sync", "bootstrap_completed", { 
+        centerId, 
+        durationMs,
+        metadata: {
+          students: data.students?.length || 0,
+          groups: data.groups?.length || 0,
+          sessions: data.sessions?.length || 0,
+        }
+      });
+    } catch (bootstrapErr: any) {
+      const durationMs = Date.now() - bootstrapStartTime;
+      Logger.error("sync", "bootstrap_failed", bootstrapErr, { 
+        centerId, 
+        durationMs 
+      });
+      SyncRepository.recordSyncError(centerId, bootstrapErr?.message || "Bootstrap failed");
+      throw bootstrapErr;
     }
   }
 
@@ -2529,8 +2675,15 @@ export class SyncEngine {
           // The next sync retries it after the app/backend has been upgraded.
           throw new Error(`Unsupported server sync entity type: ${entityType}`);
         }
-        } catch (applyErr) {
-          console.warn("Failed to apply change:", change, applyErr);
+        } catch (applyErr: any) {
+          Logger.warn("sync", "apply_change_failed", {
+            centerId,
+            metadata: {
+              entityType: change.entityType,
+              entityId: change.entityId,
+              error: applyErr?.message || String(applyErr),
+            }
+          });
           throw applyErr;
         }
       }
@@ -2597,6 +2750,28 @@ export class SyncEngine {
   }> {
     const startTime = Date.now();
 
+    // 0. Rate limiting check
+    const lastSync = this.lastSyncAttempt.get(centerId) || 0;
+    const timeSinceLastSync = Date.now() - lastSync;
+    
+    if (timeSinceLastSync < this.MIN_SYNC_INTERVAL_MS) {
+      Logger.debug("sync", "rate_limited", { 
+        centerId, 
+        metadata: {
+          waitMs: this.MIN_SYNC_INTERVAL_MS - timeSinceLastSync
+        }
+      });
+      return {
+        syncedCount: 0,
+        errors: 0,
+        conflicts: 0,
+        state: "online",
+        arabicMessage: "المزامنة قيد التنفيذ بالفعل، يرجى الانتظار قليلاً.",
+      };
+    }
+    
+    this.lastSyncAttempt.set(centerId, Date.now());
+
     // 1. Inactive device check
     const deviceStatus = DeviceRepository.getDeviceStatus(centerId);
     if (deviceStatus === "inactive") {
@@ -2654,15 +2829,25 @@ export class SyncEngine {
       } catch {}
 
       let currentCursor = SyncRepository.getServerCursor(centerId);
-      // Always bootstrap once per app process. This is required after a
-      // server reset/reseed: the server sequence may have started again at a
-      // value that is not lower than the client's cursor, so cursor comparison
-      // alone cannot reveal that older local records are missing remotely.
-      const firstBootstrapForCenter = !this.bootstrapCompletedCenters.has(centerId);
-      if (firstBootstrapForCenter || currentCursor === "0" || localTeachersCount === 0) {
+      
+      // Check if bootstrap is needed based on persistent metadata
+      const lastBootstrap = SyncRepository.getLastBootstrapTime(centerId);
+      const needsBootstrap = !lastBootstrap || 
+        currentCursor === "0" || 
+        localTeachersCount === 0 ||
+        (Date.now() - new Date(lastBootstrap).getTime() > this.BOOTSTRAP_INTERVAL_MS);
+      
+      if (needsBootstrap) {
         try {
+          Logger.info("sync", "bootstrap_triggered", { 
+            centerId, 
+            metadata: {
+              reason: !lastBootstrap ? "first_time" : 
+                      currentCursor === "0" ? "cursor_reset" :
+                      localTeachersCount === 0 ? "empty_data" : "scheduled"
+            }
+          });
           await this.bootstrapCenter(centerId);
-          this.bootstrapCompletedCenters.add(centerId);
           currentCursor = SyncRepository.getServerCursor(centerId);
         } catch (bootErr: any) {
           Logger.warn("sync", "bootstrap_skipped", {
@@ -2679,7 +2864,11 @@ export class SyncEngine {
       try {
         let hasMore = true;
         let batches = 0;
-        while (hasMore && batches < 100) {
+        const pullStartTime = Date.now();
+        
+        while (hasMore && 
+               batches < this.MAX_PULL_BATCHES_PER_SYNC && 
+               (Date.now() - pullStartTime) < this.MAX_SYNC_DURATION_MS) {
           const pullResponse = await this.adapter.pullChanges(centerId, currentCursor, pullLimit);
           if (Number(pullResponse.resetGeneration || 0) > SyncRepository.getResetGeneration(centerId)) {
             await this.bootstrapCenter(centerId);
@@ -2706,6 +2895,27 @@ export class SyncEngine {
           }
           hasMore = Boolean(pullResponse.hasMore);
           batches += 1;
+        }
+        
+        if (hasMore && batches >= this.MAX_PULL_BATCHES_PER_SYNC) {
+          Logger.info("sync", "pull_paused_will_resume", { 
+            centerId, 
+            metadata: {
+              batches,
+              message: "Pull paused after max batches, will continue in next sync"
+            }
+          });
+        }
+        
+        if (hasMore && (Date.now() - pullStartTime) >= this.MAX_SYNC_DURATION_MS) {
+          Logger.info("sync", "pull_paused_timeout", { 
+            centerId, 
+            metadata: {
+              batches,
+              durationMs: Date.now() - pullStartTime,
+              message: "Pull paused after timeout, will continue in next sync"
+            }
+          });
         }
       } catch (pullErr: any) {
         // Do not push while the local cursor is stale. Otherwise a device can
@@ -2825,6 +3035,10 @@ export class SyncEngine {
 
       this.currentState = errors > 0 ? "error" : "online";
       const durationMs = Date.now() - startTime;
+      
+      // Update sync metadata
+      SyncRepository.setLastFullSyncTime(centerId);
+      
       Logger.info("sync", "sync_completed", {
         centerId,
         durationMs,
@@ -2840,7 +3054,12 @@ export class SyncEngine {
       };
     } catch (err: any) {
       this.currentState = "error";
-      Logger.error("sync", "sync_failed", err, { centerId });
+      const durationMs = Date.now() - startTime;
+      
+      // Record error in metadata
+      SyncRepository.recordSyncError(centerId, err?.message || "Sync failed");
+      
+      Logger.error("sync", "sync_failed", err, { centerId, durationMs });
       return {
         syncedCount,
         errors: errors || 1,

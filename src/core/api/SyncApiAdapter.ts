@@ -60,10 +60,10 @@ export interface ISyncApiAdapter {
   bootstrapCenter(centerId: string): Promise<BootstrapResponse>;
 }
 
-// Render cold starts and the full bootstrap snapshot can legitimately take
-// longer than ordinary API calls. Keep the general client timeout unchanged,
-// but give only sync requests enough time to complete.
-const SYNC_REQUEST_TIMEOUT_MS = 45_000;
+// Different timeouts for different sync operations
+const PUSH_TIMEOUT_MS = 15_000;        // Push operations should be fast
+const PULL_TIMEOUT_MS = 20_000;        // Pull is medium priority
+const BOOTSTRAP_TIMEOUT_MS = 45_000;   // Bootstrap can take longer
 
 /**
  * Real HTTP Axios adapter connecting to FIXION backend contracts:
@@ -87,15 +87,19 @@ export class HttpSyncApiAdapter implements ISyncApiAdapter {
           appVersion: env.appVersion,
         },
         {
-          timeout: SYNC_REQUEST_TIMEOUT_MS,
+          timeout: PUSH_TIMEOUT_MS,
           headers: {
             "X-Center-Id": centerId,
             "X-Device-Id": deviceId,
           },
         },
       );
-    } catch (e) {
-      console.warn("Auto-register device notice:", e);
+    } catch (e: any) {
+      Logger.info("sync", "device_auto_register_attempt", { 
+        centerId,
+        deviceId: deviceId.slice(-4),
+        error: e?.message
+      });
     }
   }
 
@@ -118,7 +122,7 @@ export class HttpSyncApiAdapter implements ISyncApiAdapter {
         "/sync/push",
         requestBody,
         {
-          timeout: SYNC_REQUEST_TIMEOUT_MS,
+          timeout: PUSH_TIMEOUT_MS,
           headers: {
             "X-Center-Id": centerId,
             "X-Device-Id": deviceId,
@@ -148,7 +152,7 @@ export class HttpSyncApiAdapter implements ISyncApiAdapter {
 
     const fetchPull = () =>
       client.get<PullSyncResponse>("/sync/pull", {
-        timeout: SYNC_REQUEST_TIMEOUT_MS,
+        timeout: PULL_TIMEOUT_MS,
         params: {
           centerId,
           cursor,
@@ -174,6 +178,46 @@ export class HttpSyncApiAdapter implements ISyncApiAdapter {
       if (isDeviceErr) {
         await this.ensureDeviceRegistered(centerId, deviceId);
         const retryResponse = await fetchPull();
+        return retryResponse.data;
+      }
+
+      throw err;
+    }
+  }
+
+  async bootstrapCenter(centerId: string): Promise<BootstrapResponse> {
+    const client = ApiClient.getInstance();
+    const deviceId = await DeviceService.getDeviceId();
+
+    const fetchBootstrap = () =>
+      client.get<BootstrapResponse>("/sync/bootstrap", {
+        timeout: BOOTSTRAP_TIMEOUT_MS,
+        headers: {
+          "X-Center-Id": centerId,
+          "X-Device-Id": deviceId,
+        },
+      });
+
+    try {
+      const response = await fetchBootstrap();
+      return response.data;
+    } catch (err: any) {
+      const isDeviceErr =
+        err?.code === "FORBIDDEN" ||
+        err?.statusCode === 403 ||
+        err?.message?.includes("Device") ||
+        err?.message?.includes("device") ||
+        err?.userMessage?.includes("الجهاز");
+
+      if (isDeviceErr) {
+        await this.ensureDeviceRegistered(centerId, deviceId);
+        const retryResponse = await fetchBootstrap();
+        return retryResponse.data;
+      }
+
+      throw err;
+    }
+  }
         return retryResponse.data;
       }
       throw err;
