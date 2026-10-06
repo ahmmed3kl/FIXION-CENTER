@@ -106,7 +106,8 @@ CREATE TABLE IF NOT EXISTS teachers (
     status VARCHAR(32) NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
     notes TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    server_revision BIGINT NOT NULL DEFAULT 1
 );
 
 -- Subjects
@@ -319,6 +320,19 @@ CREATE TABLE IF NOT EXISTS payment_reversals (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     user_id VARCHAR(64) NOT NULL REFERENCES users(id) ON DELETE RESTRICT
 );
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM payment_reversals
+         GROUP BY payment_id
+        HAVING COUNT(*) > 1
+    ) THEN
+        RAISE EXCEPTION
+            'Cannot enforce one reversal per payment: duplicate payment_reversals.payment_id rows require audited reconciliation';
+    END IF;
+END $$;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_payment_reversals_payment
+    ON payment_reversals(payment_id);
 
 -- Debt Adjustments (Approved discounts, waivers, penalties)
 CREATE TABLE IF NOT EXISTS debt_adjustments (
@@ -686,4 +700,3 @@ CREATE TABLE IF NOT EXISTS grade_scores (
 );
 
 COMMIT;
-

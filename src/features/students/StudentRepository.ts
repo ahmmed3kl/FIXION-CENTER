@@ -538,6 +538,7 @@ export class StudentRepository {
         studentType,
         student_type: studentType,
         notes,
+        baseUpdatedAt: existing.updatedAt ?? null,
         updatedAt: now,
         updated_at: now,
         student: {
@@ -624,6 +625,7 @@ export class StudentRepository {
       payload: {
         id: studentId,
         studentId,
+        baseUpdatedAt: existing.updatedAt ?? null,
         updatedAt: now,
         updated_at: now,
         student: {
@@ -647,7 +649,7 @@ export class StudentRepository {
 
   static restoreDeletedStudent(studentId: string): Student {
     const { centerId, user } = this.getActiveContext();
-    if (!PermissionService.hasPermission(user.permissions, "students.deactivate")) {
+    if (!PermissionService.hasPermission(user.permissions, "students.restore")) {
       throw new ForbiddenError("ليس لديك صلاحية استرجاع الطالب.");
     }
     const existing = this.findByIdInternal(studentId);
@@ -685,6 +687,7 @@ export class StudentRepository {
         payload: {
           id: studentId,
           studentId,
+          baseUpdatedAt: existing.updatedAt ?? null,
           updatedAt: now,
           updated_at: now,
           student: { id: studentId, deletedAt: null, deleted_at: null, deletedBy: null, deleted_by: null, updatedAt: now, updated_at: now },

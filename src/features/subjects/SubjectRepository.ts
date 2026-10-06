@@ -224,7 +224,7 @@ export class SubjectRepository {
       operationType: "UPDATE",
       entityType: "subject",
       entityId: subjectId,
-      payload: { id: subjectId, subjectId, name, code, status, updatedAt: now },
+      payload: { id: subjectId, subjectId, name, code, status, baseUpdatedAt: existing.updatedAt ?? null, updatedAt: now },
     });
 
     SyncEngine.syncCenterNow(centerId).catch((err) => {
@@ -283,7 +283,7 @@ export class SubjectRepository {
       operationType: "UPDATE",
       entityType: "subject",
       entityId: subjectId,
-      payload: { status: "inactive", updatedAt: now },
+      payload: { status: "inactive", baseUpdatedAt: existing.updatedAt ?? null, updatedAt: now },
     });
   }
 
@@ -296,7 +296,7 @@ export class SubjectRepository {
     DatabaseService.getDb().runSync("UPDATE subjects SET status='active', updated_at=? WHERE center_id=? AND id=?", [now, centerId, subjectId]);
     const operationId = `op-subj-reactivate-${Date.now()}-${subjectId}`; const deviceId = DeviceService.getDeviceIdSync();
     AuditService.recordEvent({ operationId, centerId, userId: user.id, deviceId, entityType: "subject", entityId: subjectId, action: "subject.reactivate", payload: {} });
-    SyncRepository.enqueueOperation({ operationId, centerId, userId: user.id, deviceId, operationType: "UPDATE", entityType: "subject", entityId: subjectId, payload: { status: "active", updatedAt: now } });
+    SyncRepository.enqueueOperation({ operationId, centerId, userId: user.id, deviceId, operationType: "UPDATE", entityType: "subject", entityId: subjectId, payload: { status: "active", baseUpdatedAt: existing.updatedAt ?? null, updatedAt: now } });
   }
 
   static deleteSubject(subjectId: string): void {
@@ -310,6 +310,6 @@ export class SubjectRepository {
     db.runSync("DELETE FROM subjects WHERE center_id=? AND id=?", [centerId, subjectId]);
     const operationId = `op-subj-delete-${Date.now()}-${subjectId}`; const deviceId = DeviceService.getDeviceIdSync();
     AuditService.recordEvent({ operationId, centerId, userId: user.id, deviceId, entityType: "subject", entityId: subjectId, action: "subject.delete", payload: { name: existing.name } });
-    SyncRepository.enqueueOperation({ operationId, centerId, userId: user.id, deviceId, operationType: "DELETE", entityType: "subject", entityId: subjectId, payload: { id: subjectId } });
+    SyncRepository.enqueueOperation({ operationId, centerId, userId: user.id, deviceId, operationType: "DELETE", entityType: "subject", entityId: subjectId, payload: { id: subjectId, baseUpdatedAt: existing.updatedAt ?? null } });
   }
 }

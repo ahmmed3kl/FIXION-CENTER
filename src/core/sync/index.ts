@@ -159,6 +159,7 @@ function upsertLocalDebtCycle(db: any, cycle: any, centerId: string): void {
   const status = cycle.status === "pending" ? "open" : (cycle.status || "open");
   const createdAt = cycle.created_at || cycle.createdAt || new Date().toISOString();
   const updatedAt = cycle.updated_at || cycle.updatedAt || createdAt;
+  const serverRevision = Number(cycle.server_revision ?? cycle.serverRevision ?? 0);
   // PostgreSQL accepts only monthly, per_session, or package. Legacy local
   // rows used "group"; treat those as monthly when repairing/bootstraping.
   const rawCycleType = String(cycle.cycle_type || cycle.cycleType || "monthly")
@@ -185,8 +186,8 @@ function upsertLocalDebtCycle(db: any, cycle: any, centerId: string): void {
   // that case so bootstrap remains idempotent.
   if (natural?.id) {
     db.runSync(
-      `UPDATE debt_cycles SET student_id=?, group_id=?, start_date=?, end_date=?, cycle_price=?, status=?, updated_at=?, package_subscription_id=?, cycle_type=?, billing_mode=? WHERE id=? AND center_id=?`,
-      [studentId, groupId, startDate, endDate, cyclePrice, status, updatedAt, packageSubscriptionId, cycleType, billingMode, natural.id, cycleCenterId],
+      `UPDATE debt_cycles SET student_id=?, group_id=?, start_date=?, end_date=?, cycle_price=?, status=?, updated_at=?, package_subscription_id=?, cycle_type=?, billing_mode=?, server_revision=? WHERE id=? AND center_id=?`,
+      [studentId, groupId, startDate, endDate, cyclePrice, status, updatedAt, packageSubscriptionId, cycleType, billingMode, serverRevision, natural.id, cycleCenterId],
     );
     return;
   }
@@ -195,8 +196,8 @@ function upsertLocalDebtCycle(db: any, cycle: any, centerId: string): void {
     `INSERT INTO debt_cycles
        (id, center_id, student_id, enrollment_id, group_id, cycle_number,
         start_date, end_date, cycle_price, status, created_at, updated_at,
-        package_subscription_id, cycle_type, billing_mode)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        package_subscription_id, cycle_type, billing_mode, server_revision)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(center_id, enrollment_id, cycle_number) DO UPDATE SET
        student_id = excluded.student_id,
        group_id = excluded.group_id,
@@ -207,7 +208,8 @@ function upsertLocalDebtCycle(db: any, cycle: any, centerId: string): void {
        updated_at = excluded.updated_at,
        package_subscription_id = excluded.package_subscription_id,
        cycle_type = excluded.cycle_type,
-       billing_mode = excluded.billing_mode
+       billing_mode = excluded.billing_mode,
+       server_revision = excluded.server_revision
      ON CONFLICT(id) DO UPDATE SET
        student_id = excluded.student_id,
        enrollment_id = excluded.enrollment_id,
@@ -220,10 +222,11 @@ function upsertLocalDebtCycle(db: any, cycle: any, centerId: string): void {
        updated_at = excluded.updated_at,
        package_subscription_id = excluded.package_subscription_id,
        cycle_type = excluded.cycle_type,
-       billing_mode = excluded.billing_mode`,
+       billing_mode = excluded.billing_mode,
+       server_revision = excluded.server_revision`,
     [targetId, cycleCenterId, studentId, enrollmentId, groupId, cycleNumber,
       startDate, endDate, cyclePrice, status, createdAt, updatedAt,
-      packageSubscriptionId, cycleType, billingMode],
+      packageSubscriptionId, cycleType, billingMode, serverRevision],
   );
 }
 
@@ -1351,6 +1354,11 @@ export class SyncEngine {
     return this.currentState;
   }
 
+  /** Clear rate-limit timestamps — for use in tests only. */
+  static clearRateLimitForTesting(): void {
+    this.lastSyncAttempt.clear();
+  }
+
   static getArabicState(): string {
     return ARABIC_SYNC_STATES[this.currentState] || "متصل";
   }
@@ -2005,10 +2013,21 @@ export class SyncEngine {
         for (const r of data.paymentReversals) {
           const paymentId = r.payment_id || r.paymentId;
           const payment = paymentById.get(paymentId) as any;
+          const reversalOperationId = r.operation_id || r.operationId || `bootstrap-reversal-${r.id}`;
+          const localReversal = db.getFirstSync<{ operation_id: string }>(
+            "SELECT operation_id FROM payment_reversals WHERE center_id = ? AND payment_id = ?",
+            [centerId, paymentId],
+          );
+          if (localReversal && localReversal.operation_id !== reversalOperationId) {
+            db.runSync(
+              "DELETE FROM payment_reversals WHERE center_id = ? AND payment_id = ?",
+              [centerId, paymentId],
+            );
+          }
           db.runSync(`INSERT INTO payment_reversals (id, operation_id, center_id, payment_id, student_id, reversed_amount, reason, reversed_by, reversed_at, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(operation_id) DO NOTHING`,
-            [r.id, r.operation_id || r.operationId || `bootstrap-reversal-${r.id}`, r.center_id || centerId, paymentId, r.student_id || r.studentId || payment?.student_id || "", Number(r.reversed_amount || r.reversedAmount || 0), r.reason || "", r.reversed_by || r.reversedBy || r.user_id || "system", r.reversed_at || r.reversedAt || r.created_at || new Date().toISOString(), r.created_at || new Date().toISOString()]);
+            [r.id, reversalOperationId, r.center_id || centerId, paymentId, r.student_id || r.studentId || payment?.student_id || "", Number(r.reversed_amount || r.reversedAmount || 0), r.reason || "", r.reversed_by || r.reversedBy || r.user_id || "system", r.reversed_at || r.reversedAt || r.created_at || new Date().toISOString(), r.created_at || new Date().toISOString()]);
         }
       }
       if (Array.isArray(data.debtAdjustments)) {
@@ -2581,14 +2600,28 @@ export class SyncEngine {
               pay.user_id || "system",
             ],
           );
+          if (data.debtCycle) {
+            upsertLocalDebtCycle(db, data.debtCycle, centerId);
+          }
         } else if (entityType === "payment_reversal") {
           const rev = data.reversal || data;
           const paymentId = rev.payment_id || rev.paymentId;
+          const reversalOperationId = change.operationId || `srv-reversal-${rev.id || change.entityId}`;
           db.runSync(`UPDATE payments SET is_reversed = 1, updated_at = ? WHERE id = ? AND center_id = ?`, [new Date().toISOString(), paymentId, centerId]);
+          const localReversal = db.getFirstSync<{ operation_id: string }>(
+            "SELECT operation_id FROM payment_reversals WHERE center_id = ? AND payment_id = ?",
+            [centerId, paymentId],
+          );
+          if (localReversal && localReversal.operation_id !== reversalOperationId) {
+            db.runSync(
+              "DELETE FROM payment_reversals WHERE center_id = ? AND payment_id = ?",
+              [centerId, paymentId],
+            );
+          }
           db.runSync(`INSERT INTO payment_reversals (id, operation_id, center_id, payment_id, student_id, reversed_amount, reason, reversed_by, reversed_at, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(operation_id) DO NOTHING`,
-            [rev.id || change.entityId, change.operationId || `srv-reversal-${rev.id || change.entityId}`, centerId, paymentId, rev.student_id || rev.studentId || "", Number(rev.reversed_amount ?? rev.reversedAmount ?? 0), rev.reason || "", rev.reversed_by || rev.reversedBy || "system", rev.reversed_at || rev.reversedAt || new Date().toISOString(), rev.created_at || new Date().toISOString()]);
+            [rev.id || change.entityId, reversalOperationId, centerId, paymentId, rev.student_id || rev.studentId || "", Number(rev.reversed_amount ?? rev.reversedAmount ?? 0), rev.reason || "", rev.reversed_by || rev.reversedBy || "system", rev.reversed_at || rev.reversedAt || new Date().toISOString(), rev.created_at || new Date().toISOString()]);
         } else if (entityType === "debt_adjustment") {
           const a = data.adjustment || data;
           db.runSync(`INSERT INTO debt_adjustments (id, operation_id, center_id, student_id, enrollment_id, debt_cycle_id, amount_before, adjustment_amount, amount_after, reason, created_by, created_at)
@@ -2770,8 +2803,6 @@ export class SyncEngine {
       };
     }
     
-    this.lastSyncAttempt.set(centerId, Date.now());
-
     // 1. Inactive device check
     const deviceStatus = DeviceRepository.getDeviceStatus(centerId);
     if (deviceStatus === "inactive") {
@@ -2800,6 +2831,7 @@ export class SyncEngine {
     }
 
     this.currentState = "syncing";
+    this.lastSyncAttempt.set(centerId, Date.now());
     const batchSize = options?.batchSize || 50;
     const pullLimit = options?.pullLimit || 50;
 
@@ -2863,12 +2895,24 @@ export class SyncEngine {
       // 4. Pull Changes from Server with Monotonic Cursor
       try {
         let hasMore = true;
-        let batches = 0;
-        const pullStartTime = Date.now();
-        
-        while (hasMore && 
-               batches < this.MAX_PULL_BATCHES_PER_SYNC && 
-               (Date.now() - pullStartTime) < this.MAX_SYNC_DURATION_MS) {
+        let batchesInSlice = 0;
+        let totalBatches = 0;
+        let pullSliceStartTime = Date.now();
+
+        while (hasMore) {
+          if (
+            batchesInSlice >= this.MAX_PULL_BATCHES_PER_SYNC ||
+            Date.now() - pullSliceStartTime >= this.MAX_SYNC_DURATION_MS
+          ) {
+            Logger.info("sync", "pull_continuing_after_yield", {
+              centerId,
+              metadata: { totalBatches, batchesInSlice },
+            });
+            await new Promise<void>((resolve) => setTimeout(resolve, 0));
+            batchesInSlice = 0;
+            pullSliceStartTime = Date.now();
+          }
+
           const pullResponse = await this.adapter.pullChanges(centerId, currentCursor, pullLimit);
           if (Number(pullResponse.resetGeneration || 0) > SyncRepository.getResetGeneration(centerId)) {
             await this.bootstrapCenter(centerId);
@@ -2894,28 +2938,8 @@ export class SyncEngine {
             currentCursor = nextCursor;
           }
           hasMore = Boolean(pullResponse.hasMore);
-          batches += 1;
-        }
-        
-        if (hasMore && batches >= this.MAX_PULL_BATCHES_PER_SYNC) {
-          Logger.info("sync", "pull_paused_will_resume", { 
-            centerId, 
-            metadata: {
-              batches,
-              message: "Pull paused after max batches, will continue in next sync"
-            }
-          });
-        }
-        
-        if (hasMore && (Date.now() - pullStartTime) >= this.MAX_SYNC_DURATION_MS) {
-          Logger.info("sync", "pull_paused_timeout", { 
-            centerId, 
-            metadata: {
-              batches,
-              durationMs: Date.now() - pullStartTime,
-              message: "Pull paused after timeout, will continue in next sync"
-            }
-          });
+          batchesInSlice += 1;
+          totalBatches += 1;
         }
       } catch (pullErr: any) {
         // Do not push while the local cursor is stale. Otherwise a device can
@@ -3017,10 +3041,12 @@ export class SyncEngine {
             conflicts++;
           }
 
-          // Advance server cursor if returned
-          if (pushResponse.serverCursor) {
-            SyncRepository.setServerCursor(centerId, pushResponse.serverCursor);
-          }
+          // Push confirms the local operations were accepted by the server.
+          // The local pull cursor must NOT be advanced from a Push response —
+          // doing so would skip any changes from other devices that were
+          // recorded between the last Pull and this Push.
+          // Cursor advances only through successful Pull batches below.
+          // (pushResponse.serverCursor is intentionally ignored here.)
         } catch (pushErr: any) {
           for (const op of pendingOps) {
             SyncRepository.markAsFailed(

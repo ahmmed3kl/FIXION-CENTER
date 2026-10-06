@@ -16,6 +16,7 @@ describe("Security & Data Integrity Audit Suite", () => {
     ConnectivityService.setState("online");
     await useAuthStore.getState().login("01000000001", "123456");
     await useAuthStore.getState().selectCenter("center-1");
+    SyncEngine.clearRateLimitForTesting();
   });
 
   describe("Point 1: Permission Fallback & Least Privilege Verification", () => {

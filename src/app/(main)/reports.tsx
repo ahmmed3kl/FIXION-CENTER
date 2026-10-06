@@ -22,6 +22,7 @@ import {
   StudentAttendanceReport,
 } from "../../shared/types";
 import { getLocalDateOnly } from "../../shared/utils/date";
+import { captureLoad, isCurrentLoadResult } from "../../shared/utils/loadResult";
 
 export default function ReportsScreen() {
   const { colors } = useTheme();
@@ -40,6 +41,10 @@ function ReportsContent() {
   const [activeReport, setActiveReport] = useState<"dailyAtt" | "studentAtt" | "dailyCash" | "studentFin" | "teacherSettlement">("dailyAtt");
 
   const [loading, setLoading] = useState(false);
+  const [reportError, setReportError] = useState("");
+  const [reportErrorKey, setReportErrorKey] = useState("");
+  const [retryCount, setRetryCount] = useState(0);
+  const [reportResultKey, setReportResultKey] = useState("");
   const [selectedDate, setSelectedDate] = useState(() => getLocalDateOnly());
   const [settlementPeriod, setSettlementPeriod] = useState<"day" | "month">("day");
 
@@ -59,6 +64,15 @@ function ReportsContent() {
   const [settlementGroupId, setSettlementGroupId] = useState("");
   const [settlementGroups, setSettlementGroups] = useState<{ id: string; name: string }[]>([]);
   const [teacherSettlement, setTeacherSettlement] = useState<TeacherSettlement | null>(null);
+  const currentReportKey = [
+    activeCenterId,
+    activeReport,
+    selectedDate,
+    selectedStudentId,
+    settlementTeacherId,
+    settlementGroupId,
+    settlementPeriod,
+  ].join(":");
 
   useEffect(() => {
     if (!activeCenterId) return;
@@ -74,33 +88,62 @@ function ReportsContent() {
 
   useEffect(() => { if (!settlementTeacherId) return; try { setSettlementGroups(TeacherSettlementService.getGroups(settlementTeacherId)); } catch { setSettlementGroups([]); } setSettlementGroupId(""); }, [settlementTeacherId]);
 
+  const clearActiveReport = () => {
+    setReportResultKey("");
+    setReportErrorKey("");
+    if (activeReport === "dailyAtt") setDailyAttReport(null);
+    else if (activeReport === "studentAtt") setStudentAttReport(null);
+    else if (activeReport === "dailyCash") setDailyCashReport(null);
+    else if (activeReport === "studentFin") setStudentFinReport(null);
+    else setTeacherSettlement(null);
+  };
+
   const loadReport = () => {
-    if (!activeCenterId) return;
+    setReportError("");
+    clearActiveReport();
+    if (!activeCenterId) {
+      setLoading(false);
+      return;
+    }
     setLoading(true);
+    let loaded = false;
+    const readReport = <T,>(load: () => T): T => {
+      const result = captureLoad(load, "تعذر تحميل التقرير.");
+      if (result.status === "error") throw new Error(result.message);
+      return result.value;
+    };
     try {
       if (activeReport === "dailyAtt") {
-        const rep = OperationalReportsService.getDailyAttendanceReport(selectedDate);
+        const rep = readReport(() => OperationalReportsService.getDailyAttendanceReport(selectedDate));
         setDailyAttReport(rep);
+        loaded = true;
       } else if (activeReport === "studentAtt" && selectedStudentId) {
         // Keep the student report scoped to the month currently selected in
         // the date control instead of using a stale deployment date.
         const fromDate = `${selectedDate.slice(0, 7)}-01`;
         const toDate = selectedDate;
-        const rep = OperationalReportsService.getStudentAttendanceReport(selectedStudentId, fromDate, toDate);
+        const rep = readReport(() => OperationalReportsService.getStudentAttendanceReport(selectedStudentId, fromDate, toDate));
         setStudentAttReport(rep);
+        loaded = true;
       } else if (activeReport === "dailyCash") {
-        const rep = OperationalReportsService.getDailyCashReport(selectedDate);
+        const rep = readReport(() => OperationalReportsService.getDailyCashReport(selectedDate));
         setDailyCashReport(rep);
+        loaded = true;
       } else if (activeReport === "studentFin" && selectedStudentId) {
-        const rep = OperationalReportsService.getStudentFinancialSummary(selectedStudentId);
+        const rep = readReport(() => OperationalReportsService.getStudentFinancialSummary(selectedStudentId));
         setStudentFinReport(rep);
+        loaded = true;
       } else if (activeReport === "teacherSettlement" && settlementTeacherId) {
         const fromDate = settlementPeriod === "month" ? `${selectedDate.slice(0, 7)}-01` : selectedDate;
         const toDate = settlementPeriod === "month" ? getLocalDateOnly(new Date(Number(selectedDate.slice(0, 4)), Number(selectedDate.slice(5, 7)), 0)) : selectedDate;
-        setTeacherSettlement(TeacherSettlementService.getSettlement({ teacherId: settlementTeacherId, fromDate, toDate, groupId: settlementGroupId || undefined }));
+        setTeacherSettlement(readReport(() => TeacherSettlementService.getSettlement({ teacherId: settlementTeacherId, fromDate, toDate, groupId: settlementGroupId || undefined })));
+        loaded = true;
       }
+      if (loaded) setReportResultKey(currentReportKey);
     } catch (err: any) {
-      console.warn("Report load error:", err.message);
+      clearActiveReport();
+      setReportError(err?.message || "تعذر تحميل التقرير.");
+      setReportErrorKey(currentReportKey);
     } finally {
       setLoading(false);
     }
@@ -108,7 +151,7 @@ function ReportsContent() {
 
   useEffect(() => {
     loadReport();
-  }, [activeReport, selectedDate, selectedStudentId, settlementTeacherId, settlementGroupId, settlementPeriod, activeCenterId]);
+  }, [activeReport, selectedDate, selectedStudentId, settlementTeacherId, settlementGroupId, settlementPeriod, activeCenterId, retryCount]);
 
   return (
     <View style={styles.container}>
@@ -196,6 +239,8 @@ function ReportsContent() {
         {activeReport === "teacherSettlement" && <View style={styles.teacherFilterBlock}><View style={styles.periodSwitch}><TouchableOpacity style={[styles.periodPill, settlementPeriod === "day" && styles.periodPillActive]} onPress={() => setSettlementPeriod("day")}><Text style={styles.periodText}>يوم</Text></TouchableOpacity><TouchableOpacity style={[styles.periodPill, settlementPeriod === "month" && styles.periodPillActive]} onPress={() => setSettlementPeriod("month")}><Text style={styles.periodText}>شهر</Text></TouchableOpacity></View><Text style={styles.filterLabel}>المدرس:</Text><ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>{teachers.map((teacher) => <TouchableOpacity key={teacher.id} style={[styles.studentMiniPill, settlementTeacherId === teacher.id && styles.studentMiniPillActive]} onPress={() => setSettlementTeacherId(teacher.id)}><Text style={[styles.studentMiniPillText, settlementTeacherId === teacher.id && styles.studentMiniPillTextActive]}>{teacher.name}</Text></TouchableOpacity>)}</ScrollView><Text style={styles.filterLabel}>المجموعة:</Text><ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>{settlementGroups.map((group) => <TouchableOpacity key={group.id} style={[styles.studentMiniPill, settlementGroupId === group.id && styles.studentMiniPillActive]} onPress={() => setSettlementGroupId(group.id)}><Text style={[styles.studentMiniPillText, settlementGroupId === group.id && styles.studentMiniPillTextActive]}>{group.name}</Text></TouchableOpacity>)}</ScrollView></View>}
       </View>
 
+      {reportError && reportErrorKey === currentReportKey && !loading ? <View style={{ margin: 16, padding: 14, borderRadius: 12, borderWidth: 1, borderColor: Colors.danger, backgroundColor: Colors.dangerLight, alignItems: "center", gap: 8 }}><Text accessibilityRole="alert" style={{ color: Colors.dangerText, textAlign: "center" }}>{reportError}</Text><TouchableOpacity onPress={() => setRetryCount((count) => count + 1)}><Text style={{ color: Colors.primary, fontWeight: "800" }}>إعادة المحاولة</Text></TouchableOpacity></View> : null}
+
       {loading ? (
         <View style={styles.centered}>
           <ActivityIndicator size="large" color={Colors.primary} />
@@ -204,7 +249,7 @@ function ReportsContent() {
       ) : (
         <ScrollView contentContainerStyle={styles.content}>
           {/* Report A: Daily Attendance */}
-          {activeReport === "dailyAtt" && dailyAttReport && (
+          {activeReport === "dailyAtt" && isCurrentLoadResult(reportResultKey, currentReportKey) && dailyAttReport && (
             <View>
               {/* Summary Cards */}
               <View style={styles.kpiRow}>
@@ -253,7 +298,7 @@ function ReportsContent() {
           )}
 
           {/* Report B: Student Attendance */}
-          {activeReport === "studentAtt" && studentAttReport && (
+          {activeReport === "studentAtt" && isCurrentLoadResult(reportResultKey, currentReportKey) && studentAttReport && (
             <View>
               <View style={styles.kpiRow}>
                 <View style={styles.kpiBox}>
@@ -333,7 +378,7 @@ function ReportsContent() {
           )}
 
           {/* Report C: Daily Cash Report */}
-          {activeReport === "dailyCash" && dailyCashReport && (
+          {activeReport === "dailyCash" && isCurrentLoadResult(reportResultKey, currentReportKey) && dailyCashReport && (
             <View>
               <View style={styles.totalBox}>
                 <Text style={styles.totalLabel}>إجمالي إيراد يوم {selectedDate}</Text>
@@ -367,7 +412,7 @@ function ReportsContent() {
           )}
 
           {/* Report D: Student Financial Summary */}
-          {activeReport === "studentFin" && studentFinReport && (
+          {activeReport === "studentFin" && isCurrentLoadResult(reportResultKey, currentReportKey) && studentFinReport && (
             <View>
               <View style={styles.kpiRow}>
                 <View style={styles.kpiBox}>
@@ -410,7 +455,7 @@ function ReportsContent() {
             </View>
           )}
 
-          {activeReport === "teacherSettlement" && teacherSettlement && <View><View style={styles.totalBox}><Text style={styles.totalLabel}>دخل {teacherSettlement.teacherName} في {selectedDate}</Text><Text style={styles.totalValue}>{teacherSettlement.totalAmount} ج.م</Text><Text style={styles.totalSub}>عدد الدفعات المرتبطة بالحصص: {teacherSettlement.paymentCount}</Text></View><Text style={styles.sectionHeader}>تفصيل الحصص والمجموعات</Text>{teacherSettlement.rows.map((row) => <View key={row.sessionId} style={styles.card}><View style={styles.cardHeader}><Text style={styles.sessGroup}>{row.groupName}</Text><Text style={styles.sessDate}>{row.sessionDate} · {row.startTime}</Text></View><Text style={styles.sessMeta}>المتحصل: {row.amount} ج.م · دفعات: {row.paymentCount}</Text></View>)}{!teacherSettlement.rows.length && <Text style={styles.loadingText}>لا توجد دفعات مرتبطة بحصص هذا المدرس في التاريخ المحدد.</Text>}</View>}
+          {activeReport === "teacherSettlement" && isCurrentLoadResult(reportResultKey, currentReportKey) && teacherSettlement && <View><View style={styles.totalBox}><Text style={styles.totalLabel}>دخل {teacherSettlement.teacherName} في {selectedDate}</Text><Text style={styles.totalValue}>{teacherSettlement.totalAmount} ج.م</Text><Text style={styles.totalSub}>عدد الدفعات المرتبطة بالحصص: {teacherSettlement.paymentCount}</Text></View><Text style={styles.sectionHeader}>تفصيل الحصص والمجموعات</Text>{teacherSettlement.rows.map((row) => <View key={row.sessionId} style={styles.card}><View style={styles.cardHeader}><Text style={styles.sessGroup}>{row.groupName}</Text><Text style={styles.sessDate}>{row.sessionDate} · {row.startTime}</Text></View><Text style={styles.sessMeta}>المتحصل: {row.amount} ج.م · دفعات: {row.paymentCount}</Text></View>)}{!teacherSettlement.rows.length && <Text style={styles.loadingText}>لا توجد دفعات مرتبطة بحصص هذا المدرس في التاريخ المحدد.</Text>}</View>}
         </ScrollView>
       )}
     </View>

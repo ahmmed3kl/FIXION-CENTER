@@ -59,6 +59,7 @@
     "lint": "expo lint",
     "backend:start": "node backend/src/server.js",
     "backend:test": "node backend/tests/backend_integration.test.js",
+    "backend:sync-test": "node backend/tests/sync_four_device.integration.test.js",
     "build:apk": "eas-cli build --platform android --profile preview"
   },
   "overrides": {

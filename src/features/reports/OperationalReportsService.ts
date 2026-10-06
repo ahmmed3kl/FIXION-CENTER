@@ -50,7 +50,7 @@ export class OperationalReportsService {
     // Build expected roster from group schedules like the dashboard, even when
     // no session has been opened yet for the timetable slot.
     const scheduledGroups = db.getAllSync<any>(
-      `SELECT DISTINCT g.id as group_id, g.subject_id, g.teacher_id, gs.start_time, gs.end_time,
+      `SELECT DISTINCT g.id as group_id, gs.id as schedule_id, g.subject_id, g.teacher_id, gs.start_time, gs.end_time,
               g.name as group_name, subj.name as subject_name, t.name as teacher_name
        FROM groups g
        JOIN group_schedules gs ON gs.center_id = g.center_id AND gs.group_id = g.id
@@ -63,7 +63,7 @@ export class OperationalReportsService {
     );
 
     const loadedSessions = db.getAllSync<any>(
-      `SELECT s.id, s.group_id, s.session_date, s.status, s.start_time, s.end_time,
+      `SELECT s.id, s.group_id, s.schedule_id, s.session_date, s.status, s.start_time, s.end_time,
               g.name as group_name, subj.name as subject_name, t.name as teacher_name
        FROM sessions s
        JOIN groups g ON g.center_id = s.center_id AND s.group_id = g.id
@@ -74,21 +74,39 @@ export class OperationalReportsService {
       [centerId, dateStr],
     );
 
-    const sessionByGroup = new Map<string, any>();
+    const sessionsBySchedule = new Map<string, any[]>();
+    const sessionsByScheduleId = new Map<string, any[]>();
     for (const s of loadedSessions) {
       if (s.status === "open" || s.status === "closed") {
-        sessionByGroup.set(s.group_id, s);
+        if (s.schedule_id) {
+          const scheduled = sessionsByScheduleId.get(s.schedule_id) || [];
+          scheduled.push(s);
+          sessionsByScheduleId.set(s.schedule_id, scheduled);
+        }
+        const key = `${s.group_id}:${s.start_time}:${s.end_time}`;
+        const scheduled = sessionsBySchedule.get(key) || [];
+        scheduled.push(s);
+        sessionsBySchedule.set(key, scheduled);
       }
     }
 
-    // Merge timetable slots with actual sessions so the report shows expected
-    // students even when the operator has not yet opened the session.
-    const sessions = scheduledGroups.map((group: any) => {
-      const existingSession = sessionByGroup.get(group.group_id);
-      if (existingSession) return existingSession;
-      return {
+    const representedSessionIds = new Set<string>();
+    const sessions = scheduledGroups.flatMap((group: any) => {
+      const key = `${group.group_id}:${group.start_time}:${group.end_time}`;
+      const matchingSessions =
+        sessionsByScheduleId.get(group.schedule_id) ||
+        (sessionsBySchedule.get(key) || []).filter(
+          (session) => !representedSessionIds.has(session.id),
+        ) ||
+        [];
+      if (matchingSessions.length) {
+        matchingSessions.forEach((session) => representedSessionIds.add(session.id));
+        return matchingSessions;
+      }
+      return [{
         id: null,
         group_id: group.group_id,
+        schedule_id: group.schedule_id,
         session_date: dateStr,
         status: "scheduled",
         start_time: group.start_time,
@@ -96,8 +114,19 @@ export class OperationalReportsService {
         group_name: group.group_name,
         subject_name: group.subject_name,
         teacher_name: group.teacher_name,
-      };
+      }];
     });
+
+    // Keep open/closed sessions visible even if their schedule was later
+    // removed or their recorded time no longer matches the current timetable.
+    for (const session of loadedSessions) {
+      if (
+        (session.status === "open" || session.status === "closed") &&
+        !representedSessionIds.has(session.id)
+      ) {
+        sessions.push(session);
+      }
+    }
 
     const sessionReport = sessions.map((s: any) => {
       let expected: any[] = [];
@@ -192,7 +221,7 @@ export class OperationalReportsService {
           : 0;
 
       return {
-        sessionId: s.id || `scheduled-${s.group_id}`,
+        sessionId: s.id || `scheduled-${s.group_id}-${s.schedule_id}`,
         groupName: s.group_name || "",
         subjectName: s.subject_name || "",
         teacherName: s.teacher_name || "",

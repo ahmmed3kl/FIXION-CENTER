@@ -1,6 +1,7 @@
 import { Platform } from "react-native";
 import { env } from "../../config/env";
 import { DeviceService } from "../device";
+import { Logger } from "../logger";
 import {
     PullSyncResponse,
     PushSyncRequest,
@@ -95,10 +96,9 @@ export class HttpSyncApiAdapter implements ISyncApiAdapter {
         },
       );
     } catch (e: any) {
-      Logger.info("sync", "device_auto_register_attempt", { 
+      Logger.info("sync", "device_auto_register_attempt", {
         centerId,
-        deviceId: deviceId.slice(-4),
-        error: e?.message
+        metadata: { deviceSuffix: deviceId.slice(-4), error: e?.message },
       });
     }
   }
@@ -215,79 +215,6 @@ export class HttpSyncApiAdapter implements ISyncApiAdapter {
         return retryResponse.data;
       }
 
-      throw err;
-    }
-  }
-        return retryResponse.data;
-      }
-      throw err;
-    }
-  }
-
-  async bootstrapCenter(centerId: string): Promise<BootstrapResponse> {
-    const client = ApiClient.getInstance();
-    const deviceId = await DeviceService.getDeviceId();
-
-    const fetchBootstrap = () =>
-      client.get<BootstrapResponse>("/sync/bootstrap", {
-        timeout: SYNC_REQUEST_TIMEOUT_MS,
-        params: { centerId },
-        headers: {
-          "X-Center-Id": centerId,
-          "X-Device-Id": deviceId,
-        },
-      });
-
-    try {
-      const response = await fetchBootstrap();
-      return response.data;
-    } catch (err: any) {
-      // A missing bootstrap endpoint is not an empty center.  Returning an
-      // empty snapshot here silently erases the device's ability to discover
-      // server data and can advance the cursor incorrectly.  Let SyncEngine
-      // fall back to the incremental pull path instead.
-      if (err?.statusCode === 404 || err?.code === "NOT_FOUND") {
-        throw err;
-      }
-
-      const isDeviceErr =
-        err?.code === "FORBIDDEN" ||
-        err?.statusCode === 403 ||
-        err?.message?.includes("Device") ||
-        err?.message?.includes("device") ||
-        err?.userMessage?.includes("الجهاز");
-
-      if (isDeviceErr) {
-        await this.ensureDeviceRegistered(centerId, deviceId);
-        try {
-          const retryResponse = await fetchBootstrap();
-          return retryResponse.data;
-        } catch {
-          return {
-            centerId,
-            students: [],
-            cards: [],
-            groups: [],
-            teachers: [],
-            subjects: [],
-            sessions: [],
-            expectedStudents: [],
-            enrollments: [],
-            attendance: [],
-            payments: [],
-            paymentReversals: [],
-            debtAdjustments: [],
-            advanceCoverages: [],
-            notificationTemplates: [],
-            notificationEvents: [],
-            notificationDeliveries: [],
-            sessionClosings: [],
-            dailyClosings: [],
-            latestServerSeq: 0,
-            timestamp: new Date().toISOString(),
-          };
-        }
-      }
       throw err;
     }
   }

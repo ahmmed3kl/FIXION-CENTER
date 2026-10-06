@@ -408,6 +408,7 @@ export interface DebtCycle {
   status: "open" | "partial" | "paid" | "overdue" | "cancelled";
   createdAt: string;
   updatedAt?: string | null;
+  serverRevision?: number;
   // Calculated runtime fields
   totalPaid?: number;
   paidAmount?: number;

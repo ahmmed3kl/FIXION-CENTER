@@ -7,18 +7,12 @@ import { useLocalDataRevision } from "../../core/database/useLocalDataRevision";
 import { Spacing, Typography, useTheme } from "../../core/theme";
 import { AppButton, AppCard, AppInput, EmptyState } from "../../shared/components";
 import { OpeningBalanceService } from "../../features/payments/OpeningBalanceService";
+import { addOpeningBalanceMonth, getOpeningBalanceDateDefaults } from "../../features/payments/openingBalanceDates";
 import { PermissionService, resolveUserPermissions } from "../../core/permissions";
 import { useAuthStore } from "../../features/auth/useAuthStore";
 import { smartSearch } from "../../shared/utils/smartSearch";
 
 type Target = { id: string; label: string; kind: "group" | "package"; cycleType: "monthly" | "package"; enrollmentId?: string; packageSubscriptionId?: string; packageId?: string; groupId?: string; startDate?: string; endDate?: string };
-
-const addMonth = (value: string) => {
-  const date = new Date(`${value}T00:00:00`);
-  date.setMonth(date.getMonth() + 1);
-  date.setDate(date.getDate() - 1);
-  return Number.isFinite(date.getTime()) ? date.toISOString().slice(0, 10) : value;
-};
 
 export default function OpeningBalanceScreen() {
   const localDataRevision = useLocalDataRevision();
@@ -30,8 +24,9 @@ export default function OpeningBalanceScreen() {
   const [selectedStudent, setSelectedStudent] = useState<any | null>(null);
   const [targets, setTargets] = useState<Target[]>([]);
   const [selectedTarget, setSelectedTarget] = useState<Target | null>(null);
-  const [startDate, setStartDate] = useState(new Date().toISOString().slice(0, 10));
-  const [endDate, setEndDate] = useState(() => addMonth(new Date().toISOString().slice(0, 10)));
+  const [dateDefaults] = useState(getOpeningBalanceDateDefaults);
+  const [startDate, setStartDate] = useState(dateDefaults.periodStart);
+  const [endDate, setEndDate] = useState(dateDefaults.periodEnd);
   const [amountDue, setAmountDue] = useState("");
   const [amountPaid, setAmountPaid] = useState("0");
   const [notes, setNotes] = useState("");
@@ -62,7 +57,7 @@ export default function OpeningBalanceScreen() {
     setSelectedTarget(target);
     if (target.startDate) setStartDate(target.startDate);
     if (target.endDate) setEndDate(target.endDate);
-    else if (target.startDate) setEndDate(addMonth(target.startDate));
+    else if (target.startDate) setEndDate(addOpeningBalanceMonth(target.startDate));
   };
 
   const save = async () => {
@@ -106,4 +101,3 @@ export default function OpeningBalanceScreen() {
 const createStyles = (colors: any) => StyleSheet.create({
   safe: { flex: 1 }, content: { padding: Spacing.lg, gap: Spacing.md, paddingBottom: 50 }, header: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" }, eyebrow: { color: colors.primary, fontSize: 12, fontWeight: "800", textAlign: "right" }, title: { ...Typography.h1, color: colors.textPrimary, textAlign: "right", marginTop: 3 }, subtitle: { color: colors.textSecondary, fontSize: 12, textAlign: "right", marginTop: 4 }, headerIcon: { width: 52, height: 52, borderRadius: 17, backgroundColor: colors.primaryLight, alignItems: "center", justifyContent: "center" }, info: { backgroundColor: colors.primaryLight, borderColor: colors.primary, borderWidth: 1 }, infoTitle: { color: colors.textPrimary, fontSize: 15, fontWeight: "900", textAlign: "right" }, infoText: { color: colors.textSecondary, fontSize: 12, lineHeight: 20, textAlign: "right", marginTop: 6 }, list: { gap: 8 }, studentRow: { backgroundColor: colors.cardBackground, borderColor: colors.border, borderWidth: 1, borderRadius: 15, padding: 13, flexDirection: "row", alignItems: "center", justifyContent: "space-between" }, studentName: { color: colors.textPrimary, fontSize: 15, fontWeight: "800", textAlign: "right" }, studentMeta: { color: colors.textSecondary, fontSize: 11, textAlign: "right", marginTop: 3 }, searchHint: { color: colors.textSecondary, fontSize: 11, textAlign: "right", marginTop: 2 }, backLink: { flexDirection: "row", alignItems: "center", gap: 6, justifyContent: "flex-end" }, backText: { color: colors.primary, fontWeight: "800" }, selectedCard: { alignItems: "flex-end" }, selectedName: { color: colors.textPrimary, fontSize: 17, fontWeight: "900" }, sectionTitle: { color: colors.textPrimary, fontSize: 15, fontWeight: "900", textAlign: "right" }, targetRow: { backgroundColor: colors.cardBackground, borderColor: colors.border, borderWidth: 1, borderRadius: 15, padding: 13, flexDirection: "row", alignItems: "center", gap: 10 }, targetRowActive: { borderColor: colors.primary, backgroundColor: colors.primaryLight }, targetLabel: { color: colors.textPrimary, fontSize: 14, fontWeight: "800", textAlign: "right" }, targetMeta: { color: colors.textSecondary, fontSize: 11, textAlign: "right", marginTop: 4 }, form: { gap: 8 },
 });
-

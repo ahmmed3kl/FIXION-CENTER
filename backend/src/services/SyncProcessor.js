@@ -108,6 +108,7 @@ function normalizeOperationId(value) {
 const SYNC_ENTITY_ALIASES = {
   student_group_enrollment: "enrollment",
   session_payment: "payment",
+  payment_collected: "payment",
   makeup_attendance: "makeup",
   attendance_marked: "attendance",
 };
@@ -203,10 +204,32 @@ function orderSyncOperations(operations) {
 
 class SyncProcessor {
   /**
+   * Serialize sync-ledger writes and snapshots for one center. The row lock is
+   * held until the surrounding transaction commits, so a later writer cannot
+   * allocate a higher server_seq before an earlier writer is visible.
+   */
+  static async acquireCenterSyncLock(client, centerId) {
+    await client.query(
+      `INSERT INTO center_data_state (center_id)
+       VALUES ($1)
+       ON CONFLICT (center_id) DO NOTHING`,
+      [centerId],
+    );
+    await client.query(
+      `SELECT center_id
+         FROM center_data_state
+        WHERE center_id = $1
+        FOR UPDATE`,
+      [centerId],
+    );
+  }
+
+  /**
    * Processes a batch of sync operations inside a true ACID transaction.
    */
   static async processPush(centerId, userId, deviceId, operations) {
     return db.withTransaction(async (client) => {
+      await SyncProcessor.acquireCenterSyncLock(client, centerId);
       const syncedOperationIds = [];
       const conflicts = [];
       // Older offline clients could generate a random session id for the same
@@ -290,7 +313,7 @@ class SyncProcessor {
             normalizedPayload.session_id = canonicalSessionId;
             normalizedPayload.sessionId = canonicalSessionId;
           }
-          await SyncProcessor.assertFreshMutation(client, centerId, entityType, entityId, normalizedPayload, operationType);
+          await SyncProcessor.assertFreshMutation(client, centerId, canonicalSyncEntity(entityType), entityId, normalizedPayload, operationType);
           // 3. Dispatch and apply domain mutation atomically
           await SyncProcessor.applyDomainMutation(client, {
             centerId,
@@ -324,6 +347,59 @@ class SyncProcessor {
           if (entityType === "notification_delivery") {
             const deliveryState = await client.query("SELECT id, notification_event_id, provider, status, retry_count, provider_message_id FROM notification_deliveries WHERE center_id=$1 AND id=$2", [centerId, entityId]);
             if (deliveryState.rows[0]) ledgerPayload = { delivery: { ...deliveryState.rows[0] } };
+          }
+          const canonicalEntity = canonicalSyncEntity(entityType);
+          if (["student", "teacher", "subject", "group", "package"].includes(canonicalEntity)) {
+            const tableByType = {
+              student: "students",
+              teacher: "teachers",
+              subject: "subjects",
+              group: "groups",
+              package: "packages",
+            };
+            const row = await client.query(
+              `SELECT updated_at::text AS updated_at FROM ${tableByType[canonicalEntity]}
+                WHERE center_id = $1 AND id = $2`,
+              [centerId, entityId],
+            );
+            if (row.rows[0]) {
+              const updatedAt = row.rows[0].updated_at;
+              const key = canonicalEntity;
+              ledgerPayload = {
+                ...(normalizedPayload || {}),
+                updatedAt,
+                updated_at: updatedAt,
+                ...(normalizedPayload?.[key]
+                  ? { [key]: { ...normalizedPayload[key], updatedAt, updated_at: updatedAt } }
+                  : {}),
+              };
+            }
+          } else if (canonicalEntity === "debt_cycle") {
+            const row = await client.query(
+              `SELECT server_revision FROM debt_cycles
+                WHERE center_id = $1 AND id = $2`,
+              [centerId, entityId],
+            );
+            if (row.rows[0]) {
+              const serverRevision = Number(row.rows[0].server_revision);
+              ledgerPayload = {
+                ...(normalizedPayload || {}),
+                serverRevision,
+                ...(normalizedPayload?.debtCycle
+                  ? { debtCycle: { ...normalizedPayload.debtCycle, serverRevision } }
+                  : {}),
+              };
+            }
+          } else if (canonicalEntity === "payment") {
+            const cycleId = normalizedPayload?.debt_cycle_id || normalizedPayload?.debtCycleId;
+            if (cycleId) {
+              const cycle = await client.query(
+                  `SELECT * FROM debt_cycles
+                    WHERE center_id = $1 AND id = $2`,
+                  [centerId, cycleId],
+              );
+              if (cycle.rows[0]) ledgerPayload = { ...(normalizedPayload || {}), debtCycle: cycle.rows[0] };
+            }
           }
           const ingestRes = await client.query(
             `INSERT INTO server_sync_operations 
@@ -401,7 +477,7 @@ class SyncProcessor {
       const checkpointId = `chk-${crypto.createHash("sha256").update(`${centerId}:${deviceId}`).digest("hex").slice(0, 48)}`;
       await client.query(
         `INSERT INTO sync_checkpoints (id, center_id, device_id, last_pulled_seq, last_pushed_operation_id, updated_at)
-         VALUES ($1, $2, $3, $4, $5, NOW())
+         VALUES ($1, $2, $3, 0, $4, NOW())
          ON CONFLICT (center_id, device_id) DO UPDATE SET
            last_pushed_operation_id = EXCLUDED.last_pushed_operation_id,
            updated_at = NOW();`,
@@ -409,7 +485,6 @@ class SyncProcessor {
           checkpointId,
           centerId,
           deviceId,
-          maxServerSeq,
           normalizeOperationId(syncedOperationIds[syncedOperationIds.length - 1]) || null,
         ],
       );
@@ -469,12 +544,12 @@ class SyncProcessor {
     // was recreated after the reset, so optimistic stale-write protection does
     // not apply to this explicit recovery operation.
     if (operationType === "REPAIR_AFTER_SERVER_RESET") return;
-    const incoming = payload && (payload.updatedAt || payload.updated_at);
-    if (!incoming || !entityId) return;
+    if (!entityId) return;
     const tableByType = {
       student: "students", teacher: "teachers", subject: "subjects",
       group: "groups", session: "sessions", enrollment: "student_group_enrollments",
-      package: "packages", package_subscription: "student_package_subscriptions",
+      package: "packages", debt_cycle: "debt_cycles",
+      package_subscription: "student_package_subscriptions",
       group_schedule: "group_schedules", student_card: "student_cards",
       package_teacher_override: "package_subject_teacher_overrides",
       grade_exam: "grade_exams", grade_score: "grade_scores",
@@ -482,9 +557,62 @@ class SyncProcessor {
     };
     const table = tableByType[entityType];
     if (!table) return;
-    const result = await client.query(`SELECT updated_at FROM ${table} WHERE center_id = $1 AND id = $2`, [centerId, entityId]);
-    const serverUpdated = result.rows[0]?.updated_at;
-    if (serverUpdated && new Date(serverUpdated).getTime() > new Date(incoming).getTime()) {
+
+    if (entityType === "debt_cycle") {
+      const cyclePayload = payload?.debtCycle || payload;
+      const current = await client.query(
+        `SELECT server_revision FROM debt_cycles
+          WHERE center_id = $1 AND id = $2
+          FOR UPDATE`,
+        [centerId, entityId],
+      );
+      if (!current.rows.length) return;
+      const expectedRevision = cyclePayload?.expectedRevision;
+      if (
+        expectedRevision === undefined ||
+        expectedRevision === null ||
+        !Number.isSafeInteger(Number(expectedRevision)) ||
+        Number(expectedRevision) < 0
+      ) {
+        throw new Error("STALE_UPDATE: debt cycle update requires its server revision.");
+      }
+      if (Number(current.rows[0].server_revision) !== Number(expectedRevision)) {
+        throw new Error("STALE_UPDATE: debt cycle has a newer server revision.");
+      }
+      return;
+    }
+
+    const versionedTypes = new Set(["student", "teacher", "subject", "group", "package"]);
+    if (!versionedTypes.has(entityType)) {
+      const incoming = payload && (payload.updatedAt || payload.updated_at);
+      if (!incoming) return;
+      const result = await client.query(`SELECT updated_at FROM ${table} WHERE center_id = $1 AND id = $2`, [centerId, entityId]);
+      const serverUpdated = result.rows[0]?.updated_at;
+      if (serverUpdated && new Date(serverUpdated).getTime() > new Date(incoming).getTime()) {
+        throw new Error("STALE_UPDATE: server has a newer version of this record.");
+      }
+      return;
+    }
+
+    const current = await client.query(
+      `SELECT updated_at FROM ${table}
+        WHERE center_id = $1 AND id = $2
+        FOR UPDATE`,
+      [centerId, entityId],
+    );
+    if (!current.rows.length) return;
+    if (!Object.prototype.hasOwnProperty.call(payload || {}, "baseUpdatedAt")) {
+      throw new Error("STALE_UPDATE: mutable record update requires its server updatedAt token.");
+    }
+    const matches = await client.query(
+      `SELECT date_trunc('milliseconds', updated_at)
+                IS NOT DISTINCT FROM
+             date_trunc('milliseconds', $3::timestamptz) AS matches
+         FROM ${table}
+        WHERE center_id = $1 AND id = $2`,
+      [centerId, entityId, payload.baseUpdatedAt],
+    );
+    if (!matches.rows[0]?.matches) {
       throw new Error("STALE_UPDATE: server has a newer version of this record.");
     }
   }
@@ -794,7 +922,8 @@ class SyncProcessor {
             await client.query(
               `UPDATE debt_cycles
                   SET amount_due = GREATEST(COALESCE(amount_due, 0), $3::numeric),
-                      updated_at = NOW()
+                      updated_at = NOW(),
+                      server_revision = server_revision + 1
                 WHERE center_id = $1 AND id = $2`,
               [centerId, debtCycleId, Number(pay.amount) || 0],
             );
@@ -827,27 +956,42 @@ class SyncProcessor {
 
       case "payment_reversal": {
         const rev = payload;
+        const paymentId = rev.payment_id || rev.paymentId;
+        const paymentResult = await client.query(
+          `SELECT id, student_id, amount, is_reversed
+             FROM payments
+            WHERE id = $1 AND center_id = $2
+            FOR UPDATE`,
+          [paymentId, centerId],
+        );
+        const payment = paymentResult.rows[0];
+        if (!payment) throw new Error("PAYMENT_NOT_FOUND: payment does not exist in this center.");
+        if (payment.is_reversed) {
+          throw new Error("PAYMENT_ALREADY_REVERSED: this payment already has a reversal.");
+        }
         await client.query(
           `INSERT INTO payment_reversals
            (id, operation_id, center_id, payment_id, reversed_amount, reason, created_at, user_id)
-           VALUES ($1, $2, $3, $4, $5, $6, NOW(), $7)
-           ON CONFLICT (operation_id) DO NOTHING;`,
+           VALUES ($1, $2, $3, $4, $5, $6, NOW(), $7);`,
           [
             rev.id,
             operationId,
             centerId,
-            rev.payment_id || rev.paymentId,
-            parseFloat(rev.reversed_amount || rev.reversedAmount),
+            paymentId,
+            Number(payment.amount),
             rev.reason || "إلغاء إيصال الدفع",
             userId,
           ],
         );
 
-        // Mark payment as reversed
-        await client.query(
-          "UPDATE payments SET is_reversed = true WHERE id = $1 AND center_id = $2",
-          [rev.payment_id || rev.paymentId, centerId],
+        const reversed = await client.query(
+          `UPDATE payments SET is_reversed = true
+            WHERE id = $1 AND center_id = $2 AND is_reversed = false`,
+          [paymentId, centerId],
         );
+        if (reversed.rowCount !== 1) {
+          throw new Error("PAYMENT_ALREADY_REVERSED: this payment was reversed concurrently.");
+        }
         break;
       }
 
@@ -1577,33 +1721,19 @@ class SyncProcessor {
           );
           const naturalId = naturalRes.rows[0]?.id;
           if (naturalId && naturalId !== targetId) {
-            const effectiveAmount = await amountForCycle(naturalId);
-            await client.query(
-              `UPDATE debt_cycles
-                  SET student_id=$2, enrollment_id=$3, group_id=$4,
-                      package_subscription_id=$5, package_id=$6,
-                      cycle_number=$7, cycle_type=$8, billing_mode=$9, period_start=$10,
-                      period_end=$11, amount_due=$12, status=$13,
-                      notes=$14, updated_at=NOW()
-                WHERE center_id=$1 AND id=$15`,
-              [centerId, studentId, enrollmentId, groupId, packageSubscriptionId, packageId,
-                cycleNumber, cycleType, billingMode, cycle.start_date || cycle.startDate || cycle.period_start,
-                cycle.end_date || cycle.endDate || cycle.period_end,
-                effectiveAmount,
-                normalizedCycleStatus, cycle.notes || null, naturalId],
-            );
-            break;
+            throw new Error("DEBT_CYCLE_NATURAL_KEY_CONFLICT: this billing cycle already exists under another id.");
           }
         }
         const effectiveAmount = await amountForCycle(targetId);
         await client.query(`INSERT INTO debt_cycles
-          (id, center_id, student_id, enrollment_id, group_id, package_subscription_id, package_id, cycle_number, cycle_type, billing_mode, period_start, period_end, amount_due, status, notes, created_at, updated_at)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,NOW(),NOW())
+          (id, center_id, student_id, enrollment_id, group_id, package_subscription_id, package_id, cycle_number, cycle_type, billing_mode, period_start, period_end, amount_due, status, notes, created_at, updated_at, server_revision)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,NOW(),NOW(),0)
           ON CONFLICT (id) DO UPDATE SET student_id=EXCLUDED.student_id, enrollment_id=EXCLUDED.enrollment_id,
             group_id=EXCLUDED.group_id, package_subscription_id=EXCLUDED.package_subscription_id,
             package_id=EXCLUDED.package_id, cycle_number=EXCLUDED.cycle_number, cycle_type=EXCLUDED.cycle_type,
             billing_mode=EXCLUDED.billing_mode, period_start=EXCLUDED.period_start, period_end=EXCLUDED.period_end, amount_due=EXCLUDED.amount_due,
-            status=EXCLUDED.status, notes=EXCLUDED.notes, updated_at=NOW()`,
+            status=EXCLUDED.status, notes=EXCLUDED.notes, updated_at=NOW(),
+            server_revision=debt_cycles.server_revision + 1`,
           [targetId, centerId, studentId, enrollmentId, groupId, packageSubscriptionId, packageId, cycleNumber, cycleType, billingMode, cycle.start_date || cycle.startDate || cycle.period_start, cycle.end_date || cycle.endDate || cycle.period_end, effectiveAmount, normalizedCycleStatus, cycle.notes || null]);
         break;
       }

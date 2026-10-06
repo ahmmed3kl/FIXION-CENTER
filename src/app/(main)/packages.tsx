@@ -85,9 +85,16 @@ export default function PackagesScreen() {
     if (!valid.length || max > valid.length) return Alert.alert("تنبيه", "أضف مدرسين، والحد الأقصى لا يتجاوز عددهم.");
     setSaving(true);
     try {
-      const pkg = editing ? await PackageRepository.updatePackage(editing.id, { name: name.trim(), price: amount, maxSelections: max, description: description.trim() }) : await PackageRepository.createPackage({ name: name.trim(), price: amount, maxSelections: max, description: description.trim() });
-      if (editing) for (const old of PackageRepository.getPackageSubjects(pkg.id)) await PackageRepository.removePackageSubject({ id: old.id, packageId: pkg.id, subjectId: old.subjectId, defaultTeacherId: old.defaultTeacherId });
-      for (const option of valid) await PackageRepository.addPackageSubject({ packageId: pkg.id, subjectId: option.subjectId, defaultTeacherId: option.teacherId });
+      if (editing) {
+        await PackageRepository.updatePackageWithSubjects({
+          id: editing.id,
+          data: { name: name.trim(), price: amount, maxSelections: max, description: description.trim() },
+          subjects: valid.map((option) => ({ subjectId: option.subjectId, defaultTeacherId: option.teacherId })),
+        });
+      } else {
+        const pkg = await PackageRepository.createPackage({ name: name.trim(), price: amount, maxSelections: max, description: description.trim() });
+        for (const option of valid) await PackageRepository.addPackageSubject({ packageId: pkg.id, subjectId: option.subjectId, defaultTeacherId: option.teacherId });
+      }
       Alert.alert("تم بنجاح", editing ? "تم تحديث الباقة." : "تم إنشاء الباقة."); reset(); load();
     } catch (e: any) { Alert.alert("خطأ", e?.message || "تعذر حفظ الباقة."); }
     finally { setSaving(false); }

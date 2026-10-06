@@ -1,4 +1,6 @@
 import { PermissionService, resolveUserPermissions } from "../../core/permissions";
+import { ForbiddenError } from "../../core/errors";
+import { DatabaseService } from "../../core/database";
 import { PaymentEvent } from "../../shared/types";
 import { getLocalDateOnly } from "../../shared/utils/date";
 import { useAuthStore } from "../auth/useAuthStore";
@@ -28,7 +30,8 @@ export class OpeningBalanceService {
     notes?: string;
   }): Promise<{ cycleId: string; payment?: PaymentEvent }> {
     const user = useAuthStore.getState().currentUser;
-    if (!user || !PermissionService.hasPermission(resolveUserPermissions(user), "payments.adjust")) {
+    const permissions = resolveUserPermissions(user);
+    if (!user || !PermissionService.hasPermission(permissions, "payments.adjust")) {
       throw new Error("ليس لديك صلاحية ترحيل الرصيد الافتتاحي.");
     }
     const due = Number(params.amountDue);
@@ -36,20 +39,25 @@ export class OpeningBalanceService {
     if (!Number.isFinite(due) || due < 0) throw new Error("المديونية الحالية غير صحيحة.");
     if (!Number.isFinite(paid) || paid < 0 || paid > due) throw new Error("المدفوع حتى بداية النظام غير صحيح.");
 
-    const cycle = await DebtCycleRepository.createOpeningCycle(params);
-    let payment: PaymentEvent | undefined;
-    if (paid > 0) {
-      payment = await PaymentRepository.recordPayment({
-        studentId: params.studentId,
-        amount: paid,
-        paymentType: paid >= due ? "monthly" : "partial",
-        debtCycleId: cycle.id,
-        subscriptionId: params.packageSubscriptionId,
-        paymentDate: getLocalDateOnly(),
-        notes: params.notes ? `رصيد افتتاحي: ${params.notes}` : "دفعة سابقة قبل تشغيل النظام",
-      });
+    if (paid > 0 && !PermissionService.hasPermission(permissions, "payments.create")) {
+      throw new ForbiddenError("لا تملك صلاحية تسجيل دفعة ضمن الرصيد الافتتاحي.");
     }
-    return { cycleId: cycle.id, payment };
+
+    return DatabaseService.runInTransactionAsync(async () => {
+      const cycle = await DebtCycleRepository.createOpeningCycle(params);
+      let payment: PaymentEvent | undefined;
+      if (paid > 0) {
+        payment = await PaymentRepository.recordPayment({
+          studentId: params.studentId,
+          amount: paid,
+          paymentType: paid >= due ? "monthly" : "partial",
+          debtCycleId: cycle.id,
+          subscriptionId: params.packageSubscriptionId,
+          paymentDate: getLocalDateOnly(),
+          notes: params.notes ? `رصيد افتتاحي: ${params.notes}` : "دفعة سابقة قبل تشغيل النظام",
+        });
+      }
+      return { cycleId: cycle.id, payment };
+    });
   }
 }
-

@@ -62,8 +62,11 @@ router.get(
 
       const snapshot = await db.withTransaction(async (client) => {
         // A repeatable-read snapshot makes the rows and max server sequence
-        // describe one exact point in the stream.
+        // describe one exact point in the stream. Acquire the same center lock
+        // as Push before the snapshot reads so no lower sequence can commit
+        // after this snapshot has selected its cursor.
         await client.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ");
+        await SyncProcessor.acquireCenterSyncLock(client, centerId);
         const [
           studentsRes,
           cardsRes,
@@ -177,6 +180,7 @@ router.post("/reset", authMiddleware, deviceGuard, requirePermission("center.res
   try {
     const centerId = req.centerId;
     const result = await db.withTransaction(async (client) => {
+      await SyncProcessor.acquireCenterSyncLock(client, centerId);
       // Delete children before parents to remain compatible with strict FKs.
       const tables = [
         "session_closing_records", "daily_closing_summaries",
@@ -313,7 +317,7 @@ router.get("/pull", authMiddleware, deviceGuard, async (req, res, next) => {
           `INSERT INTO sync_checkpoints (id, center_id, device_id, last_pulled_seq, updated_at)
            VALUES ($1, $2, $3, $4, NOW())
            ON CONFLICT (center_id, device_id) DO UPDATE SET
-             last_pulled_seq = EXCLUDED.last_pulled_seq,
+             last_pulled_seq = GREATEST(sync_checkpoints.last_pulled_seq, EXCLUDED.last_pulled_seq),
              updated_at = NOW();`,
           [
           `chk-${crypto.createHash("sha256").update(`${req.centerId}:${req.deviceId}`).digest("hex").slice(0, 48)}`,

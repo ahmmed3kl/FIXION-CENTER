@@ -16,6 +16,14 @@ import { useAuthStore } from "../auth/useAuthStore";
 import { GroupRepository } from "../groups/GroupRepository";
 import { DebtCycleRepository } from "../payments/DebtCycleRepository";
 
+function generateUUID(): string {
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === "x" ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
 export interface EnrollStudentDTO {
   studentId: string;
   groupId: string;
@@ -221,7 +229,8 @@ export class EnrollmentRepository {
               group_id as groupId, cycle_number as cycleNumber,
               start_date as startDate, end_date as endDate,
               cycle_price as cyclePrice, package_subscription_id as packageSubscriptionId,
-              package_id as packageId, cycle_type as cycleType
+              package_id as packageId, cycle_type as cycleType,
+              billing_mode as billingMode, server_revision as serverRevision
        FROM debt_cycles
        WHERE center_id = ? AND enrollment_id = ? AND status IN ('open', 'partial')`,
       [centerId, enrollmentId],
@@ -270,7 +279,7 @@ export class EnrollmentRepository {
           operationType: "UPDATE",
           entityType: "debt_cycle",
           entityId: cycle.id,
-          payload: { ...cycle, cyclePrice: retainedCyclePrice, status: "cancelled", updatedAt: now },
+          payload: { ...cycle, cyclePrice: retainedCyclePrice, status: "cancelled", expectedRevision: Number(cycle.serverRevision || 0), updatedAt: now },
         });
       }
     });
@@ -333,11 +342,39 @@ export class EnrollmentRepository {
     const now = new Date().toISOString();
     const operationId = `op-enr-transfer-${Date.now()}-${enrollmentId}`;
     const deviceId = DeviceService.getDeviceIdSync();
+    const cycles = db.getAllSync<any>(
+      `SELECT id, student_id as studentId, enrollment_id as enrollmentId,
+              group_id as groupId, cycle_number as cycleNumber,
+              start_date as startDate, end_date as endDate,
+              cycle_price as cyclePrice, status, package_subscription_id as packageSubscriptionId,
+              package_id as packageId, cycle_type as cycleType,
+              billing_mode as billingMode, server_revision as serverRevision
+         FROM debt_cycles
+        WHERE center_id = ? AND enrollment_id = ?`,
+      [centerId, enrollmentId],
+    );
     DatabaseService.runInTransaction(() => {
       db.runSync(`UPDATE student_group_enrollments SET group_id = ?, updated_at = ? WHERE center_id = ? AND id = ?`, [targetGroupId, now, centerId, enrollmentId]);
       db.runSync(`UPDATE debt_cycles SET group_id = ?, updated_at = ? WHERE center_id = ? AND enrollment_id = ?`, [targetGroupId, now, centerId, enrollmentId]);
       AuditService.recordEvent({ operationId, centerId, userId: user.id, deviceId, entityType: "enrollment", entityId: enrollmentId, action: "enrollment.transfer", payload: { studentId: enrollment.studentId, fromGroupId: enrollment.groupId, toGroupId: targetGroupId } });
       SyncRepository.enqueueOperation({ operationId, centerId, userId: user.id, deviceId, operationType: "UPDATE", entityType: "enrollment", entityId: enrollmentId, payload: { studentId: enrollment.studentId, groupId: targetGroupId, startDate: enrollment.startDate, endDate: enrollment.endDate || null, status: enrollment.status, specialMonthlyPrice: enrollment.specialMonthlyPrice ?? null, updatedAt: now } });
+      for (const cycle of cycles) {
+        SyncRepository.enqueueOperation({
+          operationId: `op-dc-transfer-${generateUUID()}`,
+          centerId,
+          userId: user.id,
+          deviceId,
+          operationType: "UPDATE",
+          entityType: "debt_cycle",
+          entityId: cycle.id,
+          payload: {
+            ...cycle,
+            groupId: targetGroupId,
+            expectedRevision: Number(cycle.serverRevision || 0),
+            updatedAt: now,
+          },
+        });
+      }
     });
   }
 }

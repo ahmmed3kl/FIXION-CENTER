@@ -355,6 +355,7 @@ export class DebtCycleRepository {
               c.package_id as packageId,
               c.cycle_type as cycleType,
               c.billing_mode as billingMode,
+              c.server_revision as serverRevision,
               p.name as packageName,
               COALESCE(p.name, g.name) as groupName
        FROM debt_cycles c
@@ -385,6 +386,7 @@ export class DebtCycleRepository {
               c.package_id as packageId,
               c.cycle_type as cycleType,
               c.billing_mode as billingMode,
+              c.server_revision as serverRevision,
               g.name as groupName
        FROM debt_cycles c
        LEFT JOIN groups g ON c.group_id = g.id
@@ -413,6 +415,7 @@ export class DebtCycleRepository {
               c.package_id as packageId,
               c.cycle_type as cycleType,
               c.billing_mode as billingMode,
+              c.server_revision as serverRevision,
               p.name as packageName,
               p.name as groupName
        FROM debt_cycles c
@@ -442,6 +445,7 @@ export class DebtCycleRepository {
               c.package_id as packageId,
               c.cycle_type as cycleType,
               c.billing_mode as billingMode,
+              c.server_revision as serverRevision,
               p.name as packageName,
               COALESCE(p.name, g.name) as groupName
        FROM debt_cycles c
@@ -540,7 +544,7 @@ export class DebtCycleRepository {
         SyncRepository.enqueueOperation({
           operationId: `op-dc-package-suppress-${generateUUID()}`,
           centerId, userId: user.id, deviceId, operationType: "UPDATE", entityType: "debt_cycle", entityId: cycle.id,
-          payload: { ...cycle, cyclePrice: retainedCyclePrice, status: "cancelled", updatedAt: now },
+          payload: { ...cycle, cyclePrice: retainedCyclePrice, status: "cancelled", expectedRevision: Number(cycle.serverRevision || 0), updatedAt: now },
         });
       }
       existingCycles = this.getCyclesForEnrollment(enrollmentId);
@@ -873,7 +877,7 @@ export class DebtCycleRepository {
       SyncRepository.enqueueOperation({
         operationId: `op-dc-package-repair-${generateUUID()}`, centerId, userId: user.id, deviceId,
         operationType: "UPDATE", entityType: "debt_cycle", entityId: canonical.id,
-        payload: { ...canonical, enrollmentId: subscriptionId, groupId: canonical.packageId || canonical.groupId, cyclePrice: totalPrice, updatedAt: now },
+        payload: { ...canonical, enrollmentId: subscriptionId, groupId: canonical.packageId || canonical.groupId, cyclePrice: totalPrice, expectedRevision: Number(canonical.serverRevision || 0), updatedAt: now },
       });
       for (const duplicate of list) {
         if (duplicate.id === canonical.id) continue;
@@ -893,7 +897,7 @@ export class DebtCycleRepository {
         SyncRepository.enqueueOperation({
           operationId: `op-dc-package-repair-${generateUUID()}`, centerId, userId: user.id, deviceId,
           operationType: "UPDATE", entityType: "debt_cycle", entityId: duplicate.id,
-          payload: { ...duplicate, cyclePrice: 0, status: "cancelled", updatedAt: now },
+          payload: { ...duplicate, cyclePrice: 0, status: "cancelled", expectedRevision: Number(duplicate.serverRevision || 0), updatedAt: now },
         });
       }
     }
@@ -915,7 +919,7 @@ export class DebtCycleRepository {
               start_date as startDate, end_date as endDate,
               cycle_price as cyclePrice, package_subscription_id as packageSubscriptionId,
               package_id as packageId, cycle_type as cycleType,
-              billing_mode as billingMode
+              billing_mode as billingMode, server_revision as serverRevision
        FROM debt_cycles WHERE center_id = ? AND id = ?`,
       [centerId, cycleId],
     );
@@ -950,6 +954,7 @@ export class DebtCycleRepository {
         endDate: cycle.endDate,
         cyclePrice: cycle.cyclePrice,
         status,
+        expectedRevision: Number(cycle.serverRevision || 0),
         updatedAt: now,
       },
     });
@@ -983,7 +988,7 @@ export class DebtCycleRepository {
               cycle_type as cycleType, billing_mode as billingMode,
               start_date as startDate, end_date as endDate,
               cycle_price as cyclePrice, status, created_at as createdAt,
-              updated_at as updatedAt
+              updated_at as updatedAt, server_revision as serverRevision
        FROM debt_cycles WHERE center_id = ? AND id = ? LIMIT 1`,
       [centerId, cycleId],
     );
@@ -1004,7 +1009,7 @@ export class DebtCycleRepository {
     SyncRepository.enqueueOperation({
       operationId, centerId, userId: user.id, deviceId,
       operationType: "UPDATE", entityType: "debt_cycle", entityId: cycleId,
-      payload: { ...cycle, billingMode, cycleType: nextCycleType, updatedAt: now },
+      payload: { ...cycle, billingMode, cycleType: nextCycleType, expectedRevision: Number(cycle.serverRevision || 0), updatedAt: now },
     });
     AuditService.recordEvent({
       operationId, centerId, userId: user.id, deviceId,

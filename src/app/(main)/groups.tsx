@@ -12,6 +12,7 @@ import { Group } from "../../shared/types";
 import { AppButton, AppInput, EmptyState } from "../../shared/components";
 import { smartSearch } from "../../shared/utils/smartSearch";
 import { useLocalDataRevision } from "../../core/database/useLocalDataRevision";
+import { captureLoad } from "../../shared/utils/loadResult";
 
 const DAYS = ["الأحد", "الإثنين", "الثلاثاء", "الأربعاء", "الخميس", "الجمعة", "السبت"];
 
@@ -22,6 +23,7 @@ export default function GroupsScreen() {
   const router = useRouter();
   const { colors } = useTheme();
   const [groups, setGroups] = useState<Group[]>([]);
+  const [loadError, setLoadError] = useState("");
   const [query, setQuery] = useState("");
   const [showCreate, setShowCreate] = useState(false);
   const [actionGroup, setActionGroup] = useState<Group | null>(null);
@@ -30,7 +32,14 @@ export default function GroupsScreen() {
   const subjects = useMemo(() => { try { return SubjectRepository.getAll().filter((item) => item.status === "active"); } catch { return []; } }, [showCreate]);
 
   const load = useCallback(() => {
-    try { setGroups(GroupRepository.getAll(true)); } catch { setGroups([]); }
+    const result = captureLoad(() => GroupRepository.getAll(true), "تعذر تحميل المجموعات.");
+    if (result.status === "success") {
+      setGroups(result.value);
+      setLoadError("");
+    } else {
+      setGroups([]);
+      setLoadError(result.message);
+    }
   }, []);
 
   useFocusEffect(
@@ -76,7 +85,7 @@ export default function GroupsScreen() {
       contentContainerStyle={styles.content}
       keyboardShouldPersistTaps="handled"
       ListHeaderComponent={<AppInput value={query} onChangeText={setQuery} placeholder="ابحث باسم المجموعة أو المادة أو المدرس..." containerStyle={styles.search} />}
-      ListEmptyComponent={<EmptyState message={query ? "لا توجد نتائج مطابقة." : "لا توجد مجموعات مسجلة."} />}
+      ListEmptyComponent={loadError ? <View style={{ alignItems: "center", padding: 24, gap: 10 }}><Text style={{ color: colors.dangerText, textAlign: "center" }}>{loadError}</Text><TouchableOpacity onPress={load}><Text style={{ color: colors.primary, fontWeight: "800" }}>إعادة المحاولة</Text></TouchableOpacity></View> : <EmptyState message={query ? "لا توجد نتائج مطابقة." : "لا توجد مجموعات مسجلة."} />}
       renderItem={({ item }) => {
         const schedules = GroupScheduleRepository.getSchedulesForGroup(item.id).filter((schedule) => schedule.status !== "inactive");
         return <TouchableOpacity activeOpacity={0.8} onPress={() => router.push({ pathname: "/(main)/group-details", params: { groupId: item.id } } as any)} onLongPress={() => setActionGroup(item)} delayLongPress={450} style={[styles.card, { backgroundColor: colors.cardBackground, borderColor: colors.border }]}>

@@ -262,7 +262,7 @@ export class PackageRepository {
       operationType: "packages.update",
       entityType: "package",
       entityId: id,
-      payload: updatedPackage,
+      payload: { ...updatedPackage, baseUpdatedAt: existing.updatedAt ?? null },
     });
 
     AuditService.recordEvent({
@@ -277,6 +277,43 @@ export class PackageRepository {
     });
 
     return updatedPackage;
+  }
+
+  static async updatePackageWithSubjects(params: {
+    id: string;
+    data: {
+      name: string;
+      price: number;
+      maxSelections: number;
+      description: string;
+    };
+    subjects: Array<{ subjectId: string; defaultTeacherId: string }>;
+  }): Promise<Package> {
+    const { user } = this.getActiveContext();
+    if (!PermissionService.hasPermission(user.permissions, "packages.manage")) {
+      throw new ForbiddenError("ليس لديك صلاحية تعديل مواد الباقة.");
+    }
+
+    return DatabaseService.runInTransactionAsync(async () => {
+      const updatedPackage = await this.updatePackage(params.id, params.data);
+      const previousSubjects = this.getPackageSubjects(params.id);
+      for (const subject of previousSubjects) {
+        await this.removePackageSubject({
+          id: subject.id,
+          packageId: params.id,
+          subjectId: subject.subjectId,
+          defaultTeacherId: subject.defaultTeacherId,
+        });
+      }
+      for (const subject of params.subjects) {
+        await this.addPackageSubject({
+          packageId: params.id,
+          subjectId: subject.subjectId,
+          defaultTeacherId: subject.defaultTeacherId,
+        });
+      }
+      return updatedPackage;
+    });
   }
 
   /**

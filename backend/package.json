@@ -6,6 +6,7 @@
   "scripts": {
     "start": "node src/server.js",
     "test": "node tests/backend_integration.test.js",
+    "sync:test": "node tests/sync_four_device.integration.test.js",
     "platform:bootstrap-admin": "node scripts/bootstrap-platform-admin.js",
     "sms:test": "node scripts/test-zadx-sms.js",
     "sms:real-test": "node scripts/test-zadx-sms-real.js"

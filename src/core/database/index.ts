@@ -791,16 +791,6 @@ export const MIGRATIONS: Migration[] = [
     },
   },
   {
-    version: 8,
-    name: "package_selection_limits",
-    up: (db: SqlDatabase) => {
-      try {
-        db.execSync("ALTER TABLE packages ADD COLUMN max_selections INTEGER NOT NULL DEFAULT 1;");
-      } catch {}
-      db.execSync("CREATE INDEX IF NOT EXISTS idx_packages_selection_limit ON packages(center_id, max_selections);");
-    },
-  },
-  {
     version: 9,
     name: "grade_book",
     up: (db: SqlDatabase) => {
@@ -978,6 +968,38 @@ export const MIGRATIONS: Migration[] = [
         `);
       } catch {}
       try { db.execSync("CREATE INDEX IF NOT EXISTS idx_debt_cycles_billing_mode ON debt_cycles(center_id, billing_mode, status);"); } catch {}
+    },
+  },
+  {
+    version: 20,
+    name: "package_selection_limits",
+    up: (db: SqlDatabase) => {
+      try {
+        db.execSync("ALTER TABLE packages ADD COLUMN max_selections INTEGER NOT NULL DEFAULT 1;");
+      } catch {}
+      db.execSync("CREATE INDEX IF NOT EXISTS idx_packages_selection_limit ON packages(center_id, max_selections);");
+    },
+  },
+  {
+    version: 21,
+    name: "debt_cycle_server_revision",
+    up: (db: SqlDatabase) => {
+      try {
+        db.execSync("ALTER TABLE debt_cycles ADD COLUMN server_revision INTEGER NOT NULL DEFAULT 0;");
+      } catch (error) {
+        if (!String(error).toLowerCase().includes("duplicate column")) throw error;
+      }
+      db.execSync(`
+        UPDATE debt_cycles
+           SET server_revision = 1
+         WHERE NOT EXISTS (
+           SELECT 1 FROM sync_operations
+            WHERE sync_operations.entity_type = 'debt_cycle'
+              AND sync_operations.entity_id = debt_cycles.id
+              AND sync_operations.status IN ('pending', 'failed')
+              AND lower(sync_operations.operation_type) LIKE '%create%'
+         );
+      `);
     },
   },
 ];
@@ -2030,6 +2052,35 @@ class InMemorySqliteMock implements SqlDatabase {
         const exact = candidates.filter((s) => s.scheduleId === scheduleId);
         if (exact.length) return exact as T[];
         return candidates.filter((s) => s.scheduleId == null) as T[];
+      }
+
+      // The Dashboard query also supports date-prefix matching and repeats
+      // date/schedule parameters for its legacy-session fallback predicate.
+      // Match its actual nine-parameter order rather than returning the first
+      // session for the group, which can assign one group's session to another.
+      if (
+        params.length >= 9 &&
+        trimmed.includes("FROM sessions") &&
+        trimmed.includes("group_id = ?") &&
+        trimmed.includes("schedule_id = ?") &&
+        trimmed.includes("session_date LIKE")
+      ) {
+        const centerId = params[0];
+        const groupId = params[1];
+        const sessionDate = String(params[2]);
+        const scheduleId = params[4];
+        const candidates = joined.filter(
+          (session) =>
+            session.centerId === centerId &&
+            session.groupId === groupId &&
+            String(session.sessionDate).startsWith(sessionDate) &&
+            session.status !== "cancelled",
+        );
+        const exact = candidates.filter(
+          (session) => session.scheduleId === scheduleId,
+        );
+        if (exact.length) return exact as T[];
+        return candidates.filter((session) => session.scheduleId == null) as T[];
       }
 
       if (
@@ -3953,8 +4004,8 @@ export class DatabaseService {
    * 3. Applies only unapplied migrations in ascending order.
    * 4. Updates schema_migrations and PRAGMA user_version.
    */
-  static runMigrations(): void {
-    const db = this.getDb();
+  static runMigrations(database?: SqlDatabase): void {
+    const db = database || this.getDb();
 
     db.execSync(`
       CREATE TABLE IF NOT EXISTS schema_migrations (

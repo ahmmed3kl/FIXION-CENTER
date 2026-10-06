@@ -13,6 +13,7 @@ import { GroupScheduleRepository } from "../../features/groups/GroupScheduleRepo
 import { TeacherRepository } from "../../features/teachers/TeacherRepository";
 import { StudentRepository } from "../../features/students/StudentRepository";
 import { getLocalDateOnly } from "../../shared/utils/date";
+import { captureLoad } from "../../shared/utils/loadResult";
 
 const DAYS = ["الأحد", "الإثنين", "الثلاثاء", "الأربعاء", "الخميس", "الجمعة", "السبت"];
 type Teacher = { id: string; name: string };
@@ -31,11 +32,15 @@ export default function FinancialReportsScreen() {
   const [rows, setRows] = useState<Row[]>([]);
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState("");
+  const [retryCount, setRetryCount] = useState(0);
 
   const loadRows = () => {
-    if (!activeCenterId || !groupId) { setRows([]); return; }
+    if (!activeCenterId || !groupId) { setRows([]); setLoadError(""); return; }
     setLoading(true);
-    try {
+    setLoadError("");
+    setRows([]);
+    const result = captureLoad(() => {
       const today = getLocalDateOnly();
       const enrollments = EnrollmentRepository.getActiveEnrollmentsForGroup(groupId, today);
       const db = DatabaseService.getDb();
@@ -103,11 +108,17 @@ export default function FinancialReportsScreen() {
           packageName: packageSubscriptions[0]?.packageName,
         });
       }
-      setRows(result.sort((a, b) => a.name.localeCompare(b.name, "ar")));
-    } catch (error) {
-      console.warn("Financial report load error", error);
+      return result.sort((a, b) => a.name.localeCompare(b.name, "ar"));
+    }, "تعذر تحميل التقرير المالي.");
+    if (result.status === "success") {
+      setRows(result.value);
+      setLoadError("");
+    } else {
+      console.warn("Financial report load error:", result.message);
       setRows([]);
-    } finally { setLoading(false); }
+      setLoadError(result.message);
+    }
+    setLoading(false);
   };
 
   useEffect(() => {
@@ -132,7 +143,7 @@ export default function FinancialReportsScreen() {
     if (!groupId) { setSchedules([]); setRows([]); return; }
     try { setSchedules(GroupScheduleRepository.getSchedulesForGroup(groupId)); } catch { setSchedules([]); }
     loadRows();
-  }, [groupId, activeCenterId]);
+  }, [groupId, activeCenterId, retryCount]);
 
   const group = groups.find((item) => item.id === groupId);
   const normalizedSearch = search.trim().toLocaleLowerCase("ar-EG");
@@ -150,8 +161,8 @@ export default function FinancialReportsScreen() {
       <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.choiceRow}>{groups.map((item) => <TouchableOpacity key={item.id} onPress={() => setGroupId(item.id)} style={[styles.choice, groupId === item.id && styles.choiceActive]}><Text style={[styles.choiceText, groupId === item.id && styles.choiceTextActive]}>{item.name}</Text><Text style={styles.choiceMeta}>{item.subjectName || ""}</Text></TouchableOpacity>)}</ScrollView>
       {group && <View style={styles.scheduleCard}><Text style={styles.groupTitle}>{group.name}</Text><Text style={styles.groupMeta}>{group.subjectName || ""} {group.grade ? `· ${group.grade}` : ""}</Text><View style={styles.scheduleWrap}>{schedules.length ? schedules.map((schedule) => <View key={schedule.id} style={styles.schedulePill}><Ionicons name="calendar-outline" size={15} color={colors.primary} /><Text style={styles.scheduleText}>{DAYS[schedule.dayOfWeek] || "اليوم"} · {formatTimeArabic(schedule.startTime)} - {formatTimeArabic(schedule.endTime)}</Text></View>) : <Text style={styles.emptyText}>لا توجد مواعيد مسجلة</Text>}</View></View>}
       {groupId ? <View style={styles.searchBox}><Ionicons name="search-outline" size={19} color={colors.slate400} /><TextInput value={search} onChangeText={setSearch} placeholder="ابحث باسم الطالب أو الباقة أو المديونية" placeholderTextColor={colors.textSecondary} style={styles.searchInput} textAlign="right" returnKeyType="search" /></View> : null}
-      <View style={styles.summaryRow}><Metric label="المستحق" value={totals.due} color={colors.primary} labelColor={colors.textSecondary} /><Metric label="المدفوع" value={totals.paid} color={colors.successText} labelColor={colors.textSecondary} /><Metric label="المديونية" value={totals.debt} color={colors.dangerText} labelColor={colors.textSecondary} /></View>
-      {loading ? <View style={styles.loading}><ActivityIndicator color={colors.primary} /><Text style={styles.emptyText}>جاري حساب المديونية...</Text></View> : visibleRows.length ? visibleRows.map((row) => <View key={row.id} style={styles.studentCard}><View style={styles.studentTop}><View style={styles.avatar}><Text style={styles.avatarText}>{row.name.trim().charAt(0) || "ط"}</Text></View><View style={styles.studentCopy}><Text style={styles.studentName}>{row.name}</Text>{row.package && <View style={styles.packageBadge}><Ionicons name="pricetag-outline" size={13} color={colors.primary} /><Text style={styles.packageText}>طالب باقة{row.packageName ? ` · ${row.packageName}` : ""}</Text></View>}</View><Text style={[styles.debtValue, { color: row.debt > 0 ? colors.dangerText : colors.successText }]}>{formatCurrency(row.debt)}</Text></View><View style={styles.studentMeta}><Text>المستحق: {formatCurrency(row.due)}</Text><Text>المدفوع: {formatCurrency(row.paid)}</Text>{row.package && <Text>من سعر الباقة: {formatCurrency(row.packageAmount)}</Text>}</View></View>) : <View style={styles.emptyCard}><Ionicons name={search ? "search-outline" : "people-outline"} size={32} color={colors.slate400} /><Text style={styles.emptyTitle}>{search ? "لا توجد نتائج" : "اختر مدرسًا ومجموعة"}</Text><Text style={styles.emptyText}>{search ? "جرّب اسمًا أو كلمة بحث مختلفة." : "ستظهر هنا مديونية الطلاب الفعلية ومواعيد المجموعة."}</Text></View>}
+      {!loading && !loadError && <View style={styles.summaryRow}><Metric label="المستحق" value={totals.due} color={colors.primary} labelColor={colors.textSecondary} /><Metric label="المدفوع" value={totals.paid} color={colors.successText} labelColor={colors.textSecondary} /><Metric label="المديونية" value={totals.debt} color={colors.dangerText} labelColor={colors.textSecondary} /></View>}
+      {loading ? <View style={styles.loading}><ActivityIndicator color={colors.primary} /><Text style={styles.emptyText}>جاري حساب المديونية...</Text></View> : loadError ? <View style={styles.emptyCard}><Ionicons name="alert-circle-outline" size={32} color={colors.dangerText} /><Text accessibilityRole="alert" style={styles.emptyTitle}>تعذر تحميل التقرير</Text><Text style={styles.emptyText}>{loadError}</Text><TouchableOpacity onPress={() => setRetryCount((count) => count + 1)}><Text style={{ color: colors.primary, fontWeight: "800" }}>إعادة المحاولة</Text></TouchableOpacity></View> : visibleRows.length ? visibleRows.map((row) => <View key={row.id} style={styles.studentCard}><View style={styles.studentTop}><View style={styles.avatar}><Text style={styles.avatarText}>{row.name.trim().charAt(0) || "ط"}</Text></View><View style={styles.studentCopy}><Text style={styles.studentName}>{row.name}</Text>{row.package && <View style={styles.packageBadge}><Ionicons name="pricetag-outline" size={13} color={colors.primary} /><Text style={styles.packageText}>طالب باقة{row.packageName ? ` · ${row.packageName}` : ""}</Text></View>}</View><Text style={[styles.debtValue, { color: row.debt > 0 ? colors.dangerText : colors.successText }]}>{formatCurrency(row.debt)}</Text></View><View style={styles.studentMeta}><Text>المستحق: {formatCurrency(row.due)}</Text><Text>المدفوع: {formatCurrency(row.paid)}</Text>{row.package && <Text>من سعر الباقة: {formatCurrency(row.packageAmount)}</Text>}</View></View>) : <View style={styles.emptyCard}><Ionicons name={search ? "search-outline" : "people-outline"} size={32} color={colors.slate400} /><Text style={styles.emptyTitle}>{search ? "لا توجد نتائج" : "اختر مدرسًا ومجموعة"}</Text><Text style={styles.emptyText}>{search ? "جرّب اسمًا أو كلمة بحث مختلفة." : "ستظهر هنا مديونية الطلاب الفعلية ومواعيد المجموعة."}</Text></View>}
     </ScrollView>
   </SafeAreaView>;
 }

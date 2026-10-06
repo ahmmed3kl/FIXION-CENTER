@@ -18,7 +18,7 @@ export default function DeletedStudentsScreen() {
   const currentUser = useAuthStore((state) => state.currentUser);
   const permissions = currentUser?.permissions || [];
   const canView = PermissionService.hasPermission(permissions, "students.view");
-  const canRestore = PermissionService.hasPermission(permissions, "students.deactivate");
+  const canRestore = PermissionService.hasPermission(permissions, "students.restore");
   const localDataRevision = useLocalDataRevision();
   const lastLoadedRevisionRef = useRef(localDataRevision);
   const hasInitialLoadedRef = useRef(false);

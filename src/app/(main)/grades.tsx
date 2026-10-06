@@ -5,6 +5,7 @@ import { Alert, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View 
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Colors, Spacing, Typography, useTheme } from "../../core/theme";
 import { GradeBookRepository, GradeExam, GradeScore } from "../../features/grades/GradeBookRepository";
+import { saveGradeEdit } from "../../features/grades/gradeScoreEdit";
 import { GroupScheduleRepository } from "../../features/groups/GroupScheduleRepository";
 import { NotificationService } from "../../features/notifications/NotificationService";
 import { Group, Student } from "../../shared/types";
@@ -24,6 +25,7 @@ export default function GradesScreen() {
   const [students, setStudents] = useState<Student[]>([]);
   const [exams, setExams] = useState<GradeExam[]>([]);
   const [scores, setScores] = useState<Record<string, string>>({});
+  const savedScoresRef = useRef<Record<string, string>>({});
   const [examName, setExamName] = useState("");
   const [maxScore, setMaxScore] = useState("100");
   const [showExamForm, setShowExamForm] = useState(false);
@@ -43,6 +45,7 @@ export default function GradesScreen() {
     const nextScores = GradeBookRepository.getScores(nextExams.map((e) => e.id), nextStudents.map((s) => s.id));
     const values: Record<string, string> = {};
     nextScores.forEach((row: GradeScore) => { values[`${row.examId}:${row.studentId}`] = row.score === null ? "" : String(row.score); });
+    savedScoresRef.current = values;
     setStudents(nextStudents); setExams(nextExams); setScores(values);
     const sent: Record<string, boolean> = {};
     nextExams.forEach((exam) => { sent[exam.id] = nextStudents.some((student) => NotificationService.hasGradeNotification(exam.id, student.id)); });
@@ -99,9 +102,20 @@ export default function GradesScreen() {
     catch (error: any) { Alert.alert("بيانات غير صحيحة", error?.message || "تعذر إضافة الامتحان."); }
   };
   const saveScore = (exam: GradeExam, student: Student, value: string) => {
-    setScores((current) => ({ ...current, [`${exam.id}:${student.id}`]: value }));
-    try { GradeBookRepository.setScore(exam, student.id, value); }
-    catch (error: any) { Alert.alert("درجة غير صحيحة", error?.message || "تعذر حفظ الدرجة."); }
+    const key = `${exam.id}:${student.id}`;
+    const result = saveGradeEdit(value, savedScoresRef.current[key] || "", (nextValue) =>
+      GradeBookRepository.setScore(exam, student.id, nextValue),
+    );
+    if (result.saved) {
+      savedScoresRef.current = { ...savedScoresRef.current, [key]: result.value };
+      setScores((current) => ({ ...current, [key]: result.value }));
+      return;
+    }
+    setScores((current) => ({ ...current, [key]: result.value }));
+    Alert.alert(
+      "درجة غير صحيحة",
+      result.error instanceof Error ? result.error.message : "تعذر حفظ الدرجة.",
+    );
   };
   const visibleStudents = useMemo(() => smartSearch(students, studentSearch, [
     { get: (student) => student.fullName, weight: 3 }, { get: (student) => student.studentCode }, { get: (student) => student.cardCode }, { get: (student) => student.phone },

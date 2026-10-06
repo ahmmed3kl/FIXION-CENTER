@@ -212,6 +212,7 @@ export class TeacherRepository {
         phone,
         notes,
         status,
+        baseUpdatedAt: existing.updatedAt ?? null,
         updatedAt: now,
       },
     });
@@ -275,7 +276,7 @@ export class TeacherRepository {
       operationType: "UPDATE",
       entityType: "teacher",
       entityId: teacherId,
-      payload: { status: "inactive", updatedAt: now },
+      payload: { status: "inactive", baseUpdatedAt: existing.updatedAt ?? null, updatedAt: now },
     });
   }
 
@@ -289,7 +290,7 @@ export class TeacherRepository {
     const operationId = `op-teach-reactivate-${Date.now()}-${teacherId}`;
     const deviceId = DeviceService.getDeviceIdSync();
     AuditService.recordEvent({ operationId, centerId, userId: user.id, deviceId, entityType: "teacher", entityId: teacherId, action: "teacher.reactivate", payload: {} });
-    SyncRepository.enqueueOperation({ operationId, centerId, userId: user.id, deviceId, operationType: "UPDATE", entityType: "teacher", entityId: teacherId, payload: { status: "active", updatedAt: now } });
+    SyncRepository.enqueueOperation({ operationId, centerId, userId: user.id, deviceId, operationType: "UPDATE", entityType: "teacher", entityId: teacherId, payload: { status: "active", baseUpdatedAt: existing.updatedAt ?? null, updatedAt: now } });
   }
 
   /** Hide a teacher and all of their groups while preserving every historical record. */
@@ -311,6 +312,6 @@ export class TeacherRepository {
     const operationId = `op-teach-delete-${Date.now()}-${teacherId}`;
     const deviceId = DeviceService.getDeviceIdSync();
     AuditService.recordEvent({ operationId, centerId, userId: user.id, deviceId, entityType: "teacher", entityId: teacherId, action: "teacher.delete", payload: { name: existing.name } });
-    SyncRepository.enqueueOperation({ operationId, centerId, userId: user.id, deviceId, operationType: "UPDATE", entityType: "teacher", entityId: teacherId, payload: { id: teacherId, status: "inactive", cascadeGroups: true, updatedAt: now } });
+    SyncRepository.enqueueOperation({ operationId, centerId, userId: user.id, deviceId, operationType: "UPDATE", entityType: "teacher", entityId: teacherId, payload: { id: teacherId, status: "inactive", cascadeGroups: true, baseUpdatedAt: existing.updatedAt ?? null, updatedAt: now } });
   }
 }

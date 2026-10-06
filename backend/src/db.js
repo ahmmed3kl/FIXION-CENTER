@@ -305,7 +305,8 @@ async function ensureSchemaCompatibility() {
       ADD COLUMN IF NOT EXISTS group_id VARCHAR(64),
       ADD COLUMN IF NOT EXISTS package_id VARCHAR(64),
       ADD COLUMN IF NOT EXISTS cycle_number INTEGER,
-      ADD COLUMN IF NOT EXISTS billing_mode VARCHAR(32) NOT NULL DEFAULT 'monthly';
+      ADD COLUMN IF NOT EXISTS billing_mode VARCHAR(32) NOT NULL DEFAULT 'monthly',
+      ADD COLUMN IF NOT EXISTS server_revision BIGINT NOT NULL DEFAULT 1;
     UPDATE debt_cycles
        SET billing_mode = CASE
          WHEN cycle_type = 'package' THEN 'package'
@@ -325,6 +326,66 @@ async function ensureSchemaCompatibility() {
        SET cycle_number = ranked.number
       FROM ranked
      WHERE c.id = ranked.id AND c.cycle_number IS NULL;
+  `);
+
+  // A reversal is an immutable financial event and each payment may have at
+  // most one. Preserve all existing rows; refuse startup with an actionable
+  // migration error rather than silently deleting historical financial data.
+  await pool.query(`
+    DO $$
+    BEGIN
+      IF EXISTS (
+        SELECT 1
+          FROM payment_reversals
+         GROUP BY payment_id
+        HAVING COUNT(*) > 1
+      ) THEN
+        RAISE EXCEPTION
+          'Cannot enforce one reversal per payment: duplicate payment_reversals.payment_id rows require audited reconciliation';
+      END IF;
+    END $$;
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_payment_reversals_payment
+      ON payment_reversals(payment_id);
+  `);
+
+  // Client concurrency tokens carry millisecond ISO timestamps. Guarantee
+  // that every server update advances beyond the prior millisecond even
+  // when two writes land in the same clock tick.
+  await pool.query(`
+    CREATE OR REPLACE FUNCTION fixion_bump_updated_at_millisecond()
+    RETURNS trigger AS $$
+    DECLARE
+      current_millisecond TIMESTAMPTZ := date_trunc('milliseconds', clock_timestamp());
+    BEGIN
+      NEW.updated_at := GREATEST(
+        current_millisecond,
+        COALESCE(date_trunc('milliseconds', OLD.updated_at) + INTERVAL '1 millisecond', current_millisecond)
+      );
+      RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql;
+
+    DO $$
+    DECLARE
+      target_table TEXT;
+      trigger_name TEXT;
+    BEGIN
+      FOREACH target_table IN ARRAY ARRAY['students', 'groups', 'teachers', 'subjects', 'packages']
+      LOOP
+        trigger_name := 'trg_' || target_table || '_server_updated_at';
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_trigger
+           WHERE tgname = trigger_name
+             AND tgrelid = target_table::regclass
+             AND NOT tgisinternal
+        ) THEN
+          EXECUTE format(
+            'CREATE TRIGGER %I BEFORE UPDATE ON %I FOR EACH ROW EXECUTE FUNCTION fixion_bump_updated_at_millisecond()',
+            trigger_name, target_table
+          );
+        END IF;
+      END LOOP;
+    END $$;
   `);
 }
 

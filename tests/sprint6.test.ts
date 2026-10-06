@@ -33,6 +33,7 @@ describe("Sprint 6 — Finalization, Backend/Sync & Production Readiness", () =>
     DatabaseService.init();
     await useAuthStore.getState().login("01000000001", "123456");
     await useAuthStore.getState().selectCenter("center-1");
+    SyncEngine.clearRateLimitForTesting();
     ConnectivityService.setState("online");
     ApiClient.resetInstance();
   });

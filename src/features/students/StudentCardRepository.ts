@@ -278,6 +278,7 @@ export class StudentCardRepository {
           card_code: cardCode,
           cardCodeChanged: true,
           replaceCard: true,
+          baseUpdatedAt: student.updatedAt ?? null,
           updatedAt: now,
           updated_at: now,
         },
