@@ -708,13 +708,46 @@ export class SyncRepository {
         [replacement, row.operationId],
       );
     }
+    db.runSync(
+      `UPDATE sync_conflicts
+       SET resolved_at = COALESCE(resolved_at, ?)
+       WHERE center_id = ? AND resolved_at IS NULL
+         AND (
+           reason LIKE '%Homework evaluation status must be active%'
+           OR reason LIKE '%Homework evaluation status requires name%'
+           OR reason LIKE '%Homework evaluation status%'
+         )`,
+      [new Date().toISOString(), centerId],
+    );
+    const unqueuedStatuses = db.getAllSync<{ id: string; name: string; status: string; createdAt: string }>(
+      `SELECT s.id, s.name, s.status, s.created_at as createdAt
+       FROM homework_evaluation_statuses s
+       WHERE s.center_id = ? AND s.status = 'active'
+         AND NOT EXISTS (
+           SELECT 1 FROM sync_operations op
+           WHERE op.center_id = ? AND op.entity_type = 'homework_evaluation_status' AND op.entity_id = s.id
+         )`,
+      [centerId, centerId],
+    );
+    for (const st of unqueuedStatuses) {
+      SyncRepository.enqueueOperation({
+        operationId: `r-hwstatus-${st.id}`,
+        centerId,
+        userId: "system",
+        deviceId: DeviceService.getDeviceIdSync(),
+        operationType: "CREATE",
+        entityType: "homework_evaluation_status",
+        entityId: st.id,
+        payload: { id: st.id, center_id: centerId, name: st.name, status: "active", created_at: st.createdAt, updated_at: new Date().toISOString() },
+      });
+    }
     const result = db.runSync(
       `UPDATE sync_operations
        SET status = 'pending', retry_count = retry_count + 1, next_retry_at = NULL, last_error = NULL
        WHERE center_id = ?
          AND status = 'conflict'
          AND retry_count < 10
-         AND entity_type IN ('teacher', 'subject', 'teacher_subject', 'group', 'group_schedule', 'enrollment', 'student_group_enrollment', 'student', 'student_card', 'package', 'package_subject', 'package_subscription', 'package_teacher_override', 'notification_template', 'session', 'attendance', 'makeup', 'debt_cycle', 'payment', 'debt_adjustment', 'grade_exam', 'grade_score')
+         AND entity_type IN ('teacher', 'subject', 'teacher_subject', 'group', 'group_schedule', 'enrollment', 'student_group_enrollment', 'student', 'student_card', 'package', 'package_subject', 'package_subscription', 'package_teacher_override', 'notification_template', 'session', 'attendance', 'makeup', 'debt_cycle', 'payment', 'debt_adjustment', 'grade_exam', 'grade_score', 'homework_evaluation_status', 'session_homework_evaluation')
          AND (
            last_error LIKE '%CARD_OUTSIDE_ALLOWED_RANGE%'
            OR last_error LIKE '%CARD_ALREADY_ASSIGNED%'
@@ -745,6 +778,9 @@ export class SyncRepository {
            OR last_error LIKE '%uq_notification_template%'
            OR last_error LIKE '%notification_templates%'
            OR last_error LIKE '%violates check constraint%'
+           OR last_error LIKE '%Homework evaluation status must be active%'
+           OR last_error LIKE '%Homework evaluation status requires name%'
+           OR last_error LIKE '%Homework evaluation status%'
            OR (
              entity_type IN ('enrollment', 'student_group_enrollment')
              AND (

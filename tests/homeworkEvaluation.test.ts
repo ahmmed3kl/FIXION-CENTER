@@ -1,5 +1,5 @@
 import { DatabaseService } from "../src/core/database";
-import { SyncEngine } from "../src/core/sync";
+import { SyncEngine, SyncRepository } from "../src/core/sync";
 import { HomeworkEvaluationRepository } from "../src/features/homework/HomeworkEvaluationRepository";
 import { NotificationService } from "../src/features/notifications/NotificationService";
 import { StudentRepository } from "../src/features/students/StudentRepository";
@@ -217,5 +217,66 @@ describe("homework evaluation data", () => {
       "SELECT session_id FROM grade_exams WHERE center_id = ? AND id = ?",
       ["center-1", examId],
     )?.session_id).toBe("session-homework-incremental");
+  });
+
+  it("requeues homework evaluation status and session evaluation conflicts safely", () => {
+    const student = createStudent();
+    createSession("session-hw-conflict");
+    const status = HomeworkEvaluationRepository.createStatus("حالة متعارضة");
+    const db = DatabaseService.getDb();
+
+    const opId = "op-parked-hweval";
+    db.runSync(
+      `INSERT INTO sync_operations (operation_id, center_id, device_id, user_id, operation_type, entity_type, entity_id, payload, status, retry_count, last_error, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'conflict', 2, ?, ?)`,
+      [
+        opId,
+        "center-1",
+        "dev-1",
+        "usr-1",
+        "CREATE",
+        "session_homework_evaluation",
+        "hweval-conflict-1",
+        JSON.stringify({
+          id: "hweval-conflict-1",
+          center_id: "center-1",
+          student_id: student.id,
+          session_id: "session-hw-conflict",
+          status_id: status.id,
+        }),
+        "تضارب مع الخادم: Homework evaluation status must be active in the authenticated center. (manual_review)",
+        new Date().toISOString(),
+      ],
+    );
+    db.runSync(
+      `INSERT INTO sync_conflicts (id, operation_id, center_id, entity_type, entity_id, reason, resolution, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, 'manual_review', ?)`,
+      [
+        "conflict-hw-1",
+        opId,
+        "center-1",
+        "session_homework_evaluation",
+        "hweval-conflict-1",
+        "Homework evaluation status must be active in the authenticated center.",
+        new Date().toISOString(),
+      ],
+    );
+
+    const changes = SyncRepository.requeueRecoverableConflicts("center-1");
+
+    expect(changes).toBeGreaterThanOrEqual(1);
+    const recoveredOp = db.getFirstSync<any>(
+      "SELECT status, retry_count, last_error, next_retry_at FROM sync_operations WHERE operation_id = ?",
+      [opId],
+    );
+    expect(recoveredOp?.status).toBe("pending");
+    expect(recoveredOp?.last_error).toBeNull();
+    expect(recoveredOp?.next_retry_at).toBeNull();
+
+    const resolvedConflict = db.getFirstSync<any>(
+      "SELECT resolved_at FROM sync_conflicts WHERE operation_id = ?",
+      [opId],
+    );
+    expect(resolvedConflict?.resolved_at).not.toBeNull();
   });
 });

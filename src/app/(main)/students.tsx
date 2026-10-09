@@ -31,6 +31,7 @@ import { PackageRepository } from "../../features/packages/PackageRepository";
 import { PackageSubscriptionRepository } from "../../features/packages/PackageSubscriptionRepository";
 import { GroupRepository } from "../../features/groups/GroupRepository";
 import { GroupScheduleRepository } from "../../features/groups/GroupScheduleRepository";
+import { returnToGroupDetailsIfRequested } from "../../features/groups/groupNavigation";
 import { TeacherSubjectRepository } from "../../features/teachers/TeacherSubjectRepository";
 import { TeacherRepository } from "../../features/teachers/TeacherRepository";
 import { DebtAdjustmentRepository } from "../../features/payments/DebtAdjustmentRepository";
@@ -128,7 +129,14 @@ export default function StudentsScreen() {
   const { colors } = useTheme();
   const { width: screenWidth, height: screenHeight, gutter, isTablet, isLandscape } = useResponsiveLayout();
   const styles = useMemo(() => createStyles(screenWidth, screenHeight, gutter, isTablet, isLandscape), [colors, screenWidth, screenHeight, gutter, isTablet, isLandscape]);
-  const { studentId, add, attendanceSessionId } = useLocalSearchParams<{ studentId?: string; add?: string; attendanceSessionId?: string }>();
+  const { studentId, add, attendanceSessionId, groupId, returnTo } = useLocalSearchParams<{
+    studentId?: string;
+    add?: string;
+    attendanceSessionId?: string;
+    groupId?: string;
+    returnTo?: string;
+  }>();
+  const returnToGroup = () => returnToGroupDetailsIfRequested(returnTo, groupId, (target) => router.replace(target as any));
   const services = useServiceVisibility();
   const paymentsEnabled = services.isEnabled("payments");
   const currentUser = useAuthStore((s) => s.currentUser);
@@ -1140,11 +1148,14 @@ export default function StudentsScreen() {
       {/* 1. Add Student Guided Wizard Modal */}
       <AddStudentWizardModal
         visible={isAddStudentOpen}
-        keepOpenAfterCreate={!attendanceSessionId}
+        initialGroupId={groupId}
+        keepOpenAfterCreate={!attendanceSessionId && returnTo !== "group-details" && returnTo !== "group"}
         onClose={() => {
           setIsAddStudentOpen(false);
           if (attendanceSessionId && !returningToAttendanceAfterCreateRef.current) {
             router.replace({ pathname: "/(main)/scanner", params: { attendanceSessionId: String(attendanceSessionId) } } as any);
+          } else {
+            returnToGroup();
           }
           returningToAttendanceAfterCreateRef.current = false;
           setReturningToAttendanceAfterCreate(false);
@@ -1155,6 +1166,8 @@ export default function StudentsScreen() {
             setReturningToAttendanceAfterCreate(true);
             returningToAttendanceAfterCreateRef.current = true;
             router.replace({ pathname: "/(main)/scanner", params: { attendanceSessionId: String(attendanceSessionId), addedStudentId: createdStudent.id } } as any);
+          } else if (returnToGroup()) {
+            setIsAddStudentOpen(false);
           }
         }}
       />

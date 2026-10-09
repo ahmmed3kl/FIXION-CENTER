@@ -1533,21 +1533,32 @@ class InMemorySqliteMock implements SqlDatabase {
         if (tableName === "sync_operations") {
           const statusMatch = trimmed.match(/status\s*=\s*'([^']+)'/i);
           const isRetryInc = trimmed.includes("retry_count = retry_count + 1");
-          const opId = params[params.length - 1];
-          const row = list.find((r) => r.operation_id === opId);
-          if (row) {
-            if (statusMatch) row.status = statusMatch[1];
-            if (isRetryInc) row.retry_count = (row.retry_count || 0) + 1;
-            if (params.length >= 2 && trimmed.includes("last_error = ?")) {
-              row.last_error = params[0];
-            }
-            if (trimmed.includes("next_retry_at = NULL")) {
-              row.next_retry_at = null;
-            } else if (trimmed.includes("next_retry_at = ?")) {
-              row.next_retry_at = params[1];
-            }
-            if (params.length >= 2 && trimmed.includes("synced_at = ?")) {
-              row.synced_at = params[0];
+          if (trimmed.includes("WHERE center_id = ?") && trimmed.includes("status = 'conflict'")) {
+            const centerId = params[0];
+            const matchingRows = list.filter((r) => r.center_id === centerId && r.status === "conflict");
+            matchingRows.forEach((row) => {
+              if (statusMatch) row.status = statusMatch[1];
+              if (isRetryInc) row.retry_count = (row.retry_count || 0) + 1;
+              if (trimmed.includes("last_error = NULL")) row.last_error = null;
+              if (trimmed.includes("next_retry_at = NULL")) row.next_retry_at = null;
+            });
+          } else {
+            const opId = params[params.length - 1];
+            const row = list.find((r) => r.operation_id === opId);
+            if (row) {
+              if (statusMatch) row.status = statusMatch[1];
+              if (isRetryInc) row.retry_count = (row.retry_count || 0) + 1;
+              if (params.length >= 2 && trimmed.includes("last_error = ?")) {
+                row.last_error = params[0];
+              }
+              if (trimmed.includes("next_retry_at = NULL")) {
+                row.next_retry_at = null;
+              } else if (trimmed.includes("next_retry_at = ?")) {
+                row.next_retry_at = params[1];
+              }
+              if (params.length >= 2 && trimmed.includes("synced_at = ?")) {
+                row.synced_at = params[0];
+              }
             }
           }
         } else if (tableName === "student_notes") {
@@ -3383,6 +3394,19 @@ class InMemorySqliteMock implements SqlDatabase {
         retryCount: r.retry_count,
         lastError: r.last_error,
         nextRetryAt: r.next_retry_at || null,
+        // snake_case
+        operation_id: r.operation_id,
+        center_id: r.center_id,
+        user_id: r.user_id,
+        device_id: r.device_id,
+        operation_type: r.operation_type,
+        entity_type: r.entity_type,
+        entity_id: r.entity_id,
+        created_at: r.created_at,
+        synced_at: r.synced_at,
+        retry_count: r.retry_count,
+        last_error: r.last_error !== undefined ? r.last_error : null,
+        next_retry_at: r.next_retry_at !== undefined ? r.next_retry_at : null,
       }));
 
       // Support the diagnostic queries used by Sync Debug in the in-memory

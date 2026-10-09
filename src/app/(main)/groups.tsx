@@ -76,7 +76,7 @@ export default function GroupsScreen() {
       <View style={styles.header}>
       <TouchableOpacity onPress={() => router.back()} style={[styles.back, { backgroundColor: colors.cardBackground, borderColor: colors.border }]} accessibilityLabel="رجوع"><Ionicons name="chevron-forward" size={22} color={colors.textPrimary} /></TouchableOpacity>
       <View style={styles.headerCopy}><Text style={[styles.eyebrow, { color: colors.primary }]}>الإدارة الأكاديمية</Text><Text style={[styles.title, { color: colors.textPrimary }]}>المجموعات</Text><Text style={[styles.subtitle, { color: colors.textSecondary }]}>كل المجموعات المسجلة في المركز</Text></View>
-      <TouchableOpacity onPress={() => router.push({ pathname: "/(main)/academic", params: { addGroup: "1", returnTo: "groups" } } as any)} style={[styles.addButton, { backgroundColor: colors.primary }]}><Ionicons name="add" size={19} color={colors.white} /><Text style={styles.addButtonText}>إضافة مجموعة</Text></TouchableOpacity>
+      <TouchableOpacity onPress={() => router.push({ pathname: "/(main)/academic", params: { addGroup: Date.now().toString(), returnTo: "groups" } } as any)} style={[styles.addButton, { backgroundColor: colors.primary }]}><Ionicons name="add" size={19} color={colors.white} /><Text style={styles.addButtonText}>إضافة مجموعة</Text></TouchableOpacity>
       <View style={[styles.count, { backgroundColor: colors.primaryLight }]}><Text style={[styles.countText, { color: colors.primary }]}>{groups.length}</Text></View>
     </View>
     <FlatList

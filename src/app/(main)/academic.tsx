@@ -26,6 +26,7 @@ import { Colors, Spacing, Typography, useTheme } from "../../core/theme";
 import { useAuthStore } from "../../features/auth/useAuthStore";
 import { GroupRepository } from "../../features/groups/GroupRepository";
 import { GroupScheduleRepository } from "../../features/groups/GroupScheduleRepository";
+import { GROUPS_ROUTE, returnToGroupsIfRequested } from "../../features/groups/groupNavigation";
 import { SessionGenerationService } from "../../features/sessions/SessionGenerationService";
 import { SubjectRepository } from "../../features/subjects/SubjectRepository";
 import { TeacherRepository } from "../../features/teachers/TeacherRepository";
@@ -70,6 +71,7 @@ export default function AcademicScreen() {
   const currentUser = useAuthStore((s) => s.currentUser);
   const activeCenterId = useAuthStore((s) => s.activeCenterId);
   const permissions = resolveUserPermissions(currentUser);
+  const returnToGroupList = () => returnToGroupsIfRequested(returnTo, (route) => router.navigate(route));
 
   const [activeTab, setActiveTab] = useState<AcademicTab>("teachers");
   const [refreshing, setRefreshing] = useState(false);
@@ -325,7 +327,7 @@ export default function AcademicScreen() {
     setIsAddGroupOpen(true);
   };
   useEffect(() => {
-    if (addGroup === "1" && handledGroupParamRef.current !== addGroup) {
+    if (addGroup && handledGroupParamRef.current !== addGroup) {
       handledGroupParamRef.current = addGroup;
       setActiveTab("groups");
       setEditingGroup(null);
@@ -395,9 +397,7 @@ export default function AcademicScreen() {
       setSelectedScheduleDays([]);
       setScheduleTimes({});
       loadData();
-      if (returnTo === "groups") {
-        router.replace("/(main)/groups" as any);
-      }
+      returnToGroupList();
     } catch (e: any) {
       Alert.alert("خطأ", e?.message || "فشل إنشاء المجموعة");
     }
@@ -999,7 +999,7 @@ export default function AcademicScreen() {
       </Modal>
 
       {/* Add Group Modal */}
-      <Modal visible={isAddGroupOpen} animationType="slide" transparent>
+      <Modal visible={isAddGroupOpen} animationType="slide" transparent onRequestClose={() => { setIsAddGroupOpen(false); returnToGroupList(); }}>
         <View style={styles.modalOverlay}>
           <View style={styles.modalCard}>
             <ScrollView style={{ maxHeight: 520 }}>
@@ -1170,7 +1170,7 @@ export default function AcademicScreen() {
               <AppButton
                 title="إلغاء"
                 variant="outline"
-                onPress={() => setIsAddGroupOpen(false)}
+                onPress={() => { setIsAddGroupOpen(false); returnToGroupList(); }}
                 style={{ flex: 1 }}
               />
             </View>

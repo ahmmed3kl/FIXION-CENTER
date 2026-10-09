@@ -1870,22 +1870,25 @@ class SyncProcessor {
       }
 
       case "homework_evaluation_status": {
-        const status = payload.status || payload;
-        const id = status.id || context.entityId;
+        const statusObj = payload.status && typeof payload.status === "object" ? payload.status : payload;
+        const id = statusObj.id || context.entityId;
         if (!id) throw new Error("Homework evaluation status requires an id.");
-        if (String(status.name || "").trim()) {
+        const name = String(statusObj.name || payload.name || "").trim();
+        const statusVal = typeof payload.status === "string" ? payload.status : (statusObj.status || "active");
+        const isDelete = operationType.toLowerCase().includes("delete") || statusVal === "deleted" || statusVal === "inactive";
+        if (name && !isDelete) {
           await client.query(
             `INSERT INTO homework_evaluation_statuses (id, center_id, name, status, created_at, updated_at)
              VALUES ($1,$2,$3,$4,COALESCE($5,NOW()),COALESCE($6,NOW()))
              ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name, status=EXCLUDED.status, updated_at=EXCLUDED.updated_at
              WHERE homework_evaluation_statuses.center_id = EXCLUDED.center_id`,
-            [id, centerId, String(status.name).trim(), status.status || "active", status.created_at || status.createdAt || null, status.updated_at || status.updatedAt || null],
+            [id, centerId, name, statusVal, statusObj.created_at || statusObj.createdAt || null, statusObj.updated_at || statusObj.updatedAt || null],
           );
         } else {
           const updated = await client.query(
             `UPDATE homework_evaluation_statuses SET status = $1, updated_at = COALESCE($2,NOW())
              WHERE center_id = $3 AND id = $4`,
-            [status.status || "deleted", status.updated_at || status.updatedAt || null, centerId, id],
+            [statusVal || "deleted", statusObj.updated_at || statusObj.updatedAt || null, centerId, id],
           );
           if (!updated.rowCount) throw new Error("Homework evaluation status does not belong to the authenticated center.");
         }

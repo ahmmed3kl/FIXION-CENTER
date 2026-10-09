@@ -1,4 +1,4 @@
-﻿import { Ionicons as BaseIonicons } from "@expo/vector-icons";
+import { Ionicons as BaseIonicons } from "@expo/vector-icons";
 import { useCameraPermissions } from "expo-camera";
 import React, { useEffect, useMemo, useState } from "react";
 import {
@@ -47,6 +47,7 @@ interface AddStudentWizardModalProps {
   onClose: () => void;
   onStudentCreated: (student?: Student) => void;
   keepOpenAfterCreate?: boolean;
+  initialGroupId?: string;
 }
 
 type FieldErrors = {
@@ -91,7 +92,7 @@ const Section = ({
   </View>
 );
 
-export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({ visible, onClose, onStudentCreated, keepOpenAfterCreate = false }) => {
+export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({ visible, onClose, onStudentCreated, keepOpenAfterCreate = false, initialGroupId }) => {
   const { colors } = useTheme();
   const { width, height } = useWindowDimensions();
   const isTablet = width >= 600;
@@ -136,7 +137,8 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({ vi
     if (!visible) return;
     try {
       setStages(CenterAcademicStageRepository.getStages());
-      setGroups(GroupRepository.getAll(true));
+      const allGroups = GroupRepository.getAll(true);
+      setGroups(allGroups);
       setTeachers(TeacherRepository.getAll());
       const map: Record<string, GroupSchedule[]> = {};
       GroupScheduleRepository.getAllActiveSchedules().forEach((schedule) => {
@@ -146,10 +148,20 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({ vi
       const packages = PackageRepository.getPackages().filter((item) => item.status === "active");
       setAvailablePackages(packages);
       setPackageOptions(Object.fromEntries(packages.map((item) => [item.id, PackageRepository.getPackageSubjects(item.id)])));
+      if (initialGroupId) {
+        const initialGroup = allGroups.find((g) => g.id === initialGroupId);
+        if (initialGroup) {
+          setSelectedGroupIds([initialGroupId]);
+          if (initialGroup.grade) {
+            setGrade(initialGroup.grade);
+            setLevelFilter(initialGroup.grade);
+          }
+        }
+      }
     } catch (error) {
       console.warn("Unable to load add-student context:", error);
     }
-  }, [visible]);
+  }, [visible, initialGroupId]);
 
   const allGrades = useMemo(() => stages.flatMap((stage) => [...stage.grades]), [stages]);
   const selectGrade = (value: string) => {

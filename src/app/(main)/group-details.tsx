@@ -77,8 +77,18 @@ export default function GroupDetailsScreen() {
   return (
     <SafeAreaView style={styles.safe}>
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => router.back()} style={styles.back}><Ionicons name="arrow-forward" size={22} color={Colors.slate800} /></TouchableOpacity>
-        <Text style={styles.headerTitle}>تفاصيل المجموعة</Text>
+        <View style={styles.headerLeft}>
+          <TouchableOpacity onPress={() => router.back()} style={styles.back} accessibilityLabel="رجوع"><Ionicons name="arrow-forward" size={22} color={colors.textPrimary || Colors.slate800} /></TouchableOpacity>
+          <Text style={styles.headerTitle}>تفاصيل المجموعة</Text>
+        </View>
+        <TouchableOpacity
+          onPress={() => router.push({ pathname: "/(main)/students", params: { add: Date.now().toString(), groupId: group.id, returnTo: "group-details" } } as any)}
+          style={[styles.addButton, { backgroundColor: colors.primary }]}
+          accessibilityLabel="إضافة طالب للمجموعة"
+        >
+          <Ionicons name="person-add" size={17} color={colors.white} />
+          <Text style={styles.addButtonText}>إضافة طالب</Text>
+        </TouchableOpacity>
       </View>
       <FlatList
         data={filteredStudents}
@@ -109,9 +119,12 @@ export default function GroupDetailsScreen() {
 
 const createStyles = () => StyleSheet.create({
   safe: { flex: 1, backgroundColor: Colors.background },
-  header: { flexDirection: "row", alignItems: "center", padding: Spacing.lg, backgroundColor: Colors.cardBackground, borderBottomWidth: 1, borderBottomColor: Colors.border, shadowColor: Colors.slate900, shadowOpacity: 0.05, shadowRadius: 8, shadowOffset: { width: 0, height: 3 }, elevation: 2 },
+  header: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", padding: Spacing.lg, backgroundColor: Colors.cardBackground, borderBottomWidth: 1, borderBottomColor: Colors.border, shadowColor: Colors.slate900, shadowOpacity: 0.05, shadowRadius: 8, shadowOffset: { width: 0, height: 3 }, elevation: 2 },
+  headerLeft: { flexDirection: "row", alignItems: "center" },
   back: { padding: 6, marginRight: Spacing.sm },
   headerTitle: { ...Typography.h2, color: Colors.slate900 },
+  addButton: { flexDirection: "row", alignItems: "center", gap: 6, borderRadius: 12, paddingHorizontal: 12, paddingVertical: 8 },
+  addButtonText: { color: Colors.white, fontWeight: "800", fontSize: 13 },
   content: { padding: Spacing.lg, paddingBottom: Spacing.xxl },
   summary: { backgroundColor: Colors.white, padding: Spacing.lg, borderRadius: 22, marginBottom: Spacing.lg, borderWidth: 1, borderColor: Colors.border },
   groupName: { ...Typography.h2, color: Colors.slate900, textAlign: "right" },
