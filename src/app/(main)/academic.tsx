@@ -64,7 +64,7 @@ export default function AcademicScreen() {
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(), [colors]);
   const router = useRouter();
-  const { addGroup, editGroupId } = useLocalSearchParams<{ addGroup?: string; editGroupId?: string }>();
+  const { addGroup, editGroupId, returnTo } = useLocalSearchParams<{ addGroup?: string; editGroupId?: string; returnTo?: string }>();
   const handledGroupParamRef = useRef<string | null>(null);
   const handledEditGroupParamRef = useRef<string | null>(null);
   const currentUser = useAuthStore((s) => s.currentUser);
@@ -395,6 +395,9 @@ export default function AcademicScreen() {
       setSelectedScheduleDays([]);
       setScheduleTimes({});
       loadData();
+      if (returnTo === "groups") {
+        router.replace("/(main)/groups" as any);
+      }
     } catch (e: any) {
       Alert.alert("خطأ", e?.message || "فشل إنشاء المجموعة");
     }
@@ -487,6 +490,7 @@ export default function AcademicScreen() {
   );
   const canUpdateGroup = PermissionService.hasPermission(permissions, "groups.update");
   const canDeactivateGroup = PermissionService.hasPermission(permissions, "groups.deactivate");
+  const canManageHomework = PermissionService.hasPermission(permissions, "homework.manage");
   const canGenSessions = PermissionService.hasPermission(
     permissions,
     "sessions.generate",
@@ -496,6 +500,15 @@ export default function AcademicScreen() {
     <SafeAreaView style={styles.safeArea}>
       <View style={styles.header}>
         <Text style={styles.headerTitle}>{Strings.tabAcademic}</Text>
+        {canManageHomework ? (
+          <TouchableOpacity
+            style={styles.homeworkHeaderButton}
+            onPress={() => router.push("/(main)/homework-evaluations" as any)}
+          >
+            <Ionicons name="checkmark-circle-outline" size={18} color={Colors.white} />
+            <Text style={styles.homeworkHeaderButtonText}>تقييم الواجب</Text>
+          </TouchableOpacity>
+        ) : null}
       </View>
 
       {/* Segmented Control Bar */}
@@ -1354,6 +1367,16 @@ const createStyles = () => StyleSheet.create({
     color: Colors.slate900,
     fontWeight: "900",
   },
+  homeworkHeaderButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    backgroundColor: Colors.primary,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+    borderRadius: 12,
+  },
+  homeworkHeaderButtonText: { color: Colors.white, fontSize: 12, fontWeight: "800" },
   headerPackagesButton: {
     flexDirection: "row",
     alignItems: "center",

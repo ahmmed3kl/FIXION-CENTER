@@ -1308,6 +1308,7 @@ export class SyncRepository {
   static clearLocalOperationalDataInTransaction(db: any, centerId: string): void {
     const tables = [
       "session_closing_records", "daily_closing_summaries",
+      "session_homework_evaluations", "homework_evaluation_statuses",
       "notification_deliveries", "notification_events", "notification_templates",
       "payment_reversals", "payments", "debt_adjustments", "advance_coverages",
       "attendance", "session_expected_students", "sessions", "debt_cycles",
@@ -1681,10 +1682,10 @@ export class SyncEngine {
 
       if (Array.isArray(data.gradeExams)) {
         for (const exam of data.gradeExams) {
-          db.runSync(`INSERT INTO grade_exams (id, center_id, name, grade, group_id, max_score, status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET name=excluded.name, grade=excluded.grade, group_id=excluded.group_id, max_score=excluded.max_score, status=excluded.status, updated_at=excluded.updated_at`,
-            [exam.id, exam.center_id || centerId, exam.name, exam.grade, exam.group_id || exam.groupId || null, Number(exam.max_score ?? exam.maxScore ?? 100), exam.status || "active", exam.created_at || new Date().toISOString(), exam.updated_at || new Date().toISOString()]);
+          db.runSync(`INSERT INTO grade_exams (id, center_id, name, grade, group_id, session_id, max_score, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET name=excluded.name, grade=excluded.grade, group_id=excluded.group_id, session_id=excluded.session_id, max_score=excluded.max_score, status=excluded.status, updated_at=excluded.updated_at`,
+            [exam.id, exam.center_id || centerId, exam.name, exam.grade, exam.group_id || exam.groupId || null, exam.session_id || exam.sessionId || null, Number(exam.max_score ?? exam.maxScore ?? 100), exam.status || "active", exam.created_at || new Date().toISOString(), exam.updated_at || new Date().toISOString()]);
         }
       }
       if (Array.isArray(data.gradeScores)) {
@@ -1695,7 +1696,14 @@ export class SyncEngine {
             [score.id, score.center_id || centerId, score.exam_id || score.examId, score.student_id || score.studentId, score.score ?? null, score.created_at || new Date().toISOString(), score.updated_at || new Date().toISOString()]);
         }
       }
-
+      if (Array.isArray(data.homeworkEvaluationStatuses)) {
+        for (const status of data.homeworkEvaluationStatuses) {
+          db.runSync(`INSERT INTO homework_evaluation_statuses (id, center_id, name, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET name=excluded.name, status=excluded.status, updated_at=excluded.updated_at`,
+            [status.id, status.center_id || centerId, status.name, status.status || "active", status.created_at || new Date().toISOString(), status.updated_at || null]);
+        }
+      }
       // Upsert Teachers
       if (Array.isArray(data.teachers)) {
         for (const t of data.teachers) {
@@ -1821,10 +1829,11 @@ export class SyncEngine {
           const studentCode =
             std.student_code ||
             std.studentCode ||
-            std.card_code ||
-            std.cardCode ||
             "";
-          const cardCode = std.card_code || std.cardCode || studentCode;
+          const hasCardCode = Object.prototype.hasOwnProperty.call(std, "card_code") || Object.prototype.hasOwnProperty.call(std, "cardCode");
+          const cardCode = hasCardCode
+            ? (Object.prototype.hasOwnProperty.call(std, "card_code") ? std.card_code : std.cardCode) ?? null
+            : studentCode;
           db.runSync(
             `INSERT INTO students (id, center_id, student_code, full_name, card_code, phone, parent_phone, grade, status, student_type, notes, deleted_at, deleted_by, created_at, updated_at)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -1977,6 +1986,17 @@ export class SyncEngine {
               sess.updated_at || sess.updatedAt || new Date().toISOString(),
             ],
           );
+        }
+      }
+      if (Array.isArray(data.sessionHomeworkEvaluations)) {
+        for (const evaluation of data.sessionHomeworkEvaluations) {
+          db.runSync(`INSERT INTO session_homework_evaluations
+              (id, center_id, student_id, session_id, status_id, created_at, updated_at, deleted_at, deleted_by)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(center_id, student_id, session_id) DO UPDATE SET
+              status_id=excluded.status_id, updated_at=excluded.updated_at,
+              deleted_at=excluded.deleted_at, deleted_by=excluded.deleted_by`,
+            [evaluation.id, evaluation.center_id || centerId, evaluation.student_id || evaluation.studentId, evaluation.session_id || evaluation.sessionId, evaluation.status_id || evaluation.statusId, evaluation.created_at || new Date().toISOString(), evaluation.updated_at || null, evaluation.deleted_at || null, evaluation.deleted_by || null]);
         }
       }
       if (Array.isArray(data.expectedStudents)) {
@@ -2182,14 +2202,31 @@ export class SyncEngine {
              FROM students WHERE center_id = ? AND id = ?`,
             [centerId, studentId],
           );
+          if (!existingStudent) {
+            const studentInAnotherCenter = db.getFirstSync<{ center_id: string }>(
+              "SELECT center_id FROM students WHERE id = ?",
+              [studentId],
+            );
+            if (studentInAnotherCenter && studentInAnotherCenter.center_id !== centerId) {
+              throw new Error("Student sync change belongs to a different center");
+            }
+          }
           const hasDeletedAt = Object.prototype.hasOwnProperty.call(s, "deleted_at") || Object.prototype.hasOwnProperty.call(s, "deletedAt");
           const hasDeletedBy = Object.prototype.hasOwnProperty.call(s, "deleted_by") || Object.prototype.hasOwnProperty.call(s, "deletedBy");
-          const deletedAt = hasDeletedAt ? (s.deleted_at ?? s.deletedAt ?? null) : (existingStudent?.deleted_at ?? null);
-          const deletedBy = hasDeletedBy ? (s.deleted_by ?? s.deletedBy ?? null) : (existingStudent?.deleted_by ?? null);
+          const isCreateChange = entityType === "student_created" || String(change.action || "").toLowerCase() === "create";
+          const isCardCodeReplacement = data.cardCodeChanged === true || data.replaceCard === true;
+          const keepExistingArchive = isCreateChange && Boolean(existingStudent?.deleted_at);
+          const deletedAt = keepExistingArchive ? existingStudent.deleted_at : hasDeletedAt ? (s.deleted_at ?? s.deletedAt ?? null) : (existingStudent?.deleted_at ?? null);
+          const deletedBy = keepExistingArchive ? existingStudent.deleted_by : hasDeletedBy ? (s.deleted_by ?? s.deletedBy ?? null) : (existingStudent?.deleted_by ?? null);
           const studentCode =
-            s.student_code || s.studentCode || s.card_code || s.cardCode || existingStudent?.student_code || existingStudent?.card_code || "";
-          const cardCode = s.card_code || s.cardCode || existingStudent?.card_code || studentCode;
-          const cardWasProvided = Boolean(data.card || !existingStudent);
+            s.student_code || s.studentCode || existingStudent?.student_code || s.card_code || s.cardCode || existingStudent?.card_code || "";
+          const hasCardCode = Object.prototype.hasOwnProperty.call(s, "card_code") || Object.prototype.hasOwnProperty.call(s, "cardCode");
+          const cardCode = existingStudent && !isCardCodeReplacement
+            ? existingStudent.card_code
+            : hasCardCode
+            ? (Object.prototype.hasOwnProperty.call(s, "card_code") ? s.card_code : s.cardCode) ?? null
+            : existingStudent?.card_code ?? studentCode;
+          const cardWasProvided = !existingStudent && Boolean(data.card || cardCode);
 
           db.runSync(
             `INSERT INTO students (id, center_id, student_code, full_name, card_code, phone, parent_phone, grade, status, student_type, notes, deleted_at, deleted_by, created_at, updated_at)
@@ -2243,6 +2280,16 @@ export class SyncEngine {
           if (!cardId || !studentId || (!cardCode && !isDeactivation)) {
             throw new Error("Invalid student card change from server");
           }
+          if (!isDeactivation) {
+            const owner = db.getFirstSync<{ deletedAt: string | null }>(
+              `SELECT deleted_at as deletedAt FROM students WHERE center_id = ? AND id = ?`,
+              [centerId, studentId],
+            );
+            if (!owner) throw new Error("Student card owner is outside the center");
+            if (owner.deletedAt) {
+              throw new Error("Cannot activate a card for an archived student");
+            }
+          }
           if (
             isDeactivation
           ) {
@@ -2274,12 +2321,23 @@ export class SyncEngine {
               [new Date().toISOString(), centerId, studentId, cardId],
             );
             const existingByCode = db.getFirstSync<any>(
-              `SELECT id, student_id as studentId FROM student_cards
+              `SELECT id, student_id as studentId, status FROM student_cards
                WHERE center_id = ? AND card_code = ?`,
               [centerId, cardCode],
             );
             if (existingByCode && existingByCode.studentId !== studentId) {
-              throw new Error("Card code is owned by another student");
+              const oldOwner = db.getFirstSync<any>(
+                `SELECT deleted_at as deletedAt FROM students WHERE center_id = ? AND id = ?`,
+                [centerId, existingByCode.studentId],
+              );
+              if (existingByCode.status === "active" || !oldOwner?.deletedAt) {
+                throw new Error("Card code is owned by another student");
+              }
+              db.runSync(
+                `UPDATE student_cards SET student_id = ?, status = 'active', deactivated_at = NULL, issued_at = ?
+                 WHERE id = ? AND center_id = ?`,
+                [studentId, card.issued_at || card.issuedAt || new Date().toISOString(), existingByCode.id, centerId],
+              );
             }
             if (existingByCode && existingByCode.id !== cardId) {
               db.runSync(
@@ -2666,13 +2724,44 @@ export class SyncEngine {
           db.runSync(`INSERT INTO advance_coverages (id, operation_id, center_id, student_id, advance_session_id, target_future_session_id, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET target_future_session_id=excluded.target_future_session_id`,
             [c.id || change.entityId, change.operationId || `srv-coverage-${c.id || change.entityId}`, centerId, c.student_id || c.studentId, c.advance_session_id || c.advanceSessionId, c.target_future_session_id || c.targetFutureSessionId, c.created_by || c.createdBy || "system", c.created_at || new Date().toISOString()]);
+        } else if (entityType === "homework_evaluation_status") {
+          const status = data.status && typeof data.status === "object" ? data.status : data;
+          if (status.name) {
+            db.runSync(`INSERT INTO homework_evaluation_statuses (id, center_id, name, status, created_at, updated_at)
+              VALUES (?, ?, ?, ?, ?, ?)
+              ON CONFLICT(id) DO UPDATE SET name=excluded.name, status=excluded.status, updated_at=excluded.updated_at`,
+              [status.id || change.entityId, centerId, status.name, status.status || "active", status.created_at || status.createdAt || new Date().toISOString(), status.updated_at || status.updatedAt || new Date().toISOString()]);
+          } else {
+            db.runSync(`UPDATE homework_evaluation_statuses SET status = ?, updated_at = ?
+              WHERE center_id = ? AND id = ?`,
+              [status.status || "deleted", status.updated_at || status.updatedAt || new Date().toISOString(), centerId, status.id || change.entityId]);
+          }
+        } else if (entityType === "session_homework_evaluation") {
+          const evaluation = data.evaluation || data;
+          const evaluationId = evaluation.id || change.entityId;
+          const statusId = evaluation.status_id || evaluation.statusId || null;
+          if (statusId) {
+            db.runSync(`INSERT INTO session_homework_evaluations
+                (id, center_id, student_id, session_id, status_id, created_at, updated_at, deleted_at, deleted_by)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+              ON CONFLICT(center_id, student_id, session_id) DO UPDATE SET
+                status_id=excluded.status_id, updated_at=excluded.updated_at,
+                deleted_at=excluded.deleted_at, deleted_by=excluded.deleted_by`,
+              [evaluationId, centerId, evaluation.student_id || evaluation.studentId, evaluation.session_id || evaluation.sessionId, statusId, evaluation.created_at || evaluation.createdAt || new Date().toISOString(), evaluation.updated_at || evaluation.updatedAt || new Date().toISOString(), evaluation.deleted_at || null, evaluation.deleted_by || evaluation.deletedBy || null]);
+          } else {
+            db.runSync(`UPDATE session_homework_evaluations
+              SET deleted_at = ?, deleted_by = ?, updated_at = ?
+              WHERE center_id = ? AND id = ?`,
+              [evaluation.deleted_at || evaluation.deletedAt || new Date().toISOString(), evaluation.deleted_by || evaluation.deletedBy || null, evaluation.updated_at || evaluation.updatedAt || new Date().toISOString(), centerId, evaluationId]);
+          }
         } else if (entityType === "grade_exam") {
           const exam = data.exam || data;
-          db.runSync(`INSERT INTO grade_exams (id, center_id, name, grade, max_score, status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET name=excluded.name, grade=excluded.grade, max_score=excluded.max_score, status=excluded.status, updated_at=excluded.updated_at`,
-            [exam.id || change.entityId, centerId, exam.name || "امتحان", exam.grade || "", Number(exam.max_score ?? exam.maxScore ?? 100), exam.status || "active", exam.created_at || exam.createdAt || new Date().toISOString(), exam.updated_at || exam.updatedAt || new Date().toISOString()]);
-          db.runSync("UPDATE grade_exams SET group_id = ? WHERE center_id = ? AND id = ?", [exam.group_id || exam.groupId || null, centerId, exam.id || change.entityId]);
+          db.runSync(`INSERT INTO grade_exams (id, center_id, name, grade, group_id, session_id, max_score, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET name=excluded.name, grade=excluded.grade,
+              group_id=excluded.group_id, session_id=excluded.session_id,
+              max_score=excluded.max_score, status=excluded.status, updated_at=excluded.updated_at`,
+            [exam.id || change.entityId, centerId, exam.name || "امتحان", exam.grade || "", exam.group_id || exam.groupId || null, exam.session_id || exam.sessionId || null, Number(exam.max_score ?? exam.maxScore ?? 100), exam.status || "active", exam.created_at || exam.createdAt || new Date().toISOString(), exam.updated_at || exam.updatedAt || new Date().toISOString()]);
         } else if (entityType === "grade_score") {
           const score = data.scoreRecord || data;
           db.runSync(`INSERT INTO grade_scores (id, center_id, exam_id, student_id, score, created_at, updated_at)

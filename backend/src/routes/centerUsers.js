@@ -13,7 +13,7 @@ const allowedPermissions = new Set([
   "dashboard.view", "students.view", "students.create", "students.edit", "students.update", "students.deactivate", "students.delete", "students.restore", "students.profile.view", "students.cards.manage",
   "teachers.view", "teachers.create", "teachers.update", "teachers.deactivate", "subjects.view", "subjects.create", "subjects.update", "subjects.deactivate", "subjects.teachers.manage",
   "groups.view", "groups.create", "groups.update", "groups.deactivate", "groups.students.view", "groups.schedule.manage",
-  "grades.view", "grades.manage", "enrollments.view", "enrollments.create", "enrollments.update", "enrollments.end",
+  "grades.view", "grades.manage", "homework.manage", "enrollments.view", "enrollments.create", "enrollments.update", "enrollments.end",
   "sessions.view", "sessions.generate", "sessions.update", "sessions.cancel", "sessions.close", "sessions.reopen",
   "attendance.view", "attendance.create", "attendance.edit", "attendance.close", "attendance.makeup", "attendance.external",
   "payments.view", "payments.create", "payments.edit", "payments.debt.view", "payments.reverse", "payments.adjust",

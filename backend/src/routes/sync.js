@@ -29,6 +29,8 @@ function requiredPermission(operation) {
   if (entity === "package_subscription") return "packages.subscribe";
   if (entity === "package" || entity === "package_subject" || entity === "package_teacher_override") return "packages.manage";
   if (entity === "grade_exam" || entity === "grade_score") return "grades.manage";
+  if (entity === "homework_evaluation_status") return "homework.manage";
+  if (entity === "session_homework_evaluation") return null;
   if (entity === "notification_template") return "notifications.templates.update";
   if (entity === "notification_event" || entity === "notification_delivery") return "notifications.send";
   if (entity === "daily_closing") return action.includes("reopen") ? "daily_closing.reopen" : "daily_closing.close";
@@ -42,8 +44,17 @@ function assertSyncPermission(req, operation) {
   // role). Normal CREATE/UPDATE operations remain permission checked below.
   if (String(operation.operationType || operation.operation_type || "").toUpperCase() === "REPAIR_AFTER_SERVER_RESET") return;
   const permission = requiredPermission(operation);
-  if (!permission || req.user.role === "admin" || req.user.role === "owner") return;
+  const entity = String(operation.entityType || operation.entity_type || "").toLowerCase();
+  if (req.user.role === "admin" || req.user.role === "owner") return;
   const permissions = req.user.permissions || {};
+  if (entity === "session_homework_evaluation") {
+    const allowed = ["grades.manage", "attendance.create", "attendance.edit"];
+    if (allowed.some((candidate) => Array.isArray(permissions)
+      ? permissions.includes(candidate)
+      : permissions[candidate] === true)) return;
+    throw new AppError("FORBIDDEN", "Missing required homework evaluation permission.", "ليس لديك الصلاحية الكافية لمزامنة تقييم الواجب.", 403);
+  }
+  if (!permission) return;
   if (Array.isArray(permissions) ? permissions.includes(permission) : permissions[permission] === true) return;
   throw new AppError("FORBIDDEN", `Missing required permission: ${permission}`, "ليس لديك الصلاحية الكافية لمزامنة هذه العملية.", 403);
 }
@@ -95,6 +106,8 @@ router.get(
           dailyClosingsRes,
           gradeExamsRes,
           gradeScoresRes,
+          homeworkStatusesRes,
+          homeworkEvaluationsRes,
           resetStateRes,
           maxSeqRes,
         ] = await Promise.all([
@@ -125,6 +138,8 @@ router.get(
           client.query("SELECT * FROM daily_closing_summaries WHERE center_id = $1", [centerId]),
           client.query("SELECT * FROM grade_exams WHERE center_id = $1", [centerId]),
           client.query("SELECT * FROM grade_scores WHERE center_id = $1", [centerId]),
+          client.query("SELECT * FROM homework_evaluation_statuses WHERE center_id = $1", [centerId]),
+          client.query("SELECT * FROM session_homework_evaluations WHERE center_id = $1", [centerId]),
           client.query("SELECT reset_generation, updated_at FROM center_data_state WHERE center_id = $1", [centerId]),
           client.query("SELECT COALESCE(MAX(server_seq), 0) as max_seq FROM server_sync_operations WHERE center_id = $1", [centerId]),
         ]);
@@ -158,6 +173,8 @@ router.get(
         dailyClosings: dailyClosingsRes.rows,
         gradeExams: gradeExamsRes.rows,
         gradeScores: gradeScoresRes.rows,
+        homeworkEvaluationStatuses: homeworkStatusesRes.rows,
+        sessionHomeworkEvaluations: homeworkEvaluationsRes.rows,
         resetGeneration: Number(resetStateRes.rows[0]?.reset_generation || 0),
         resetAt: resetStateRes.rows[0]?.updated_at || null,
         latestServerSeq: parseInt(maxSeqRes.rows[0]?.max_seq || 0, 10),
@@ -184,6 +201,7 @@ router.post("/reset", authMiddleware, deviceGuard, requirePermission("center.res
       // Delete children before parents to remain compatible with strict FKs.
       const tables = [
         "session_closing_records", "daily_closing_summaries",
+        "session_homework_evaluations", "homework_evaluation_statuses",
         "notification_deliveries", "notification_events", "notification_templates",
         "payment_reversals", "payments", "debt_adjustments", "advance_coverages",
         "attendance", "session_expected_students", "sessions", "debt_cycles",

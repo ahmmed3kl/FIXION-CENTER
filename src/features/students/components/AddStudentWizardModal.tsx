@@ -51,6 +51,7 @@ interface AddStudentWizardModalProps {
 
 type FieldErrors = {
   cardCode?: string;
+  studentCode?: string;
   fullName?: string;
   phone?: string;
   parentPhone?: string;
@@ -99,6 +100,7 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({ vi
   const [cameraActive, setCameraActive] = useState(false);
   const [torchEnabled, setTorchEnabled] = useState(false);
   const [cardCode, setCardCode] = useState("");
+  const [studentCode, setStudentCode] = useState("");
   const [scanError, setScanError] = useState<string | null>(null);
   const [fullName, setFullName] = useState("");
   const [phone, setPhone] = useState("");
@@ -193,7 +195,7 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({ vi
   };
 
   const resetForm = () => {
-    setCameraActive(false); setTorchEnabled(false); setCardCode(""); setScanError(null);
+    setCameraActive(false); setTorchEnabled(false); setCardCode(""); setStudentCode(""); setScanError(null);
     setFullName(""); setPhone(""); setParentPhone(""); setGrade(""); setNotes(""); setErrors({});
     setPhoneDuplicateWarning(false); setParentPhoneDuplicateWarning(false);
     setLevelFilter("all"); setSubjectFilter("all"); setTeacherFilter("all"); setTeacherSearch(""); setShowLevels(false); setShowSubjects(false); setShowTeachers(false); setSelectedGroupIds([]);
@@ -201,7 +203,7 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({ vi
   };
 
   const resetStudentFields = () => {
-    setCameraActive(false); setTorchEnabled(false); setCardCode(""); setScanError(null);
+    setCameraActive(false); setTorchEnabled(false); setCardCode(""); setStudentCode(""); setScanError(null);
     setFullName(""); setPhone(""); setParentPhone(""); setNotes(""); setErrors({});
     setPhoneDuplicateWarning(false); setParentPhoneDuplicateWarning(false); setSubmitting(false);
   };
@@ -222,11 +224,14 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({ vi
     if (!raw) { setScanError("أدخل أو امسح كود الكارت أولاً."); return false; }
     if (!isNumericCode(raw)) { setScanError(ValidationMessages.code); return false; }
     try {
-      if (StudentCardRepository.findByCardCode(raw) || StudentRepository.findByStudentCode(raw)) {
+      const archivedOwner = StudentRepository.getArchivedCardOwner(raw);
+      if (StudentCardRepository.findActiveCardByCodeAnywhere(raw) && !archivedOwner) {
         setScanError("هذا الكود مستخدم بالفعل لطالب آخر في هذا المركز."); return false;
       }
     } catch (error) { console.warn("Card validation notice:", error); }
-    setCardCode(raw); setScanError(null); setErrors((old) => ({ ...old, cardCode: undefined })); return true;
+    setCardCode(raw);
+    setStudentCode((current) => current === cardCode || !current ? raw : current);
+    setScanError(null); setErrors((old) => ({ ...old, cardCode: undefined })); return true;
   };
 
   const openCamera = async () => {
@@ -320,6 +325,9 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({ vi
     // known; selected groups/packages are still validated when provided.
     const code = cardCode.trim();
     if (!code || !isNumericCode(code)) next.cardCode = !code ? "كود الطالب مطلوب." : ValidationMessages.code;
+    const cleanStudentCode = studentCode.trim();
+    if (!cleanStudentCode || !isNumericCode(cleanStudentCode)) next.studentCode = !cleanStudentCode ? "كود الطالب مطلوب." : ValidationMessages.code;
+    else if (StudentRepository.findByStudentCode(cleanStudentCode)) next.studentCode = "كود الطالب مستخدم في سجل آخر. أدخل كودًا مختلفًا.";
     if (!isValidName(fullName)) next.fullName = ValidationMessages.name;
     if (!isEgyptianPhone(phone)) next.phone = ValidationMessages.phone;
     if (!isEgyptianPhone(parentPhone)) next.parentPhone = ValidationMessages.phone;
@@ -331,12 +339,31 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({ vi
 
   const submit = async () => {
     if (!validateForm()) { Alert.alert("راجع البيانات", "أكمل الحقول المطلوبة قبل إضافة الطالب."); return; }
+    const archivedCardOwner = StudentRepository.getArchivedCardOwner(cardCode.trim());
+    if (archivedCardOwner) {
+      Alert.alert(
+        "إعادة استخدام الكارت",
+        `هذا الكارت كان مرتبطًا بالطالب المؤرشف «${archivedCardOwner.fullName}». هل تريد استخدامه للطالب الجديد؟`,
+        [
+          { text: "إلغاء", style: "cancel" },
+          { text: "استخدام الكارت", onPress: () => { void createStudent(true); } },
+        ],
+      );
+      return;
+    }
+    await createStudent(false);
+  };
+
+  const createStudent = async (reuseArchivedCard: boolean) => {
     setSubmitting(true);
     try {
       const packageGroups = packageOptionIds.map((id) => packageGroupIds[id]).filter(Boolean);
       // Package groups are enrolled with their first real scheduled class as
       // the start date; StudentRepository's generic groupIds path uses today.
-      const student = StudentRepository.createStudent({ studentCode: cardCode.trim(), cardCode: cardCode.trim(), fullName: fullName.trim(), phone: phone.trim(), parentPhone: parentPhone.trim(), grade, notes: notes.trim(), groupIds: [] });
+      const student = StudentRepository.createStudent(
+        { studentCode: studentCode.trim(), cardCode: cardCode.trim(), fullName: fullName.trim(), phone: phone.trim(), parentPhone: parentPhone.trim(), grade, notes: notes.trim(), groupIds: [] },
+        { reuseArchivedCard },
+      );
       if (packageId) {
         // Create the package ledger before its attendance enrollments. This
         // prevents each selected package group from opening an extra monthly
@@ -377,8 +404,9 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({ vi
             <View style={styles.headerMark}><Ionicons name="school-outline" size={25} color="#2563EB" /></View>
           </View>
           <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
-            <Section styles={styles} icon="card-outline" title="الكارت / كود الطالب" hint="امسح الكارت أو أدخل الكود يدوياً">
+            <Section styles={styles} icon="card-outline" title="الكارت" hint="امسح الكارت أو أدخل الكود يدوياً">
               {cameraActive ? <BarcodeScannerView onDetected={(data) => { if (validateCard(data)) setCameraActive(false); }} onClose={() => { setTorchEnabled(false); setCameraActive(false); }} style={styles.cameraWrap} /> : <View style={styles.codeRow}><AppInput value={cardCode} onChangeText={(value) => { setCardCode(value); setScanError(null); clearError("cardCode"); }} onBlur={() => cardCode && validateCard(cardCode)} error={scanError || errors.cardCode} placeholder="00126" keyboardType="number-pad" inputKind="cardCode" containerStyle={styles.codeInputWrap} style={styles.compactInput} /><TouchableOpacity style={styles.scanButton} onPress={openCamera}><Ionicons name="camera-outline" size={22} color="#FFF" /></TouchableOpacity></View>}
+              <AppInput label="كود الطالب *" value={studentCode} onChangeText={(value) => { setStudentCode(value); clearError("studentCode"); }} error={errors.studentCode} placeholder="00126" keyboardType="number-pad" inputKind="cardCode" containerStyle={styles.field} style={styles.compactInput} />
             </Section>
 
             <Section styles={styles} icon="person-outline" title="بيانات الطالب">

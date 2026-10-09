@@ -11,6 +11,7 @@ import {
     ScrollView,
     StyleSheet,
     Text,
+    TextInput,
     TouchableOpacity,
     View,
     useWindowDimensions,
@@ -18,7 +19,7 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalDataRevision } from "../../core/database/useLocalDataRevision";
 import { formatCurrency, formatTimeArabic, Strings } from "../../core/localization";
-import { formatLocalDateTime, getLocalDateOnly } from "../../shared/utils/date";
+import { formatLocalDate, formatLocalDateTime, getLocalDateOnly } from "../../shared/utils/date";
 import { PermissionService } from "../../core/permissions";
 import { AuditService } from "../../core/audit";
 import { Colors, Spacing, Typography, useTheme } from "../../core/theme";
@@ -36,6 +37,8 @@ import { DebtAdjustmentRepository } from "../../features/payments/DebtAdjustment
 import { FinancialCalculationService } from "../../features/payments/FinancialCalculationService";
 import { PaymentRepository } from "../../features/payments/PaymentRepository";
 import { GradeBookRepository, GradeExam, GradeScore } from "../../features/grades/GradeBookRepository";
+import { HomeworkEvaluationRepository } from "../../features/homework/HomeworkEvaluationRepository";
+import { saveGradeEdit } from "../../features/grades/gradeScoreEdit";
 import { StudentNoteRepository } from "../../features/students/StudentNoteRepository";
 import { NotificationService } from "../../features/notifications/NotificationService";
 import { StudentCardRepository } from "../../features/students/StudentCardRepository";
@@ -154,11 +157,14 @@ export default function StudentsScreen() {
   const [selectedStudent, setSelectedStudent] = useState<Student | null>(null);
   const [studentSubscriptions, setStudentSubscriptions] = useState<StudentPackageSubscription[]>([]);
   const [studentAttendance, setStudentAttendance] = useState<Attendance[]>([]);
+  const [studentHomeworkEvaluations, setStudentHomeworkEvaluations] = useState<import("../../shared/types").SessionHomeworkEvaluation[]>([]);
   const [studentNotes, setStudentNotes] = useState<import("../../shared/types").StudentNote[]>([]);
   const [studentAuditLogs, setStudentAuditLogs] = useState<import("../../shared/types").AuditLog[]>([]);
   const [noteText, setNoteText] = useState("");
   const [editingNoteId, setEditingNoteId] = useState<string | null>(null);
-  const [profileTab, setProfileTab] = useState<"groups" | "packages" | "attendance" | "payments" | "notes" | "activity">("groups");
+  const [profileTab, setProfileTab] = useState<"groups" | "packages" | "attendance" | "payments" | "exams" | "notes" | "activity">("groups");
+  const [profileGradeRecords, setProfileGradeRecords] = useState<Array<{ exam: GradeExam; groupName: string; score: GradeScore | null; sessionDate: string | null }>>([]);
+  const [profileGradeDrafts, setProfileGradeDrafts] = useState<Record<string, string>>({});
   const [barcodeModalOpen, setBarcodeModalOpen] = useState(false);
   const [studentEnrollments, setStudentEnrollments] = useState<
     StudentGroupEnrollment[]
@@ -388,8 +394,11 @@ export default function StudentsScreen() {
     setStudentEnrollments([]);
     setStudentSubscriptions([]);
     setStudentAttendance([]);
+    setStudentHomeworkEvaluations([]);
     setStudentNotes([]);
     setStudentAuditLogs([]);
+    setProfileGradeRecords([]);
+    setProfileGradeDrafts({});
     setNoteText("");
     setEditingNoteId(null);
     setAttendanceSummaries([]);
@@ -398,6 +407,28 @@ export default function StudentsScreen() {
         student.id,
       );
       setStudentEnrollments(enrollments);
+      if (PermissionService.hasAnyPermission(permissions, ["grades.view", "grades.manage", "groups.view"])) {
+        const records = new Map<string, { exam: GradeExam; groupName: string; score: GradeScore | null; sessionDate: string | null }>();
+        for (const enrollment of enrollments) {
+          const group = availableGroups.find((item) => item.id === enrollment.groupId) || GroupRepository.findById(enrollment.groupId);
+          if (!group) continue;
+          const exams = GradeBookRepository.getExams(group.id, group.grade);
+          const scores = GradeBookRepository.getScores(exams.map((exam) => exam.id), [student.id]);
+          for (const exam of exams) {
+            if (!records.has(exam.id)) {
+              records.set(exam.id, {
+                exam,
+                groupName: group.name,
+                score: scores.find((item) => item.examId === exam.id) || null,
+                sessionDate: exam.sessionId ? GradeBookRepository.getSessionDate(exam.sessionId) : exam.createdAt?.slice(0, 10) || null,
+              });
+            }
+          }
+        }
+        const rows = Array.from(records.values()).sort((a, b) => String(b.exam.createdAt).localeCompare(String(a.exam.createdAt)));
+        setProfileGradeRecords(rows);
+        setProfileGradeDrafts(Object.fromEntries(rows.map((row) => [row.exam.id, row.score?.score == null ? "" : String(row.score.score)])));
+      }
       try {
         setStudentSubscriptions(PermissionService.hasPermission(permissions, "packages.view")
           ? PackageSubscriptionRepository.getSubscriptionsForStudent(student.id, true)
@@ -406,6 +437,11 @@ export default function StudentsScreen() {
       try {
         setStudentAttendance(AttendanceRepository.getStudentAttendance(student.id));
       } catch { setStudentAttendance([]); }
+      try {
+        setStudentHomeworkEvaluations(PermissionService.hasPermission(permissions, "attendance.view")
+          ? HomeworkEvaluationRepository.getForStudent(student.id)
+          : []);
+      } catch { setStudentHomeworkEvaluations([]); }
       try { setStudentNotes(StudentNoteRepository.listForStudent(student.id)); } catch { setStudentNotes([]); }
       try { setStudentAuditLogs(AuditService.getEntityLogs(activeCenterId || student.centerId, student.id)); } catch { setStudentAuditLogs([]); }
       try {
@@ -432,6 +468,22 @@ export default function StudentsScreen() {
       setStudentNotes(StudentNoteRepository.listForStudent(selectedStudent.id));
       setNoteText(""); setEditingNoteId(null);
     } catch (error: any) { Alert.alert("تعذر حفظ الملاحظة", error?.message || "حاول مرة أخرى."); }
+  };
+
+  const saveProfileGrade = (exam: GradeExam, value: string) => {
+    const previous = profileGradeDrafts[exam.id] || "";
+    const result = saveGradeEdit(value, previous, (nextValue) =>
+      GradeBookRepository.setScore(exam, selectedStudent!.id, nextValue),
+    );
+    if (result.saved) {
+      setProfileGradeDrafts((current) => ({ ...current, [exam.id]: result.value }));
+      setProfileGradeRecords((current) => current.map((row) => row.exam.id === exam.id
+        ? { ...row, score: { id: row.score?.id || `score-${exam.id}-${selectedStudent!.id}`, centerId: activeCenterId || row.exam.centerId, examId: exam.id, studentId: selectedStudent!.id, score: result.value === "" ? null : Number(result.value), createdAt: row.score?.createdAt || new Date().toISOString() } }
+        : row));
+      return;
+    }
+    setProfileGradeDrafts((current) => ({ ...current, [exam.id]: previous }));
+    Alert.alert("درجة غير صحيحة", result.error instanceof Error ? result.error.message : "تعذر حفظ الدرجة.");
   };
 
   const removeStudentNote = (noteId: string) => {
@@ -858,6 +910,7 @@ export default function StudentsScreen() {
     "payments.view",
   );
   const canViewAttendance = PermissionService.hasAnyPermission(permissions, ["attendance.view", "reports.attendance.view", "reports.view"]);
+  const canViewGrades = PermissionService.hasAnyPermission(permissions, ["grades.view", "grades.manage", "groups.view"]);
   const canCreatePayment = paymentsEnabled && PermissionService.hasPermission(
     permissions,
     "payments.create",
@@ -1151,10 +1204,39 @@ export default function StudentsScreen() {
 
               <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.profileTabsScroller} contentContainerStyle={styles.profileTabs}>
                 {([
-                  ["groups", "المجموعات", "people-outline"], ...(canViewPackages ? [["packages", "الباقات", "card-outline"] as const] : []), ...(canViewAttendance ? [["attendance", "الحضور والغياب", "calendar-outline"] as const] : []), ...(canViewPayments ? [["payments", "المدفوعات", "wallet-outline"] as const] : []), ["notes", "الملاحظات", "document-text-outline"],
+                  ["groups", "المجموعات", "people-outline"], ...(canViewPackages ? [["packages", "الباقات", "card-outline"] as const] : []), ...(canViewAttendance ? [["attendance", "الحضور والغياب", "calendar-outline"] as const] : []), ...(canViewGrades ? [["exams", "الامتحانات", "school-outline"] as const] : []), ...(canViewPayments ? [["payments", "المدفوعات", "wallet-outline"] as const] : []), ["notes", "الملاحظات", "document-text-outline"],
                 ] as const).map(([key, label, icon]) => <TouchableOpacity key={key} style={[styles.profileTab, profileTab === key && styles.profileTabActive]} onPress={() => setProfileTab(key)}><Ionicons name={icon} size={16} color={profileTab === key ? Colors.primary : Colors.slate500} /><Text style={[styles.profileTabText, profileTab === key && styles.profileTabTextActive]}>{label}</Text></TouchableOpacity>)}
                 <TouchableOpacity key="activity" style={[styles.profileTab, profileTab === "activity" && styles.profileTabActive]} onPress={() => setProfileTab("activity")}><Ionicons name="time-outline" size={16} color={profileTab === "activity" ? Colors.primary : Colors.slate500} /><Text style={[styles.profileTabText, profileTab === "activity" && styles.profileTabTextActive]}>سجل النشاط</Text></TouchableOpacity>
               </ScrollView>
+
+              {profileTab === "exams" && canViewGrades && <View style={styles.profileSection}>
+                <View style={styles.profileSectionHeader}><View><Text style={styles.profileSectionTitle}>الامتحانات</Text><Text style={styles.profileSectionCaption}>الدرجات المسجلة للمجموعات الحالية</Text></View></View>
+                {!profileGradeRecords.length ? <View style={styles.profileEmpty}><Ionicons name="school-outline" size={25} color={Colors.slate400} /><Text style={styles.profileEmptyTitle}>لا توجد امتحانات</Text><Text style={styles.profileEmptyText}>ستظهر امتحانات المجموعات المسجل بها الطالب هنا.</Text></View> : profileGradeRecords.map(({ exam, groupName, score, sessionDate }) => {
+                  const scoreValue = score?.score;
+                  const percentage = scoreValue == null ? null : Math.round((scoreValue / exam.maxScore) * 100);
+                  const canEditGrade = PermissionService.hasPermission(permissions, "grades.manage") || PermissionService.hasPermission(permissions, "groups.update");
+                  return <View key={exam.id} style={styles.profileExamCard}>
+                    <View style={styles.profileExamCopy}>
+                      <Text style={styles.profileRowTitle}>{exam.name}</Text>
+                      <Text style={styles.profileRowMeta}>المجموعة: {groupName} · التاريخ: {sessionDate ? formatLocalDate(sessionDate) : "غير محدد"}</Text>
+                    </View>
+                    <View style={styles.profileExamGradeRow}>
+                      {canEditGrade ? <TextInput
+                        style={styles.profileExamInput}
+                        value={profileGradeDrafts[exam.id] ?? ""}
+                        onChangeText={(value) => setProfileGradeDrafts((current) => ({ ...current, [exam.id]: value }))}
+                        onBlur={() => saveProfileGrade(exam, profileGradeDrafts[exam.id] ?? "")}
+                        keyboardType="decimal-pad"
+                        placeholder="لم يتم الرصد"
+                        placeholderTextColor={Colors.slate400}
+                        textAlign="center"
+                      /> : <Text style={styles.profileExamScore}>{scoreValue == null ? "لم يتم الرصد" : `${scoreValue} / ${exam.maxScore}`}</Text>}
+                      {canEditGrade && <Text style={styles.profileExamMax}>من {exam.maxScore}</Text>}
+                      {percentage !== null && <Text style={styles.profileExamPercent}>{percentage}%</Text>}
+                    </View>
+                  </View>;
+                })}
+              </View>}
 
               {profileTab === "groups" && <View style={styles.profileSection}>
                 <View style={styles.profileSectionHeader}><View><Text style={styles.profileSectionTitle}>المجموعات</Text><Text style={styles.profileSectionCaption}>{studentEnrollments.length} مجموعة نشطة</Text></View>{canEnroll && <TouchableOpacity style={styles.profileInlineAction} onPress={openEnrollModal}><Ionicons name="add" size={18} color={Colors.primary} /><Text style={styles.profileInlineActionText}>تسجيل</Text></TouchableOpacity>}</View>
@@ -1177,6 +1259,22 @@ export default function StudentsScreen() {
                 <View style={styles.profileSectionHeader}><View><Text style={styles.profileSectionTitle}>سجل النشاط</Text><Text style={styles.profileSectionCaption}>من أضاف الطالب أو عدّل بياناته أو سجّل دفعة أو حضورًا</Text></View></View>
                 {studentAuditLogs.length === 0 ? <Text style={styles.profileEmptyText}>لا يوجد نشاط مسجل لهذا الطالب.</Text> : studentAuditLogs.slice(0, 100).map((log) => { let payload: any = {}; try { payload = log.payload ? JSON.parse(log.payload) : {}; } catch {} const actionLabels: Record<string, string> = { "student.create": "تم إضافة الطالب", "student.update": "تم تعديل بيانات الطالب", "student.card_code.updated": "تم تحديث كود الكارت", "student.deactivate": "تم تعطيل الطالب", "student.delete": "تم حذف الطالب", "student_card.issue": "تم إصدار بطاقة جديدة", "student_card.deactivate": "تم تحديث سجل بطاقة قديم", "student_card.reactivate": "تم تحديث سجل بطاقة قديم", "attendance.record": "تم تسجيل الحضور", "attendance.makeup": "تم تسجيل تعويض", "payment.create": "تم تسجيل دفعة", "payment.delete": "تم حذف دفعة", "enrollment.create": "تم التسجيل في مجموعة", "enrollment.end": "تم إنهاء التسجيل", "enrollment.transfer": "تم تحويل المجموعة", "note.create": "تم إضافة ملاحظة", "note.update": "تم تعديل ملاحظة", "note.delete": "تم حذف ملاحظة" }; const actionLabel = actionLabels[log.action] || log.action; return <View key={log.id} style={styles.profileHistoryRow}><View style={styles.profileHistoryIcon}><Ionicons name="time-outline" size={16} color={Colors.primary} /></View><View style={styles.profileRowCopy}><Text style={styles.profileRowTitle}>{actionLabel}</Text><Text style={styles.profileRowMeta}>{payload.actorName || (log.userId === currentUser?.id ? currentUser?.fullName : `مستخدم`)} · {formatLocalDateTime(log.timestamp)}</Text></View></View>; })}
               </View>}
+              {profileTab === "attendance" && canViewAttendance && studentHomeworkEvaluations.length > 0 ? <View style={styles.profileSection}>
+                <View style={styles.profileSectionHeader}><View><Text style={styles.profileSectionTitle}>تقييم الواجب</Text><Text style={styles.profileSectionCaption}>الحالة المسجلة لكل حصة</Text></View></View>
+                {studentHomeworkEvaluations.map((evaluation) => {
+                  const attendanceLabel = evaluation.attendanceStatus === "late" ? "حاضر متأخر"
+                    : evaluation.attendanceStatus === "present" ? "حاضر"
+                    : evaluation.attendanceStatus === "absent" ? "غائب"
+                    : evaluation.attendanceStatus || "لم يسجل الحضور";
+                  return <View key={evaluation.id} style={styles.profileHistoryRow}>
+                    <View style={styles.profileHistoryIcon}><Ionicons name="document-text-outline" size={16} color={Colors.primary} /></View>
+                    <View style={styles.profileRowCopy}>
+                      <Text style={styles.profileRowTitle}>الواجب: {evaluation.statusName}</Text>
+                      <Text style={styles.profileRowMeta}>{evaluation.groupName || "مجموعة"} · {evaluation.sessionDate ? formatLocalDate(evaluation.sessionDate) : "تاريخ غير متاح"} · {attendanceLabel}</Text>
+                    </View>
+                  </View>;
+                })}
+              </View> : null}
             </ScrollView>
           </SafeAreaView>
         </Modal>
@@ -2874,6 +2972,13 @@ const createStyles = (screenWidth = 390, screenHeight = 844, gutter = Spacing.lg
   profileTabTextActive: { color: Colors.primary, fontWeight: "900" },
   profileSection: { paddingTop: 16, paddingBottom: 10 },
   profileSectionHeader: { flexDirection: "row-reverse", alignItems: "center", justifyContent: "space-between", gap: 10 },
+  profileExamCard: { flexDirection: "row-reverse", alignItems: "center", justifyContent: "space-between", gap: 10, padding: 12, marginTop: 9, borderRadius: 14, borderWidth: 1, borderColor: Colors.border, backgroundColor: Colors.cardBackground },
+  profileExamCopy: { flex: 1, alignItems: "flex-end" },
+  profileExamGradeRow: { flexDirection: "row-reverse", alignItems: "center", gap: 6 },
+  profileExamInput: { minWidth: 86, minHeight: 40, paddingHorizontal: 9, borderRadius: 10, borderWidth: 1, borderColor: Colors.border, backgroundColor: Colors.white, color: Colors.slate900, fontWeight: "800" },
+  profileExamScore: { color: Colors.slate900, fontWeight: "800", fontSize: 12 },
+  profileExamMax: { color: Colors.slate500, fontSize: 10 },
+  profileExamPercent: { color: Colors.primary, fontWeight: "900", fontSize: 12 },
   profileSectionTitle: { color: Colors.slate900, fontSize: 16, fontWeight: "900", textAlign: "right" },
   profileSectionCaption: { color: Colors.slate500, fontSize: 11, marginTop: 2, textAlign: "right" },
   profileInlineAction: { minHeight: 35, flexDirection: "row-reverse", alignItems: "center", gap: 3, paddingHorizontal: 10, borderRadius: 10, backgroundColor: Colors.primaryLight + "45" },

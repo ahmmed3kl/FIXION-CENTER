@@ -23,6 +23,7 @@ const SUPPORTED_VARIABLES = [
   "{{score}}",
   "{{max_score}}",
   "{{grades_summary}}",
+  "{{homework_evaluation}}",
 ];
 
 // Default Arabic templates
@@ -36,8 +37,8 @@ export const DEFAULT_TEMPLATES: Record<NotificationEventType, Record<Notificatio
     sms: "غاب {{student_name}} عن حصة {{subject_name}} بتاريخ {{session_date}}. للاستفسار تواصل مع {{center_name}}.",
   },
   grades: {
-    push: "تم تسجيل درجات {{student_name}}: {{grades_summary}}. {{center_name}}",
-    sms: "درجات {{student_name}}: {{grades_summary}}. للاستفسار تواصل مع {{center_name}}.",
+    push: "تم تسجيل درجات {{student_name}}: {{grades_summary}}.\n{{homework_evaluation}}\n{{center_name}}",
+    sms: "درجات {{student_name}}: {{grades_summary}}.\n{{homework_evaluation}}\nللاستفسار تواصل مع {{center_name}}.",
   },
   custom: {
     push: "رسالة من المركز إلى {{student_name}}",
@@ -58,7 +59,10 @@ function generateUUID(): string {
  * Unknown variables are left as-is (no crash).
  */
 export function renderTemplate(templateBody: string, vars: Record<string, string>): string {
-  let result = templateBody;
+  const homeworkValue = vars.homework_evaluation?.trim();
+  let result = homeworkValue
+    ? templateBody
+    : templateBody.split(/\r?\n/).filter((line) => !line.includes("{{homework_evaluation}}")).join("\n").replace(/\n[ \t]*\n/g, "\n");
   for (const [key, value] of Object.entries(vars)) {
     result = result.replace(new RegExp(`\\{\\{${key}\\}\\}`, "g"), value || "");
   }
@@ -95,16 +99,18 @@ export class NotificationTemplateRepository {
              VALUES (?, ?, ?, ?, ?, 1, ?, ?)`,
             [id, centerId, eventType, channel, body, user.id, now],
           );
-          SyncRepository.enqueueOperation({
-            operationId: `op-notif-template-${id}`,
-            centerId,
-            userId: user.id,
-            deviceId: DeviceService.getDeviceIdSync(),
-            operationType: "CREATE",
-            entityType: "notification_template",
-            entityId: id,
-            payload: { id, centerId, eventType, channel, templateBody: body, isDefault: true, createdBy: user.id, createdAt: now },
-          });
+          if (PermissionService.hasPermission(user.permissions, "notifications.templates.update")) {
+            SyncRepository.enqueueOperation({
+              operationId: `op-notif-template-${id}`,
+              centerId,
+              userId: user.id,
+              deviceId: DeviceService.getDeviceIdSync(),
+              operationType: "CREATE",
+              entityType: "notification_template",
+              entityId: id,
+              payload: { id, centerId, eventType, channel, templateBody: body, isDefault: true, createdBy: user.id, createdAt: now },
+            });
+          }
         }
       }
     }

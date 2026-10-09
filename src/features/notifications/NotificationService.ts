@@ -12,6 +12,7 @@ import {
     NotificationEventType,
 } from "../../shared/types";
 import { useAuthStore } from "../auth/useAuthStore";
+import { HomeworkEvaluationRepository } from "../homework/HomeworkEvaluationRepository";
 import {
     NotificationTemplateRepository,
     renderTemplate,
@@ -210,7 +211,12 @@ export class NotificationService {
       const bodyTemplate =
         params.customMessage ?? template?.templateBody ??
         `إشعار للطالب ${params.vars.student_name ?? ""}`;
-      const rendered = renderTemplate(bodyTemplate, params.vars);
+      const renderedTemplate = renderTemplate(bodyTemplate, params.vars);
+      const rendered = params.eventType === "grades" &&
+        params.vars.homework_evaluation?.trim() &&
+        !bodyTemplate.includes("{{homework_evaluation}}")
+        ? `${renderedTemplate}\n${params.vars.homework_evaluation}`
+        : renderedTemplate;
 
       const recipient =
         channel === "sms"
@@ -542,6 +548,8 @@ export class NotificationService {
   static notifyGrades(params: {
     studentId: string;
     summary: string;
+    examId?: string;
+    sessionId?: string | null;
     examName?: string;
     score?: number | null;
     maxScore?: number | null;
@@ -552,10 +560,21 @@ export class NotificationService {
     const db = DatabaseService.getDb();
     const student = db.getFirstSync<any>("SELECT full_name FROM students WHERE center_id = ? AND id = ?", [centerId, params.studentId]);
     const center = db.getFirstSync<any>("SELECT name FROM centers WHERE id = ?", [centerId]);
+    const exam = params.examId
+      ? db.getFirstSync<any>("SELECT session_id, center_id FROM grade_exams WHERE center_id = ? AND id = ?", [centerId, params.examId])
+      : null;
+    if (params.examId && !exam) throw new Error("الامتحان غير موجود في هذا المركز.");
+    if (params.examId && params.sessionId && params.sessionId !== (exam?.session_id || null)) {
+      throw new Error("الحصة المرتبطة لا تطابق حصة الامتحان.");
+    }
+    const sessionId = params.examId ? exam?.session_id || null : params.sessionId || null;
+    const homeworkEvaluation = sessionId
+      ? HomeworkEvaluationRepository.getForSession(sessionId, params.studentId)
+      : null;
     const event = this.createNotificationEvent({
       operationId: params.operationId || `op-notif-grades-${params.studentId}-${Date.now()}`,
       studentId: params.studentId,
-      sessionId: "",
+      sessionId: sessionId || "",
       eventType: "grades",
       vars: {
         student_name: student?.full_name || "",
@@ -566,6 +585,9 @@ export class NotificationService {
         score: params.score == null ? "" : String(params.score),
         max_score: params.maxScore == null ? "" : String(params.maxScore),
         grades_summary: params.summary,
+        homework_evaluation: homeworkEvaluation?.statusName
+          ? `حالة الواجب: ${homeworkEvaluation.statusName}`
+          : "",
       },
     });
     return event;

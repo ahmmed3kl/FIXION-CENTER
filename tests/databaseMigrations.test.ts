@@ -84,6 +84,12 @@ describe("SQLite migration ordering and upgrades", () => {
     expect(database.getFirstSync<{ name: string }>(
       "SELECT name FROM sqlite_master WHERE type='table' AND name='sync_metadata'",
     )?.name).toBe("sync_metadata");
+    expect(database.getFirstSync<{ notnull: number }>(
+      "SELECT \"notnull\" FROM pragma_table_info('students') WHERE name='card_code'",
+    )?.notnull).toBe(0);
+    expect(database.getFirstSync<{ name: string }>(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='session_homework_evaluations'",
+    )?.name).toBe("session_homework_evaluations");
 
     const schemaObjects = database.getAllSync<{ type: string; name: string }>(
       "SELECT type, name FROM sqlite_master WHERE type IN ('table', 'index')",
@@ -116,7 +122,7 @@ describe("SQLite migration ordering and upgrades", () => {
     expect(expectedIndexes.filter((name) => !existingNames.has(name))).toEqual([]);
   });
 
-  it("upgrades an existing v1-v20 database without resetting its rows", () => {
+  it("upgrades an existing v1-v22 database without resetting its rows", () => {
     const database = new SqliteCliDatabase(path.join(tempDirectory, "existing.sqlite"));
     database.execSync(`
       CREATE TABLE schema_migrations (
@@ -126,7 +132,7 @@ describe("SQLite migration ordering and upgrades", () => {
       );
     `);
 
-    for (const migration of MIGRATIONS.filter((item) => item.version < 21)) {
+    for (const migration of MIGRATIONS.filter((item) => item.version < 23)) {
       migration.up(database);
       database.runSync(
         "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
@@ -159,10 +165,10 @@ describe("SQLite migration ordering and upgrades", () => {
     )?.name).toBe("server_revision");
     expect(database.getFirstSync<{ user_version: number }>(
       "PRAGMA user_version",
-    )?.user_version).toBe(21);
+    )?.user_version).toBe(23);
   });
 
-  it("can run again at v21 without duplicate migration records or schema changes", () => {
+  it("can run again at v23 without duplicate migration records or schema changes", () => {
     const database = new SqliteCliDatabase(path.join(tempDirectory, "rerun.sqlite"));
     DatabaseService.runMigrations(database);
 
@@ -182,7 +188,7 @@ describe("SQLite migration ordering and upgrades", () => {
     );
     expect(database.getFirstSync<{ user_version: number }>(
       "PRAGMA user_version",
-    )?.user_version).toBe(21);
+    )?.user_version).toBe(23);
   });
 
   it("repairs missing sync metadata when the migration ledger already marks it applied", () => {
@@ -220,6 +226,6 @@ describe("SQLite migration ordering and upgrades", () => {
     )?.name).toBe("Keep Center");
     expect(database.getFirstSync<{ user_version: number }>(
       "PRAGMA user_version",
-    )?.user_version).toBe(21);
+    )?.user_version).toBe(23);
   });
 });

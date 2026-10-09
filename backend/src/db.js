@@ -80,6 +80,7 @@ async function ensureSchemaCompatibility() {
       SELECT id FROM centers
       ON CONFLICT (center_id) DO NOTHING;
   `);
+  await pool.query("ALTER TABLE students ALTER COLUMN card_code DROP NOT NULL");
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS grade_exams (
@@ -88,6 +89,7 @@ async function ensureSchemaCompatibility() {
       name TEXT NOT NULL,
       grade VARCHAR(128) NOT NULL,
       group_id VARCHAR(64),
+      session_id VARCHAR(64),
       max_score NUMERIC(10, 2) NOT NULL DEFAULT 100,
       status VARCHAR(32) NOT NULL DEFAULT 'active',
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -105,8 +107,45 @@ async function ensureSchemaCompatibility() {
     );
     CREATE INDEX IF NOT EXISTS idx_grade_exams_grade ON grade_exams(center_id, grade, status);
     ALTER TABLE grade_exams ADD COLUMN IF NOT EXISTS group_id VARCHAR(64);
+    ALTER TABLE grade_exams ADD COLUMN IF NOT EXISTS session_id VARCHAR(64);
     CREATE INDEX IF NOT EXISTS idx_grade_exams_group ON grade_exams(center_id, group_id, grade, status);
+    CREATE INDEX IF NOT EXISTS idx_grade_exams_session ON grade_exams(center_id, session_id);
     CREATE INDEX IF NOT EXISTS idx_grade_scores_exam ON grade_scores(center_id, exam_id);
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS homework_evaluation_statuses (
+      id VARCHAR(64) PRIMARY KEY,
+      center_id VARCHAR(64) NOT NULL REFERENCES centers(id) ON DELETE CASCADE,
+      name VARCHAR(120) NOT NULL,
+      status VARCHAR(16) NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive', 'deleted')),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ,
+      CONSTRAINT uq_homework_status_name UNIQUE (center_id, name)
+    );
+    ALTER TABLE homework_evaluation_statuses
+      DROP CONSTRAINT IF EXISTS uq_homework_status_name;
+    DROP INDEX IF EXISTS uq_homework_status_name;
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_homework_status_name
+      ON homework_evaluation_statuses(center_id, lower(name))
+      WHERE status != 'deleted';
+    CREATE INDEX IF NOT EXISTS idx_homework_statuses_active
+      ON homework_evaluation_statuses(center_id, status, name);
+    CREATE TABLE IF NOT EXISTS session_homework_evaluations (
+      id VARCHAR(64) PRIMARY KEY,
+      center_id VARCHAR(64) NOT NULL REFERENCES centers(id) ON DELETE CASCADE,
+      student_id VARCHAR(64) NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+      session_id VARCHAR(64) NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+      status_id VARCHAR(64) NOT NULL REFERENCES homework_evaluation_statuses(id),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ,
+      deleted_at TIMESTAMPTZ,
+      deleted_by VARCHAR(64),
+      CONSTRAINT uq_session_homework_evaluation UNIQUE (center_id, student_id, session_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_session_homework_student
+      ON session_homework_evaluations(center_id, student_id, deleted_at);
+    CREATE INDEX IF NOT EXISTS idx_session_homework_session
+      ON session_homework_evaluations(center_id, session_id, deleted_at);
   `);
   await pool.query(`
     ALTER TABLE packages

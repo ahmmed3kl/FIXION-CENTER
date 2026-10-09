@@ -28,6 +28,7 @@ export type Permission =
   | "groups.students.view"
   | "grades.view"
   | "grades.manage"
+  | "homework.manage"
   | "enrollments.view"
   | "enrollments.create"
   | "enrollments.update"
@@ -120,6 +121,7 @@ export interface Student {
   notes?: string | null;
   deletedAt?: string | null;
   deletedBy?: string | null;
+  deletedByName?: string | null;
   createdAt?: string;
   updatedAt?: string | null;
 }
@@ -232,6 +234,30 @@ export interface Session {
   status: "scheduled" | "open" | "completed" | "closed" | "cancelled";
   createdAt?: string;
   updatedAt?: string | null;
+}
+
+export interface HomeworkEvaluationStatus {
+  id: string;
+  centerId: string;
+  name: string;
+  status: "active" | "inactive" | "deleted";
+  createdAt: string;
+  updatedAt?: string | null;
+}
+
+export interface SessionHomeworkEvaluation {
+  id: string;
+  centerId: string;
+  studentId: string;
+  sessionId: string;
+  statusId: string;
+  statusName?: string;
+  groupName?: string;
+  sessionDate?: string;
+  attendanceStatus?: string;
+  createdAt: string;
+  updatedAt?: string | null;
+  deletedAt?: string | null;
 }
 
 export interface SessionExpectedStudent {

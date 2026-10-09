@@ -29,6 +29,10 @@ export interface CreateStudentDTO {
   groupIds?: string[];
 }
 
+export interface CreateStudentOptions {
+  reuseArchivedCard?: boolean;
+}
+
 export interface UpdateStudentDTO {
   fullName?: string;
   phone?: string;
@@ -54,9 +58,20 @@ export class StudentRepository {
   static findByCardCode(normalizedCardCode: string): Student | null {
     const { centerId } = this.getActiveContext();
     const db = DatabaseService.getDb();
+    const activeCard = StudentCardRepository.findByCardCode(normalizedCardCode);
+    if (activeCard) {
+      const cardOwner = this.findByIdInternal(activeCard.studentId, false);
+      return cardOwner ? { ...cardOwner, cardCode: normalizedCardCode } : null;
+    }
+
+    const staleCard = StudentCardRepository.findCardByCodeInActiveCenter(normalizedCardCode);
+    if (staleCard) {
+      const staleOwner = this.findByIdInternal(staleCard.studentId, true);
+      if (staleOwner && staleOwner.deletedAt) return null;
+    }
+
     // The current student.card_code is the source of truth for scans. This
-    // prevents an old student_cards history row from identifying a student
-    // after a simple card-code replacement.
+    // compatibility path is only for legacy records without a card-history row.
     const currentStudent = db.getFirstSync<any>(
       `SELECT id FROM students
        WHERE center_id = ? AND card_code = ? AND status = 'active' AND deleted_at IS NULL
@@ -65,15 +80,7 @@ export class StudentRepository {
     );
     if (currentStudent) return this.findByIdInternal(currentStudent.id, false);
 
-    // Legacy rows may have a missing students.card_code but a matching active
-    // card row. Keep that compatibility path only when the card row is still
-    // the student's current active identifier.
-    const card = StudentCardRepository.findByCardCode(normalizedCardCode);
-    if (!card) return null;
-    const student = this.findByIdInternal(card.studentId, false);
-    return student && student.cardCode === normalizedCardCode
-      ? { ...student, cardCode: normalizedCardCode }
-      : null;
+    return null;
   }
 
   static findByStudentCode(studentCode: string): Student | null {
@@ -86,16 +93,42 @@ export class StudentRepository {
               deleted_at as deletedAt, deleted_by as deletedBy,
               created_at as createdAt, updated_at as updatedAt
        FROM students
-       WHERE center_id = ? AND student_code = ?`,
+       WHERE center_id = ? AND student_code = ?
+       ORDER BY created_at DESC`,
       [centerId, studentCode.trim()],
     );
 
     if (!row) return null;
-    const activeCard = StudentCardRepository.getActiveCardByStudentId(row.id);
     return {
       ...row,
-      cardCode: row.cardCode || activeCard?.cardCode,
+      cardCode: this.resolveCardCode(centerId, row),
     };
+  }
+
+  private static getHistoricalCardCode(centerId: string, studentId: string): string | undefined {
+    const events = AuditService.getEntityLogs(centerId, studentId);
+    for (const event of events) {
+      if (event.entityType !== "student_card" || event.action !== "student_card.deactivate" || !event.payload) continue;
+      try {
+        const payload = JSON.parse(event.payload);
+        if (payload.studentId === studentId && typeof payload.cardCode === "string") return payload.cardCode;
+      } catch {
+        continue;
+      }
+    }
+    return undefined;
+  }
+
+  private static resolveCardCode(centerId: string, row: { id: string; cardCode?: string | null; deletedAt?: string | null }): string | undefined {
+    const activeCard = StudentCardRepository.getActiveCardByStudentId(row.id);
+    if (row.deletedAt) {
+      return row.cardCode || activeCard?.cardCode || this.getHistoricalCardCode(centerId, row.id);
+    }
+    const knownCard = row.cardCode
+      ? StudentCardRepository.findCardByCodeInActiveCenter(row.cardCode)
+      : null;
+    if (knownCard && knownCard.studentId !== row.id) return undefined;
+    return row.cardCode || activeCard?.cardCode || undefined;
   }
 
   private static findByIdInternal(studentId: string, includeDeleted = true): Student | null {
@@ -108,15 +141,15 @@ export class StudentRepository {
               deleted_at as deletedAt, deleted_by as deletedBy,
               created_at as createdAt, updated_at as updatedAt
        FROM students
-       WHERE center_id = ? AND id = ?${includeDeleted ? "" : " AND deleted_at IS NULL"}`,
+       WHERE center_id = ? AND id = ?${includeDeleted ? "" : " AND deleted_at IS NULL"}
+       ORDER BY created_at DESC`,
       [centerId, studentId],
     );
 
     if (!row) return null;
-    const activeCard = StudentCardRepository.getActiveCardByStudentId(row.id);
     return {
       ...row,
-      cardCode: row.cardCode || activeCard?.cardCode,
+      cardCode: this.resolveCardCode(centerId, row),
     };
   }
 
@@ -150,10 +183,32 @@ export class StudentRepository {
        FROM students WHERE center_id = ? AND deleted_at IS NOT NULL ORDER BY deleted_at DESC, full_name ASC`,
       [centerId],
     );
-    return rows.map((row) => ({
-      ...row,
-      cardCode: row.cardCode || StudentCardRepository.getActiveCardByStudentId(row.id)?.cardCode,
-    }));
+    return rows.map((row) => {
+      const deleteEvent = AuditService.getEntityLogs(centerId, row.id)
+        .find((event) => event.action === "student.delete");
+      let deletedByName: string | null = null;
+      if (deleteEvent?.payload) {
+        try {
+          const payload = JSON.parse(deleteEvent.payload);
+          deletedByName = typeof payload.actorName === "string" ? payload.actorName : null;
+        } catch {
+          deletedByName = null;
+        }
+      }
+      return {
+        ...row,
+        deletedByName,
+        cardCode: this.resolveCardCode(centerId, row),
+      };
+    });
+  }
+
+  static getArchivedCardOwner(cardCode: string): Student | null {
+    const { centerId } = this.getActiveContext();
+    const card = StudentCardRepository.findCardByCodeInActiveCenter(cardCode);
+    if (!card) return null;
+    const owner = this.findByIdInternal(card.studentId);
+    return owner?.deletedAt ? owner : null;
   }
 
   static searchDeletedStudents(query: string): Student[] {
@@ -223,16 +278,7 @@ export class StudentRepository {
           const status = String(r.status ?? "").trim().toLowerCase();
           return status === "active" || status === "1" || r.status === true;
         });
-    return filtered.map((row) => {
-      const activeCard = StudentCardRepository.getActiveCardByStudentId(row.id);
-      return {
-        ...row,
-        // The students.card_code column is still part of the authoritative
-        // student snapshot. If the card-history table is missing/stale on a
-        // device, do not discard a card code that arrived from PostgreSQL.
-        cardCode: row.cardCode || activeCard?.cardCode,
-      };
-    });
+    return filtered.map((row) => ({ ...row, cardCode: this.resolveCardCode(centerId, row) }));
   }
 
   /** Students available to the attendance picker without requiring full student-list access. */
@@ -250,13 +296,10 @@ export class StudentRepository {
        FROM students WHERE center_id = ? AND status = 'active' AND deleted_at IS NULL
        ORDER BY full_name ASC`, [centerId],
     );
-    return rows.map((row) => ({
-      ...row,
-      cardCode: row.cardCode || StudentCardRepository.getActiveCardByStudentId(row.id)?.cardCode || "",
-    }));
+    return rows.map((row) => ({ ...row, cardCode: this.resolveCardCode(centerId, row) || "" }));
   }
 
-  static createStudent(dto: CreateStudentDTO): Student {
+  static createStudent(dto: CreateStudentDTO, options: CreateStudentOptions = {}): Student {
     const { centerId, user } = this.getActiveContext();
     if (!PermissionService.hasPermission(user.permissions, "students.create")) {
       throw new ForbiddenError("ليس لديك صلاحية تسجيل طالب جديد.");
@@ -301,13 +344,27 @@ export class StudentRepository {
       );
     }
 
-    // Enforce uniqueness of cardCode within center if cardCode is present
+    // Card codes are globally exclusive while active. An inactive card may
+    // only be reassigned after explicit confirmation when its current-center
+    // owner is archived.
+    let archivedCardOwner: Student | null = null;
     if (cardCode) {
-      const existingCard = StudentCardRepository.findByCardCodeAnywhere(cardCode);
-      if (existingCard) {
+      const activeCard = StudentCardRepository.findActiveCardByCodeAnywhere(cardCode);
+      if (activeCard) {
         throw new ConflictError(
-          `كود الكارت (${cardCode}) مستخدم بالفعل لطالب آخر في هذا المركز.`,
+          `كود الكارت (${cardCode}) مستخدم بالفعل لطالب آخر.`,
         );
+      }
+      const existingCard = StudentCardRepository.findCardByCodeInActiveCenter(cardCode);
+      if (existingCard) {
+        archivedCardOwner = this.findByIdInternal(existingCard.studentId, true);
+        if (!archivedCardOwner?.deletedAt || options.reuseArchivedCard !== true) {
+          throw new ConflictError(
+            archivedCardOwner?.deletedAt
+              ? "هذا الكارت مرتبط بطالب مؤرشف ويتطلب تأكيد إعادة استخدامه."
+              : `كود الكارت (${cardCode}) مرتبط بسجل طالب آخر.`,
+          );
+        }
       }
     }
 
@@ -318,11 +375,45 @@ export class StudentRepository {
     const notes = dto.notes?.trim() || null;
     const deviceId = DeviceService.getDeviceIdSync();
     const operationId = `op-std-create-${Date.now()}-${studentId}`;
+    let issuedCardId = `card-${studentId}`;
 
     // Atomic creation: insert student + issue card + create enrollments.
     // All writes use the shared transaction helper so a failed enrollment or
     // card insert cannot leave a partially-created student behind.
     DatabaseService.runInTransaction(() => {
+      if (archivedCardOwner) {
+        const releaseOperationId = `op-student-card-release-${Date.now()}-${archivedCardOwner.id}`;
+        AuditService.recordEvent({
+          operationId: releaseOperationId,
+          centerId,
+          userId: user.id,
+          deviceId,
+          entityType: "student",
+          entityId: archivedCardOwner.id,
+          action: "student.card_reused",
+          payload: { studentId: archivedCardOwner.id, cardCode, newStudentId: studentId, actorName: user.fullName },
+        });
+        SyncRepository.enqueueOperation({
+          operationId: releaseOperationId,
+          centerId,
+          userId: user.id,
+          deviceId,
+          operationType: "UPDATE",
+          entityType: "student",
+          entityId: archivedCardOwner.id,
+          payload: {
+            id: archivedCardOwner.id,
+            studentId: archivedCardOwner.id,
+            baseUpdatedAt: archivedCardOwner.updatedAt ?? null,
+            updatedAt: now,
+            updated_at: now,
+            cardCode,
+            card_code: cardCode,
+            cardCodeChanged: true,
+            replaceCard: true,
+          },
+        });
+      }
       db.runSync(
         `INSERT INTO students (id, center_id, student_code, full_name, card_code, phone, parent_phone, grade, status, student_type, notes, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)`,
@@ -343,7 +434,7 @@ export class StudentRepository {
 
       // Issue card via canonical StudentCardRepository
       if (cardCode) {
-        StudentCardRepository.issueCard(studentId, cardCode);
+        issuedCardId = StudentCardRepository.issueCard(studentId, cardCode).id;
       }
 
       // Enroll in selected groups atomically
@@ -420,7 +511,7 @@ export class StudentRepository {
           notes,
         },
         card: {
-          id: `card-${studentId}`,
+          id: issuedCardId,
           cardCode,
           card_code: cardCode,
         },
@@ -601,6 +692,42 @@ export class StudentRepository {
          WHERE center_id = ? AND id = ? AND deleted_at IS NULL`,
         [now, user.id, now, centerId, studentId],
       );
+      if (existing.cardCode) {
+        db.runSync(
+          `UPDATE students SET card_code = ?, updated_at = ?
+           WHERE center_id = ? AND id = ? AND deleted_at IS NOT NULL`,
+          [existing.cardCode, now, centerId, studentId],
+        );
+      }
+      const activeCard = StudentCardRepository.getActiveCardByStudentId(studentId);
+      if (activeCard) {
+        db.runSync(
+          `UPDATE student_cards SET status = 'inactive', deactivated_at = ?
+           WHERE center_id = ? AND id = ? AND status = 'active'`,
+          [now, centerId, activeCard.id],
+        );
+        const cardOperationId = `op-card-archive-${Date.now()}-${activeCard.id}`;
+        AuditService.recordEvent({
+          operationId: cardOperationId,
+          centerId,
+          userId: user.id,
+          deviceId,
+          entityType: "student_card",
+          entityId: activeCard.id,
+          action: "student_card.deactivate",
+          payload: { studentId, cardCode: activeCard.cardCode, reason: "student_archive" },
+        });
+        SyncRepository.enqueueOperation({
+          operationId: cardOperationId,
+          centerId,
+          userId: user.id,
+          deviceId,
+          operationType: "UPDATE",
+          entityType: "student_card",
+          entityId: activeCard.id,
+          payload: { studentId, cardCode: activeCard.cardCode, status: "inactive", deactivatedAt: now },
+        });
+      }
       // Keep audit and outbox in the same local commit as the status change.
 
     AuditService.recordEvent({
@@ -666,6 +793,36 @@ export class StudentRepository {
          WHERE center_id = ? AND id = ? AND deleted_at IS NOT NULL`,
         [now, centerId, studentId],
       );
+      const archivedCard = db.getFirstSync<any>(
+        `SELECT id, card_code as cardCode FROM student_cards
+         WHERE center_id = ? AND student_id = ? AND status = 'inactive'
+         ORDER BY deactivated_at DESC LIMIT 1`,
+        [centerId, studentId],
+      );
+      if (archivedCard) {
+        const currentOwner = StudentCardRepository.findActiveCardByCodeAnywhere(archivedCard.cardCode);
+        if (!currentOwner) {
+          db.runSync(
+            `UPDATE student_cards SET status = 'active', deactivated_at = NULL, issued_at = ?
+             WHERE center_id = ? AND id = ? AND student_id = ? AND status = 'inactive'`,
+            [now, centerId, archivedCard.id, studentId],
+          );
+          db.runSync(
+            `UPDATE students SET card_code = ?, updated_at = ? WHERE center_id = ? AND id = ?`,
+            [existing.cardCode || archivedCard.cardCode, now, centerId, studentId],
+          );
+          SyncRepository.enqueueOperation({
+            operationId: `op-card-restore-${Date.now()}-${archivedCard.id}`,
+            centerId,
+            userId: user.id,
+            deviceId,
+            operationType: "UPDATE",
+            entityType: "student_card",
+            entityId: archivedCard.id,
+            payload: { studentId, cardCode: archivedCard.cardCode, status: "active", issuedAt: now },
+          });
+        }
+      }
       AuditService.recordEvent({
         operationId,
         centerId,
@@ -697,7 +854,17 @@ export class StudentRepository {
     SyncEngine.syncCenterNow(centerId).catch((error) => {
       console.warn("Background auto-sync student restore notice:", error);
     });
-    return { ...existing, deletedAt: null, deletedBy: null, updatedAt: now };
+    const restoredCard = StudentCardRepository.getActiveCardByStudentId(studentId);
+    const historicalCardCode = existing.cardCode && !StudentCardRepository.findActiveCardByCodeAnywhere(existing.cardCode)
+      ? existing.cardCode
+      : undefined;
+    return {
+      ...existing,
+      cardCode: restoredCard?.cardCode ?? historicalCardCode,
+      deletedAt: null,
+      deletedBy: null,
+      updatedAt: now,
+    };
   }
 
   static search(query: string): Student[] {

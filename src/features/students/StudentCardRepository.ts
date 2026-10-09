@@ -63,6 +63,32 @@ export class StudentCardRepository {
     return current?.cardCode === row.cardCode ? row : null;
   }
 
+  static findActiveCardByCodeAnywhere(cardCode: string): StudentCard | null {
+    const db = DatabaseService.getDb();
+    const row = db.getFirstSync<any>(
+      `SELECT id, center_id as centerId, student_id as studentId, card_code as cardCode,
+              status, issued_at as issuedAt, deactivated_at as deactivatedAt, created_at as createdAt
+       FROM student_cards
+       WHERE card_code = ? AND status = 'active'
+       LIMIT 1`,
+      [cardCode.trim()],
+    );
+    return row || null;
+  }
+
+  static findCardByCodeInActiveCenter(cardCode: string): StudentCard | null {
+    const { centerId } = this.getActiveContext();
+    const db = DatabaseService.getDb();
+    return db.getFirstSync<StudentCard>(
+      `SELECT id, center_id as centerId, student_id as studentId, card_code as cardCode,
+              status, issued_at as issuedAt, deactivated_at as deactivatedAt, created_at as createdAt
+       FROM student_cards
+       WHERE center_id = ? AND card_code = ?
+       LIMIT 1`,
+      [centerId, cardCode.trim()],
+    );
+  }
+
   static getActiveCardByStudentId(studentId: string): StudentCard | null {
     const { centerId } = this.getActiveContext();
     const db = DatabaseService.getDb();
@@ -111,13 +137,22 @@ export class StudentCardRepository {
 
     const trimmedCard = cardCode.trim();
     const db = DatabaseService.getDb();
+    const student = db.getFirstSync<{ deletedAt: string | null }>(
+      `SELECT deleted_at as deletedAt
+       FROM students
+       WHERE center_id = ? AND id = ?`,
+      [centerId, studentId],
+    );
+    if (!student) {
+      throw new NotFoundError("الطالب غير موجود في هذا المركز.");
+    }
+    if (student.deletedAt) {
+      throw new ConflictError("لا يمكن إصدار بطاقة لطالب مؤرشف.");
+    }
 
     // Check if card code is currently active anywhere (only block ACTIVE cards)
-    const existingActive = db.getFirstSync<any>(
-      `SELECT id, student_id as studentId FROM student_cards WHERE center_id = ? AND card_code = ? AND status = 'active' LIMIT 1`,
-      [centerId, trimmedCard],
-    );
-    if (existingActive && existingActive.studentId !== studentId) {
+    const existingActive = this.findActiveCardByCodeAnywhere(trimmedCard);
+    if (existingActive && (existingActive.centerId !== centerId || existingActive.studentId !== studentId)) {
       throw new ConflictError(
         `البطاقة رقم (${trimmedCard}) مفعّلة لطالب آخر بالفعل.`,
       );
@@ -144,10 +179,31 @@ export class StudentCardRepository {
     });
 
     const reusableCard = db.getFirstSync<any>(
-      `SELECT id FROM student_cards WHERE center_id = ? AND card_code = ? LIMIT 1`,
+      `SELECT sc.id, sc.student_id as studentId, s.deleted_at as deletedAt
+       FROM student_cards sc
+       LEFT JOIN students s ON s.id = sc.student_id AND s.center_id = sc.center_id
+       WHERE sc.center_id = ? AND sc.card_code = ?
+       ORDER BY sc.created_at DESC, sc.issued_at DESC
+       LIMIT 1`,
       [centerId, trimmedCard],
     );
-    if (reusableCard) {
+    const canReuseCardHistory = reusableCard && reusableCard.studentId === studentId;
+    const isArchivedHistory = Boolean(reusableCard && reusableCard.deletedAt);
+    if (reusableCard && canReuseCardHistory) {
+      db.runSync(
+        `UPDATE student_cards SET status = 'active', issued_at = ?, deactivated_at = NULL WHERE id = ? AND center_id = ?`,
+        [now, reusableCard.id, centerId],
+      );
+    } else if (reusableCard && isArchivedHistory) {
+      // Preserve the archived student card row as historical evidence.
+      // Reassigning it to a different student would overwrite the original
+      // identity and break restore/audit expectations.
+      db.runSync(
+        `INSERT INTO student_cards (id, center_id, student_id, card_code, status, issued_at, created_at)
+         VALUES (?, ?, ?, ?, 'active', ?, ?)`,
+        [cardId, centerId, studentId, trimmedCard, now, now],
+      );
+    } else if (reusableCard) {
       db.runSync(
         `UPDATE student_cards SET student_id = ?, status = 'active', issued_at = ?, deactivated_at = NULL WHERE id = ? AND center_id = ?`,
         [studentId, now, reusableCard.id, centerId],
@@ -341,6 +397,18 @@ export class StudentCardRepository {
 
     if (!row) {
       throw new NotFoundError("البطاقة غير موجودة.");
+    }
+    const student = db.getFirstSync<{ deletedAt: string | null }>(
+      `SELECT deleted_at as deletedAt
+       FROM students
+       WHERE center_id = ? AND id = ?`,
+      [centerId, row.studentId],
+    );
+    if (!student) {
+      throw new NotFoundError("الطالب غير موجود في هذا المركز.");
+    }
+    if (student.deletedAt) {
+      throw new ConflictError("لا يمكن إعادة تفعيل بطاقة لطالب مؤرشف.");
     }
 
     if (row.status === "active") {

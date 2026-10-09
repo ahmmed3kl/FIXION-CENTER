@@ -34,6 +34,7 @@ import { AttendanceSessionService, AttendanceSummary } from "../../features/atte
 import { MakeupService } from "../../features/attendance/MakeupService";
 import { GroupScheduleRepository } from "../../features/groups/GroupScheduleRepository";
 import { GroupRepository } from "../../features/groups/GroupRepository";
+import { HomeworkEvaluationRepository } from "../../features/homework/HomeworkEvaluationRepository";
 import { PaymentRepository } from "../../features/payments/PaymentRepository";
 import { SessionRepository } from "../../features/sessions/SessionRepository";
 import { SessionClosingService } from "../../features/sessions/SessionClosingService";
@@ -136,6 +137,9 @@ function ScannerContent() {
   const [showAttendanceNoteModal, setShowAttendanceNoteModal] = useState(false);
   const [attendanceNoteText, setAttendanceNoteText] = useState("");
   const [attendanceNotes, setAttendanceNotes] = useState<import("../../shared/types").StudentNote[]>([]);
+  const [homeworkStatuses, setHomeworkStatuses] = useState<import("../../shared/types").HomeworkEvaluationStatus[]>([]);
+  const [homeworkEvaluation, setHomeworkEvaluation] = useState<import("../../shared/types").SessionHomeworkEvaluation | null>(null);
+  const [homeworkError, setHomeworkError] = useState<string | null>(null);
 
   // Quick Payment Modal
   const [showPaymentModal, setShowPaymentModal] = useState(false);
@@ -157,8 +161,43 @@ function ScannerContent() {
       setActiveSessionsByGroup(Object.fromEntries(sessions.map((session) => [`${session.groupId}:${session.scheduleId}`, session])));
       setAllGroups(GroupRepository.getAll());
       setAllStudents(StudentRepository.getAllForAttendance());
+      try {
+        setHomeworkStatuses(HomeworkEvaluationRepository.listStatuses());
+        setHomeworkError(null);
+      } catch (error) {
+        setHomeworkStatuses([]);
+        setHomeworkError(getUserErrorMessage(error));
+      }
     } catch (error) { setSearchError(getUserErrorMessage(error)); }
   }, []);
+
+  useEffect(() => {
+    const sessionId = activeSessionId || selectedSessionId;
+    if (!student || !sessionId) {
+      setHomeworkEvaluation(null);
+      setHomeworkError(null);
+      return;
+    }
+    try {
+      setHomeworkEvaluation(HomeworkEvaluationRepository.getForSession(sessionId, student.id));
+      setHomeworkError(null);
+    } catch (error) {
+      setHomeworkEvaluation(null);
+      setHomeworkError(getUserErrorMessage(error));
+    }
+  }, [student?.id, activeSessionId, selectedSessionId, localDataRevision]);
+
+  const saveHomeworkEvaluation = (statusId: string | null) => {
+    const sessionId = activeSessionId || selectedSessionId;
+    if (!student || !sessionId) return;
+    try {
+      const result = HomeworkEvaluationRepository.setForSession(sessionId, student.id, statusId);
+      setHomeworkEvaluation(result);
+      setHomeworkError(null);
+    } catch (error: any) {
+      Alert.alert("تعذر حفظ تقييم الواجب", getUserErrorMessage(error));
+    }
+  };
 
   // Refresh when the screen becomes active. Deduplication ensures we don't
   // double-load when focus and revision fire at the same time.
@@ -726,6 +765,15 @@ function ScannerContent() {
           {attendanceSummary ? <View style={styles.rebuildSummary}><View style={[styles.summaryTile, styles.summaryAll]}><Ionicons name="people" size={21} color={Colors.primary} /><Text style={styles.summaryValue}>{attendanceSummary.total}</Text><Text style={styles.summaryLabel}>الكل</Text></View><View style={[styles.summaryTile, styles.summaryPresent]}><Ionicons name="checkmark-circle" size={21} color={Colors.successText} /><Text style={styles.summaryValue}>{attendanceSummary.present}</Text><Text style={styles.summaryLabel}>حاضر</Text></View><View style={[styles.summaryTile, styles.summaryAbsent]}><Ionicons name="close-circle" size={21} color={Colors.dangerText} /><Text style={styles.summaryValue}>{attendanceSummary.absent}</Text><Text style={styles.summaryLabel}>غائب</Text></View><View style={[styles.summaryTile, styles.summaryMakeup]}><Ionicons name="people-outline" size={21} color={Colors.warningText} /><Text style={styles.summaryValue}>{attendanceSummary.makeup}</Text><Text style={styles.summaryLabel}>تعويض</Text></View></View> : null}
           <View style={styles.rebuildScanPanel}><View style={styles.rebuildScanInput}><Ionicons name="search-outline" size={23} color={Colors.slate400} /><AppInput value={manualCode} onChangeText={setManualCode} placeholder="اكتب كود الطالب للبحث اليدوي" containerStyle={{ flex: 1, marginBottom: 0 }} /></View><TouchableOpacity style={styles.rebuildManualButton} onPress={() => lookupCard(manualCode, undefined, true)}><Text style={styles.rebuildManualText}>بحث بالكود</Text></TouchableOpacity>{isCameraActive ? <BarcodeScannerView onDetected={(data) => handleBarcodeScanned({ data })} onClose={() => { setIsTorchOn(false); setIsCameraActive(false); }} style={styles.rebuildCamera} /> : <TouchableOpacity style={styles.rebuildScanButton} onPress={() => { isScanningBlockedRef.current = false; lastScannedRef.current = null; setIsCameraActive(true); }}><Ionicons name="scan-outline" size={25} color={Colors.white} /><Text style={styles.rebuildScanButtonText}>مسح كود الطالب</Text></TouchableOpacity>}</View>
           {student ? <View style={styles.rebuildStudentCard}><View style={styles.rebuildStudentAvatar}><Ionicons name="person" size={34} color={Colors.primary} /></View><View style={styles.rebuildStudentCopy}><Text style={styles.rebuildStudentName}>{student.fullName}</Text><Text style={styles.rebuildStudentMeta}>كود الطالب: {student.cardCode || student.studentCode}</Text><Text style={styles.rebuildStudentMeta}>{[student.grade, currentGroupLabel].filter(Boolean).join(" · ")}</Text></View><View style={styles.rebuildStatus}><Ionicons name={attendanceResult?.isLate ? "time-outline" : "checkmark-circle"} size={22} color={attendanceResult?.isLate ? Colors.warningText : Colors.successText} /><Text style={styles.rebuildStatusText}>{attendanceResult?.isLate ? "متأخر" : attendanceResult ? "حاضر" : isAlreadyAttended ? "مسجل" : makeupNotice ? "تعويض مستحق" : isExternalAttendance ? "خارج المجموعة" : "جاهز للتسجيل"}</Text>{attendanceResult?.checkInTime ? <Text style={styles.rebuildTime}>{attendanceResult.checkInTime}</Text> : null}</View>{!attendanceResult && !isAlreadyAttended ? <AppButton title={makeupNotice ? "تسجيل حضور تعويضي" : isExternalAttendance ? "تسجيل حضور خارجي" : "تسجيل الحضور"} onPress={requestAttendanceConfirmation} loading={isProcessing} disabled={isSessionClosed} size="lg" /> : null}<View style={styles.rebuildActions}><TouchableOpacity style={styles.rebuildSecondaryAction} onPress={handleReset}><Ionicons name="refresh" size={20} color={Colors.primary} /><Text style={styles.rebuildActionText}>مسح طالب آخر</Text></TouchableOpacity><TouchableOpacity style={styles.rebuildSecondaryAction} onPress={() => router.push({ pathname: "/(main)/students", params: { add: "1", attendanceSessionId: activeSessionId } } as any)}><Ionicons name="person-add-outline" size={20} color={Colors.primary} /><Text style={styles.rebuildActionText}>إضافة طالب</Text></TouchableOpacity></View></View> : null}
+          {student && (activeSessionId || selectedSessionId) ? <View style={styles.homeworkEvaluationBox}>
+            <View style={styles.rebuildSectionHeader}><View><Text style={styles.rebuildSectionTitle}>حالة الواجب</Text><Text style={styles.rebuildFinanceHint}>{homeworkEvaluation?.statusName || "لم تُسجل حالة لهذه الحصة"}</Text></View><Ionicons name="document-text-outline" size={20} color={Colors.primary} /></View>
+            {homeworkError ? <Text style={styles.errorAlertText}>{homeworkError}</Text> : homeworkStatuses.length ? <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.homeworkStatusChoices}>
+              {homeworkStatuses.map((status) => <TouchableOpacity key={status.id} onPress={() => saveHomeworkEvaluation(status.id)} style={[styles.homeworkStatusChoice, homeworkEvaluation?.statusId === status.id && styles.homeworkStatusChoiceActive]}>
+                <Text style={[styles.homeworkStatusChoiceText, homeworkEvaluation?.statusId === status.id && styles.homeworkStatusChoiceTextActive]}>{status.name}</Text>
+              </TouchableOpacity>)}
+              {homeworkEvaluation ? <TouchableOpacity onPress={() => saveHomeworkEvaluation(null)} style={styles.homeworkClearChoice}><Text style={styles.homeworkClearChoiceText}>إزالة</Text></TouchableOpacity> : null}
+            </ScrollView> : <Text style={styles.rebuildEmpty}>لا توجد حالات مفعّلة؛ يمكن لمدير المركز إضافتها من إدارة الأكاديمية.</Text>}
+          </View> : null}
           {student ? <View style={styles.rebuildNotesSection}><View style={styles.rebuildSectionHeader}><View><Text style={styles.rebuildSectionTitle}>ملاحظات الطالب</Text><Text style={styles.rebuildFinanceHint}>{student.notes?.trim() ? "ملاحظة محفوظة" : "لا توجد ملاحظات"}</Text></View><TouchableOpacity onPress={() => router.push({ pathname: "/(main)/students", params: { studentId: student.id } } as any)}><Text style={styles.rebuildLink}>+ إضافة ملاحظة</Text></TouchableOpacity></View>{student.notes?.trim() ? <View style={styles.rebuildNote}><Ionicons name="document-text-outline" size={19} color={Colors.primary} /><Text style={styles.rebuildNoteText}>{student.notes}</Text></View> : <Text style={styles.rebuildEmpty}>لا توجد ملاحظات لهذا الطالب</Text>}</View> : null}
           {paymentsEnabled && student && financialStatus ? <View style={styles.rebuildFinance}><TouchableOpacity style={styles.rebuildSectionHeader} onPress={() => setFinancialExpanded((value) => !value)}><View><Text style={styles.rebuildSectionTitle}>الحالة المالية</Text><Text style={styles.rebuildFinanceHint}>المستحق · المدفوع · المتبقي</Text></View><Ionicons name={financialExpanded ? "chevron-up" : "chevron-down"} size={23} color={Colors.primary} /></TouchableOpacity><View style={styles.rebuildFinanceTiles}><View><Text style={styles.rebuildFinanceLabel}>المستحق</Text><Text style={styles.rebuildFinanceDue}>{formatCurrency(financialStatus.totalDue)}</Text></View><View><Text style={styles.rebuildFinanceLabel}>المدفوع</Text><Text style={styles.rebuildFinancePaid}>{formatCurrency(financialStatus.totalPaid)}</Text></View><View><Text style={styles.rebuildFinanceLabel}>المتبقي</Text><Text style={styles.rebuildFinanceRemaining}>{formatCurrency(financialStatus.remainingBalance)}</Text></View></View>{financialExpanded ? <><Text style={styles.paymentHistoryTitle}>سجل مدفوعات الطالب</Text>{financialStatus.payments.map((payment) => <View key={payment.id} style={styles.paymentHistoryRow}><Text style={styles.paymentHistoryAmount}>{formatCurrency(payment.amount)}</Text><Text style={styles.paymentHistoryType}>{payment.paymentType === "monthly" ? "دفعة شهرية" : payment.paymentType === "session" ? "دفعة حصة" : "دفعة جزئية"}</Text><Text style={styles.paymentHistoryMeta}>{payment.paymentDate || payment.createdAt.slice(0, 10)}</Text></View>)}</> : null}<AppButton title="تسجيل دفعة" onPress={openQuickPaymentModal} size="lg" /></View> : null}
         </ScrollView>
@@ -1329,6 +1377,14 @@ const createStyles = () => StyleSheet.create({
   summaryTile: { flex: 1, minHeight: 91, borderRadius: BorderRadius.lg, alignItems: "center", justifyContent: "center", gap: 4 }, summaryAll: { backgroundColor: Colors.primaryMuted }, summaryPresent: { backgroundColor: Colors.successLight }, summaryAbsent: { backgroundColor: Colors.dangerLight }, summaryMakeup: { backgroundColor: Colors.warningLight }, summaryValue: { color: Colors.slate900, fontSize: 23, fontWeight: "900" }, summaryLabel: { color: Colors.slate600, fontSize: 11, fontWeight: "800" },
   rebuildScanPanel: { backgroundColor: Colors.white, borderRadius: BorderRadius.xl, padding: Spacing.md, ...Shadows.card }, rebuildScanInput: { flexDirection: "row", alignItems: "center", gap: 7, borderWidth: 1, borderColor: Colors.border, borderRadius: BorderRadius.lg, paddingHorizontal: 10 }, rebuildScanButton: { marginTop: Spacing.sm, minHeight: 50, borderRadius: BorderRadius.lg, backgroundColor: Colors.primary, alignItems: "center", justifyContent: "center", flexDirection: "row", gap: 7 }, rebuildScanButtonText: { color: Colors.white, fontWeight: "900" }, rebuildManualButton: { marginTop: 7, alignItems: "center", paddingVertical: 8 }, rebuildManualText: { color: Colors.primary, fontWeight: "800" }, rebuildCamera: { marginTop: Spacing.sm, height: 230, borderRadius: BorderRadius.lg, overflow: "hidden", backgroundColor: Colors.slate900 }, closeCameraButton: { position: "absolute", bottom: 10, alignSelf: "center", backgroundColor: "rgba(15,23,42,.75)", paddingHorizontal: 14, paddingVertical: 7, borderRadius: 9 }, closeCameraText: { color: Colors.white, fontWeight: "800" },
   rebuildStudentCard: { backgroundColor: Colors.white, borderRadius: BorderRadius.xl, padding: Spacing.md, ...Shadows.card }, rebuildStudentAvatar: { width: 76, height: 76, borderRadius: 38, backgroundColor: Colors.primaryLight, alignItems: "center", justifyContent: "center", alignSelf: "flex-end" }, rebuildStudentCopy: { alignItems: "flex-end", marginTop: -63, marginRight: 90, minHeight: 74 }, rebuildStudentName: { color: Colors.slate900, fontSize: 19, fontWeight: "900", textAlign: "right" }, rebuildStudentMeta: { color: Colors.slate500, fontSize: 12, marginTop: 4, textAlign: "right" }, rebuildStatus: { marginTop: 17, backgroundColor: Colors.successLight, borderRadius: 28, paddingVertical: 9, paddingHorizontal: 16, alignSelf: "flex-start", alignItems: "center", minWidth: 105 }, rebuildStatusText: { color: Colors.successText, fontWeight: "900", marginTop: 2 }, rebuildTime: { color: Colors.successText, fontSize: 11, marginTop: 2 }, rebuildActions: { flexDirection: "row-reverse", gap: 8, marginTop: Spacing.md, borderTopWidth: 1, borderTopColor: Colors.border, paddingTop: Spacing.md }, rebuildSecondaryAction: { flex: 1, minHeight: 46, borderRadius: BorderRadius.md, borderWidth: 1, borderColor: Colors.primaryLight, alignItems: "center", justifyContent: "center", flexDirection: "row-reverse", gap: 6 }, rebuildActionText: { color: Colors.primary, fontWeight: "800", fontSize: 12 },
+  homeworkEvaluationBox: { backgroundColor: Colors.white, borderRadius: BorderRadius.xl, padding: Spacing.md, ...Shadows.card },
+  homeworkStatusChoices: { flexDirection: "row-reverse", alignItems: "center", gap: 8, paddingTop: Spacing.md },
+  homeworkStatusChoice: { minHeight: 42, justifyContent: "center", paddingHorizontal: 14, borderRadius: BorderRadius.lg, backgroundColor: Colors.slate50, borderWidth: 1, borderColor: Colors.border },
+  homeworkStatusChoiceActive: { backgroundColor: Colors.primary, borderColor: Colors.primary },
+  homeworkStatusChoiceText: { color: Colors.slate700, fontSize: 13, fontWeight: "800" },
+  homeworkStatusChoiceTextActive: { color: Colors.white },
+  homeworkClearChoice: { minHeight: 42, justifyContent: "center", paddingHorizontal: 14, borderRadius: BorderRadius.lg, backgroundColor: Colors.dangerLight },
+  homeworkClearChoiceText: { color: Colors.dangerText, fontSize: 13, fontWeight: "800" },
   rebuildNotesSection: { backgroundColor: Colors.white, borderRadius: BorderRadius.xl, padding: Spacing.md, ...Shadows.card }, rebuildSectionHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" }, rebuildLink: { color: Colors.primary, fontWeight: "800", fontSize: 12 }, rebuildNote: { flexDirection: "row", gap: 8, marginTop: Spacing.md, padding: Spacing.md, borderRadius: BorderRadius.md, backgroundColor: Colors.slate50 }, rebuildNoteText: { flex: 1, color: Colors.slate700, lineHeight: 20, textAlign: "right" }, rebuildEmpty: { color: Colors.slate500, fontSize: 12, textAlign: "right", marginTop: Spacing.md },
   rebuildFinance: { backgroundColor: Colors.white, borderRadius: BorderRadius.xl, padding: Spacing.md, ...Shadows.card }, rebuildFinanceHint: { color: Colors.slate500, fontSize: 11, marginTop: 3, textAlign: "right" }, rebuildFinanceTiles: { flexDirection: "row-reverse", gap: 7, marginTop: Spacing.md }, rebuildFinanceLabel: { color: Colors.slate500, fontSize: 11, textAlign: "center" }, rebuildFinanceDue: { color: Colors.warningText, fontWeight: "900", marginTop: 4, textAlign: "center" }, rebuildFinancePaid: { color: Colors.primary, fontWeight: "900", marginTop: 4, textAlign: "center" }, rebuildFinanceRemaining: { color: Colors.dangerText, fontWeight: "900", marginTop: 4, textAlign: "center" },
   headerSubtitle: { ...Typography.caption, color: Colors.slate500, marginTop: 2, textAlign: "right" },

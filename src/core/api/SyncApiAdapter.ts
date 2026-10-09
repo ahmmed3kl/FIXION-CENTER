@@ -39,6 +39,8 @@ export interface BootstrapResponse {
   dailyClosings?: any[];
   gradeExams?: any[];
   gradeScores?: any[];
+  homeworkEvaluationStatuses?: any[];
+  sessionHomeworkEvaluations?: any[];
   resetGeneration?: number;
   /** Time at which the server reset generation was advanced. */
   resetAt?: string;

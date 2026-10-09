@@ -91,8 +91,13 @@ export default function DeletedStudentsScreen() {
           كود الطالب: {formatDisplayIdentifier(item.studentCode)}{item.grade ? ` · ${item.grade}` : ""}
         </Text>
         <Text style={[styles.studentMeta, { color: colors.textSecondary }]}>
+          الكارت: {item.cardCode ? formatDisplayIdentifier(item.cardCode) : "لا يوجد كارت"}
+          {item.phone ? ` · هاتف الطالب ${item.phone}` : ""}
+          {item.parentPhone ? ` · هاتف ولي الأمر ${item.parentPhone}` : ""}
+        </Text>
+        <Text style={[styles.studentMeta, { color: colors.textSecondary }]}>
           حُذف في {item.deletedAt ? item.deletedAt.slice(0, 10) : "تاريخ غير متاح"}
-          {item.deletedBy ? ` · المستخدم ${item.deletedBy}` : ""}
+          {item.deletedByName ? ` · بواسطة ${item.deletedByName}` : item.deletedBy ? ` · المستخدم ${item.deletedBy}` : ""}
         </Text>
       </View>
       {canRestore && (

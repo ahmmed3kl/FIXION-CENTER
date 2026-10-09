@@ -116,6 +116,7 @@ const SYNC_ENTITY_PRIORITY = {
   teacher: 10,
   subject: 10,
   package: 15,
+  homework_evaluation_status: 18,
   group: 20,
   student: 30,
   student_card: 35,
@@ -132,6 +133,7 @@ const SYNC_ENTITY_PRIORITY = {
   payment_reversal: 100,
   debt_adjustment: 100,
   advance_coverage: 90,
+  session_homework_evaluation: 95,
 };
 
 function canonicalSyncEntity(value) {
@@ -181,6 +183,11 @@ function orderSyncOperations(operations) {
     if (entity === "debt_cycle") refs.push(["enrollment", value("enrollmentId", "enrollment_id")], ["student", value("studentId", "student_id")], ["package_subscription", value("packageSubscriptionId", "package_subscription_id")]);
     if (entity === "package_subscription") refs.push(["student", value("studentId", "student_id")], ["package", value("packageId", "package_id")]);
     if (entity === "package_teacher_override") refs.push(["package_subscription", value("subscriptionId", "subscription_id")], ["teacher", value("teacherId", "teacher_id")], ["subject", value("subjectId", "subject_id")]);
+    if (entity === "session_homework_evaluation") refs.push(
+      ["student", value("studentId", "student_id")],
+      ["session", value("sessionId", "session_id")],
+      ["homework_evaluation_status", value("statusId", "status_id")],
+    );
     return refs.filter(([, id]) => id !== undefined).map(([type, id]) => `${type}:${String(id)}`);
   };
   const visited = new Set();
@@ -586,6 +593,8 @@ class SyncProcessor {
       package_subscription: "student_package_subscriptions",
       grade_exam: "grade_exams",
       grade_score: "grade_scores",
+      homework_evaluation_status: "homework_evaluation_statuses",
+      session_homework_evaluation: "session_homework_evaluations",
       debt_cycle: "debt_cycles",
       notification_event: "notification_events",
       notification_template: "notification_templates",
@@ -616,6 +625,8 @@ class SyncProcessor {
       group_schedule: "group_schedules", student_card: "student_cards",
       package_teacher_override: "package_subject_teacher_overrides",
       grade_exam: "grade_exams", grade_score: "grade_scores",
+      homework_evaluation_status: "homework_evaluation_statuses",
+      session_homework_evaluation: "session_homework_evaluations",
       notification_template: "notification_templates",
     };
     const table = tableByType[entityType];
@@ -692,17 +703,31 @@ class SyncProcessor {
         const student = payload.student || payload;
         const studentId = student.id || student.studentId || context.entityId;
         const existingStudentRes = await client.query(
-          `SELECT student_code, card_code, full_name, phone, parent_phone, grade, student_type, notes, status, deleted_at, deleted_by
-           FROM students WHERE center_id = $1 AND id = $2`,
-          [centerId, studentId],
+          `SELECT center_id, student_code, card_code, full_name, phone, parent_phone, grade, student_type, notes, status, deleted_at, deleted_by
+           FROM students WHERE id = $1`,
+          [studentId],
         );
         const existingStudent = existingStudentRes.rows[0];
+        if (existingStudent && existingStudent.center_id !== centerId) {
+          throw new AppError("STUDENT_BELONGS_TO_OTHER_CENTER", "Student belongs to another center.", "الطالب تابع لمركز آخر.", 403);
+        }
         const hasDeletedAt = Object.prototype.hasOwnProperty.call(student, "deleted_at") || Object.prototype.hasOwnProperty.call(student, "deletedAt");
         const hasDeletedBy = Object.prototype.hasOwnProperty.call(student, "deleted_by") || Object.prototype.hasOwnProperty.call(student, "deletedBy");
-        const deletedAt = hasDeletedAt ? (student.deleted_at ?? student.deletedAt ?? null) : (existingStudent?.deleted_at ?? null);
-        const deletedBy = hasDeletedBy ? (student.deleted_by ?? student.deletedBy ?? null) : (existingStudent?.deleted_by ?? null);
+        const preserveArchive = String(operationType || "").toUpperCase() === "CREATE" && Boolean(existingStudent?.deleted_at);
+        const deletedAt = preserveArchive ? existingStudent.deleted_at : hasDeletedAt ? (student.deleted_at ?? student.deletedAt ?? null) : (existingStudent?.deleted_at ?? null);
+        const deletedBy = preserveArchive ? existingStudent.deleted_by : hasDeletedBy ? (student.deleted_by ?? student.deletedBy ?? null) : (existingStudent?.deleted_by ?? null);
+        const isCardCodeReplacement = payload.cardCodeChanged === true || payload.replaceCard === true;
+        const hasCardCode = Object.prototype.hasOwnProperty.call(student, "card_code") ||
+          Object.prototype.hasOwnProperty.call(student, "cardCode");
+        const suppliedCardCode = Object.prototype.hasOwnProperty.call(student, "card_code")
+          ? student.card_code
+          : student.cardCode;
         const cardCode = String(
-          student.card_code || student.cardCode || student.student_code || student.studentCode || existingStudent?.card_code || existingStudent?.student_code || "",
+          existingStudent && !isCardCodeReplacement
+            ? (existingStudent.card_code || "")
+            : hasCardCode
+            ? (suppliedCardCode ?? "")
+            : (student.student_code || student.studentCode || existingStudent?.card_code || existingStudent?.student_code || ""),
         ).trim();
         const studentCode = String(
           student.student_code || student.studentCode || existingStudent?.student_code || cardCode,
@@ -713,7 +738,6 @@ class SyncProcessor {
         // bootstrap, but that payload can be retried long after the student
         // has received a replacement card. Replaying it must never
         // deactivate the current card and resurrect the old one.
-        const isCardCodeReplacement = payload.cardCodeChanged === true || payload.replaceCard === true;
         const cardWasProvided = (!existingStudent && Boolean(payload.card || cardCode)) || isCardCodeReplacement;
 
         if (!studentId || (!cardCode && !existingStudent)) {
@@ -741,14 +765,19 @@ class SyncProcessor {
         let cardConflictWithAnotherStudent = false;
         if (cardCode) {
           const cardOwner = await client.query(
-            `SELECT student_id AS owner_id, center_id FROM student_cards
-             WHERE card_code = $1
+            `SELECT cards.student_id AS owner_id, cards.center_id, students.deleted_at AS owner_deleted_at
+               FROM student_cards cards
+               LEFT JOIN students ON students.id = cards.student_id AND students.center_id = cards.center_id
+              WHERE cards.card_code = $1
              UNION
-             SELECT id AS owner_id, center_id FROM students
-             WHERE card_code = $1`,
+             SELECT id AS owner_id, center_id, deleted_at AS owner_deleted_at FROM students
+              WHERE card_code = $1`,
             [cardCode],
           );
-          const otherOwner = cardOwner.rows.find((row) => row.owner_id !== studentId);
+          const otherOwner = cardOwner.rows.find((row) =>
+            row.owner_id !== studentId &&
+            !(row.center_id === centerId && row.owner_deleted_at),
+          );
           if (otherOwner) {
             if (operationType === "REPAIR_AFTER_SERVER_RESET") {
               cardConflictWithAnotherStudent = true;
@@ -761,7 +790,7 @@ class SyncProcessor {
         }
         const persistedCardCode = cardConflictWithAnotherStudent
           ? (existingStudent?.card_code || null)
-          : cardCode;
+          : (cardCode || null);
 
         const rawStudentType = student.student_type || student.studentType || existingStudent?.student_type || "registered";
         const studentType = ["registered", "external", "guest", "scholarship"].includes(String(rawStudentType).toLowerCase())
@@ -816,15 +845,29 @@ class SyncProcessor {
             [centerId, studentId, cardId],
           );
           try {
-            await client.query(
-              `INSERT INTO student_cards (id, center_id, student_id, card_code, status, issued_at, created_at)
-               VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
-               ON CONFLICT (id) DO UPDATE SET
-                 card_code = EXCLUDED.card_code,
-                 status = EXCLUDED.status,
-                 deactivated_at = CASE WHEN EXCLUDED.status = 'active' THEN NULL ELSE student_cards.deactivated_at END;`,
-              [cardId, centerId, studentId, persistedCardCode, status === "active" ? "active" : "deactivated"],
+            const reusableCard = await client.query(
+              `SELECT id, student_id, status FROM student_cards
+               WHERE center_id = $1 AND card_code = $2 FOR UPDATE`,
+              [centerId, persistedCardCode],
             );
+            if (reusableCard.rows[0]) {
+              await client.query(
+                `UPDATE student_cards
+                    SET student_id = $1, status = $2, issued_at = NOW(), deactivated_at = NULL
+                  WHERE center_id = $3 AND id = $4`,
+                [studentId, status === "active" ? "active" : "deactivated", centerId, reusableCard.rows[0].id],
+              );
+            } else {
+              await client.query(
+                `INSERT INTO student_cards (id, center_id, student_id, card_code, status, issued_at, created_at)
+                 VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
+                 ON CONFLICT (id) DO UPDATE SET
+                   card_code = EXCLUDED.card_code,
+                   status = EXCLUDED.status,
+                   deactivated_at = CASE WHEN EXCLUDED.status = 'active' THEN NULL ELSE student_cards.deactivated_at END;`,
+                [cardId, centerId, studentId, persistedCardCode, status === "active" ? "active" : "deactivated"],
+              );
+            }
           } catch (cardErr) {
             // A server-reset repair must not fail the student upload merely
             // because its historical physical card is now owned by another
@@ -1335,11 +1378,14 @@ class SyncProcessor {
           throw new Error("Student card requires cardCode.");
         }
         const owner = await client.query(
-          "SELECT id FROM students WHERE id = $1 AND center_id = $2",
+          "SELECT id, deleted_at FROM students WHERE id = $1 AND center_id = $2",
           [studentId, centerId],
         );
         if (owner.rows.length === 0) {
           throw new Error("Student card owner is outside the authenticated center.");
+        }
+        if (!isDeactivation && owner.rows[0].deleted_at) {
+          throw new AppError("STUDENT_ARCHIVED", "Cannot activate a card for an archived student.", "لا يمكن تفعيل بطاقة لطالب مؤرشف.", 409);
         }
         if (isDeactivation) {
           await client.query(
@@ -1823,14 +1869,77 @@ class SyncProcessor {
         break;
       }
 
+      case "homework_evaluation_status": {
+        const status = payload.status || payload;
+        const id = status.id || context.entityId;
+        if (!id) throw new Error("Homework evaluation status requires an id.");
+        if (String(status.name || "").trim()) {
+          await client.query(
+            `INSERT INTO homework_evaluation_statuses (id, center_id, name, status, created_at, updated_at)
+             VALUES ($1,$2,$3,$4,COALESCE($5,NOW()),COALESCE($6,NOW()))
+             ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name, status=EXCLUDED.status, updated_at=EXCLUDED.updated_at
+             WHERE homework_evaluation_statuses.center_id = EXCLUDED.center_id`,
+            [id, centerId, String(status.name).trim(), status.status || "active", status.created_at || status.createdAt || null, status.updated_at || status.updatedAt || null],
+          );
+        } else {
+          const updated = await client.query(
+            `UPDATE homework_evaluation_statuses SET status = $1, updated_at = COALESCE($2,NOW())
+             WHERE center_id = $3 AND id = $4`,
+            [status.status || "deleted", status.updated_at || status.updatedAt || null, centerId, id],
+          );
+          if (!updated.rowCount) throw new Error("Homework evaluation status does not belong to the authenticated center.");
+        }
+        break;
+      }
+
+      case "session_homework_evaluation": {
+        const evaluation = payload.evaluation || payload;
+        const id = evaluation.id || context.entityId;
+        const studentId = evaluation.student_id || evaluation.studentId;
+        const sessionId = evaluation.session_id || evaluation.sessionId;
+        const statusId = evaluation.status_id || evaluation.statusId || null;
+        if (!id || !studentId || !sessionId) throw new Error("Homework evaluation requires student and session.");
+        const [student, session] = await Promise.all([
+          client.query("SELECT id FROM students WHERE center_id = $1 AND id = $2", [centerId, studentId]),
+          client.query("SELECT id FROM sessions WHERE center_id = $1 AND id = $2", [centerId, sessionId]),
+        ]);
+        if (!student.rows[0] || !session.rows[0]) throw new Error("Homework evaluation student/session must belong to the authenticated center.");
+        if (statusId) {
+          const status = await client.query(
+            "SELECT id FROM homework_evaluation_statuses WHERE center_id = $1 AND id = $2 AND status = 'active'",
+            [centerId, statusId],
+          );
+          if (!status.rows[0]) throw new Error("Homework evaluation status must be active in the authenticated center.");
+          await client.query(
+            `INSERT INTO session_homework_evaluations
+              (id, center_id, student_id, session_id, status_id, created_at, updated_at, deleted_at, deleted_by)
+             VALUES ($1,$2,$3,$4,$5,COALESCE($6,NOW()),COALESCE($7,NOW()),NULL,NULL)
+             ON CONFLICT (center_id, student_id, session_id) DO UPDATE SET
+               status_id=EXCLUDED.status_id, updated_at=EXCLUDED.updated_at,
+               deleted_at=NULL, deleted_by=NULL`,
+            [id, centerId, studentId, sessionId, statusId, evaluation.created_at || evaluation.createdAt || null, evaluation.updated_at || evaluation.updatedAt || null],
+          );
+        } else {
+          await client.query(
+            `UPDATE session_homework_evaluations
+                SET deleted_at = COALESCE($1,NOW()), deleted_by = $2, updated_at = COALESCE($3,NOW())
+              WHERE center_id = $4 AND id = $5`,
+            [evaluation.deleted_at || evaluation.deletedAt || null, evaluation.deleted_by || evaluation.deletedBy || userId, evaluation.updated_at || evaluation.updatedAt || null, centerId, id],
+          );
+        }
+        break;
+      }
+
       case "grade_exam": {
         const exam = payload.exam || payload;
         const id = exam.id || context.entityId;
         if (!id || !exam.name || !exam.grade) throw new Error("Grade exam requires name and grade.");
-          await client.query(`INSERT INTO grade_exams (id, center_id, name, grade, group_id, max_score, status, created_at, updated_at)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,COALESCE($8,NOW()),NOW())
-          ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name, grade=EXCLUDED.grade, group_id=EXCLUDED.group_id, max_score=EXCLUDED.max_score, status=EXCLUDED.status, updated_at=NOW()`,
-          [id, centerId, exam.name, exam.grade, exam.group_id || exam.groupId || null, Number(exam.max_score ?? exam.maxScore ?? 100), exam.status || "active", exam.created_at || exam.createdAt || null]);
+        await client.query(`INSERT INTO grade_exams (id, center_id, name, grade, group_id, session_id, max_score, status, created_at, updated_at)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,COALESCE($9,NOW()),NOW())
+          ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name, grade=EXCLUDED.grade,
+            group_id=EXCLUDED.group_id, session_id=EXCLUDED.session_id,
+            max_score=EXCLUDED.max_score, status=EXCLUDED.status, updated_at=NOW()`,
+          [id, centerId, exam.name, exam.grade, exam.group_id || exam.groupId || null, exam.session_id || exam.sessionId || null, Number(exam.max_score ?? exam.maxScore ?? 100), exam.status || "active", exam.created_at || exam.createdAt || null]);
         break;
       }
 

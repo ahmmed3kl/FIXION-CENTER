@@ -377,6 +377,10 @@ export default function NotificationsScreen() {
             <Text style={styles.varItem}>• {"{{session_date}}"} : تاريخ الحصة</Text>
             <Text style={styles.varItem}>• {"{{session_time}}"} : وقت الحصة</Text>
             <Text style={styles.varItem}>• {"{{attendance_status}}"} : حالة الحضور</Text>
+            <Text style={styles.varItem}>• {"{{exam_name}}"} : اسم الامتحان</Text>
+            <Text style={styles.varItem}>• {"{{score}}"} و{"{{max_score}}"} : الدرجة والدرجة النهائية</Text>
+            <Text style={styles.varItem}>• {"{{grades_summary}}"} : ملخص درجات الامتحان</Text>
+            <Text style={styles.varItem}>• {"{{homework_evaluation}}"} : تقييم الواجب للحصة المرتبطة بالامتحان (يُحذف سطره عند عدم وجود تقييم)</Text>
           </View>
         </ScrollView>
       )}

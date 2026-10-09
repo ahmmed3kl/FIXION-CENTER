@@ -76,6 +76,7 @@ export default function MainLayout() {
         }}
       />
       <Tabs.Screen name="deleted-students" options={{ href: null, title: "الطلاب المحذوفون" }} />
+      <Tabs.Screen name="homework-evaluations" options={{ href: null, title: "تقييم الواجب" }} />
       <Tabs.Screen
         name="academic"
         options={{

@@ -1002,6 +1002,102 @@ export const MIGRATIONS: Migration[] = [
       `);
     },
   },
+  {
+    version: 22,
+    name: "homework_evaluations_and_exam_sessions",
+    up: (db: SqlDatabase) => {
+      try {
+        db.execSync("ALTER TABLE grade_exams ADD COLUMN session_id TEXT;");
+      } catch (error) {
+        if (!String(error).toLowerCase().includes("duplicate column")) throw error;
+      }
+      db.execSync(`
+        CREATE TABLE IF NOT EXISTS homework_evaluation_statuses (
+          id TEXT PRIMARY KEY,
+          center_id TEXT NOT NULL,
+          name TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive', 'deleted')),
+          created_at TEXT NOT NULL,
+          updated_at TEXT
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_homework_status_name
+          ON homework_evaluation_statuses(center_id, name COLLATE NOCASE)
+          WHERE status != 'deleted';
+        CREATE INDEX IF NOT EXISTS idx_homework_statuses_active
+          ON homework_evaluation_statuses(center_id, status, name);
+        CREATE TABLE IF NOT EXISTS session_homework_evaluations (
+          id TEXT PRIMARY KEY,
+          center_id TEXT NOT NULL,
+          student_id TEXT NOT NULL,
+          session_id TEXT NOT NULL,
+          status_id TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT,
+          deleted_at TEXT,
+          deleted_by TEXT,
+          CONSTRAINT uq_session_homework_evaluation UNIQUE (center_id, student_id, session_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_session_homework_student
+          ON session_homework_evaluations(center_id, student_id, deleted_at);
+        CREATE INDEX IF NOT EXISTS idx_session_homework_session
+          ON session_homework_evaluations(center_id, session_id, deleted_at);
+      `);
+    },
+  },
+  {
+    version: 23,
+    name: "allow_archived_students_without_current_card",
+    up: (db: SqlDatabase) => {
+      db.execSync("PRAGMA foreign_keys = OFF;");
+      try {
+        db.execSync(`
+          BEGIN;
+          CREATE TABLE students_rebuilt (
+            id TEXT PRIMARY KEY,
+            center_id TEXT NOT NULL,
+            student_code TEXT,
+            full_name TEXT NOT NULL,
+            card_code TEXT,
+            phone TEXT NOT NULL,
+            parent_phone TEXT NOT NULL,
+            grade TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'active',
+            created_at TEXT NOT NULL,
+            student_type TEXT NOT NULL DEFAULT 'registered',
+            notes TEXT,
+            updated_at TEXT,
+            deleted_at TEXT,
+            deleted_by TEXT,
+            CONSTRAINT uq_student_card UNIQUE (center_id, card_code)
+          );
+          INSERT INTO students_rebuilt (
+            id, center_id, student_code, full_name, card_code, phone, parent_phone,
+            grade, status, created_at, student_type, notes, updated_at, deleted_at, deleted_by
+          )
+          SELECT
+            id, center_id, student_code, full_name, card_code, phone, parent_phone,
+            grade, status, created_at, student_type, notes, updated_at, deleted_at, deleted_by
+          FROM students;
+          DROP TABLE students;
+          ALTER TABLE students_rebuilt RENAME TO students;
+          CREATE INDEX IF NOT EXISTS idx_students_card ON students(center_id, card_code);
+          CREATE INDEX IF NOT EXISTS idx_students_code ON students(center_id, student_code);
+          CREATE INDEX IF NOT EXISTS idx_students_name ON students(center_id, full_name);
+          CREATE INDEX IF NOT EXISTS idx_students_deleted ON students(center_id, deleted_at);
+          COMMIT;
+        `);
+      } catch (error) {
+        try {
+          db.execSync("ROLLBACK;");
+        } catch {
+          // Preserve the migration error if SQLite already rolled back.
+        }
+        throw error;
+      } finally {
+        db.execSync("PRAGMA foreign_keys = ON;");
+      }
+    },
+  },
 ];
 
 // In-Memory SQLite Mock for Jest / Test environments
@@ -1049,6 +1145,8 @@ class InMemorySqliteMock implements SqlDatabase {
     this.tables.set("sync_cursors", []);
     this.tables.set("grade_exams", []);
     this.tables.set("grade_scores", []);
+    this.tables.set("homework_evaluation_statuses", []);
+    this.tables.set("session_homework_evaluations", []);
   }
 
   execSync(sql: string): void {
@@ -1124,12 +1222,21 @@ class InMemorySqliteMock implements SqlDatabase {
             return { lastInsertRowId: existingIndex + 1, changes: 1 };
           }
         }
-        // Check UNIQUE constraints
+        const isActiveStudentRow = (candidate: any) =>
+          candidate.deleted_at == null ||
+          candidate.deleted_at === "" ||
+          candidate.deleted_at === undefined;
+
+        // Check UNIQUE constraints. Soft-deleted students remain visible to
+        // historical lookups, but they must not block a fresh student from
+        // reusing the same card/student code after explicit archive/restore.
         if (tableName === "students") {
           if (row.card_code) {
             const cardExists = list.some(
               (r) =>
-                r.center_id === row.center_id && r.card_code === row.card_code,
+                r.center_id === row.center_id &&
+                r.card_code === row.card_code &&
+                isActiveStudentRow(r),
             );
             if (cardExists) {
               throw new Error(
@@ -1141,7 +1248,8 @@ class InMemorySqliteMock implements SqlDatabase {
             const codeExists = list.some(
               (r) =>
                 r.center_id === row.center_id &&
-                r.student_code === row.student_code,
+                r.student_code === row.student_code &&
+                isActiveStudentRow(r),
             );
             if (codeExists) {
               throw new Error(
@@ -1452,29 +1560,78 @@ class InMemorySqliteMock implements SqlDatabase {
             if (trimmed.includes("updated_by = ?")) row.updated_by = params[2];
           }
         } else if (tableName === "student_cards") {
-          const id = params[params.length - 1];
+          const id = trimmed.includes("id = ? AND (student_id = ?") || trimmed.includes("id = ? AND student_id = ?") || trimmed.includes("id = ? AND center_id = ?")
+            ? params[params.length - 2]
+            : params[params.length - 1];
           const row = list.find((r) => r.id === id);
           if (row) {
+            const setClause = trimmed.split(/\bWHERE\b/i)[0];
             if (trimmed.includes("status = 'inactive'"))
               row.status = "inactive";
-            else if (trimmed.includes("status = ?")) row.status = params[0];
+            else if (trimmed.includes("status = 'active'"))
+              row.status = "active";
+            else if (setClause.includes("status = ?")) row.status = params[0];
+            if (setClause.includes("student_id = ?")) row.student_id = params[0];
+            if (setClause.includes("issued_at = ?")) row.issued_at = setClause.includes("student_id = ?") ? params[1] : params[0];
 
             if (trimmed.includes("deactivated_at = ?")) {
               row.deactivated_at = trimmed.includes("status = ?")
                 ? params[1]
                 : params[0];
             }
+            if (trimmed.includes("deactivated_at = NULL")) row.deactivated_at = null;
+          }
+        } else if (tableName === "homework_evaluation_statuses") {
+          const id = params[params.length - 1];
+          const row = list.find((r) => r.id === id && r.center_id === params[params.length - 2]);
+          if (row) {
+            if (trimmed.includes("name = ?")) row.name = params[0];
+            if (trimmed.includes("status = 'deleted'")) row.status = "deleted";
+            else if (trimmed.includes("status = ?")) row.status = params[1];
+            row.updated_at = trimmed.includes("name = ?") ? params[2] : params[0];
+          }
+        } else if (tableName === "session_homework_evaluations") {
+          const id = params[params.length - 1];
+          const row = list.find((r) => r.id === id && r.center_id === params[params.length - 2]);
+          if (row) {
+            row.deleted_at = params[0];
+            row.deleted_by = params[1];
+            row.updated_at = params[2];
           }
         } else if (tableName === "students") {
-          const id = params[params.length - 1];
-          const row = list.find((r) => r.id === id);
+          let row: any = null;
+
+          if (trimmed.includes("card_code = NULL") && trimmed.includes("WHERE center_id = ? AND id = ? AND card_code = ?")) {
+            row = list.find((candidate) =>
+              candidate.center_id === params[1] &&
+              candidate.id === params[2] &&
+              candidate.card_code === params[3],
+            );
+          } else if (trimmed.includes("card_code = ?") && trimmed.includes("WHERE center_id = ? AND id = ?")) {
+            row = list.find((candidate) =>
+              candidate.center_id === params[2] && candidate.id === params[3],
+            );
+          } else if (trimmed.includes("deleted_at = NULL") || trimmed.includes("deleted_at = ?")) {
+            row = list.find((candidate) =>
+              candidate.center_id === params[params.length - 2] && candidate.id === params[params.length - 1],
+            );
+          } else if (trimmed.includes("status = ?")) {
+            row = list.find((candidate) => candidate.id === params[params.length - 1]);
+          } else {
+            row = list.find((candidate) => candidate.id === params[params.length - 1]);
+          }
+
           if (row) {
-            if (trimmed.includes("card_code = ?")) {
+            if (trimmed.includes("card_code = NULL")) {
+              row.card_code = null;
+              row.updated_at = params[0];
+            } else if (trimmed.includes("card_code = ?")) {
               const nextCardCode = params[0];
               const cardOwner = list.find((candidate) =>
-                candidate.id !== id &&
+                candidate.id !== row.id &&
                 candidate.center_id === row.center_id &&
-                candidate.card_code === nextCardCode,
+                candidate.card_code === nextCardCode &&
+                (candidate.deleted_at == null || candidate.deleted_at === "" || candidate.deleted_at === undefined),
               );
               if (cardOwner) {
                 throw new Error(
@@ -1482,7 +1639,7 @@ class InMemorySqliteMock implements SqlDatabase {
                 );
               }
               row.card_code = nextCardCode;
-              row.updated_at = params[1];
+              row.updated_at = params[1] ?? params[0];
             } else if (trimmed.includes("deleted_at = NULL")) {
               row.deleted_at = null;
               row.deleted_by = null;
@@ -1919,6 +2076,52 @@ class InMemorySqliteMock implements SqlDatabase {
       const subjects = this.tables.get("subjects") || [];
       const teachers = this.tables.get("teachers") || [];
       const expected = this.tables.get("session_expected_students") || [];
+      if (
+        trimmed.includes("FROM sessions session") &&
+        trimmed.includes("JOIN student_group_enrollments enrollment") &&
+        params.length >= 2
+      ) {
+        const [centerId, sessionId] = params;
+        const session = list.find(
+          (row) => row.center_id === centerId && row.id === sessionId,
+        );
+        if (!session) return [] as T[];
+        const enrollments = this.tables.get("student_group_enrollments") || [];
+        const students = this.tables.get("students") || [];
+        return enrollments
+          .filter(
+            (enrollment) =>
+              enrollment.center_id === centerId &&
+              enrollment.group_id === session.group_id &&
+              enrollment.status === "active" &&
+              enrollment.start_date <= session.session_date &&
+              (!enrollment.end_date ||
+                enrollment.end_date >= session.session_date),
+          )
+          .flatMap((enrollment) => {
+            const student = students.find(
+              (row) =>
+                row.center_id === centerId &&
+                row.id === enrollment.student_id,
+            );
+            if (!student) return [];
+            return [{
+              id: student.id,
+              centerId: student.center_id,
+              studentCode: student.student_code,
+              fullName: student.full_name,
+              cardCode: student.card_code,
+              phone: student.phone,
+              parentPhone: student.parent_phone,
+              grade: student.grade,
+              status: student.status,
+              studentType: student.student_type || "registered",
+              notes: student.notes || null,
+              createdAt: student.created_at,
+              updatedAt: student.updated_at || null,
+            }];
+          }) as T[];
+      }
 
       const joined = list.map((s) => {
         const g = groups.find((grp) => grp.id === s.group_id);
@@ -2215,6 +2418,14 @@ class InMemorySqliteMock implements SqlDatabase {
         issuedAt: r.issued_at,
         deactivatedAt: r.deactivated_at,
         createdAt: r.created_at,
+        // Preserve raw SQLite column names for legacy queries and tests that
+        // select snake_case fields directly without aliases.
+        center_id: r.center_id,
+        student_id: r.student_id,
+        card_code: r.card_code,
+        issued_at: r.issued_at,
+        deactivated_at: r.deactivated_at,
+        created_at: r.created_at,
       }));
       if (params.length >= 2 && trimmed.includes("card_code = ?")) {
         const centerId = params[0];
@@ -2241,6 +2452,15 @@ class InMemorySqliteMock implements SqlDatabase {
           return result.filter((r) => r.status === "active") as T[];
         }
         return result as T[];
+      }
+      if (
+        params.length >= 2 &&
+        trimmed.includes("center_id = ?") &&
+        trimmed.includes(" AND id = ?")
+      ) {
+        return mapped.filter(
+          (r) => r.centerId === params[0] && r.id === params[1],
+        ) as T[];
       }
       if (params.length >= 2 && trimmed.includes("student_id = ?")) {
         if (trimmed.includes("status = 'active'")) {
@@ -2528,6 +2748,20 @@ class InMemorySqliteMock implements SqlDatabase {
           (r) => r.centerId === params[0] && r.id === params[1],
         ) as T[];
       }
+      if (
+        params.length >= 5 &&
+        trimmed.includes("group_id = ? AND student_id = ?")
+      ) {
+        return mapped.filter(
+          (r) =>
+            r.centerId === params[0] &&
+            r.groupId === params[1] &&
+            r.studentId === params[2] &&
+            r.status === "active" &&
+            r.startDate <= params[3] &&
+            (!r.endDate || r.endDate >= params[4]),
+        ) as T[];
+      }
       if (params.length >= 2 && trimmed.includes("student_id = ?")) {
         if (trimmed.includes("status = 'active'")) {
           return mapped.filter(
@@ -2587,6 +2821,36 @@ class InMemorySqliteMock implements SqlDatabase {
 
     if (trimmed.includes("FROM session_expected_students")) {
       const list = this.tables.get("session_expected_students") || [];
+      if (trimmed.includes("JOIN students s") && params.length >= 2) {
+        const [centerId, sessionId] = params;
+        const students = this.tables.get("students") || [];
+        return list
+          .filter(
+            (r) => r.center_id === centerId && r.session_id === sessionId,
+          )
+          .flatMap((expected) => {
+            const student = students.find(
+              (r) =>
+                r.center_id === centerId && r.id === expected.student_id,
+            );
+            if (!student) return [];
+            return [{
+              id: student.id,
+              centerId: student.center_id,
+              studentCode: student.student_code,
+              fullName: student.full_name,
+              cardCode: student.card_code,
+              phone: student.phone,
+              parentPhone: student.parent_phone,
+              grade: student.grade,
+              status: student.status,
+              studentType: student.student_type || "registered",
+              notes: student.notes || null,
+              createdAt: student.created_at,
+              updatedAt: student.updated_at || null,
+            }];
+          }) as T[];
+      }
       if (
         trimmed.includes("SELECT DISTINCT student_id") &&
         params.length >= 2
@@ -2727,25 +2991,59 @@ class InMemorySqliteMock implements SqlDatabase {
       const mapped = list.map((r) => ({
         id: r.id,
         centerId: r.center_id,
+        center_id: r.center_id,
         studentCode: r.student_code || `MIGRATED-LEGACY-${r.id}`,
+        student_code: r.student_code || `MIGRATED-LEGACY-${r.id}`,
         fullName: r.full_name,
+        full_name: r.full_name,
         cardCode: r.card_code,
+        card_code: r.card_code,
         phone: r.phone,
         parentPhone: r.parent_phone,
+        parent_phone: r.parent_phone,
         grade: r.grade,
         status: r.status,
         studentType: r.student_type || "registered",
+        student_type: r.student_type || "registered",
         notes: r.notes || null,
         deletedAt: r.deleted_at || null,
+        deleted_at: r.deleted_at || null,
         deletedBy: r.deleted_by || null,
+        deleted_by: r.deleted_by || null,
         createdAt: r.created_at,
+        created_at: r.created_at,
         updatedAt: r.updated_at || null,
+        updated_at: r.updated_at || null,
       }));
       const archiveFiltered = trimmed.includes("deleted_at IS NOT NULL")
         ? mapped.filter((student) => Boolean(student.deletedAt))
         : trimmed.includes("deleted_at IS NULL")
           ? mapped.filter((student) => !student.deletedAt)
           : mapped;
+      if (
+        trimmed.includes("JOIN student_group_enrollments e") &&
+        params.length >= 2
+      ) {
+        const [centerId, groupId] = params;
+        const enrollments = this.tables.get("student_group_enrollments") || [];
+        const enrolledIds = new Set(
+          enrollments
+            .filter(
+              (enrollment) =>
+                enrollment.center_id === centerId &&
+                enrollment.group_id === groupId &&
+                enrollment.status === "active",
+            )
+            .map((enrollment) => enrollment.student_id),
+        );
+        return archiveFiltered.filter(
+          (student) =>
+            student.centerId === centerId &&
+            student.status === "active" &&
+            !student.deletedAt &&
+            enrolledIds.has(student.id),
+        ) as T[];
+      }
       if (params.length >= 2 && trimmed.includes("card_code = ?")) {
         return archiveFiltered.filter(
           (r) => r.centerId === params[0] && r.cardCode === params[1],
@@ -2755,6 +3053,13 @@ class InMemorySqliteMock implements SqlDatabase {
         return archiveFiltered.filter(
           (r) => r.centerId === params[0] && r.studentCode === params[1],
         ) as T[];
+      }
+      if (
+        params.length === 1 &&
+        trimmed.includes("WHERE id = ?") &&
+        !trimmed.includes("center_id = ?")
+      ) {
+        return archiveFiltered.filter((r) => r.id === params[0]) as T[];
       }
       if (
         params.length >= 2 &&
@@ -3403,6 +3708,119 @@ class InMemorySqliteMock implements SqlDatabase {
       return mapped as T[];
     }
 
+    if (trimmed.includes("FROM grade_exams")) {
+      const list = this.tables.get("grade_exams") || [];
+      const mapped = list.map((r) => ({
+        id: r.id,
+        centerId: r.center_id,
+        name: r.name,
+        grade: r.grade,
+        groupId: r.group_id ?? null,
+        sessionId: r.session_id ?? null,
+        maxScore: r.max_score ?? 100,
+        status: r.status,
+        createdAt: r.created_at,
+        updatedAt: r.updated_at || null,
+        center_id: r.center_id,
+        group_id: r.group_id ?? null,
+        session_id: r.session_id ?? null,
+        max_score: r.max_score ?? 100,
+        created_at: r.created_at,
+        updated_at: r.updated_at || null,
+      }));
+      if (params.length >= 2 && trimmed.includes("id = ?")) {
+        return mapped.filter((r) => r.centerId === params[0] && r.id === params[1]) as T[];
+      }
+      if (params.length >= 1 && trimmed.includes("center_id = ?")) {
+        return mapped.filter((r) => r.centerId === params[0]) as T[];
+      }
+      return mapped as T[];
+    }
+
+    if (trimmed.includes("FROM grade_scores")) {
+      const list = this.tables.get("grade_scores") || [];
+      const mapped = list.map((r) => ({
+        id: r.id,
+        centerId: r.center_id,
+        examId: r.exam_id,
+        studentId: r.student_id,
+        score: r.score,
+        createdAt: r.created_at,
+        updatedAt: r.updated_at || null,
+        center_id: r.center_id,
+        exam_id: r.exam_id,
+        student_id: r.student_id,
+        created_at: r.created_at,
+        updated_at: r.updated_at || null,
+      }));
+      const examFilter = trimmed.match(/exam_id IN \(([^)]+)\)/);
+      const studentFilter = trimmed.match(/student_id IN \(([^)]+)\)/);
+      if (examFilter && studentFilter && params.length >= 1) {
+        const examCount = examFilter[1].split(",").length;
+        const studentCount = studentFilter[1].split(",").length;
+        const examIds = new Set(params.slice(1, 1 + examCount));
+        const studentIds = new Set(
+          params.slice(1 + examCount, 1 + examCount + studentCount),
+        );
+        return mapped.filter(
+          (r) =>
+            r.centerId === params[0] &&
+            examIds.has(r.examId) &&
+            studentIds.has(r.studentId),
+        ) as T[];
+      }
+      if (params.length >= 1 && trimmed.includes("center_id = ?")) {
+        return mapped.filter((r) => r.centerId === params[0]) as T[];
+      }
+      return mapped as T[];
+    }
+
+    if (trimmed.includes("FROM homework_evaluation_statuses")) {
+      const list = this.tables.get("homework_evaluation_statuses") || [];
+      const mapped = list.map((r) => ({
+        id: r.id, centerId: r.center_id, name: r.name, status: r.status,
+        createdAt: r.created_at, updatedAt: r.updated_at || null,
+        center_id: r.center_id, created_at: r.created_at, updated_at: r.updated_at || null,
+      }));
+      let filtered = mapped;
+      if (params.length >= 2 && trimmed.includes("id = ?")) {
+        filtered = filtered.filter((r) => r.centerId === params[0] && r.id === params[1]);
+      } else if (params.length >= 2 && trimmed.includes("lower(name) = lower(?)")) {
+        filtered = filtered.filter((r) => r.centerId === params[0] && r.name.toLowerCase() === String(params[1]).toLowerCase());
+      } else if (params.length >= 1 && trimmed.includes("center_id = ?")) {
+        filtered = filtered.filter((r) => r.centerId === params[0]);
+      }
+      if (trimmed.includes("status = 'active'")) filtered = filtered.filter((r) => r.status === "active");
+      else if (trimmed.includes("status != 'deleted'")) filtered = filtered.filter((r) => r.status !== "deleted");
+      return filtered as T[];
+    }
+
+    if (trimmed.includes("FROM session_homework_evaluations")) {
+      const list = this.tables.get("session_homework_evaluations") || [];
+      const mapped = list.map((r) => ({
+        id: r.id, centerId: r.center_id, studentId: r.student_id, sessionId: r.session_id,
+        statusId: r.status_id, createdAt: r.created_at, updatedAt: r.updated_at || null,
+        deletedAt: r.deleted_at || null, deletedBy: r.deleted_by || null,
+        center_id: r.center_id, student_id: r.student_id, session_id: r.session_id,
+        status_id: r.status_id, created_at: r.created_at, updated_at: r.updated_at || null,
+        deleted_at: r.deleted_at || null,
+      }));
+      let filtered = mapped;
+      if (trimmed.includes("status_id = ?") && params.length >= 2) {
+        filtered = filtered.filter((r) => r.centerId === params[0] && r.statusId === params[1]);
+      } else if (trimmed.includes("session_id = ?") && trimmed.includes("student_id = ?") && params.length >= 3) {
+        filtered = filtered.filter((r) => r.centerId === params[0] && r.sessionId === params[1] && r.studentId === params[2]);
+      } else if (trimmed.includes("student_id = ?") && params.length >= 2) {
+        filtered = filtered.filter((r) => r.centerId === params[0] && r.studentId === params[1]);
+      } else if (trimmed.includes("id = ?") && params.length >= 2) {
+        filtered = filtered.filter((r) => r.centerId === params[0] && r.id === params[1]);
+      } else if (params.length >= 1 && trimmed.includes("center_id = ?")) {
+        filtered = filtered.filter((r) => r.centerId === params[0]);
+      }
+      if (trimmed.includes("deleted_at IS NULL")) filtered = filtered.filter((r) => !r.deletedAt);
+      return filtered as T[];
+    }
+
     if (trimmed.includes("FROM notification_templates")) {
       const list = this.tables.get("notification_templates") || [];
       const mapped = list.map((r) => ({
@@ -3852,6 +4270,7 @@ export class DatabaseService {
 
   static init(): void {
     const hasNativeSQLite = typeof SQLite?.openDatabaseSync === "function";
+    this.db = null;
     try {
       if (hasNativeSQLite) {
         let nativeDb: any = null;
@@ -3910,19 +4329,33 @@ export class DatabaseService {
    */
   static ensureSyncMetadataSchema(database?: SqlDatabase): void {
     const db = database || this.getDb();
-    db.execSync(`
-      CREATE TABLE IF NOT EXISTS sync_metadata (
-        center_id TEXT PRIMARY KEY,
-        last_bootstrap TEXT,
-        last_full_sync TEXT,
-        bootstrap_count INTEGER NOT NULL DEFAULT 0,
-        total_syncs INTEGER NOT NULL DEFAULT 0,
-        last_error TEXT,
-        updated_at TEXT NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS idx_sync_metadata_bootstrap
-        ON sync_metadata(center_id, last_bootstrap);
-    `);
+    try {
+      db.execSync(`
+        CREATE TABLE IF NOT EXISTS sync_metadata (
+          center_id TEXT PRIMARY KEY,
+          last_bootstrap TEXT,
+          last_full_sync TEXT,
+          bootstrap_count INTEGER NOT NULL DEFAULT 0,
+          total_syncs INTEGER NOT NULL DEFAULT 0,
+          last_error TEXT,
+          updated_at TEXT NOT NULL
+        );
+      `);
+    } catch (error) {
+      console.warn("[DatabaseService] Failed to create sync_metadata table:", error);
+      throw error;
+    }
+
+    try {
+      db.execSync(`
+        CREATE INDEX IF NOT EXISTS idx_sync_metadata_bootstrap
+          ON sync_metadata(center_id, last_bootstrap);
+      `);
+    } catch (error) {
+      // Some SQLite variants may have a partially initialized table/index state;
+      // keep the schema repair idempotent without crashing the app bootstrap.
+      console.warn("[DatabaseService] Failed to create sync_metadata index:", error);
+    }
   }
   
   /**
