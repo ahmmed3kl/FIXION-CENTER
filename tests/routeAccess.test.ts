@@ -28,4 +28,10 @@ describe("route permission access", () => {
     expect(resolvePermissionRouteName(["(main)", "groups"])).toBe("groups");
     expect(resolvePermissionRouteName(["groups", "[groupId]"])).toBe("groups");
   });
+
+  it("resolves the main route group to the dashboard while its index route initializes", () => {
+    expect(resolvePermissionRouteName(["(main)"])).toBe("index");
+    expect(canAccessRoute("index", ["dashboard.view"])).toBe(true);
+    expect(canAccessRoute("index", [])).toBe(false);
+  });
 });

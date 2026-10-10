@@ -45,6 +45,7 @@ const routeAllPermissions: Partial<Record<string, Permission[]>> = {
 };
 
 export function resolvePermissionRouteName(segments: readonly string[]): string {
+  if (segments.length === 1 && segments[0] === "(main)") return "index";
   return segments.find((segment) => segment in routePermissions || unrestrictedRoutes.has(segment))
     || segments[segments.length - 1]
     || "unlisted-route";

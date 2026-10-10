@@ -29,6 +29,7 @@ export default function MainLayout() {
 
   return (
     <Tabs
+      initialRouteName="index"
       backBehavior="history"
       screenOptions={{
         headerShown: false,
