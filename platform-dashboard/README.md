@@ -10,7 +10,7 @@ copy .env.example .env
 npm run dev
 ```
 
-Set `VITE_API_BASE_URL` to the public Backend API base URL. Only public browser configuration belongs in this file. Never add database URLs, JWT secrets, private keys, or service credentials.
+Set `VITE_API_BASE_URL` to the public Backend API base URL. Production builds default to `https://fixion-center.onrender.com/v1`; ensure the Vercel Production environment variable uses that same value because it overrides the checked-in build default. For a local backend, use `http://localhost:3000/v1`. Only public browser configuration belongs in this file. Never add database URLs, JWT secrets, private keys, or service credentials.
 
 ## Commands
 
