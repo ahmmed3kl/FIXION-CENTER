@@ -4,14 +4,21 @@ import type { Center, Device } from "../types";
 
 export function deviceModel(device: Device): string {
   const name = device.device_name?.trim();
-  if (!name || /^(ANDROID|IOS|IPADOS|WEB)-Device-[A-Za-z0-9]{4}$/i.test(name)) {
+  if (
+    !name ||
+    /^(?:موديل غير معروف|unknown(?: device)?|device|mobile tablet\/phone)$/i.test(name) ||
+    /^(ANDROID|IOS|IPADOS|WEB)-Device-[A-Za-z0-9]{4}$/i.test(name) ||
+    /^dev-[0-9a-f-]{30,}$/i.test(name) ||
+    /^user-[0-9a-f-]{30,}$/i.test(name) ||
+    /^[0-9a-f]{8}-[0-9a-f-]{27,}$/i.test(name)
+  ) {
     return "موديل غير معروف";
   }
   return name;
 }
 
 export function lastAccount(device: Device): string {
-  return device.full_name || device.user_email || device.user_id || "لا يوجد حساب مسجّل";
+  return device.full_name?.trim() || device.user_email?.trim() || "بيانات الحساب غير متاحة";
 }
 
 function lastSeen(device: Device): string {
@@ -34,6 +41,7 @@ export function DevicesPage() {
   const [centerId, setCenterId] = useState("");
   const [items, setItems] = useState<Device[]>([]);
   const [error, setError] = useState("");
+  const [copiedDeviceId, setCopiedDeviceId] = useState("");
 
   useEffect(() => {
     void platformApi
@@ -83,6 +91,34 @@ export function DevicesPage() {
     }
   }
 
+  async function copyDeviceId(deviceId: string) {
+    try {
+      await navigator.clipboard.writeText(deviceId);
+      setCopiedDeviceId(deviceId);
+      window.setTimeout(() => setCopiedDeviceId(""), 1800);
+    } catch {
+      setError("تعذر نسخ معرّف الجهاز من هذا المتصفح.");
+    }
+  }
+
+  function technicalDetails(device: Device) {
+    return (
+      <details className="device-technical-details">
+        <summary>بيانات تقنية</summary>
+        <div className="device-technical-value">
+          <code dir="ltr">{device.id}</code>
+          <button
+            className="text-button"
+            type="button"
+            onClick={() => void copyDeviceId(device.id)}
+          >
+            {copiedDeviceId === device.id ? "تم النسخ" : "نسخ المعرّف"}
+          </button>
+        </div>
+      </details>
+    );
+  }
+
   return (
     <section className="devices-page">
       <div className="page-heading">
@@ -115,8 +151,8 @@ export function DevicesPage() {
         <table>
           <thead>
             <tr>
-              <th>موديل الجهاز / المعرّف</th>
-              <th>آخر حساب مسجّل</th>
+              <th>موديل الجهاز</th>
+              <th>آخر حساب استخدم الجهاز</th>
               <th>الحالة</th>
               <th>آخر ظهور</th>
               <th>فاشلة</th>
@@ -128,10 +164,11 @@ export function DevicesPage() {
               <tr key={device.id}>
                 <td>
                   <strong dir="auto">{deviceModel(device)}</strong>
-                  <small dir="ltr">{device.id}</small>
+                  {technicalDetails(device)}
                 </td>
                 <td>
                   <span dir="auto">{lastAccount(device)}</span>
+                  <small>آخر حساب معروف، وليس بالضرورة النشط الآن</small>
                   {device.full_name && device.user_email && (
                     <small dir="ltr">{device.user_email}</small>
                   )}
@@ -165,11 +202,11 @@ export function DevicesPage() {
             </div>
             <dl className="device-fields">
               <div className="device-field">
-                <dt>معرّف الجهاز</dt>
-                <dd dir="ltr">{device.id}</dd>
+                <dt>معرّف الجهاز للتشخيص</dt>
+                <dd>{technicalDetails(device)}</dd>
               </div>
               <div className="device-field">
-                <dt>آخر حساب مسجّل على الجهاز</dt>
+                <dt>آخر حساب استخدم الجهاز</dt>
                 <dd dir="auto">{lastAccount(device)}</dd>
               </div>
               {device.full_name && device.user_email && (
@@ -187,6 +224,9 @@ export function DevicesPage() {
                 <dd>{device.failed_operations ?? 0}</dd>
               </div>
             </dl>
+            <p className="device-account-note">
+              هذا آخر حساب مسجّل على الجهاز، وليس بالضرورة الحساب النشط الآن.
+            </p>
             <button
               className="secondary-button device-action"
               onClick={() => void toggle(device)}

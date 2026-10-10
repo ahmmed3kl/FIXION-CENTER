@@ -26,7 +26,23 @@ function generateUUID(): string {
 }
 
 export function resolveDeviceModelName(modelName?: string | null): string {
-  return modelName?.trim() || "موديل غير معروف";
+  const normalizedName = modelName?.trim();
+  if (!normalizedName || !isReportedDeviceModel(normalizedName)) {
+    return "موديل غير معروف";
+  }
+  return normalizedName;
+}
+
+function isReportedDeviceModel(modelName: string): boolean {
+  return !(
+    /^(?:موديل غير معروف|unknown(?: device)?|device|mobile tablet\/phone)$/i.test(
+      modelName,
+    ) ||
+    /^(ANDROID|IOS|IPADOS|WEB)-Device-[A-Za-z0-9]{4}$/i.test(modelName) ||
+    /^dev-[0-9a-f-]{30,}$/i.test(modelName) ||
+    /^user-[0-9a-f-]{30,}$/i.test(modelName) ||
+    /^[0-9a-f]{8}-[0-9a-f-]{27,}$/i.test(modelName)
+  );
 }
 
 export class DeviceRepository {
@@ -40,9 +56,9 @@ export class DeviceRepository {
   }): DeviceRecord {
     const db = DatabaseService.getDb();
     const deviceIdentifier = DeviceService.getDeviceIdSync();
-    const deviceName =
-      params.deviceName ||
-      DeviceService.getDeviceModelName();
+    const reportedDeviceName = resolveDeviceModelName(
+      params.deviceName || DeviceService.getDeviceModelName(),
+    );
 
     const existing = db.getFirstSync<any>(
       `SELECT id, center_id as centerId, user_id as userId, device_name as deviceName,
@@ -54,6 +70,11 @@ export class DeviceRepository {
     );
 
     if (existing) {
+      const existingDeviceName = resolveDeviceModelName(existing.deviceName);
+      const deviceName =
+        reportedDeviceName === "موديل غير معروف"
+          ? existingDeviceName
+          : reportedDeviceName;
       // Update last seen
       const now = new Date().toISOString();
       db.runSync(
@@ -62,11 +83,13 @@ export class DeviceRepository {
       );
       return {
         ...existing,
+        deviceName,
         lastSeenAt: now,
         userId: params.userId,
       };
     }
 
+    const deviceName = reportedDeviceName;
     const id = `dev-rec-${generateUUID()}`;
     const now = new Date().toISOString();
 

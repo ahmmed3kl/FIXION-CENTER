@@ -2,6 +2,7 @@ const express = require("express");
 const db = require("../db");
 const { authMiddleware } = require("../middleware/auth");
 const { AppError } = require("../middleware/errorHandler");
+const { normalizeDeviceModelName } = require("../services/deviceMetadata");
 
 const router = express.Router();
 
@@ -10,7 +11,8 @@ const router = express.Router();
  */
 router.post("/register", authMiddleware, async (req, res, next) => {
   try {
-    const { deviceIdentifier, deviceName, platform, appVersion } = req.body;
+    const { deviceIdentifier, platform, appVersion } = req.body;
+    const deviceName = normalizeDeviceModelName(req.body.deviceName);
     const deviceId = deviceIdentifier || req.body.deviceId;
 
     if (!deviceId) {
@@ -22,12 +24,6 @@ router.post("/register", authMiddleware, async (req, res, next) => {
       );
     }
 
-    // Security check: Verify device does not belong to another center
-    const existing = await db.query(
-      "SELECT id, center_id, status FROM devices WHERE id = $1",
-      [deviceId],
-    );
-
     // authMiddleware already verifies that the user belongs to req.centerId.
     // Rebinding the device here allows one tablet to serve multiple authorized
     // centers while preserving tenant isolation for every request.
@@ -37,11 +33,12 @@ router.post("/register", authMiddleware, async (req, res, next) => {
       `INSERT INTO devices (id, center_id, user_id, device_name, platform, app_version, status, last_seen_at, created_at, updated_at)
        VALUES ($1, $2, $3, $4, $5, $6, 'active', NOW(), NOW(), NOW())
        ON CONFLICT (id) DO UPDATE SET
+         center_id = EXCLUDED.center_id,
          user_id = EXCLUDED.user_id,
          device_name = CASE
-           WHEN EXCLUDED.device_name ~ '^[A-Z]+-Device-[[:alnum:]]{4}$'
-             THEN COALESCE(devices.device_name, 'موديل غير معروف')
-           ELSE COALESCE(EXCLUDED.device_name, devices.device_name)
+           WHEN EXCLUDED.device_name IS NULL
+             THEN devices.device_name
+           ELSE EXCLUDED.device_name
          END,
          platform = COALESCE(EXCLUDED.platform, devices.platform),
          app_version = COALESCE(EXCLUDED.app_version, devices.app_version),
@@ -52,7 +49,7 @@ router.post("/register", authMiddleware, async (req, res, next) => {
         deviceId,
         req.centerId,
         req.user.id,
-        deviceName || "موديل غير معروف",
+        deviceName,
         platform || "android",
         appVersion || "1.0.0",
       ],

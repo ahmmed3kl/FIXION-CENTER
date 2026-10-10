@@ -78,17 +78,26 @@ const BOOTSTRAP_TIMEOUT_MS = 45_000;   // Bootstrap can take longer
  * GET  /sync/bootstrap?centerId=...
  */
 export class HttpSyncApiAdapter implements ISyncApiAdapter {
+  private readonly registeredDevices = new Map<string, number>();
+
   private async ensureDeviceRegistered(
     centerId: string,
     deviceId: string,
   ): Promise<void> {
+    const deviceName = DeviceService.getDeviceModelName();
+    const registrationKey = `${centerId}:${deviceId}:${deviceName}`;
+    const lastRegisteredAt = this.registeredDevices.get(registrationKey);
+    if (lastRegisteredAt && Date.now() - lastRegisteredAt < 5 * 60_000) {
+      return;
+    }
+
     try {
       const client = ApiClient.getInstance();
       await client.post(
         "/devices/register",
         {
           deviceId,
-          deviceName: DeviceService.getDeviceModelName(),
+          deviceName,
           platform: Platform.OS,
           appVersion: env.appVersion,
         },
@@ -97,9 +106,11 @@ export class HttpSyncApiAdapter implements ISyncApiAdapter {
           headers: {
             "X-Center-Id": centerId,
             "X-Device-Id": deviceId,
+            "X-Device-Name": deviceName,
           },
         },
       );
+      this.registeredDevices.set(registrationKey, Date.now());
     } catch (e: any) {
       Logger.info("sync", "device_auto_register_attempt", {
         centerId,
@@ -114,6 +125,7 @@ export class HttpSyncApiAdapter implements ISyncApiAdapter {
   ): Promise<PushSyncResponse> {
     const client = ApiClient.getInstance();
     const deviceId = await DeviceService.getDeviceId();
+    await this.ensureDeviceRegistered(centerId, deviceId);
 
     const requestBody: PushSyncRequest = {
       centerId,
@@ -154,6 +166,7 @@ export class HttpSyncApiAdapter implements ISyncApiAdapter {
   ): Promise<PullSyncResponse> {
     const client = ApiClient.getInstance();
     const deviceId = await DeviceService.getDeviceId();
+    await this.ensureDeviceRegistered(centerId, deviceId);
 
     const fetchPull = () =>
       client.get<PullSyncResponse>("/sync/pull", {
@@ -193,6 +206,7 @@ export class HttpSyncApiAdapter implements ISyncApiAdapter {
   async bootstrapCenter(centerId: string): Promise<BootstrapResponse> {
     const client = ApiClient.getInstance();
     const deviceId = await DeviceService.getDeviceId();
+    await this.ensureDeviceRegistered(centerId, deviceId);
 
     const fetchBootstrap = () =>
       client.get<BootstrapResponse>("/sync/bootstrap", {

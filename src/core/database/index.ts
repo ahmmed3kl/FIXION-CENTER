@@ -2035,6 +2035,9 @@ class InMemorySqliteMock implements SqlDatabase {
             } else if (trimmed.includes("last_seen_at = ?")) {
               row.last_seen_at = params[0];
               row.user_id = params[1];
+              if (trimmed.includes("device_name = ?")) {
+                row.device_name = params[2];
+              }
             }
           }
         } else if (tableName === "sync_cursors") {

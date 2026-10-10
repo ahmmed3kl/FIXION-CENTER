@@ -21,11 +21,15 @@ describe("device labels", () => {
     expect(deviceModel(device())).toBe("iPhone 15 Pro Max");
     expect(deviceModel(device({ device_name: "ANDROID-Device-b3bb" }))).toBe("موديل غير معروف");
     expect(deviceModel(device({ device_name: null }))).toBe("موديل غير معروف");
+    expect(deviceModel(device({ device_name: "موديل غير معروف" }))).toBe("موديل غير معروف");
+    expect(deviceModel(device({ device_name: "dev-123e4567-e89b-12d3-a456-426614174000" }))).toBe("موديل غير معروف");
+    expect(deviceModel(device({ device_name: "Mobile Tablet/Phone" }))).toBe("موديل غير معروف");
+    expect(deviceModel(device({ device_name: "user-123e4567-e89b-12d3-a456-426614174000" }))).toBe("موديل غير معروف");
   });
 
   it("shows the last associated account without claiming it is currently active", () => {
     expect(lastAccount(device())).toBe("أحمد محمد");
     expect(lastAccount(device({ full_name: null }))).toBe("ahmed@example.com");
-    expect(lastAccount(device({ full_name: null, user_email: null }))).toBe("user-1");
+    expect(lastAccount(device({ full_name: null, user_email: null }))).toBe("بيانات الحساب غير متاحة");
   });
 });

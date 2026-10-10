@@ -1,5 +1,6 @@
 const db = require("../db");
 const { AppError } = require("./errorHandler");
+const { normalizeDeviceModelName } = require("../services/deviceMetadata");
 
 /**
  * Device Gatekeeping Middleware:
@@ -39,7 +40,7 @@ async function deviceGuard(req, res, next) {
           deviceId,
           req.centerId,
           req.user ? req.user.id : null,
-          req.headers["x-device-name"] || "Mobile Tablet/Phone",
+          normalizeDeviceModelName(req.headers["x-device-name"]),
           req.headers["x-platform"] || "android",
           req.headers["x-app-version"] || "1.0.0",
         ],
