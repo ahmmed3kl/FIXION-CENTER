@@ -68,7 +68,8 @@ export function getOperationPriority(entityType: string): number {
   // CRUD mutations remain priority 5 for callers that consume the public
   // category value. The queue sorter below adds dependency-aware ordering
   // without changing this backwards-compatible contract.
-  if (e === "teacher" || e === "subject" || e === "teacher_subject" ||
+  if (e === "center_academic_stage" || e === "center_academic_stages" ||
+      e === "teacher" || e === "subject" || e === "teacher_subject" ||
       e === "group" || e === "group_schedule" || e === "student" ||
       e === "student_card" || e === "package" || e === "package_subject" ||
       e === "enrollment" || e === "student_group_enrollment" ||
@@ -78,6 +79,7 @@ export function getOperationPriority(entityType: string): number {
 }
 
 const REPAIR_DEPENDENCY_PRIORITY: Record<string, number> = {
+  center_academic_stage: 5,
   teacher: 10,
   subject: 10,
   teacher_subject: 20,
@@ -1402,6 +1404,10 @@ export class SyncEngine {
     this.lastSyncAttempt.clear();
   }
 
+  static getLastSyncAttempt(centerId: string): number {
+    return this.lastSyncAttempt.get(centerId) || 0;
+  }
+
   static getArabicState(): string {
     return ARABIC_SYNC_STATES[this.currentState] || "متصل";
   }
@@ -1666,6 +1672,14 @@ export class SyncEngine {
       [centerId],
     );
     for (const override of overrides) queue("package_teacher_override", override.id, override);
+
+    const stageRow = db.getFirstSync<{ stagesJson: string }>(
+      "SELECT stages_json as stagesJson FROM center_academic_stages WHERE center_id = ?",
+      [centerId],
+    );
+    if (stageRow?.stagesJson && !snapshot.academicStages) {
+      queue("center_academic_stage", centerId, { stages_json: stageRow.stagesJson });
+    }
 
     return queued;
   }
@@ -2183,6 +2197,15 @@ export class SyncEngine {
             [c.id, `bootstrap-${c.id}`, c.center_id || centerId, c.business_date || c.businessDate, c.status || "closed", c.closed_by || c.closedBy || null, c.closed_at || c.closedAt || null, Number(c.cash_in_drawer ?? c.total_revenue ?? 0), Number(c.payment_count || 0), c.closed_at || new Date().toISOString(), new Date().toISOString()]);
         }
       }
+      if (data.academicStages) {
+        const rawStages = data.academicStages;
+        const stagesJson = typeof rawStages === "string" ? rawStages : JSON.stringify(rawStages);
+        db.runSync(
+          `INSERT INTO center_academic_stages (center_id, stages_json, updated_at) VALUES (?, ?, ?)
+           ON CONFLICT(center_id) DO UPDATE SET stages_json = excluded.stages_json, updated_at = excluded.updated_at`,
+          [centerId, stagesJson, new Date().toISOString()],
+        );
+      }
 
       if (data.latestServerSeq > 0) {
         SyncRepository.setServerCursor(centerId, String(data.latestServerSeq));
@@ -2609,47 +2632,64 @@ export class SyncEngine {
         ) {
           const g = data.group || data;
           const groupId = g.id || change.entityId;
-          const defaultFee = Number(g.default_fee || g.defaultFee || 0);
-          const sessionPrice = Number(
-            g.session_price || g.sessionPrice || defaultFee,
-          );
-          const monthlyPrice = Number(
-            g.monthly_price || g.monthlyPrice || defaultFee * 4,
-          );
-          db.runSync(
-            `INSERT INTO groups (id, center_id, name, teacher_id, subject_id, grade, default_fee, session_price, monthly_price, session_duration_minutes, late_after_minutes, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT(id) DO UPDATE SET name=excluded.name, teacher_id=excluded.teacher_id, subject_id=excluded.subject_id, grade=excluded.grade, default_fee=excluded.default_fee, session_price=excluded.session_price, monthly_price=excluded.monthly_price, session_duration_minutes=excluded.session_duration_minutes, late_after_minutes=excluded.late_after_minutes, status=excluded.status, updated_at=excluded.updated_at`,
-            [
-              groupId,
-              centerId,
-              g.name || "مجموعة",
-              g.teacher_id || g.teacherId,
-              g.subject_id || g.subjectId,
-              g.grade || "الصف الثالث الثانوي",
-              defaultFee,
-              sessionPrice,
-              monthlyPrice,
-              Number(g.session_duration_minutes || 120),
-              Number(g.late_after_minutes || 15),
-              g.status === "archived" ? "inactive" : (g.status || "active"),
-              g.created_at || new Date().toISOString(),
-              g.updated_at || new Date().toISOString(),
-            ],
-          );
-          if ((g.teacher_id || g.teacherId) && (g.subject_id || g.subjectId)) {
-            try {
-              db.runSync(
-                `INSERT OR IGNORE INTO teacher_subjects (id, center_id, teacher_id, subject_id, created_at) VALUES (?, ?, ?, ?, ?)`,
-                [
-                  `ts-${centerId}-${g.teacher_id || g.teacherId}-${g.subject_id || g.subjectId}`,
-                  centerId,
-                  g.teacher_id || g.teacherId,
-                  g.subject_id || g.subjectId,
-                  new Date().toISOString(),
-                ],
-              );
-            } catch {}
+          const action = String(change.action || change.operationType || "").toUpperCase();
+          if (action === "DELETE" || action === "REMOVE") {
+            db.runSync("DELETE FROM group_schedules WHERE center_id = ? AND group_id = ?", [centerId, groupId]);
+            db.runSync("DELETE FROM groups WHERE center_id = ? AND id = ?", [centerId, groupId]);
+          } else {
+            const defaultFee = Number(g.default_fee || g.defaultFee || 0);
+            const sessionPrice = Number(
+              g.session_price || g.sessionPrice || defaultFee,
+            );
+            const monthlyPrice = Number(
+              g.monthly_price || g.monthlyPrice || defaultFee * 4,
+            );
+            db.runSync(
+              `INSERT INTO groups (id, center_id, name, teacher_id, subject_id, grade, default_fee, session_price, monthly_price, session_duration_minutes, late_after_minutes, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(id) DO UPDATE SET name=excluded.name, teacher_id=excluded.teacher_id, subject_id=excluded.subject_id, grade=excluded.grade, default_fee=excluded.default_fee, session_price=excluded.session_price, monthly_price=excluded.monthly_price, session_duration_minutes=excluded.session_duration_minutes, late_after_minutes=excluded.late_after_minutes, status=excluded.status, updated_at=excluded.updated_at`,
+              [
+                groupId,
+                centerId,
+                g.name || "مجموعة",
+                g.teacher_id || g.teacherId,
+                g.subject_id || g.subjectId,
+                g.grade || "الصف الثالث الثانوي",
+                defaultFee,
+                sessionPrice,
+                monthlyPrice,
+                Number(g.session_duration_minutes || 120),
+                Number(g.late_after_minutes || 15),
+                g.status === "archived" ? "inactive" : (g.status || "active"),
+                g.created_at || new Date().toISOString(),
+                g.updated_at || new Date().toISOString(),
+              ],
+            );
+            if ((g.teacher_id || g.teacherId) && (g.subject_id || g.subjectId)) {
+              try {
+                db.runSync(
+                  `INSERT OR IGNORE INTO teacher_subjects (id, center_id, teacher_id, subject_id, created_at) VALUES (?, ?, ?, ?, ?)`,
+                  [
+                    `ts-${centerId}-${g.teacher_id || g.teacherId}-${g.subject_id || g.subjectId}`,
+                    centerId,
+                    g.teacher_id || g.teacherId,
+                    g.subject_id || g.subjectId,
+                    new Date().toISOString(),
+                  ],
+                );
+              } catch {}
+            }
           }
+        } else if (
+          entityType === "center_academic_stage" ||
+          entityType === "center_academic_stages"
+        ) {
+          const raw = data.stages || data.stages_json || data;
+          const stagesJson = typeof raw === "string" ? raw : JSON.stringify(raw);
+          db.runSync(
+            `INSERT INTO center_academic_stages (center_id, stages_json, updated_at) VALUES (?, ?, ?)
+             ON CONFLICT(center_id) DO UPDATE SET stages_json = excluded.stages_json, updated_at = excluded.updated_at`,
+            [centerId, stagesJson, new Date().toISOString()],
+          );
         } else if (
           entityType === "attendance" ||
           entityType === "attendance_marked"

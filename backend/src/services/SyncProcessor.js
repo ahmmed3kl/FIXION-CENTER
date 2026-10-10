@@ -113,6 +113,7 @@ const SYNC_ENTITY_ALIASES = {
   attendance_marked: "attendance",
 };
 const SYNC_ENTITY_PRIORITY = {
+  center_academic_stage: 5,
   teacher: 10,
   subject: 10,
   package: 15,
@@ -1537,11 +1538,45 @@ class SyncProcessor {
         break;
       }
 
+      case "center_academic_stage":
+      case "center_academic_stages": {
+        const stages = payload.stages || payload.stages_json || payload;
+        const stagesJson = typeof stages === "string" ? stages : JSON.stringify(stages);
+        await client.query(
+          `INSERT INTO center_academic_stages (center_id, stages_json, updated_at)
+           VALUES ($1, $2::jsonb, NOW())
+           ON CONFLICT (center_id) DO UPDATE SET
+             stages_json = EXCLUDED.stages_json,
+             updated_at = NOW();`,
+          [centerId, stagesJson],
+        );
+        break;
+      }
+
       case "group":
       case "group_created":
       case "group_updated": {
         const grp = payload.group || payload;
         const groupId = grp.id || grp.groupId || context.entityId;
+        const operation = String(context.operationType || "").toUpperCase();
+        if (operation === "DELETE" || operation === "REMOVE") {
+          const enrollments = await client.query(
+            `SELECT COUNT(*)::int AS count FROM student_group_enrollments WHERE center_id = $1 AND group_id = $2`,
+            [centerId, groupId],
+          );
+          if (enrollments.rows[0]?.count > 0) {
+            throw new Error("لا يمكن حذف مجموعة لها تسجيلات؛ عطّلها للحفاظ على السجل.");
+          }
+          await client.query(
+            `DELETE FROM group_schedules WHERE center_id = $1 AND group_id = $2`,
+            [centerId, groupId],
+          );
+          await client.query(
+            `DELETE FROM groups WHERE center_id = $1 AND id = $2`,
+            [centerId, groupId],
+          );
+          break;
+        }
         const groupStatus = (grp.status || "active") === "inactive" ? "archived" : (grp.status || "active");
         const existingGroup = await client.query(
           `SELECT name, teacher_id, subject_id, grade, default_fee, session_price,
@@ -1555,7 +1590,7 @@ class SyncProcessor {
         const monthlyPrice = Number(grp.monthly_price ?? grp.monthlyPrice ?? previous.monthly_price ?? defaultFee * 4);
         const duration = Number(grp.session_duration_minutes ?? grp.sessionDurationMinutes ?? previous.session_duration_minutes ?? 120);
         const lateAfter = Number(grp.late_after_minutes ?? grp.lateAfterMinutes ?? previous.late_after_minutes ?? 15);
-        await client.query(
+        const groupWrite = await client.query(
           `INSERT INTO groups
              (id, center_id, name, teacher_id, subject_id, grade, default_fee, session_price,
               monthly_price, session_duration_minutes, late_after_minutes, status, created_at, updated_at)
@@ -1571,7 +1606,8 @@ class SyncProcessor {
              session_duration_minutes = EXCLUDED.session_duration_minutes,
              late_after_minutes = EXCLUDED.late_after_minutes,
              status = EXCLUDED.status,
-             updated_at = NOW();`,
+             updated_at = NOW()
+           WHERE groups.center_id = EXCLUDED.center_id;`,
           [
             groupId,
             centerId,
@@ -1587,6 +1623,9 @@ class SyncProcessor {
             groupStatus,
           ],
         );
+        if (groupWrite.rowCount === 0) {
+          throw new AppError("GROUP_BELONGS_TO_OTHER_CENTER", "Group belongs to another center.", "المجموعة تابعة لمركز آخر.", 403);
+        }
         break;
       }
 

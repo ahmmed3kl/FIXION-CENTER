@@ -1,4 +1,7 @@
+import { AuditService } from "../../core/audit";
 import { DatabaseService } from "../../core/database";
+import { DeviceService } from "../../core/device";
+import { SyncEngine, SyncRepository } from "../../core/sync";
 import { useAuthStore } from "../auth/useAuthStore";
 
 export const DEFAULT_ACADEMIC_STAGES = [
@@ -43,6 +46,7 @@ export class CenterAcademicStageRepository {
   static saveStages(stages: AcademicStage[]): void {
     const centerId = useAuthStore.getState().activeCenterId;
     if (!centerId) throw new Error("يجب تحديد السنتر أولاً.");
+    const user = useAuthStore.getState().currentUser;
     const seen = new Set<string>();
     const cleaned = stages
       .filter((stage) => stage && typeof stage.id === "string" && typeof stage.label === "string")
@@ -52,11 +56,47 @@ export class CenterAcademicStageRepository {
         grades: Array.from(new Set((stage.grades || []).map((grade) => String(grade).trim()).filter(Boolean))),
       }))
       .filter((stage) => stage.id && stage.label && !seen.has(stage.id) && (seen.add(stage.id), true));
+    const now = new Date().toISOString();
+    const stagesJson = JSON.stringify(cleaned);
     DatabaseService.getDb().runSync(
       `INSERT INTO center_academic_stages (center_id, stages_json, updated_at) VALUES (?, ?, ?)
        ON CONFLICT(center_id) DO UPDATE SET stages_json = excluded.stages_json, updated_at = excluded.updated_at`,
-      [centerId, JSON.stringify(cleaned), new Date().toISOString()],
+      [centerId, stagesJson, now],
     );
+
+    const deviceId = DeviceService.getDeviceIdSync();
+    const operationId = `op-stages-${Date.now()}-${centerId}`;
+
+    AuditService.recordEvent({
+      operationId,
+      centerId,
+      userId: user?.id || "system",
+      deviceId,
+      entityType: "center_academic_stage",
+      entityId: centerId,
+      action: "academic_stages.update",
+      payload: { stages: cleaned },
+    });
+
+    SyncRepository.enqueueOperation({
+      operationId,
+      centerId,
+      userId: user?.id || "system",
+      deviceId,
+      operationType: "UPDATE",
+      entityType: "center_academic_stage",
+      entityId: centerId,
+      payload: {
+        centerId,
+        stages: cleaned,
+        stages_json: stagesJson,
+        updatedAt: now,
+      },
+    });
+
+    SyncEngine.syncCenterNow(centerId).catch((err) => {
+      console.warn("Auto-sync academic stages notice:", err);
+    });
   }
 
   static addStage(label: string, grades: string[] = []): AcademicStage[] {

@@ -443,6 +443,9 @@ export class GroupRepository {
       entityId: groupId,
       payload: { status: "inactive", baseUpdatedAt: existing.updatedAt ?? null, updatedAt: now },
     });
+    SyncEngine.syncCenterNow(centerId).catch((err) => {
+      console.warn("Auto-sync group deactivation notice:", err);
+    });
   }
 
   static reactivateGroup(groupId: string): void {
@@ -453,6 +456,9 @@ export class GroupRepository {
     const operationId = `op-grp-reactivate-${Date.now()}-${groupId}`; const deviceId = DeviceService.getDeviceIdSync();
     AuditService.recordEvent({ operationId, centerId, userId: user.id, deviceId, entityType: "group", entityId: groupId, action: "group.reactivate", payload: {} });
     SyncRepository.enqueueOperation({ operationId, centerId, userId: user.id, deviceId, operationType: "UPDATE", entityType: "group", entityId: groupId, payload: { status: "active", baseUpdatedAt: existing.updatedAt ?? null, updatedAt: now } });
+    SyncEngine.syncCenterNow(centerId).catch((err) => {
+      console.warn("Auto-sync group reactivation notice:", err);
+    });
   }
 
   static deleteGroup(groupId: string): void {
@@ -467,5 +473,8 @@ export class GroupRepository {
     const operationId = `op-grp-delete-${Date.now()}-${groupId}`; const deviceId = DeviceService.getDeviceIdSync();
     AuditService.recordEvent({ operationId, centerId, userId: user.id, deviceId, entityType: "group", entityId: groupId, action: "group.delete", payload: { name: existing.name } });
     SyncRepository.enqueueOperation({ operationId, centerId, userId: user.id, deviceId, operationType: "DELETE", entityType: "group", entityId: groupId, payload: { id: groupId, baseUpdatedAt: existing.updatedAt ?? null } });
+    SyncEngine.syncCenterNow(centerId).catch((err) => {
+      console.warn("Auto-sync group delete notice:", err);
+    });
   }
 }

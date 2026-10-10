@@ -132,6 +132,13 @@ CREATE TABLE IF NOT EXISTS teacher_subjects (
     CONSTRAINT uq_center_teacher_subject UNIQUE (center_id, teacher_id, subject_id)
 );
 
+-- Center Academic Stages
+CREATE TABLE IF NOT EXISTS center_academic_stages (
+    center_id VARCHAR(64) PRIMARY KEY REFERENCES centers(id) ON DELETE CASCADE,
+    stages_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 -- Groups
 CREATE TABLE IF NOT EXISTS groups (
     id VARCHAR(64) PRIMARY KEY,

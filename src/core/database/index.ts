@@ -1147,6 +1147,7 @@ class InMemorySqliteMock implements SqlDatabase {
     this.tables.set("grade_scores", []);
     this.tables.set("homework_evaluation_statuses", []);
     this.tables.set("session_homework_evaluations", []);
+    this.tables.set("center_academic_stages", []);
   }
 
   execSync(sql: string): void {
@@ -1214,8 +1215,9 @@ class InMemorySqliteMock implements SqlDatabase {
         // Basic SQLite-compatible upsert behavior for the in-memory test DB.
         // Most sync writes use ON CONFLICT(id) DO UPDATE; merge those rows
         // instead of incorrectly raising a duplicate-key error.
-        if (trimmed.toUpperCase().includes("ON CONFLICT") && row.id != null) {
-          const existingIndex = list.findIndex((r) => r.id === row.id);
+        if (trimmed.toUpperCase().includes("ON CONFLICT") && (row.id != null || row.center_id != null)) {
+          const keyField = row.id != null ? "id" : "center_id";
+          const existingIndex = list.findIndex((r) => r[keyField] === row[keyField]);
           if (existingIndex >= 0) {
             list[existingIndex] = { ...list[existingIndex], ...row };
             this.tables.set(tableName, list);
@@ -2057,6 +2059,30 @@ class InMemorySqliteMock implements SqlDatabase {
           );
         }
       }
+      if (trimmed.includes("FROM groups")) {
+        const list = this.tables.get("groups") || [];
+        const id = params[params.length - 1];
+        this.tables.set(
+          "groups",
+          list.filter((r) => r.id !== id),
+        );
+      }
+      if (trimmed.includes("FROM group_schedules")) {
+        const list = this.tables.get("group_schedules") || [];
+        if (trimmed.includes("group_id = ?")) {
+          const groupId = params[params.length - 1];
+          this.tables.set(
+            "group_schedules",
+            list.filter((r) => r.group_id !== groupId),
+          );
+        } else if (trimmed.includes("id = ?")) {
+          const id = params[params.length - 1];
+          this.tables.set(
+            "group_schedules",
+            list.filter((r) => r.id !== id),
+          );
+        }
+      }
       return { lastInsertRowId: 0, changes: 1 };
     }
     return { lastInsertRowId: 0, changes: 0 };
@@ -2079,6 +2105,17 @@ class InMemorySqliteMock implements SqlDatabase {
 
     if (trimmed.includes("FROM centers")) {
       return (this.tables.get("centers") || []) as T[];
+    }
+
+    if (trimmed.includes("FROM center_academic_stages")) {
+      const centerId = params[0];
+      const rows = this.tables.get("center_academic_stages") || [];
+      return rows
+        .filter((row) => row.center_id === centerId)
+        .map((row) => ({
+          ...row,
+          stagesJson: row.stages_json,
+        })) as T[];
     }
 
     if (trimmed.includes("FROM sessions")) {
@@ -2674,6 +2711,48 @@ class InMemorySqliteMock implements SqlDatabase {
 
     if (trimmed.includes("FROM group_schedules")) {
       const list = this.tables.get("group_schedules") || [];
+      if (
+        trimmed.includes("FROM group_schedules gs") &&
+        trimmed.includes("JOIN group_schedules own") &&
+        params.length >= 4
+      ) {
+        const [groupId, centerId, excludedGroupId, teacherId] = params;
+        const groups = this.tables.get("groups") || [];
+        const ownSchedules = list.filter(
+          (row) =>
+            row.center_id === centerId &&
+            row.group_id === groupId &&
+            row.status === "active",
+        );
+        const conflicts = list.flatMap((schedule) => {
+          if (
+            schedule.center_id !== centerId ||
+            schedule.group_id === excludedGroupId ||
+            schedule.status !== "active"
+          ) {
+            return [];
+          }
+          const group = groups.find(
+            (row) =>
+              row.center_id === centerId &&
+              row.id === schedule.group_id &&
+              row.teacher_id === teacherId,
+          );
+          if (!group) return [];
+          return ownSchedules
+            .filter(
+              (own) =>
+                own.day_of_week === schedule.day_of_week &&
+                !(own.end_time <= schedule.start_time || own.start_time >= schedule.end_time),
+            )
+            .map((own) => ({
+              groupName: group.name,
+              startTime: schedule.start_time,
+              endTime: schedule.end_time,
+            }));
+        });
+        return conflicts.slice(0, 1) as T[];
+      }
       const mapped = list.map((r) => ({
         id: r.id,
         centerId: r.center_id,

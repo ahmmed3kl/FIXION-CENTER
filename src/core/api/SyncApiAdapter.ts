@@ -41,6 +41,7 @@ export interface BootstrapResponse {
   gradeScores?: any[];
   homeworkEvaluationStatuses?: any[];
   sessionHomeworkEvaluations?: any[];
+  academicStages?: any;
   resetGeneration?: number;
   /** Time at which the server reset generation was advanced. */
   resetAt?: string;

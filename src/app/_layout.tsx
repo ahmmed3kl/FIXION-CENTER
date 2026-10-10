@@ -7,7 +7,7 @@ import { SafeAreaProvider } from "react-native-safe-area-context";
 import { DatabaseService } from "../core/database";
 import { ConnectivityService } from "../core/connectivity";
 import { initializeRTL } from "../core/localization";
-import { SyncEngine } from "../core/sync";
+import { SyncEngine, SyncRepository } from "../core/sync";
 import { registerBackgroundSync } from "../core/sync/backgroundTask";
 import "../core/database/registerAtomicRepositories";
 import { ThemeProvider, useTheme } from "../core/theme";
@@ -31,9 +31,11 @@ function AuthGuard({ children }: { children: React.ReactNode }) {
     restoreSession();
   }, []);
 
-  // Keep the sync engine connected to the real device network state. When
-  // Wi‑Fi/internet returns, pending local operations and server changes are
-  // synchronized automatically for the active center.
+  // Automatic synchronization:
+  // 1. On app open / authentication restored.
+  // 2. When internet connectivity is restored (offline -> online).
+  // 3. When the app resumes from background (AppState active) if pending operations exist or data is stale.
+  // SyncEngine locks and rate limiting protect against duplicate or concurrent sync cycles.
   useEffect(() => {
     if (!isAuthenticated || !activeCenterId) return;
 
@@ -44,22 +46,35 @@ function AuthGuard({ children }: { children: React.ReactNode }) {
         console.warn("Automatic sync failed:", error);
       });
     };
+
+    // 1. Immediate sync on app open / session restored
+    sync();
+
+    // 2. Network state monitoring: trigger sync once on reconnect.
     const stopMonitoring = ConnectivityService.startMonitoring(() => {
       sync();
     });
+
     registerBackgroundSync();
+
+    // 3. AppState resume: trigger sync when foregrounded if operations are pending or cache is stale
     const appStateSubscription = AppState.addEventListener("change", (state) => {
-      if (state === "active") sync();
+      if (state === "active") {
+        if (disposed) return;
+        if (ConnectivityService.getState() === "offline") return;
+        const pendingCount = SyncRepository.getPendingOperationsCount(activeCenterId);
+        const lastSync = SyncEngine.getLastSyncAttempt(activeCenterId);
+        const isStale = Date.now() - lastSync > 15_000;
+        if (pendingCount > 0 || isStale) {
+          sync();
+        }
+      }
     });
-    // Retry while the app remains foregrounded. Native background execution
-    // still requires a separately configured Expo background task.
-    const interval = setInterval(sync, 30_000);
 
     return () => {
       disposed = true;
       stopMonitoring();
       appStateSubscription.remove();
-      clearInterval(interval);
     };
   }, [isAuthenticated, activeCenterId]);
 

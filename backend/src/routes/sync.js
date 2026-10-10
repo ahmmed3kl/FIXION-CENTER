@@ -19,7 +19,12 @@ function requiredPermission(operation) {
   if (entity === "teacher" || entity.startsWith("teacher_")) return action.includes("create") ? "teachers.create" : "teachers.update";
   if (entity === "subject" || entity.startsWith("subject_")) return action.includes("create") ? "subjects.create" : "subjects.update";
   if (entity === "group_schedule") return "groups.schedule.manage";
-  if (entity === "group" || entity.startsWith("group_")) return action.includes("create") ? "groups.create" : "groups.update";
+  if (entity === "group" || entity.startsWith("group_")) {
+    if (action.includes("create")) return "groups.create";
+    if (action.includes("delete") || action.includes("deactivate")) return "groups.deactivate";
+    return "groups.update";
+  }
+  if (entity === "center_academic_stage" || entity === "center_academic_stages") return "groups.create";
   if (entity === "enrollment" || entity === "student_group_enrollment") return action.includes("create") ? "enrollments.create" : "enrollments.update";
   if (entity === "session") return String(operation.payload?.action || "").toLowerCase() === "close" ? "sessions.close" : String(operation.payload?.action || "").toLowerCase() === "reopen" ? "sessions.reopen" : "attendance.create";
   if (entity === "attendance" || entity === "advance_coverage") return "attendance.create";
@@ -45,6 +50,7 @@ function assertSyncPermission(req, operation) {
   if (String(operation.operationType || operation.operation_type || "").toUpperCase() === "REPAIR_AFTER_SERVER_RESET") return;
   const permission = requiredPermission(operation);
   const entity = String(operation.entityType || operation.entity_type || "").toLowerCase();
+  const action = String(operation.operationType || operation.operation_type || operation.payload?.action || "").toLowerCase();
   if (req.user.role === "admin" || req.user.role === "owner") return;
   const permissions = req.user.permissions || {};
   if (entity === "session_homework_evaluation") {
@@ -53,6 +59,17 @@ function assertSyncPermission(req, operation) {
       ? permissions.includes(candidate)
       : permissions[candidate] === true)) return;
     throw new AppError("FORBIDDEN", "Missing required homework evaluation permission.", "ليس لديك الصلاحية الكافية لمزامنة تقييم الواجب.", 403);
+  }
+  if (entity === "group" || entity.startsWith("group_")) {
+    if (action.includes("delete") || action.includes("deactivate")) {
+      const allowed = ["groups.deactivate", "groups.update"];
+      if (allowed.some((p) => Array.isArray(permissions) ? permissions.includes(p) : permissions[p] === true)) return;
+    }
+  }
+  if (entity === "center_academic_stage" || entity === "center_academic_stages") {
+    const allowed = ["center.settings.manage", "groups.create", "groups.update"];
+    if (allowed.some((p) => Array.isArray(permissions) ? permissions.includes(p) : permissions[p] === true)) return;
+    throw new AppError("FORBIDDEN", "Missing required academic stages permission.", "ليس لديك الصلاحية الكافية لمزامنة المراحل الدراسية.", 403);
   }
   if (!permission) return;
   if (Array.isArray(permissions) ? permissions.includes(permission) : permissions[permission] === true) return;
@@ -108,6 +125,7 @@ router.get(
           gradeScoresRes,
           homeworkStatusesRes,
           homeworkEvaluationsRes,
+          academicStagesRes,
           resetStateRes,
           maxSeqRes,
         ] = await Promise.all([
@@ -140,6 +158,7 @@ router.get(
           client.query("SELECT * FROM grade_scores WHERE center_id = $1", [centerId]),
           client.query("SELECT * FROM homework_evaluation_statuses WHERE center_id = $1", [centerId]),
           client.query("SELECT * FROM session_homework_evaluations WHERE center_id = $1", [centerId]),
+          client.query("SELECT * FROM center_academic_stages WHERE center_id = $1", [centerId]).catch(() => ({ rows: [] })),
           client.query("SELECT reset_generation, updated_at FROM center_data_state WHERE center_id = $1", [centerId]),
           client.query("SELECT COALESCE(MAX(server_seq), 0) as max_seq FROM server_sync_operations WHERE center_id = $1", [centerId]),
         ]);
@@ -175,6 +194,7 @@ router.get(
         gradeScores: gradeScoresRes.rows,
         homeworkEvaluationStatuses: homeworkStatusesRes.rows,
         sessionHomeworkEvaluations: homeworkEvaluationsRes.rows,
+        academicStages: academicStagesRes.rows[0]?.stages_json || null,
         resetGeneration: Number(resetStateRes.rows[0]?.reset_generation || 0),
         resetAt: resetStateRes.rows[0]?.updated_at || null,
         latestServerSeq: parseInt(maxSeqRes.rows[0]?.max_seq || 0, 10),
