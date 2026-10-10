@@ -13,6 +13,7 @@ import { DeviceRepository, DeviceService } from "../device";
 import { DatabaseError } from "../errors";
 import { Logger } from "../logger";
 import { getLocalDateOnly } from "../../shared/utils/date";
+import { CardRangeRepository } from "../../features/students/CardRangeRepository";
 
 export type SyncEngineState = "online" | "offline" | "syncing" | "error";
 
@@ -2204,6 +2205,14 @@ export class SyncEngine {
           `INSERT INTO center_academic_stages (center_id, stages_json, updated_at) VALUES (?, ?, ?)
            ON CONFLICT(center_id) DO UPDATE SET stages_json = excluded.stages_json, updated_at = excluded.updated_at`,
           [centerId, stagesJson, new Date().toISOString()],
+        );
+      }
+      if (Array.isArray(data.cardRanges)) {
+        CardRangeRepository.replaceCenterRanges(
+          centerId,
+          data.cardRanges.filter(
+            (range) => !range.center_id || range.center_id === centerId,
+          ),
         );
       }
 

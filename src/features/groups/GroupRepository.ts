@@ -2,15 +2,15 @@ import { AuditService } from "../../core/audit";
 import { DatabaseService } from "../../core/database";
 import { DeviceService } from "../../core/device";
 import {
-    ConflictError,
-    ForbiddenError,
-    NotFoundError,
-    UnauthorizedError,
-    ValidationError,
+  ConflictError,
+  ForbiddenError,
+  NotFoundError,
+  UnauthorizedError,
+  ValidationError,
 } from "../../core/errors";
 import {
-    PermissionService,
-    resolveUserPermissions
+  PermissionService,
+  resolveUserPermissions,
 } from "../../core/permissions";
 import { SyncEngine, SyncRepository } from "../../core/sync";
 import { Group } from "../../shared/types";
@@ -300,7 +300,10 @@ export class GroupRepository {
        LIMIT 1`,
       [groupId, centerId, groupId, teacherId],
     );
-    if (scheduleConflict) throw new ConflictError(`المدرس مشغول مع ${scheduleConflict.groupName || "مجموعة أخرى"} (${scheduleConflict.startTime} - ${scheduleConflict.endTime}).`);
+    if (scheduleConflict)
+      throw new ConflictError(
+        `المدرس مشغول مع ${scheduleConflict.groupName || "مجموعة أخرى"} (${scheduleConflict.startTime} - ${scheduleConflict.endTime}).`,
+      );
     const now = new Date().toISOString();
     const name = dto.name !== undefined ? dto.name.trim() : existing.name;
     const grade = dto.grade !== undefined ? dto.grade.trim() : existing.grade;
@@ -441,7 +444,11 @@ export class GroupRepository {
       operationType: "UPDATE",
       entityType: "group",
       entityId: groupId,
-      payload: { status: "inactive", baseUpdatedAt: existing.updatedAt ?? null, updatedAt: now },
+      payload: {
+        status: "inactive",
+        baseUpdatedAt: existing.updatedAt ?? null,
+        updatedAt: now,
+      },
     });
     SyncEngine.syncCenterNow(centerId).catch((err) => {
       console.warn("Auto-sync group deactivation notice:", err);
@@ -450,12 +457,41 @@ export class GroupRepository {
 
   static reactivateGroup(groupId: string): void {
     const { centerId, user } = this.getActiveContext();
-    if (!PermissionService.hasPermission(user.permissions, "groups.update")) throw new ForbiddenError("ليس لديك صلاحية إعادة تفعيل المجموعة.");
-    const existing = this.findById(groupId); if (!existing) throw new NotFoundError("المجموعة غير موجودة.");
-    const now = new Date().toISOString(); DatabaseService.getDb().runSync("UPDATE groups SET status='active', updated_at=? WHERE center_id=? AND id=?", [now, centerId, groupId]);
-    const operationId = `op-grp-reactivate-${Date.now()}-${groupId}`; const deviceId = DeviceService.getDeviceIdSync();
-    AuditService.recordEvent({ operationId, centerId, userId: user.id, deviceId, entityType: "group", entityId: groupId, action: "group.reactivate", payload: {} });
-    SyncRepository.enqueueOperation({ operationId, centerId, userId: user.id, deviceId, operationType: "UPDATE", entityType: "group", entityId: groupId, payload: { status: "active", baseUpdatedAt: existing.updatedAt ?? null, updatedAt: now } });
+    if (!PermissionService.hasPermission(user.permissions, "groups.update"))
+      throw new ForbiddenError("ليس لديك صلاحية إعادة تفعيل المجموعة.");
+    const existing = this.findById(groupId);
+    if (!existing) throw new NotFoundError("المجموعة غير موجودة.");
+    const now = new Date().toISOString();
+    DatabaseService.getDb().runSync(
+      "UPDATE groups SET status='active', updated_at=? WHERE center_id=? AND id=?",
+      [now, centerId, groupId],
+    );
+    const operationId = `op-grp-reactivate-${Date.now()}-${groupId}`;
+    const deviceId = DeviceService.getDeviceIdSync();
+    AuditService.recordEvent({
+      operationId,
+      centerId,
+      userId: user.id,
+      deviceId,
+      entityType: "group",
+      entityId: groupId,
+      action: "group.reactivate",
+      payload: {},
+    });
+    SyncRepository.enqueueOperation({
+      operationId,
+      centerId,
+      userId: user.id,
+      deviceId,
+      operationType: "UPDATE",
+      entityType: "group",
+      entityId: groupId,
+      payload: {
+        status: "active",
+        baseUpdatedAt: existing.updatedAt ?? null,
+        updatedAt: now,
+      },
+    });
     SyncEngine.syncCenterNow(centerId).catch((err) => {
       console.warn("Auto-sync group reactivation notice:", err);
     });
@@ -463,16 +499,49 @@ export class GroupRepository {
 
   static deleteGroup(groupId: string): void {
     const { centerId, user } = this.getActiveContext();
-    if (!PermissionService.hasPermission(user.permissions, "groups.deactivate")) throw new ForbiddenError("ليس لديك صلاحية حذف المجموعة.");
-    const existing = this.findById(groupId); if (!existing) throw new NotFoundError("المجموعة غير موجودة.");
+    if (!PermissionService.hasPermission(user.permissions, "groups.deactivate"))
+      throw new ForbiddenError("ليس لديك صلاحية حذف المجموعة.");
+    const existing = this.findById(groupId);
+    if (!existing) throw new NotFoundError("المجموعة غير موجودة.");
     const db = DatabaseService.getDb();
-    const refs = db.getFirstSync<{ count: number }>("SELECT COUNT(*) as count FROM student_group_enrollments WHERE center_id=? AND group_id=?", [centerId, groupId]);
-    if ((refs?.count || 0) > 0) throw new ValidationError("لا يمكن حذف مجموعة لها تسجيلات؛ عطّلها للحفاظ على السجل.");
-    db.runSync("DELETE FROM group_schedules WHERE center_id=? AND group_id=?", [centerId, groupId]);
-    db.runSync("DELETE FROM groups WHERE center_id=? AND id=?", [centerId, groupId]);
-    const operationId = `op-grp-delete-${Date.now()}-${groupId}`; const deviceId = DeviceService.getDeviceIdSync();
-    AuditService.recordEvent({ operationId, centerId, userId: user.id, deviceId, entityType: "group", entityId: groupId, action: "group.delete", payload: { name: existing.name } });
-    SyncRepository.enqueueOperation({ operationId, centerId, userId: user.id, deviceId, operationType: "DELETE", entityType: "group", entityId: groupId, payload: { id: groupId, baseUpdatedAt: existing.updatedAt ?? null } });
+    const refs = db.getFirstSync<{ count: number }>(
+      "SELECT COUNT(*) as count FROM student_group_enrollments WHERE center_id=? AND group_id=?",
+      [centerId, groupId],
+    );
+    if ((refs?.count || 0) > 0)
+      throw new ValidationError(
+        "لا يمكن حذف مجموعة لها تسجيلات؛ عطّلها للحفاظ على السجل.",
+      );
+    db.runSync("DELETE FROM group_schedules WHERE center_id=? AND group_id=?", [
+      centerId,
+      groupId,
+    ]);
+    db.runSync("DELETE FROM groups WHERE center_id=? AND id=?", [
+      centerId,
+      groupId,
+    ]);
+    const operationId = `op-grp-delete-${Date.now()}-${groupId}`;
+    const deviceId = DeviceService.getDeviceIdSync();
+    AuditService.recordEvent({
+      operationId,
+      centerId,
+      userId: user.id,
+      deviceId,
+      entityType: "group",
+      entityId: groupId,
+      action: "group.delete",
+      payload: { name: existing.name },
+    });
+    SyncRepository.enqueueOperation({
+      operationId,
+      centerId,
+      userId: user.id,
+      deviceId,
+      operationType: "DELETE",
+      entityType: "group",
+      entityId: groupId,
+      payload: { id: groupId, baseUpdatedAt: existing.updatedAt ?? null },
+    });
     SyncEngine.syncCenterNow(centerId).catch((err) => {
       console.warn("Auto-sync group delete notice:", err);
     });

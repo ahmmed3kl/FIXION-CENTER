@@ -4,14 +4,14 @@ import { StatusBar } from "expo-status-bar";
 import React, { useEffect } from "react";
 import { AppState, View } from "react-native";
 import { SafeAreaProvider } from "react-native-safe-area-context";
-import { DatabaseService } from "../core/database";
 import { ConnectivityService } from "../core/connectivity";
+import { DatabaseService } from "../core/database";
+import "../core/database/registerAtomicRepositories";
 import { initializeRTL } from "../core/localization";
+import { ServiceVisibilityProvider } from "../core/services/ServiceVisibilityContext";
 import { SyncEngine, SyncRepository } from "../core/sync";
 import { registerBackgroundSync } from "../core/sync/backgroundTask";
-import "../core/database/registerAtomicRepositories";
 import { ThemeProvider, useTheme } from "../core/theme";
-import { ServiceVisibilityProvider } from "../core/services/ServiceVisibilityContext";
 import { useAuthStore } from "../features/auth/useAuthStore";
 import { LoadingState } from "../shared/components";
 
@@ -22,7 +22,7 @@ initializeRTL();
 DatabaseService.init();
 
 function AuthGuard({ children }: { children: React.ReactNode }) {
-  const { isAuthenticated, activeCenterId, isLoading, restoreSession } =
+  const { isAuthenticated, activeCenterId, isLoading, restoreSession, refreshPermissions } =
     useAuthStore();
   const segments = useSegments();
   const router = useRouter();
@@ -50,33 +50,55 @@ function AuthGuard({ children }: { children: React.ReactNode }) {
     // 1. Immediate sync on app open / session restored
     sync();
 
-    // 2. Network state monitoring: trigger sync once on reconnect.
+    // 2. Network state monitoring: trigger sync on reconnect
+    let previousConn = ConnectivityService.getState();
     const stopMonitoring = ConnectivityService.startMonitoring(() => {
       sync();
+    });
+    const unsubscribeConn = ConnectivityService.subscribe((state) => {
+      if (state === "online" && previousConn !== "online") {
+        refreshPermissions().catch((error) => {
+          console.warn("Session permission refresh failed:", error);
+        });
+        sync();
+      }
+      previousConn = state;
     });
 
     registerBackgroundSync();
 
     // 3. AppState resume: trigger sync when foregrounded if operations are pending or cache is stale
-    const appStateSubscription = AppState.addEventListener("change", (state) => {
-      if (state === "active") {
-        if (disposed) return;
-        if (ConnectivityService.getState() === "offline") return;
-        const pendingCount = SyncRepository.getPendingOperationsCount(activeCenterId);
-        const lastSync = SyncEngine.getLastSyncAttempt(activeCenterId);
-        const isStale = Date.now() - lastSync > 15_000;
-        if (pendingCount > 0 || isStale) {
-          sync();
+    const appStateSubscription = AppState.addEventListener(
+      "change",
+      (state) => {
+        if (state === "active") {
+          if (disposed) return;
+          if (ConnectivityService.getState() === "offline") return;
+          refreshPermissions().catch((error) => {
+            console.warn("Session permission refresh failed:", error);
+          });
+          const pendingCount =
+            SyncRepository.getPendingOperationsCount(activeCenterId);
+          const lastSync = SyncEngine.getLastSyncAttempt(activeCenterId);
+          const isStale = Date.now() - lastSync > 15_000;
+          if (pendingCount > 0 || isStale) {
+            sync();
+          }
         }
-      }
-    });
+      },
+    );
+
+    // 4. Background periodic retry while app remains active
+    const interval = setInterval(sync, 30_000);
 
     return () => {
       disposed = true;
       stopMonitoring();
+      unsubscribeConn();
       appStateSubscription.remove();
+      clearInterval(interval);
     };
-  }, [isAuthenticated, activeCenterId]);
+  }, [isAuthenticated, activeCenterId, refreshPermissions]);
 
   useEffect(() => {
     if (isLoading) return;
@@ -104,7 +126,9 @@ function AuthGuard({ children }: { children: React.ReactNode }) {
 function ThemeChrome({ children }: { children: React.ReactNode }) {
   const { isDarkMode, colors } = useTheme();
   return (
-    <View style={{ flex: 1, backgroundColor: colors.background, direction: "rtl" }}>
+    <View
+      style={{ flex: 1, backgroundColor: colors.background, direction: "rtl" }}
+    >
       <StatusBar style={isDarkMode ? "light" : "dark"} />
       {children}
     </View>

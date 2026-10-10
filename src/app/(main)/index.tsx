@@ -13,6 +13,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { ConnectivityService } from "../../core/connectivity";
 import { useLocalDataRevision } from "../../core/database/useLocalDataRevision";
 import { Strings, formatCurrency, formatNumber } from "../../core/localization";
+import { PermissionService, resolveUserPermissions } from "../../core/permissions";
 import { SyncEngine, SyncRepository } from "../../core/sync";
 import {
     BorderRadius,
@@ -36,6 +37,12 @@ export default function DashboardScreen() {
   const router = useRouter();
   const { currentUser, activeCenter, activeCenterId, availableCenters } =
     useAuthStore();
+  const userPermissions = resolveUserPermissions(currentUser);
+  const canCreateAttendance = PermissionService.hasPermission(userPermissions, "attendance.create");
+  const canViewAttendance = PermissionService.hasAnyPermission(userPermissions, ["attendance.view", "attendance.create"]);
+  const canViewFinance = PermissionService.hasAnyPermission(userPermissions, ["payments.view", "reports.financial.view"]);
+  const canViewSessions = PermissionService.hasAnyPermission(userPermissions, ["sessions.view", "attendance.view"]);
+  const canManageSync = PermissionService.hasPermission(userPermissions, "sync.manage");
   const localDataRevision = useLocalDataRevision();
   const lastLoadedRevisionRef = useRef(localDataRevision);
   const hasInitialLoadedRef = useRef(false);
@@ -53,8 +60,11 @@ export default function DashboardScreen() {
     // render a false all-zero snapshot during app startup.
     if (!activeCenterId) return;
     try {
-      const s = DashboardService.getTodaySummary();
-      setSummary(s);
+      setSummary(
+        canViewAttendance || canViewFinance || canViewSessions
+          ? DashboardService.getTodaySummary()
+          : null,
+      );
 
       const stats = SyncRepository.getStats(activeCenterId);
       setSyncStats(stats);
@@ -62,7 +72,7 @@ export default function DashboardScreen() {
     } catch (e) {
       console.error("Error loading dashboard data:", e);
     }
-  }, [activeCenterId]);
+  }, [activeCenterId, canViewAttendance, canViewFinance, canViewSessions]);
 
   useFocusEffect(
     useCallback(() => {
@@ -90,7 +100,7 @@ export default function DashboardScreen() {
 
   const onRefresh = async () => {
     setRefreshing(true);
-    if (activeCenterId) {
+    if (activeCenterId && canManageSync) {
       await SyncEngine.syncCenterNow(activeCenterId).catch(console.error);
     }
     loadData();
@@ -98,7 +108,7 @@ export default function DashboardScreen() {
   };
 
   const handleSyncNow = async () => {
-    if (!activeCenterId) return;
+    if (!activeCenterId || !canManageSync) return;
     ConnectivityService.setState("syncing");
     setConnectivity("syncing");
     const result = await SyncEngine.syncCenterNow(activeCenterId);
@@ -136,7 +146,7 @@ export default function DashboardScreen() {
     <SafeAreaView style={styles.safeArea}>
       {/* Top App Header */}
       <View style={styles.headerBar}>
-        <TouchableOpacity style={styles.syncStatusButton} onPress={handleSyncNow}>
+        <TouchableOpacity style={styles.syncStatusButton} onPress={handleSyncNow} disabled={!canManageSync} accessibilityState={{ disabled: !canManageSync }}>
           <Ionicons name={syncIcon as any} size={17} color={syncState === "online" ? "#A7F3D0" : "#FFE08A"} />
           <Text style={styles.syncStatusText}>{syncLabel}</Text>
           {syncStats.pending > 0 ? <Text style={styles.syncPendingText}>({syncStats.pending})</Text> : null}
@@ -162,7 +172,7 @@ export default function DashboardScreen() {
         }
       >
         {/* HERO ACTION: SCAN CARD */}
-        <TouchableOpacity
+        {canCreateAttendance ? <TouchableOpacity
           activeOpacity={0.85}
           onPress={() => router.push("/(main)/scanner")}
           style={styles.heroBanner}
@@ -183,7 +193,7 @@ export default function DashboardScreen() {
             </View>
             <Ionicons name="chevron-back" size={24} color={Colors.white} />
           </View>
-        </TouchableOpacity>
+        </TouchableOpacity> : null}
 
         {/* PENDING SYNC WARNING */}
         {syncStats.pending > 0 && connectivity === "offline" && !pendingWarningDismissed && (
@@ -215,6 +225,7 @@ export default function DashboardScreen() {
         )}
 
         {/* TODAY SUMMARY CARD */}
+        {canViewAttendance ? <>
         <View style={styles.sectionHeadingRow}>
           <Text style={styles.sectionHeader}>{Strings.todaySummaryTitle}</Text>
           <View style={styles.todayBadge}><Ionicons name="calendar-outline" size={14} color={Colors.primary} /><Text style={styles.todayBadgeText}>اليوم</Text></View>
@@ -297,11 +308,12 @@ export default function DashboardScreen() {
             </View>
           </View>
         </AppCard>
+        </> : null}
 
         {/* FINANCIAL & SESSIONS ROW */}
-        <View style={styles.twoColumnRow}>
+        {canViewFinance || canViewSessions ? <View style={styles.twoColumnRow}>
           {/* Today Collections */}
-          <AppCard style={styles.halfCard}>
+          {canViewFinance ? <AppCard style={[styles.halfCard, !canViewSessions ? { width: "100%" } : null]}>
             <View style={styles.cardHeaderRow}>
               <Ionicons name="cash-outline" size={20} color={Colors.success} />
               <Text style={styles.cardTitle}>
@@ -311,10 +323,10 @@ export default function DashboardScreen() {
             <Text style={styles.financialAmount}>
               {formatCurrency(summary?.todayCollections || 0)}
             </Text>
-          </AppCard>
+          </AppCard> : null}
 
           {/* Today Sessions */}
-          <AppCard style={styles.halfCard}>
+          {canViewSessions ? <AppCard style={[styles.halfCard, !canViewFinance ? { width: "100%" } : null]}>
             <View style={styles.cardHeaderRow}>
               <Ionicons
                 name="calendar-outline"
@@ -333,8 +345,8 @@ export default function DashboardScreen() {
                 {formatNumber(summary?.closedSessions || 0)}
               </Text>
             </View>
-          </AppCard>
-        </View>
+          </AppCard> : null}
+        </View> : null}
       </ScrollView>
     </SafeAreaView>
   );

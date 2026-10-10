@@ -123,6 +123,25 @@ button:disabled { cursor: not-allowed; opacity: .58; }
 @media (max-width: 620px) { .page-heading { align-items: stretch; flex-direction: column; gap: 14px; } .page-heading > button { align-self: flex-start; } .kpi-grid { grid-template-columns: repeat(2, 1fr); gap: 9px; } .kpi-card { min-height: 92px; padding: 12px; } .kpi-card strong { font-size: 1.55rem; } .health-grid { grid-template-columns: 1fr; } .panel { padding: 15px; } .toolbar > * { width: 100%; } .toolbar input { min-width: 0; } .pagination { flex-wrap: wrap; } .auth-card { padding: 28px 22px; } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; } }
 
+/* Device records become self-contained cards on narrow screens. */
+.device-card-list { display: none; }
+.devices-page, .device-card, .device-field { min-width: 0; }
+.devices-table td strong { display: block; }
+.devices-table td small { direction: ltr; unicode-bidi: isolate; }
+.devices-table td span[dir="auto"], .devices-table td strong[dir="auto"] { unicode-bidi: plaintext; }
+@media (max-width: 720px) {
+  .devices-page .devices-table { display: none; }
+  .device-card-list { display: grid; gap: 12px; }
+  .device-card { padding: 15px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); box-shadow: var(--shadow); }
+  .device-card-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+  .device-card-heading > strong { min-width: 0; overflow-wrap: anywhere; color: var(--ink); font-size: .95rem; unicode-bidi: plaintext; }
+  .device-fields { display: grid; gap: 0; margin: 12px 0 0; }
+  .device-field { display: grid; grid-template-columns: minmax(112px, .8fr) minmax(0, 1.2fr); gap: 10px; padding: 10px 0; border-top: 1px solid #edf2f7; }
+  .device-field dt { color: var(--muted); font-size: .72rem; font-weight: 700; }
+  .device-field dd { min-width: 0; margin: 0; color: var(--ink); font-size: .76rem; text-align: left; overflow-wrap: anywhere; unicode-bidi: plaintext; }
+  .device-action { width: 100%; margin-top: 12px; min-height: 44px; }
+}
+
 /* Dashboard home refinement */
 .topbar-tools { display: flex; align-items: center; gap: 18px; }
 .header-refresh { display: inline-flex; align-items: center; gap: 7px; border: 0; color: var(--blue-strong); background: transparent; font-size: .76rem; font-weight: 800; }

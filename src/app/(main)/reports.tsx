@@ -10,6 +10,7 @@ import {
   View,
 } from "react-native";
 import { Colors, useTheme } from "../../core/theme";
+import { PermissionService, resolveUserPermissions } from "../../core/permissions";
 import { useServiceVisibility } from "../../core/services/ServiceVisibilityContext";
 import { useAuthStore } from "../../features/auth/useAuthStore";
 import { OperationalReportsService } from "../../features/reports/OperationalReportsService";
@@ -37,7 +38,14 @@ function ReportsContent() {
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(), [colors]);
   const services = useServiceVisibility();
-  const { activeCenterId } = useAuthStore();
+  const { activeCenterId, currentUser } = useAuthStore();
+  const permissions = resolveUserPermissions(currentUser);
+  const canViewAttendanceReports = PermissionService.hasAnyPermission(permissions, ["attendance.view", "reports.attendance.view", "reports.view"]);
+  const canViewStudentReports = canViewAttendanceReports && PermissionService.hasPermission(permissions, "students.view");
+  const canViewFinancialReports = PermissionService.hasAnyPermission(permissions, ["payments.view", "payments.debt.view", "reports.financial.view"]);
+  const canViewCollections = PermissionService.hasAnyPermission(permissions, ["payments.view", "reports.financial.view"]);
+  const canViewTeacherSettlement = PermissionService.hasAnyPermission(permissions, ["payments.view", "reports.financial.view"]);
+  const canViewStudentFinancialReport = canViewFinancialReports && PermissionService.hasPermission(permissions, "students.view");
   const [activeReport, setActiveReport] = useState<"dailyAtt" | "studentAtt" | "dailyCash" | "studentFin" | "teacherSettlement">("dailyAtt");
 
   const [loading, setLoading] = useState(false);
@@ -75,18 +83,59 @@ function ReportsContent() {
   ].join(":");
 
   useEffect(() => {
-    if (!activeCenterId) return;
-    try {
-      const stdList = StudentRepository.getAll();
-      setStudents(stdList);
-      if (stdList.length > 0 && !selectedStudentId) {
-        setSelectedStudentId(stdList[0].id);
-      }
-    } catch (e) {}
-    try { const list = TeacherSettlementService.getTeachers(); setTeachers(list); if (list.length && !settlementTeacherId) setSettlementTeacherId(list[0].id); } catch (e) {}
-  }, [activeCenterId]);
+    if (
+      (activeReport === "dailyAtt" && !canViewAttendanceReports) ||
+      (activeReport === "studentAtt" && !canViewStudentReports) ||
+      (activeReport === "dailyCash" && !canViewCollections) ||
+      (activeReport === "studentFin" && !canViewStudentFinancialReport) ||
+      (activeReport === "teacherSettlement" && !canViewTeacherSettlement)
+    ) {
+      setActiveReport(canViewAttendanceReports ? "dailyAtt" : canViewCollections ? "dailyCash" : canViewStudentFinancialReport ? "studentFin" : canViewTeacherSettlement ? "teacherSettlement" : "dailyAtt");
+      clearActiveReport();
+    }
+  }, [activeReport, canViewAttendanceReports, canViewCollections, canViewStudentReports, canViewStudentFinancialReport, canViewTeacherSettlement]);
 
-  useEffect(() => { if (!settlementTeacherId) return; try { setSettlementGroups(TeacherSettlementService.getGroups(settlementTeacherId)); } catch { setSettlementGroups([]); } setSettlementGroupId(""); }, [settlementTeacherId]);
+  useEffect(() => {
+    if (!activeCenterId) return;
+    if (canViewStudentReports || canViewStudentFinancialReport) {
+      try {
+        const stdList = StudentRepository.getAll();
+        setStudents(stdList);
+        if (stdList.length > 0 && !selectedStudentId) {
+          setSelectedStudentId(stdList[0].id);
+        }
+      }
+      catch (error) { console.error("تعذر تحميل قائمة الطلاب للتقارير المصرح بها:", error); }
+    } else {
+      setStudents([]);
+      setSelectedStudentId("");
+    }
+    if (canViewTeacherSettlement) {
+      try {
+        const list = TeacherSettlementService.getTeachers();
+        setTeachers(list);
+        if (list.length && !settlementTeacherId) setSettlementTeacherId(list[0].id);
+      } catch (error) { console.error("تعذر تحميل قائمة المدرسين للتقارير المصرح بها:", error); }
+    } else {
+      setTeachers([]);
+      setSettlementTeacherId("");
+    }
+  }, [activeCenterId, canViewStudentReports, canViewStudentFinancialReport, canViewTeacherSettlement]);
+
+  useEffect(() => {
+    if (!canViewTeacherSettlement || !settlementTeacherId) {
+      setSettlementGroups([]);
+      setSettlementGroupId("");
+      return;
+    }
+    try {
+      setSettlementGroups(TeacherSettlementService.getGroups(settlementTeacherId));
+    } catch (error) {
+      console.error("تعذر تحميل مجموعات تقرير التسوية:", error);
+      setSettlementGroups([]);
+    }
+    setSettlementGroupId("");
+  }, [canViewTeacherSettlement, settlementTeacherId]);
 
   const clearActiveReport = () => {
     setReportResultKey("");
@@ -101,6 +150,16 @@ function ReportsContent() {
   const loadReport = () => {
     setReportError("");
     clearActiveReport();
+    if (
+      (activeReport === "dailyAtt" && !canViewAttendanceReports) ||
+      (activeReport === "studentAtt" && !canViewStudentReports) ||
+      (activeReport === "dailyCash" && !canViewCollections) ||
+      (activeReport === "studentFin" && !canViewStudentFinancialReport) ||
+      (activeReport === "teacherSettlement" && !canViewTeacherSettlement)
+    ) {
+      setLoading(false);
+      return;
+    }
     if (!activeCenterId) {
       setLoading(false);
       return;
@@ -160,42 +219,45 @@ function ReportsContent() {
         <Text style={styles.headerTitle}>التقارير التشغيلية</Text>
         <Text style={styles.headerSubtitle}>تقارير الحضور والغياب اليومية والتحصيلات النقدية</Text>
       </View>
+      {!canViewAttendanceReports && !canViewFinancialReports ? (
+        <Text style={styles.loadingText}>لا تملك صلاحية عرض تقارير الحضور أو التقارير المالية.</Text>
+      ) : null}
 
       {/* Report Selector Pills */}
       <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.pillsContainer}>
-        <TouchableOpacity
+        {canViewAttendanceReports ? <TouchableOpacity
           style={[styles.pill, activeReport === "dailyAtt" && styles.pillActive]}
           onPress={() => setActiveReport("dailyAtt")}
         >
           <Text style={[styles.pillText, activeReport === "dailyAtt" && styles.pillTextActive]}>
             حضور اليوم
           </Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={[styles.pill, activeReport === "teacherSettlement" && styles.pillActive]} onPress={() => setActiveReport("teacherSettlement")}><Text style={[styles.pillText, activeReport === "teacherSettlement" && styles.pillTextActive]}>دخل المدرسين</Text></TouchableOpacity>
-        <TouchableOpacity
+        </TouchableOpacity> : null}
+        {canViewTeacherSettlement ? <TouchableOpacity style={[styles.pill, activeReport === "teacherSettlement" && styles.pillActive]} onPress={() => setActiveReport("teacherSettlement")}><Text style={[styles.pillText, activeReport === "teacherSettlement" && styles.pillTextActive]}>دخل المدرسين</Text></TouchableOpacity> : null}
+        {canViewStudentReports ? <TouchableOpacity
           style={[styles.pill, activeReport === "studentAtt" && styles.pillActive]}
           onPress={() => setActiveReport("studentAtt")}
         >
           <Text style={[styles.pillText, activeReport === "studentAtt" && styles.pillTextActive]}>
             حضور طالب
           </Text>
-        </TouchableOpacity>
-        <TouchableOpacity
+        </TouchableOpacity> : null}
+        {canViewCollections ? <TouchableOpacity
           style={[styles.pill, activeReport === "dailyCash" && styles.pillActive]}
           onPress={() => setActiveReport("dailyCash")}
         >
           <Text style={[styles.pillText, activeReport === "dailyCash" && styles.pillTextActive]}>
             نقدية اليوم
           </Text>
-        </TouchableOpacity>
-        <TouchableOpacity
+        </TouchableOpacity> : null}
+        {canViewStudentFinancialReport ? <TouchableOpacity
           style={[styles.pill, activeReport === "studentFin" && styles.pillActive]}
           onPress={() => setActiveReport("studentFin")}
         >
           <Text style={[styles.pillText, activeReport === "studentFin" && styles.pillTextActive]}>
             الموقف المالي لطالب
           </Text>
-        </TouchableOpacity>
+        </TouchableOpacity> : null}
       </ScrollView>
 
       {/* Date / Student Filter Bar */}

@@ -38,7 +38,11 @@ router.post("/register", authMiddleware, async (req, res, next) => {
        VALUES ($1, $2, $3, $4, $5, $6, 'active', NOW(), NOW(), NOW())
        ON CONFLICT (id) DO UPDATE SET
          user_id = EXCLUDED.user_id,
-         device_name = COALESCE(EXCLUDED.device_name, devices.device_name),
+         device_name = CASE
+           WHEN EXCLUDED.device_name ~ '^[A-Z]+-Device-[[:alnum:]]{4}$'
+             THEN COALESCE(devices.device_name, 'موديل غير معروف')
+           ELSE COALESCE(EXCLUDED.device_name, devices.device_name)
+         END,
          platform = COALESCE(EXCLUDED.platform, devices.platform),
          app_version = COALESCE(EXCLUDED.app_version, devices.app_version),
          last_seen_at = NOW(),
@@ -48,7 +52,7 @@ router.post("/register", authMiddleware, async (req, res, next) => {
         deviceId,
         req.centerId,
         req.user.id,
-        deviceName || "Mobile Tablet/Phone",
+        deviceName || "موديل غير معروف",
         platform || "android",
         appVersion || "1.0.0",
       ],

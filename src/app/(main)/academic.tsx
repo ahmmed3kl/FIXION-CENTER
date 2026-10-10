@@ -73,7 +73,19 @@ export default function AcademicScreen() {
   const permissions = resolveUserPermissions(currentUser);
   const returnToGroupList = () => returnToGroupsIfRequested(returnTo, (route) => router.navigate(route));
 
-  const [activeTab, setActiveTab] = useState<AcademicTab>("teachers");
+  const canViewTeachers = PermissionService.hasPermission(permissions, "teachers.view");
+  const canAccessTeachersTab = PermissionService.hasAnyPermission(permissions, ["teachers.view", "teachers.create", "teachers.update", "teachers.deactivate"]);
+  const canViewSubjects = PermissionService.hasPermission(permissions, "subjects.view");
+  const canAccessSubjectsTab = PermissionService.hasAnyPermission(permissions, ["subjects.view", "subjects.create", "subjects.update", "subjects.deactivate"]);
+  const canViewStages = PermissionService.hasAnyPermission(permissions, ["center.settings.view", "center.settings.manage"]);
+  const canViewGroups = PermissionService.hasPermission(permissions, "groups.view");
+  const canViewSessions = PermissionService.hasPermission(permissions, "sessions.view");
+  const availableTabs: AcademicTab[] = [
+    ...(canAccessTeachersTab ? ["teachers" as const] : []),
+    ...(canAccessSubjectsTab ? ["subjects" as const] : []),
+    ...(canViewStages ? ["stages" as const] : []),
+  ];
+  const [activeTab, setActiveTab] = useState<AcademicTab>(() => availableTabs[0] || "teachers");
   const [refreshing, setRefreshing] = useState(false);
 
   // Data lists
@@ -208,13 +220,13 @@ export default function AcademicScreen() {
   const loadData = () => {
     try {
       const currentDate = getLocalDateOnly();
-      setTeachers(TeacherRepository.getAll());
-      setSubjects(SubjectRepository.getAll());
-      setGroups(GroupRepository.getAll(true));
+      setTeachers(canViewTeachers ? TeacherRepository.getAll() : []);
+      setSubjects(canViewSubjects ? SubjectRepository.getAll() : []);
+      setGroups(canViewGroups ? GroupRepository.getAll(true) : []);
       const todayDayOfWeek = new Date(`${currentDate}T12:00:00`).getDay();
-      setTodayGroupIds(GroupRepository.getGroupsForDay(todayDayOfWeek).map((group) => group.id));
-      setTodaySessions(SessionGenerationService.getSessionsForDate(currentDate));
-      setAcademicStages(CenterAcademicStageRepository.getStages());
+      setTodayGroupIds(canViewGroups ? GroupRepository.getGroupsForDay(todayDayOfWeek).map((group) => group.id) : []);
+      setTodaySessions(canViewSessions ? SessionGenerationService.getSessionsForDate(currentDate) : []);
+      setAcademicStages(canViewStages ? CenterAcademicStageRepository.getStages() : []);
     } catch (e: any) {
       console.error("Academic loadData error:", e);
     }
@@ -243,7 +255,7 @@ export default function AcademicScreen() {
         })
         .catch(() => {});
     }
-  }, [activeCenterId]);
+  }, [activeCenterId, canViewTeachers, canViewSubjects, canViewStages, canViewGroups, canViewSessions]);
   useEffect(() => {
     if (localDataRevision > 0) loadData();
   }, [localDataRevision]);
@@ -252,7 +264,13 @@ export default function AcademicScreen() {
   // "today's groups" filter whenever this screen becomes visible again.
   useFocusEffect(useCallback(() => {
     loadData();
-  }, [activeCenterId]));
+  }, [activeCenterId, canViewTeachers, canViewSubjects, canViewStages, canViewGroups, canViewSessions]));
+
+  useEffect(() => {
+    if (!availableTabs.includes(activeTab) && availableTabs[0]) {
+      setActiveTab(availableTabs[0]);
+    }
+  }, [activeTab, canAccessTeachersTab, canAccessSubjectsTab, canViewStages]);
 
   // 1. Teachers Actions
   const handleCreateTeacher = () => {
@@ -513,7 +531,7 @@ export default function AcademicScreen() {
 
       {/* Segmented Control Bar */}
       <View style={styles.tabBar}>
-        <TouchableOpacity
+        {canAccessTeachersTab ? <TouchableOpacity
           style={[
             styles.tabButton,
             activeTab === "teachers" && styles.tabButtonActive,
@@ -528,8 +546,8 @@ export default function AcademicScreen() {
           >
             المعلمون
           </Text>
-        </TouchableOpacity>
-        <TouchableOpacity
+        </TouchableOpacity> : null}
+        {canAccessSubjectsTab ? <TouchableOpacity
           style={[
             styles.tabButton,
             activeTab === "subjects" && styles.tabButtonActive,
@@ -544,7 +562,7 @@ export default function AcademicScreen() {
           >
             المواد
           </Text>
-        </TouchableOpacity>
+        </TouchableOpacity> : null}
         <TouchableOpacity
           style={[
             styles.tabButton,
@@ -562,18 +580,18 @@ export default function AcademicScreen() {
             المجموعات
           </Text>
         </TouchableOpacity>
-        <TouchableOpacity style={[styles.tabButton, activeTab === "stages" && styles.tabButtonActive]} onPress={() => setActiveTab("stages")}>
+        {canViewStages ? <TouchableOpacity style={[styles.tabButton, activeTab === "stages" && styles.tabButtonActive]} onPress={() => setActiveTab("stages")}>
           <Text style={[styles.tabButtonText, activeTab === "stages" && styles.tabButtonTextActive]}>المراحل</Text>
-        </TouchableOpacity>
+        </TouchableOpacity> : null}
       </View>
 
       <View style={styles.content}>
         {/* TAB 1: TEACHERS */}
-        {activeTab === "teachers" && (
+        {activeTab === "teachers" && canAccessTeachersTab && (
           <View style={{ flex: 1 }}>
             <View style={styles.tabActionHeader}>
               <Text style={styles.tabActionTitle}>
-                قائمة المعلمين ({teachers.length})
+                {canViewTeachers ? `قائمة المعلمين (${teachers.length})` : "إضافة معلم"}
               </Text>
               {canCreateTeacher && (
                 <TouchableOpacity
@@ -598,7 +616,7 @@ export default function AcademicScreen() {
                 />
               }
               ListEmptyComponent={
-                <EmptyState message="لا يوجد معلمون مسجلون" />
+                <EmptyState message={canViewTeachers ? "لا يوجد معلمون مسجلون" : "لا تملك صلاحية عرض المعلمين."} />
               }
               renderItem={({ item }) => (
                 <AppCard style={styles.itemCard}>
@@ -627,11 +645,11 @@ export default function AcademicScreen() {
         )}
 
         {/* TAB 2: SUBJECTS */}
-        {activeTab === "subjects" && (
+        {activeTab === "subjects" && canAccessSubjectsTab && (
           <View style={{ flex: 1 }}>
             <View style={styles.tabActionHeader}>
               <Text style={styles.tabActionTitle}>
-                المواد الدراسية ({subjects.length})
+                {canViewSubjects ? `المواد الدراسية (${subjects.length})` : "إضافة مادة"}
               </Text>
               {canCreateSubject && (
                 <TouchableOpacity
@@ -655,7 +673,7 @@ export default function AcademicScreen() {
                   tintColor={Colors.primary}
                 />
               }
-              ListEmptyComponent={<EmptyState message="لا توجد مواد مسجلة" />}
+              ListEmptyComponent={<EmptyState message={canViewSubjects ? "لا توجد مواد مسجلة" : "لا تملك صلاحية عرض المواد الدراسية."} />}
               renderItem={({ item }) => (
                 <AppCard style={styles.itemCard}>
                   <View style={{ flex: 1 }}>
@@ -782,7 +800,7 @@ export default function AcademicScreen() {
         )}
 
         {/* TAB 4: CENTER ACADEMIC STAGES */}
-        {activeTab === "stages" && (
+        {activeTab === "stages" && canViewStages && (
           <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: Spacing.xl }}>
             <AppCard style={styles.generatorCard}>
               <Text style={styles.sectionHeaderTitle}>المراحل الدراسية التي يقدمها السنتر</Text>

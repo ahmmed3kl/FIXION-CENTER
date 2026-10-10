@@ -29,8 +29,11 @@ interface AuthState {
   logout: () => Promise<void>;
   selectCenter: (centerId: string) => Promise<void>;
   restoreSession: () => Promise<boolean>;
+  refreshPermissions: () => Promise<void>;
   clearError: () => void;
 }
+
+let permissionsRefreshPromise: Promise<void> | null = null;
 
 export const useAuthStore = create<AuthState>((set, get) => ({
   currentUser: null,
@@ -208,6 +211,32 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       set({ isAuthenticated: false, isLoading: false });
       return false;
     }
+  },
+
+  refreshPermissions: async () => {
+    if (permissionsRefreshPromise) return permissionsRefreshPromise;
+    const currentUserId = get().currentUser?.id;
+    if (!currentUserId || !get().isAuthenticated) return;
+
+    permissionsRefreshPromise = (async () => {
+      const refreshedUser = await AuthRepository.refreshSessionUser({ persist: false });
+      if (!refreshedUser) return;
+      const currentUser = get().currentUser;
+      if (!currentUser || currentUser.id !== currentUserId) return;
+
+      const normalizedUser = {
+        ...refreshedUser,
+        permissions: resolveUserPermissions(refreshedUser),
+      };
+      await SecureStorageService.setItem("user_session", JSON.stringify(normalizedUser));
+      set({ currentUser: normalizedUser });
+    })().catch((error) => {
+      console.warn("Could not refresh session permissions:", error);
+    }).finally(() => {
+      permissionsRefreshPromise = null;
+    });
+
+    return permissionsRefreshPromise;
   },
 
   clearError: () => set({ error: null }),

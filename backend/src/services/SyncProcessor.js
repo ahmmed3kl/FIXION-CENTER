@@ -2,14 +2,7 @@ const crypto = require("crypto");
 const db = require("../db");
 const { AppError } = require("../middleware/errorHandler");
 const zadxSmsProvider = require("./zadxSmsProvider");
-
-async function validateCardCode(client, centerId, cardCode) {
-  if (!/^\d+$/.test(cardCode)) throw new AppError("INVALID_CARD_CODE", "Card code must contain digits only.", "كود الكارت غير صحيح.", 400);
-  const ranges = await client.query("SELECT 1 FROM card_ranges WHERE center_id = $1 AND status = 'active' LIMIT 1", [centerId]);
-  if (ranges.rows.length === 0) return;
-  const range = await client.query("SELECT 1 FROM card_ranges WHERE center_id = $1 AND status = 'active' AND length(start_code) = length($2) AND start_code <= $2 AND end_code >= $2 LIMIT 1", [centerId, cardCode]);
-  if (!range.rows.length) throw new AppError("CARD_OUTSIDE_ALLOWED_RANGE", "Card is outside the center allowed ranges.", "الكارت خارج النطاق المسموح لهذا المركز.", 403);
-}
+const { validateCardCode } = require("./cardRangeValidation");
 
 /**
  * Mobile clients historically stored check-in values as HH:mm:ss. PostgreSQL

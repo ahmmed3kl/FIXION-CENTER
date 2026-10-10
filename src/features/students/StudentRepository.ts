@@ -15,6 +15,7 @@ import { isEgyptianPhone, isNumericCode, isValidName, normalizeDigits, Validatio
 import { useAuthStore } from "../auth/useAuthStore";
 import { EnrollmentRepository } from "../enrollments/EnrollmentRepository";
 import { StudentCardRepository } from "./StudentCardRepository";
+import { CardRangeRepository } from "./CardRangeRepository";
 import { smartSearch } from "../../shared/utils/smartSearch";
 
 export interface CreateStudentDTO {
@@ -318,6 +319,7 @@ export class StudentRepository {
     if (!isNumericCode(trimmedCode) || !isNumericCode(cardCode)) {
       throw new ValidationError(ValidationMessages.code);
     }
+    CardRangeRepository.assertCodeAllowed(centerId, cardCode);
     if (!isValidName(dto.fullName || "")) {
       throw new ValidationError(ValidationMessages.name);
     }

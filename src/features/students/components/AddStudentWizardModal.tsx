@@ -30,6 +30,7 @@ import { PackageSubscriptionRepository } from "../../packages/PackageSubscriptio
 import { TeacherRepository } from "../../teachers/TeacherRepository";
 import { StudentCardRepository } from "../StudentCardRepository";
 import { StudentRepository } from "../StudentRepository";
+import { CardRangeRepository } from "../CardRangeRepository";
 
 // Use the flashlight glyph for the torch control. Older code used the
 // lightning glyph names, which rendered as the wrong symbol on Android/iOS.
@@ -235,6 +236,15 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({ vi
     const raw = value.trim();
     if (!raw) { setScanError("أدخل أو امسح كود الكارت أولاً."); return false; }
     if (!isNumericCode(raw)) { setScanError(ValidationMessages.code); return false; }
+    try {
+      CardRangeRepository.assertCodeAllowed(
+        useAuthStore.getState().activeCenterId || "",
+        raw,
+      );
+    } catch (error) {
+      setScanError(error instanceof Error ? error.message : "تعذر التحقق من نطاق البطاقة.");
+      return false;
+    }
     try {
       const archivedOwner = StudentRepository.getArchivedCardOwner(raw);
       if (StudentCardRepository.findActiveCardByCodeAnywhere(raw) && !archivedOwner) {

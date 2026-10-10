@@ -1,15 +1,32 @@
 import { Ionicons } from "@expo/vector-icons";
-import { Tabs } from "expo-router";
+import { Tabs, useRouter, useSegments } from "expo-router";
+import { useEffect } from "react";
 import { StyleSheet, View, useWindowDimensions } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { canAccessRoute, resolvePermissionRouteName } from "../../core/permissions/routeAccess";
+import { resolveUserPermissions } from "../../core/permissions";
 import { Strings } from "../../core/localization";
 import { Colors, useTheme } from "../../core/theme";
+import { useAuthStore } from "../../features/auth/useAuthStore";
 
 export default function MainLayout() {
+  const router = useRouter();
+  const segments = useSegments();
+  const currentUser = useAuthStore((state) => state.currentUser);
+  const userPermissions = resolveUserPermissions(currentUser);
   const insets = useSafeAreaInsets();
   const { colors } = useTheme();
   const { height, width } = useWindowDimensions();
   const compactLandscape = width > height && height < 520;
+  const routeName = resolvePermissionRouteName(segments);
+  const routeAllowed = canAccessRoute(routeName, userPermissions);
+
+  useEffect(() => {
+    if (!routeAllowed) router.replace("/(main)/more" as any);
+  }, [routeAllowed, router]);
+
+  if (!routeAllowed) return <View style={{ flex: 1, backgroundColor: colors.background }} />;
+
   return (
     <Tabs
       backBehavior="history"

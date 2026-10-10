@@ -6,75 +6,15 @@ const { requirePermission } = require("../middleware/auth");
 const { deviceGuard } = require("../middleware/deviceGuard");
 const { AppError } = require("../middleware/errorHandler");
 const SyncProcessor = require("../services/SyncProcessor");
+const {
+  assertSyncPermission,
+  canReadSyncEntity,
+  filterBootstrapSnapshot,
+} = require("../services/syncPermissionPolicy");
 
 const router = express.Router();
 const { requireService } = require("../middleware/serviceGuard");
 const { getServiceKeyForEntity } = require("../services/serviceCatalog");
-
-function requiredPermission(operation) {
-  const entity = String(operation.entityType || operation.entity_type || "").toLowerCase();
-  const action = String(operation.operationType || operation.operation_type || operation.payload?.action || "").toLowerCase();
-  if (entity.includes("student_card")) return "students.cards.manage";
-  if (entity === "student" || entity.startsWith("student_")) return action.includes("create") ? "students.create" : "students.update";
-  if (entity === "teacher" || entity.startsWith("teacher_")) return action.includes("create") ? "teachers.create" : "teachers.update";
-  if (entity === "subject" || entity.startsWith("subject_")) return action.includes("create") ? "subjects.create" : "subjects.update";
-  if (entity === "group_schedule") return "groups.schedule.manage";
-  if (entity === "group" || entity.startsWith("group_")) {
-    if (action.includes("create")) return "groups.create";
-    if (action.includes("delete") || action.includes("deactivate")) return "groups.deactivate";
-    return "groups.update";
-  }
-  if (entity === "center_academic_stage" || entity === "center_academic_stages") return "groups.create";
-  if (entity === "enrollment" || entity === "student_group_enrollment") return action.includes("create") ? "enrollments.create" : "enrollments.update";
-  if (entity === "session") return String(operation.payload?.action || "").toLowerCase() === "close" ? "sessions.close" : String(operation.payload?.action || "").toLowerCase() === "reopen" ? "sessions.reopen" : "attendance.create";
-  if (entity === "attendance" || entity === "advance_coverage") return "attendance.create";
-  if (entity === "payment_reversal") return "payments.reverse";
-  if (entity === "debt_adjustment") return "payments.adjust";
-  if (entity === "payment" || entity === "debt_cycle") return "payments.create";
-  if (entity === "package_subscription") return "packages.subscribe";
-  if (entity === "package" || entity === "package_subject" || entity === "package_teacher_override") return "packages.manage";
-  if (entity === "grade_exam" || entity === "grade_score") return "grades.manage";
-  if (entity === "homework_evaluation_status") return "homework.manage";
-  if (entity === "session_homework_evaluation") return null;
-  if (entity === "notification_template") return "notifications.templates.update";
-  if (entity === "notification_event" || entity === "notification_delivery") return "notifications.send";
-  if (entity === "daily_closing") return action.includes("reopen") ? "daily_closing.reopen" : "daily_closing.close";
-  return null;
-}
-
-function assertSyncPermission(req, operation) {
-  // A server-reset repair is a recovery of rows already stored on the device.
-  // It must not be blocked by the permissions of the assistant who happens
-  // to reconnect first (older devices can contain records created by another
-  // role). Normal CREATE/UPDATE operations remain permission checked below.
-  if (String(operation.operationType || operation.operation_type || "").toUpperCase() === "REPAIR_AFTER_SERVER_RESET") return;
-  const permission = requiredPermission(operation);
-  const entity = String(operation.entityType || operation.entity_type || "").toLowerCase();
-  const action = String(operation.operationType || operation.operation_type || operation.payload?.action || "").toLowerCase();
-  if (req.user.role === "admin" || req.user.role === "owner") return;
-  const permissions = req.user.permissions || {};
-  if (entity === "session_homework_evaluation") {
-    const allowed = ["grades.manage", "attendance.create", "attendance.edit"];
-    if (allowed.some((candidate) => Array.isArray(permissions)
-      ? permissions.includes(candidate)
-      : permissions[candidate] === true)) return;
-    throw new AppError("FORBIDDEN", "Missing required homework evaluation permission.", "ليس لديك الصلاحية الكافية لمزامنة تقييم الواجب.", 403);
-  }
-  if (entity === "group" || entity.startsWith("group_")) {
-    if (action.includes("delete") || action.includes("deactivate")) {
-      const allowed = ["groups.deactivate", "groups.update"];
-      if (allowed.some((p) => Array.isArray(permissions) ? permissions.includes(p) : permissions[p] === true)) return;
-    }
-  }
-  if (entity === "center_academic_stage" || entity === "center_academic_stages") {
-    const allowed = ["center.settings.manage", "groups.create", "groups.update"];
-    if (allowed.some((p) => Array.isArray(permissions) ? permissions.includes(p) : permissions[p] === true)) return;
-    throw new AppError("FORBIDDEN", "Missing required academic stages permission.", "ليس لديك الصلاحية الكافية لمزامنة المراحل الدراسية.", 403);
-  }
-  if (!permission) return;
-  if (Array.isArray(permissions) ? permissions.includes(permission) : permissions[permission] === true) return;
-  throw new AppError("FORBIDDEN", `Missing required permission: ${permission}`, "ليس لديك الصلاحية الكافية لمزامنة هذه العملية.", 403);
-}
 
 /**
  * Full snapshot bootstrap for center
@@ -126,6 +66,7 @@ router.get(
           homeworkStatusesRes,
           homeworkEvaluationsRes,
           academicStagesRes,
+          cardRangesRes,
           resetStateRes,
           maxSeqRes,
         ] = await Promise.all([
@@ -159,6 +100,7 @@ router.get(
           client.query("SELECT * FROM homework_evaluation_statuses WHERE center_id = $1", [centerId]),
           client.query("SELECT * FROM session_homework_evaluations WHERE center_id = $1", [centerId]),
           client.query("SELECT * FROM center_academic_stages WHERE center_id = $1", [centerId]).catch(() => ({ rows: [] })),
+          client.query("SELECT id, center_id, start_code, end_code, status, created_at, updated_at FROM card_ranges WHERE center_id = $1", [centerId]),
           client.query("SELECT reset_generation, updated_at FROM center_data_state WHERE center_id = $1", [centerId]),
           client.query("SELECT COALESCE(MAX(server_seq), 0) as max_seq FROM server_sync_operations WHERE center_id = $1", [centerId]),
         ]);
@@ -195,6 +137,7 @@ router.get(
         homeworkEvaluationStatuses: homeworkStatusesRes.rows,
         sessionHomeworkEvaluations: homeworkEvaluationsRes.rows,
         academicStages: academicStagesRes.rows[0]?.stages_json || null,
+        cardRanges: cardRangesRes.rows,
         resetGeneration: Number(resetStateRes.rows[0]?.reset_generation || 0),
         resetAt: resetStateRes.rows[0]?.updated_at || null,
         latestServerSeq: parseInt(maxSeqRes.rows[0]?.max_seq || 0, 10),
@@ -202,7 +145,7 @@ router.get(
         };
       });
 
-      return res.json(snapshot);
+      return res.json(filterBootstrapSnapshot(snapshot, req.user));
     } catch (err) {
       next(err);
     }
@@ -337,7 +280,7 @@ router.get("/pull", authMiddleware, deviceGuard, async (req, res, next) => {
     }
 
     // Format changes as ServerChangeRecord
-    const changes = returnedRows.map((row) => ({
+    const changes = returnedRows.filter((row) => canReadSyncEntity(row.entity_type, req.user)).map((row) => ({
       sequenceNumber: parseInt(row.server_seq, 10),
       operationId: row.operation_id,
       entityType: row.entity_type,

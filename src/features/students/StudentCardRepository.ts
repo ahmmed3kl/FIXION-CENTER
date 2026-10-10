@@ -12,6 +12,7 @@ import { PermissionService } from "../../core/permissions";
 import { SyncRepository } from "../../core/sync";
 import { Student, StudentCard } from "../../shared/types";
 import { useAuthStore } from "../auth/useAuthStore";
+import { CardRangeRepository } from "./CardRangeRepository";
 
 export class StudentCardRepository {
   private static getActiveContext() {
@@ -136,6 +137,7 @@ export class StudentCardRepository {
     }
 
     const trimmedCard = cardCode.trim();
+    CardRangeRepository.assertCodeAllowed(centerId, trimmedCard);
     const db = DatabaseService.getDb();
     const student = db.getFirstSync<{ deletedAt: string | null }>(
       `SELECT deleted_at as deletedAt
@@ -414,6 +416,7 @@ export class StudentCardRepository {
     if (row.status === "active") {
       throw new ConflictError("البطاقة مفعّلة بالفعل.");
     }
+    CardRangeRepository.assertCodeAllowed(centerId, row.cardCode);
 
     // Check if the card code is currently active for another student
     const existingActive = db.getFirstSync<any>(

@@ -144,7 +144,7 @@ export class AuthRepository {
             "/devices/register",
             {
               deviceId,
-              deviceName: `${Platform.OS.toUpperCase()}-Device-${deviceId.slice(-4)}`,
+              deviceName: DeviceService.getDeviceModelName(),
               platform: Platform.OS,
               appVersion: env.appVersion,
             },
@@ -224,7 +224,7 @@ export class AuthRepository {
                   "/devices/register",
                   {
                     deviceId,
-                    deviceName: `${Platform.OS.toUpperCase()}-Device-${deviceId.slice(-4)}`,
+                    deviceName: DeviceService.getDeviceModelName(),
                     platform: Platform.OS,
                     appVersion: env.appVersion,
                   },
@@ -254,7 +254,7 @@ export class AuthRepository {
     return null;
   }
 
-  static async refreshSessionUser(): Promise<User | null> {
+  static async refreshSessionUser(options: { persist?: boolean } = {}): Promise<User | null> {
     if (env.enableMockData) return null;
     try {
       const response = await ApiClient.getInstance().get<{
@@ -285,7 +285,9 @@ export class AuthRepository {
       for (const center of data.centers || []) {
         db.runSync("INSERT OR REPLACE INTO centers (id, name, code) VALUES (?, ?, ?)", [center.id, center.name, center.code]);
       }
-      await SecureStorageService.setItem("user_session", JSON.stringify(user));
+      if (options.persist !== false) {
+        await SecureStorageService.setItem("user_session", JSON.stringify(user));
+      }
       return user;
     } catch {
       // Offline startup must continue using the cached session and centers.

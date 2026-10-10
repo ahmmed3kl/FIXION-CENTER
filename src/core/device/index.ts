@@ -1,4 +1,5 @@
 import { Platform } from "react-native";
+import * as ExpoDevice from "expo-device";
 import { DatabaseService } from "../database";
 import { ForbiddenError } from "../errors";
 import { SecureStorageService } from "../storage";
@@ -24,6 +25,10 @@ function generateUUID(): string {
   });
 }
 
+export function resolveDeviceModelName(modelName?: string | null): string {
+  return modelName?.trim() || "موديل غير معروف";
+}
+
 export class DeviceRepository {
   /**
    * Registers a device or retrieves existing record for the center.
@@ -37,7 +42,7 @@ export class DeviceRepository {
     const deviceIdentifier = DeviceService.getDeviceIdSync();
     const deviceName =
       params.deviceName ||
-      `${Platform.OS.toUpperCase()}-Device-${deviceIdentifier.slice(-4)}`;
+      DeviceService.getDeviceModelName();
 
     const existing = db.getFirstSync<any>(
       `SELECT id, center_id as centerId, user_id as userId, device_name as deviceName,
@@ -52,8 +57,8 @@ export class DeviceRepository {
       // Update last seen
       const now = new Date().toISOString();
       db.runSync(
-        `UPDATE devices SET last_seen_at = ?, user_id = ? WHERE id = ?`,
-        [now, params.userId, existing.id],
+        `UPDATE devices SET last_seen_at = ?, user_id = ?, device_name = ? WHERE id = ?`,
+        [now, params.userId, deviceName, existing.id],
       );
       return {
         ...existing,
@@ -209,6 +214,11 @@ export class DeviceService {
     return {
       os: Platform.OS,
       version: Platform.Version,
+      modelName: this.getDeviceModelName(),
     };
+  }
+
+  static getDeviceModelName(): string {
+    return resolveDeviceModelName(ExpoDevice.modelName);
   }
 }

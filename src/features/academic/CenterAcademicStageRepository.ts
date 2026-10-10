@@ -1,6 +1,8 @@
 import { AuditService } from "../../core/audit";
 import { DatabaseService } from "../../core/database";
 import { DeviceService } from "../../core/device";
+import { ForbiddenError } from "../../core/errors";
+import { PermissionService, resolveUserPermissions } from "../../core/permissions";
 import { SyncEngine, SyncRepository } from "../../core/sync";
 import { useAuthStore } from "../auth/useAuthStore";
 
@@ -47,6 +49,9 @@ export class CenterAcademicStageRepository {
     const centerId = useAuthStore.getState().activeCenterId;
     if (!centerId) throw new Error("يجب تحديد السنتر أولاً.");
     const user = useAuthStore.getState().currentUser;
+    if (!PermissionService.hasPermission(resolveUserPermissions(user), "center.settings.manage")) {
+      throw new ForbiddenError("ليس لديك صلاحية إدارة المراحل الدراسية.");
+    }
     const seen = new Set<string>();
     const cleaned = stages
       .filter((stage) => stage && typeof stage.id === "string" && typeof stage.label === "string")

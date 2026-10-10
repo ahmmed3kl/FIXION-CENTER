@@ -9,6 +9,7 @@ import {
     SyncOperationPayload,
 } from "./contracts";
 import { ApiClient } from "./index";
+import type { CardRangeRecord } from "../../features/students/CardRangeRepository";
 
 export interface BootstrapResponse {
   centerId: string;
@@ -42,6 +43,7 @@ export interface BootstrapResponse {
   homeworkEvaluationStatuses?: any[];
   sessionHomeworkEvaluations?: any[];
   academicStages?: any;
+  cardRanges?: CardRangeRecord[];
   resetGeneration?: number;
   /** Time at which the server reset generation was advanced. */
   resetAt?: string;
@@ -86,7 +88,7 @@ export class HttpSyncApiAdapter implements ISyncApiAdapter {
         "/devices/register",
         {
           deviceId,
-          deviceName: `${Platform.OS.toUpperCase()}-Device-${deviceId.slice(-4)}`,
+          deviceName: DeviceService.getDeviceModelName(),
           platform: Platform.OS,
           appVersion: env.appVersion,
         },
@@ -303,6 +305,7 @@ export class MockSyncApiAdapter implements ISyncApiAdapter {
       subjects: [],
       sessions: [],
       enrollments: [],
+      cardRanges: [],
       latestServerSeq: 1000,
       timestamp: new Date().toISOString(),
     };
