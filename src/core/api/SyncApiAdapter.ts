@@ -10,6 +10,7 @@ import {
 } from "./contracts";
 import { ApiClient } from "./index";
 import type { CardRangeRecord } from "../../features/students/CardRangeRepository";
+import { ConnectivityService } from "../connectivity";
 
 export interface BootstrapResponse {
   centerId: string;
@@ -146,6 +147,7 @@ export class HttpSyncApiAdapter implements ISyncApiAdapter {
           },
         },
       );
+      ConnectivityService.recordApiSuccess();
       return response.data;
     } catch (err: any) {
       const isDeviceErr =
@@ -184,6 +186,7 @@ export class HttpSyncApiAdapter implements ISyncApiAdapter {
 
     try {
       const response = await fetchPull();
+      ConnectivityService.recordApiSuccess();
       return response.data;
     } catch (err: any) {
       const isDeviceErr =
@@ -196,6 +199,7 @@ export class HttpSyncApiAdapter implements ISyncApiAdapter {
       if (isDeviceErr) {
         await this.ensureDeviceRegistered(centerId, deviceId);
         const retryResponse = await fetchPull();
+        ConnectivityService.recordApiSuccess();
         return retryResponse.data;
       }
 
@@ -219,6 +223,7 @@ export class HttpSyncApiAdapter implements ISyncApiAdapter {
 
     try {
       const response = await fetchBootstrap();
+      ConnectivityService.recordApiSuccess();
       return response.data;
     } catch (err: any) {
       const isDeviceErr =
@@ -231,6 +236,7 @@ export class HttpSyncApiAdapter implements ISyncApiAdapter {
       if (isDeviceErr) {
         await this.ensureDeviceRegistered(centerId, deviceId);
         const retryResponse = await fetchBootstrap();
+        ConnectivityService.recordApiSuccess();
         return retryResponse.data;
       }
 

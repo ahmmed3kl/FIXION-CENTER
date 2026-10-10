@@ -112,7 +112,7 @@ export default function DashboardScreen() {
     ConnectivityService.setState("syncing");
     setConnectivity("syncing");
     const result = await SyncEngine.syncCenterNow(activeCenterId);
-    const nextState = result.state === "error" ? "offline" : result.state;
+    const nextState = result.state === "error" ? "degraded" : result.state;
     ConnectivityService.setState(nextState);
     setConnectivity(nextState);
     loadData();

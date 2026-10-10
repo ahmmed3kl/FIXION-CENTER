@@ -1,13 +1,66 @@
+import axios from "axios";
+import { env } from "../../config/env";
 import { ConnectivityState } from "../../shared/types";
 
 type Listener = (state: ConnectivityState) => void;
+export type DeviceNetworkState = "unknown" | "connected" | "disconnected";
+export type BackendReachability = "unknown" | "available" | "unavailable" | "degraded";
+
+export interface ConnectivityDiagnostics {
+  deviceNetwork: DeviceNetworkState;
+  backend: BackendReachability;
+  backendCheckedAt: string | null;
+  lastApiSuccessAt: string | null;
+}
+
+export function resolveDeviceNetworkState(networkState: {
+  isConnected?: boolean | null;
+  isInternetReachable?: boolean | null;
+}): DeviceNetworkState {
+  if (networkState.isConnected === true) return "connected";
+  if (networkState.isConnected === false) return "disconnected";
+  return "unknown";
+}
+
+export function resolveBackendReachability(
+  status: number | null,
+  body?: unknown,
+): BackendReachability {
+  if (status === null) return "unavailable";
+  if (status < 200 || status >= 300) return "degraded";
+  if (
+    body &&
+    typeof body === "object" &&
+    "status" in body &&
+    body.status === "ok" &&
+    "database" in body &&
+    body.database === "connected"
+  ) {
+    return "available";
+  }
+  return "degraded";
+}
+
+type DiagnosticsListener = (diagnostics: ConnectivityDiagnostics) => void;
 
 export class ConnectivityService {
-  private static currentState: ConnectivityState = "offline";
+  private static currentState: ConnectivityState = "degraded";
   private static listeners = new Set<Listener>();
+  private static diagnosticsListeners = new Set<DiagnosticsListener>();
+  private static probeGeneration = 0;
+  private static diagnostics: ConnectivityDiagnostics = {
+    deviceNetwork: "unknown",
+    backend: "unknown",
+    backendCheckedAt: null,
+    lastApiSuccessAt: null,
+  };
 
   static getState(): ConnectivityState {
     return this.currentState;
+  }
+
+  static getDiagnostics(): ConnectivityDiagnostics {
+    return { ...this.diagnostics };
   }
 
   static setState(state: ConnectivityState): void {
@@ -15,6 +68,25 @@ export class ConnectivityService {
       this.currentState = state;
       this.notifyListeners();
     }
+  }
+
+  static subscribeDiagnostics(listener: DiagnosticsListener): () => void {
+    this.diagnosticsListeners.add(listener);
+    listener(this.getDiagnostics());
+    return () => {
+      this.diagnosticsListeners.delete(listener);
+    };
+  }
+
+  static recordApiSuccess(): void {
+    const timestamp = new Date().toISOString();
+    this.updateDiagnostics({
+      deviceNetwork: "connected",
+      backend: "available",
+      backendCheckedAt: timestamp,
+      lastApiSuccessAt: timestamp,
+    });
+    if (this.currentState === "degraded") this.setState("online");
   }
 
   static subscribe(listener: Listener): () => void {
@@ -26,48 +98,114 @@ export class ConnectivityService {
   }
 
   /**
-   * Connects the app to the native network state listener. The callback runs
-   * only when the device transitions from offline to reachable, which makes
-   * it safe to trigger a sync without starting duplicate requests for every
-   * network event.
+   * Connects the app to the native network state listener. A device is marked
+   * offline only when the native API explicitly confirms no active network.
    */
   static startMonitoring(onOnline?: () => void): () => void {
     let disposed = false;
     let subscription: { remove: () => void } | null = null;
+    let networkUpdate = 0;
     const applyNetworkState = (networkState: {
-      isConnected?: boolean;
+      isConnected?: boolean | null;
       isInternetReachable?: boolean | null;
     }) => {
-      const reachable =
-        networkState.isConnected === true &&
-        networkState.isInternetReachable !== false;
-      const nextState: ConnectivityState = reachable ? "online" : "offline";
-      const previousState = this.currentState;
-      this.setState(nextState);
-      if (nextState === "online" && previousState !== "online") {
-        onOnline?.();
-      }
+      networkUpdate += 1;
+      void this.applyNetworkState(networkState, onOnline, () => disposed);
     };
 
-    // Resolve the initial state so a user who opens the app while already on
-    // Wi‑Fi gets an automatic sync as well.
-    // Dynamic import keeps the Node/Jest repository tests independent from
-    // Expo's native ESM module while still loading it in the real app.
+    // Dynamic import keeps Node/Jest repository tests independent from Expo's
+    // native module while still loading it in the real app.
     import("expo-network")
       .then((Network) => {
         if (disposed) return;
-        Network.getNetworkStateAsync()
-          .then(applyNetworkState)
-          .catch(() => this.setState("offline"));
         subscription = Network.addNetworkStateListener(applyNetworkState);
+        const initialUpdate = networkUpdate;
+        Network.getNetworkStateAsync()
+          .then((state) => {
+            if (!disposed && networkUpdate === initialUpdate) applyNetworkState(state);
+          })
+          .catch(() => {
+            if (disposed || networkUpdate !== initialUpdate) return;
+            applyNetworkState({ isConnected: null });
+          });
       })
-      .catch(() => this.setState("offline"));
+      .catch(() => {
+        if (disposed) return;
+        applyNetworkState({ isConnected: null });
+      });
 
     return () => {
       disposed = true;
+      this.probeGeneration += 1;
       subscription?.remove();
       subscription = null;
     };
+  }
+
+  private static async applyNetworkState(
+    networkState: {
+      isConnected?: boolean | null;
+      isInternetReachable?: boolean | null;
+    },
+    onOnline: (() => void) | undefined,
+    isDisposed: () => boolean,
+  ): Promise<void> {
+    const deviceNetwork = resolveDeviceNetworkState(networkState);
+    if (deviceNetwork === "disconnected") {
+      this.probeGeneration += 1;
+      this.updateDiagnostics({
+        deviceNetwork,
+        backend: "unknown",
+        backendCheckedAt: null,
+      });
+      this.setState("offline");
+      return;
+    }
+
+    this.updateDiagnostics({ deviceNetwork });
+    this.setState("degraded");
+    const generation = ++this.probeGeneration;
+    const previousBackend = this.diagnostics.backend;
+    let status: number | null = null;
+    let body: unknown;
+    try {
+      const response = await axios.get(
+        `${env.apiUrl.replace(/\/+$/, "")}/health`,
+        { timeout: 8_000, validateStatus: () => true },
+      );
+      status = response.status;
+      body = response.data;
+    } catch (error) {
+      if (axios.isAxiosError(error) && error.response) {
+        status = error.response.status;
+        body = error.response.data;
+      }
+    }
+
+    if (isDisposed() || generation !== this.probeGeneration) return;
+    const backend = resolveBackendReachability(status, body);
+    this.updateDiagnostics({
+      backend,
+      backendCheckedAt: new Date().toISOString(),
+    });
+    this.setState(backend === "available" ? "online" : "degraded");
+    if (backend === "available" && previousBackend !== "available") {
+      onOnline?.();
+    }
+  }
+
+  private static updateDiagnostics(
+    update: Partial<ConnectivityDiagnostics>,
+  ): void {
+    this.diagnostics = { ...this.diagnostics, ...update };
+    const diagnostics = this.getDiagnostics();
+    for (const listener of this.diagnosticsListeners) {
+      try {
+        listener(diagnostics);
+      } catch (error) {
+        console.error("Connectivity diagnostics listener error:", error);
+      }
+    }
   }
 
   private static notifyListeners(): void {

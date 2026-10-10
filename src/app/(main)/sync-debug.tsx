@@ -54,6 +54,7 @@ export default function SyncDebugScreen() {
   const [loading, setLoading] = useState(true);
   const [lastResult, setLastResult] = useState("");
   const [loadError, setLoadError] = useState("");
+  const [diagnostics, setDiagnostics] = useState(ConnectivityService.getDiagnostics());
 
   const load = useCallback(() => {
     if (!activeCenter) return;
@@ -72,6 +73,11 @@ export default function SyncDebugScreen() {
   useFocusEffect(useCallback(() => {
     load();
   }, [load]));
+
+  useFocusEffect(useCallback(() => {
+    const unsubscribeDiagnostics = ConnectivityService.subscribeDiagnostics(setDiagnostics);
+    return unsubscribeDiagnostics;
+  }, []));
 
   const syncNow = async () => {
     if (!activeCenter) return;
@@ -106,8 +112,45 @@ export default function SyncDebugScreen() {
         </View>
 
         <View style={styles.connectionCard}>
-          <Text style={styles.connectionLabel}>Connection</Text>
-          <Text style={styles.connectionValue}>{ConnectivityService.getState()}</Text>
+          <Text style={styles.connectionLabel}>حالة الاتصال</Text>
+          <View style={styles.connectionRow}>
+            <Text style={styles.connectionLabel}>شبكة الهاتف</Text>
+            <Text style={styles.connectionValue}>
+              {diagnostics.deviceNetwork === "connected"
+                ? "متصل بالشبكة"
+                : diagnostics.deviceNetwork === "disconnected"
+                  ? "غير متصل بالشبكة"
+                  : "حالة الشبكة غير محددة"}
+            </Text>
+          </View>
+          <View style={styles.connectionRow}>
+            <Text style={styles.connectionLabel}>خادم FIXION</Text>
+            <Text style={[
+              styles.connectionValue,
+              diagnostics.backend !== "available" && styles.connectionWarning,
+            ]}>
+              {diagnostics.backend === "available"
+                ? "استجاب فحص الخادم بنجاح"
+                : diagnostics.backend === "degraded"
+                  ? "الخادم استجاب بخطأ"
+                  : diagnostics.backend === "unavailable"
+                    ? "تعذر الوصول في آخر فحص"
+                    : "لم يتم التحقق بعد"}
+            </Text>
+          </View>
+          <View style={styles.connectionRow}>
+            <Text style={styles.connectionLabel}>آخر طلب API ناجح</Text>
+            <Text style={styles.connectionValue}>
+              {diagnostics.lastApiSuccessAt
+                ? formatDate(diagnostics.lastApiSuccessAt)
+                : "لا يوجد طلب ناجح مسجل"}
+            </Text>
+          </View>
+          <Text style={styles.connectionHint}>
+            {diagnostics.backendCheckedAt
+              ? `آخر فحص للخادم: ${formatDate(diagnostics.backendCheckedAt)}`
+              : "لم يتم فحص الخادم بعد"}
+          </Text>
         </View>
 
         <TouchableOpacity style={styles.syncButton} onPress={syncNow} disabled={refreshing}>
@@ -179,9 +222,12 @@ const createStyles = () => StyleSheet.create({
   titleRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
   title: { ...Typography.h2, color: Colors.slate900 },
   subtitle: { color: Colors.slate500, marginTop: 2 },
-  connectionCard: { backgroundColor: Colors.white, borderRadius: 18, borderWidth: 1, borderColor: Colors.border, padding: Spacing.lg, flexDirection: "row", justifyContent: "space-between" },
+  connectionCard: { backgroundColor: Colors.white, borderRadius: 18, borderWidth: 1, borderColor: Colors.border, padding: Spacing.lg, gap: 10 },
+  connectionRow: { flexDirection: "row", alignItems: "flex-start", justifyContent: "space-between", gap: 12 },
   connectionLabel: { color: Colors.slate600, fontWeight: "700" },
-  connectionValue: { color: Colors.successText, fontWeight: "900" },
+  connectionValue: { color: Colors.successText, fontWeight: "900", flexShrink: 1, textAlign: "right" },
+  connectionWarning: { color: Colors.warningText },
+  connectionHint: { color: Colors.slate500, fontSize: 12, textAlign: "right" },
   syncButton: { backgroundColor: Colors.primary, borderRadius: 14, minHeight: 50, alignItems: "center", justifyContent: "center", flexDirection: "row", gap: 8, elevation: 3 },
   syncButtonText: { color: Colors.white, fontWeight: "800", fontSize: 15 },
   result: { color: Colors.slate600, textAlign: "center", fontSize: 12 },
