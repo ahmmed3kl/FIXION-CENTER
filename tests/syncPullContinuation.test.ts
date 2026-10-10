@@ -299,3 +299,216 @@ describe("Incremental pull backlog continuation", () => {
     expect(SyncRepository.getServerCursor(centerId)).toBe("100");
   });
 });
+
+describe("Notification pull constraint regression", () => {
+  beforeAll(() => {
+    DatabaseService.init();
+    ConnectivityService.setState("online");
+  });
+
+  it("does not abort the pull when a server notification_event collides with a local row on (attendance_id, event_type)", async () => {
+    const centerId = `notif-event-constraint-${Date.now()}`;
+    const db = DatabaseService.getDb();
+    const existingEventId = `local-notif-event-${Date.now()}`;
+    const attendanceId = `att-${Date.now()}`;
+    const operationId = `local-op-notif-${Date.now()}`;
+
+    db.runSync(
+      `INSERT INTO teachers (id, center_id, name, phone, status, notes, created_at, updated_at)
+       VALUES (?, ?, ?, NULL, 'active', NULL, ?, ?)`,
+      [`notif-seed-teacher-${Date.now()}`, centerId, "Seed teacher",
+       new Date().toISOString(), new Date().toISOString()],
+    );
+
+    // Insert a local notification_event that occupies (center_id, attendance_id, event_type).
+    db.runSync(
+      `INSERT INTO notification_events
+         (id, operation_id, center_id, student_id, session_id, attendance_id, event_type, template_id, created_by, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 'user', ?)`,
+      [existingEventId, operationId, centerId, "student-1", "session-1",
+       attendanceId, "attendance_marked", new Date().toISOString()],
+    );
+
+    SyncRepository.setServerCursor(centerId, "1");
+    SyncRepository.setLastBootstrapTime(centerId);
+    SyncEngine.clearRateLimitForTesting();
+
+    // Server sends a notification_event with the same attendance_id+event_type but a different id.
+    // Before the fix this threw UNIQUE constraint violation and aborted the pull (errors: 1).
+    const serverEventId = `server-notif-event-${Date.now()}`;
+    SyncEngine.setAdapter({
+      async pushOperations(): Promise<PushSyncResponse> {
+        return { success: true, syncedOperationIds: [], conflicts: [], serverCursor: "1", processedAt: new Date().toISOString() };
+      },
+      async pullChanges(_centerId: string, cursor: string): Promise<PullSyncResponse> {
+        if (cursor === "1") {
+          return {
+            changes: [{
+              sequenceNumber: 2,
+              operationId: "srv-notif-op-1",
+              entityType: "notification_event",
+              entityId: serverEventId,
+              action: "create",
+              data: {
+                id: serverEventId,
+                student_id: "student-1",
+                session_id: "session-1",
+                attendance_id: attendanceId,
+                event_type: "attendance_marked",
+                template_id: "template-updated-by-server",
+                created_by: "system",
+                created_at: new Date().toISOString(),
+              },
+              serverTimestamp: new Date().toISOString(),
+            }, {
+              sequenceNumber: 3,
+              operationId: "srv-teacher-subsequent-1",
+              entityType: "teacher",
+              entityId: `teacher-after-collision-${Date.now()}`,
+              action: "create",
+              data: {
+                id: `teacher-after-collision-${Date.now()}`,
+                name: "Subsequent Teacher After Collision",
+                status: "active",
+              },
+              serverTimestamp: new Date().toISOString(),
+            }],
+            nextCursor: "3",
+            hasMore: false,
+            serverTimestamp: new Date().toISOString(),
+          };
+        }
+        return { changes: [], nextCursor: cursor, hasMore: false, serverTimestamp: new Date().toISOString() };
+      },
+      async bootstrapCenter(): Promise<BootstrapResponse> { throw new Error("Unexpected bootstrap"); },
+    } as ISyncApiAdapter);
+
+    const result = await SyncEngine.syncCenterNow(centerId);
+
+    // Pull must NOT have failed — cursor must advance past both changes.
+    expect(result.errors).toBe(0);
+    expect(SyncRepository.getServerCursor(centerId)).toBe("3");
+
+    // The existing local row must still exist (local row preserved without duplicate index collision).
+    const localRow = db.getFirstSync<{ id: string }>(
+      `SELECT id FROM notification_events WHERE center_id = ? AND attendance_id = ? AND event_type = ?`,
+      [centerId, attendanceId, "attendance_marked"],
+    );
+    expect(localRow?.id).toBe(existingEventId);
+
+    // Subsequent change in the same pull batch was committed and applied.
+    const subsequentTeacher = db.getFirstSync<{ name: string }>(
+      `SELECT name FROM teachers WHERE center_id = ? AND name = 'Subsequent Teacher After Collision'`,
+      [centerId],
+    );
+    expect(subsequentTeacher).not.toBeNull();
+  });
+
+  it("does not abort the pull when a server notification_delivery collides on (notification_event_id, channel)", async () => {
+    const centerId = `notif-delivery-constraint-${Date.now()}`;
+    const db = DatabaseService.getDb();
+    const eventId = `notif-event-for-delivery-${Date.now()}`;
+    const localDeliveryId = `local-delivery-${Date.now()}`;
+
+    db.runSync(
+      `INSERT INTO teachers (id, center_id, name, phone, status, notes, created_at, updated_at)
+       VALUES (?, ?, ?, NULL, 'active', NULL, ?, ?)`,
+      [`delivery-seed-teacher-${Date.now()}`, centerId, "Seed teacher",
+       new Date().toISOString(), new Date().toISOString()],
+    );
+
+    db.runSync(
+      `INSERT INTO notification_events
+         (id, operation_id, center_id, student_id, session_id, attendance_id, event_type, template_id, created_by, created_at)
+       VALUES (?, ?, ?, ?, ?, NULL, ?, NULL, 'user', ?)`,
+      [eventId, `op-for-event-${Date.now()}`, centerId, "student-2", "session-2",
+       "attendance_marked", new Date().toISOString()],
+    );
+
+    // Local delivery row occupies (notification_event_id, channel) = (eventId, "sms").
+    db.runSync(
+      `INSERT INTO notification_deliveries
+         (id, center_id, notification_event_id, channel, status, recipient, rendered_message,
+          sent_at, failure_reason, retry_count, created_at, updated_at)
+       VALUES (?, ?, ?, 'sms', 'pending', '+201000000000', 'Test', NULL, NULL, 0, ?, ?)`,
+      [localDeliveryId, centerId, eventId,
+       new Date().toISOString(), new Date().toISOString()],
+    );
+
+    SyncRepository.setServerCursor(centerId, "1");
+    SyncRepository.setLastBootstrapTime(centerId);
+    SyncEngine.clearRateLimitForTesting();
+
+    const serverDeliveryId = `server-delivery-${Date.now()}`;
+    SyncEngine.setAdapter({
+      async pushOperations(): Promise<PushSyncResponse> {
+        return { success: true, syncedOperationIds: [], conflicts: [], serverCursor: "1", processedAt: new Date().toISOString() };
+      },
+      async pullChanges(_centerId: string, cursor: string): Promise<PullSyncResponse> {
+        if (cursor === "1") {
+          return {
+            changes: [{
+              sequenceNumber: 2,
+              operationId: "srv-delivery-op-1",
+              entityType: "notification_delivery",
+              entityId: serverDeliveryId,
+              action: "create",
+              data: {
+                id: serverDeliveryId,
+                notification_event_id: eventId,
+                channel: "sms",
+                status: "sent",
+                recipient: "+201000000000",
+                rendered_message: "Test",
+                retry_count: 0,
+                provider_message_id: "prov-msg-12345",
+                created_at: new Date().toISOString(),
+                updated_at: new Date().toISOString(),
+              },
+              serverTimestamp: new Date().toISOString(),
+            }, {
+              sequenceNumber: 3,
+              operationId: "srv-teacher-subsequent-2",
+              entityType: "teacher",
+              entityId: `teacher-after-delivery-collision-${Date.now()}`,
+              action: "create",
+              data: {
+                id: `teacher-after-delivery-collision-${Date.now()}`,
+                name: "Subsequent Teacher After Delivery Collision",
+                status: "active",
+              },
+              serverTimestamp: new Date().toISOString(),
+            }],
+            nextCursor: "3",
+            hasMore: false,
+            serverTimestamp: new Date().toISOString(),
+          };
+        }
+        return { changes: [], nextCursor: cursor, hasMore: false, serverTimestamp: new Date().toISOString() };
+      },
+      async bootstrapCenter(): Promise<BootstrapResponse> { throw new Error("Unexpected bootstrap"); },
+    } as ISyncApiAdapter);
+
+    const result = await SyncEngine.syncCenterNow(centerId);
+
+    // Pull must NOT fail — cursor must advance past all batch changes.
+    expect(result.errors).toBe(0);
+    expect(SyncRepository.getServerCursor(centerId)).toBe("3");
+
+    // The delivery row for this event must still exist and must not regress.
+    const delivery = db.getFirstSync<{ id: string; status: string }>(
+      `SELECT id, status FROM notification_deliveries
+       WHERE center_id = ? AND notification_event_id = ? AND channel = 'sms'`,
+      [centerId, eventId],
+    );
+    expect(delivery).not.toBeNull();
+    expect(["pending", "queued", "sent", "failed"]).toContain(delivery?.status);
+
+    // Subsequent change in the same batch was successfully applied.
+    const subsequentTeacher = db.getFirstSync<{ name: string }>(
+      `SELECT name FROM teachers WHERE center_id = ? AND name = 'Subsequent Teacher After Delivery Collision'`,
+      [centerId],
+    );
+    expect(subsequentTeacher).not.toBeNull();
+  });
+});

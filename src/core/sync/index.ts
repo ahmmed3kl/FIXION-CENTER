@@ -694,7 +694,7 @@ export class SyncRepository {
       `SELECT operation_id as operationId FROM sync_operations
        WHERE center_id = ? AND status = 'conflict' AND retry_count < 10
          AND LENGTH(operation_id) > 64
-         AND entity_type IN ('student', 'student_card', 'teacher', 'subject', 'group', 'group_schedule', 'session', 'enrollment', 'student_group_enrollment', 'attendance', 'payment', 'payment_reversal', 'debt_adjustment', 'debt_cycle', 'package', 'package_subject', 'package_subscription', 'package_teacher_override', 'notification_template')`,
+         AND entity_type IN ('student', 'student_card', 'teacher', 'subject', 'group', 'group_schedule', 'session', 'enrollment', 'student_group_enrollment', 'attendance', 'payment', 'payment_reversal', 'debt_adjustment', 'debt_cycle', 'package', 'package_subject', 'package_subscription', 'package_teacher_override', 'notification_template', 'notification_event', 'notification_delivery')`,
       [centerId],
     );
     for (const row of longIds) {
@@ -747,7 +747,7 @@ export class SyncRepository {
        WHERE center_id = ?
          AND status = 'conflict'
          AND retry_count < 10
-         AND entity_type IN ('teacher', 'subject', 'teacher_subject', 'group', 'group_schedule', 'enrollment', 'student_group_enrollment', 'student', 'student_card', 'package', 'package_subject', 'package_subscription', 'package_teacher_override', 'notification_template', 'session', 'attendance', 'makeup', 'debt_cycle', 'payment', 'debt_adjustment', 'grade_exam', 'grade_score', 'homework_evaluation_status', 'session_homework_evaluation')
+         AND entity_type IN ('teacher', 'subject', 'teacher_subject', 'group', 'group_schedule', 'enrollment', 'student_group_enrollment', 'student', 'student_card', 'package', 'package_subject', 'package_subscription', 'package_teacher_override', 'notification_template', 'notification_event', 'notification_delivery', 'session', 'attendance', 'makeup', 'debt_cycle', 'payment', 'debt_adjustment', 'grade_exam', 'grade_score', 'homework_evaluation_status', 'session_homework_evaluation')
          AND (
            last_error LIKE '%CARD_OUTSIDE_ALLOWED_RANGE%'
            OR last_error LIKE '%CARD_ALREADY_ASSIGNED%'
@@ -2806,14 +2806,77 @@ export class SyncEngine {
             [score.id || change.entityId, centerId, score.exam_id || score.examId, score.student_id || score.studentId, score.score === "" ? null : (score.score ?? null), score.created_at || score.createdAt || new Date().toISOString(), score.updated_at || score.updatedAt || new Date().toISOString()]);
         } else if (entityType === "notification_event") {
           const e = data.event || data;
+          const notifEventId = e.id || e.eventId || change.entityId;
+          const notifAttendanceId = e.attendance_id || e.attendanceId || null;
+          const notifEventType = e.event_type || e.eventType || "";
+          // The partial unique index uq_notif_events_attendance covers
+          // (center_id, attendance_id, event_type) when attendance_id IS NOT NULL.
+          // ON CONFLICT(id) does not cover it, so a conflicting server change would
+          // throw and abort the pull transaction. Pre-check: if a local row with
+          // the same attendance_id+event_type already exists, the local row wins
+          // (it was created offline first) — skip the server change to let the
+          // cursor advance safely.
+          if (notifAttendanceId) {
+            const existingNotifByAttendance = db.getFirstSync<{ id: string }>(
+              `SELECT id FROM notification_events
+               WHERE center_id = ? AND attendance_id = ? AND event_type = ?`,
+              [centerId, notifAttendanceId, notifEventType],
+            );
+            if (existingNotifByAttendance && existingNotifByAttendance.id !== notifEventId) {
+              // Local row already tracks this attendance event — skip to prevent violating uq_notif_events_attendance.
+              continue;
+            }
+          }
           db.runSync(`INSERT INTO notification_events (id, operation_id, center_id, student_id, session_id, attendance_id, event_type, template_id, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET event_type=excluded.event_type, template_id=excluded.template_id`,
-            [e.id || e.eventId || change.entityId, change.operationId || e.operation_id || `srv-notif-${e.id || change.entityId}`, centerId, e.student_id || e.studentId, e.session_id || e.sessionId || "", e.attendance_id || e.attendanceId || null, e.event_type || e.eventType || "", e.template_id || e.templateId || null, e.created_by || e.createdBy || "system", e.created_at || new Date().toISOString()]);
+            [notifEventId, change.operationId || e.operation_id || `srv-notif-${notifEventId}`, centerId, e.student_id || e.studentId, e.session_id || e.sessionId || "", notifAttendanceId, notifEventType, e.template_id || e.templateId || null, e.created_by || e.createdBy || "system", e.created_at || new Date().toISOString()]);
         } else if (entityType === "notification_delivery") {
           const d = data.delivery || data;
-          db.runSync(`INSERT INTO notification_deliveries (id, center_id, notification_event_id, channel, status, recipient, rendered_message, sent_at, failure_reason, retry_count, provider_message_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET channel=excluded.channel, status=excluded.status, sent_at=excluded.sent_at, failure_reason=excluded.failure_reason, retry_count=excluded.retry_count, provider_message_id=excluded.provider_message_id, updated_at=excluded.updated_at`,
-            [d.id || change.entityId, centerId, d.notification_event_id || d.notificationEventId, d.provider || d.channel || "push", d.status || "pending", d.recipient || "", d.rendered_message || d.renderedMessage || "", d.sent_at || d.sentAt || null, d.failure_reason || d.failureReason || null, Number(d.retry_count || 0), d.provider_message_id || d.providerMessageId || null, d.created_at || new Date().toISOString(), d.updated_at || new Date().toISOString()]);
+          const delivId = d.id || change.entityId;
+          const delivEventId = d.notification_event_id || d.notificationEventId;
+          const delivChannel = d.provider || d.channel || "push";
+          // uq_notif_delivery UNIQUE(notification_event_id, channel) is not covered
+          // by ON CONFLICT(id). Pre-check: if a row with the same event+channel exists,
+          // update it in-place so we don't throw and abort the pull transaction.
+          const existingDelivery = db.getFirstSync<{ id: string; status: string; provider_message_id?: string | null; sent_at?: string | null }>(
+            `SELECT id, status, provider_message_id, sent_at FROM notification_deliveries
+             WHERE center_id = ? AND notification_event_id = ? AND channel = ?`,
+            [centerId, delivEventId, delivChannel],
+          );
+          if (existingDelivery && existingDelivery.id !== delivId) {
+            // Never regress an already 'sent' delivery back to 'pending' or 'queued'.
+            const incomingStatus = d.status || "pending";
+            const effectiveStatus = existingDelivery.status === "sent" && incomingStatus !== "sent"
+              ? "sent"
+              : incomingStatus;
+            const effectiveSentAt = d.sent_at || d.sentAt || existingDelivery.sent_at || null;
+
+            db.runSync(
+              `UPDATE notification_deliveries
+               SET status=?, sent_at=?, failure_reason=?, retry_count=?, updated_at=?
+               WHERE id=? AND center_id=?`,
+              [effectiveStatus, effectiveSentAt,
+               d.failure_reason || d.failureReason || null, Number(d.retry_count || 0),
+               d.updated_at || new Date().toISOString(),
+               existingDelivery.id, centerId],
+            );
+            // provider_message_id is added in migration v13; update it separately
+            // so that an older local DB doesn't abort the pull, but never overwrite a valid existing ID with null.
+            try {
+              const incomingPmId = d.provider_message_id || d.providerMessageId || null;
+              const effectivePmId = incomingPmId || existingDelivery.provider_message_id || null;
+              if (effectivePmId !== null) {
+                db.runSync(
+                  `UPDATE notification_deliveries SET provider_message_id=? WHERE id=? AND center_id=?`,
+                  [effectivePmId, existingDelivery.id, centerId],
+                );
+              }
+            } catch { /* column may not exist on pre-migration builds */ }
+          } else {
+            db.runSync(`INSERT INTO notification_deliveries (id, center_id, notification_event_id, channel, status, recipient, rendered_message, sent_at, failure_reason, retry_count, provider_message_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              ON CONFLICT(id) DO UPDATE SET channel=excluded.channel, status=excluded.status, sent_at=excluded.sent_at, failure_reason=excluded.failure_reason, retry_count=excluded.retry_count, provider_message_id=excluded.provider_message_id, updated_at=excluded.updated_at`,
+              [delivId, centerId, delivEventId, delivChannel, d.status || "pending", d.recipient || "", d.rendered_message || d.renderedMessage || "", d.sent_at || d.sentAt || null, d.failure_reason || d.failureReason || null, Number(d.retry_count || 0), d.provider_message_id || d.providerMessageId || null, d.created_at || new Date().toISOString(), d.updated_at || new Date().toISOString()]);
+          }
         } else if (entityType === "notification_template") {
           const t = data.template || data;
           db.runSync(`INSERT INTO notification_templates (id, center_id, event_type, channel, template_body, is_default, created_by, updated_by, created_at, updated_at)
