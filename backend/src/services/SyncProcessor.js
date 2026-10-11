@@ -3,6 +3,32 @@ const db = require("../db");
 const { AppError } = require("../middleware/errorHandler");
 const zadxSmsProvider = require("./zadxSmsProvider");
 const { validateCardCode } = require("./cardRangeValidation");
+const SERVICE_VERSION = require("../../package.json").version;
+
+function logGroupScheduleUpdate(operation, phase, error) {
+  if (
+    canonicalSyncEntity(operation.entityType) !== "group_schedule" ||
+    String(operation.operationType || "").toUpperCase() !== "UPDATE"
+  ) {
+    return;
+  }
+
+  const entry = {
+    event: "sync_group_schedule_update",
+    operationId: String(operation.operationId || "").slice(0, 64),
+    operationType: String(operation.operationType || "").toUpperCase(),
+    entityType: "group_schedule",
+    phase,
+    serviceVersion: SERVICE_VERSION,
+    deployCommit: process.env.RENDER_GIT_COMMIT || process.env.GIT_COMMIT || null,
+  };
+  if (error) {
+    entry.errorClass = error.code === "42703" ? "undefined_column" : "operation_failed";
+    entry.errorCode = error.code || null;
+    entry.errorName = error.name || "Error";
+  }
+  console.info(JSON.stringify(entry));
+}
 
 /**
  * Mobile clients historically stored check-in values as HH:mm:ss. PostgreSQL
@@ -290,6 +316,9 @@ class SyncProcessor {
           continue;
         }
         const operationId = normalizeOperationId(rawOperationId);
+        const operationLogContext = { ...op, operationId: rawOperationId };
+        let operationPhase = "idempotency_check";
+        logGroupScheduleUpdate(operationLogContext, operationPhase);
 
         // 1. Check if operation was already processed (Database-level Idempotency)
         const existingOp = await client.query(
@@ -308,6 +337,7 @@ class SyncProcessor {
             });
             continue;
           }
+          logGroupScheduleUpdate(operationLogContext, "already_applied");
           syncedOperationIds.push(rawOperationId);
           const existingSeq = parseInt(existingOp.rows[0].server_seq, 10);
           if (existingSeq > maxServerSeq) {
@@ -330,6 +360,7 @@ class SyncProcessor {
 
         await client.query("SAVEPOINT op_savepoint");
         try {
+          operationPhase = "payload_normalization";
           const normalizedPayload = typeof payload === "string" ? JSON.parse(payload || "{}") : { ...(payload || {}) };
           const referencedSessionId = normalizedPayload.session_id || normalizedPayload.sessionId;
           const canonicalSessionId = referencedSessionId && canonicalSessionIds.get(String(referencedSessionId));
@@ -351,8 +382,10 @@ class SyncProcessor {
               }
             }
           }
+          operationPhase = "freshness_check";
           await SyncProcessor.assertFreshMutation(client, centerId, canonicalSyncEntity(entityType), entityId, normalizedPayload, operationType);
           // 3. Dispatch and apply domain mutation atomically
+          operationPhase = "domain_mutation";
           const mutationContext = {
             centerId,
             userId,
@@ -365,6 +398,7 @@ class SyncProcessor {
             createdAt,
           };
           await SyncProcessor.applyDomainMutation(client, mutationContext);
+          operationPhase = "ledger_write";
           const ledgerEntityId = mutationContext.canonicalEntityId || entityId;
           if (
             canonicalSyncEntity(entityType) === "debt_cycle" &&
@@ -488,6 +522,7 @@ class SyncProcessor {
             maxServerSeq = seq;
           }
 
+          operationPhase = "audit_write";
           // 5. Record Server-Side Audit Trail
           const studentAuditState = entityType === "student" ? (payload?.student || payload || {}) : {};
           const hasStudentArchiveMutation = entityType === "student" && (
@@ -516,8 +551,10 @@ class SyncProcessor {
           );
 
           await client.query("RELEASE SAVEPOINT op_savepoint");
+          logGroupScheduleUpdate(operationLogContext, "applied");
           syncedOperationIds.push(rawOperationId);
         } catch (opErr) {
+          logGroupScheduleUpdate(operationLogContext, operationPhase, opErr);
           await client.query("ROLLBACK TO SAVEPOINT op_savepoint");
           let serverState = null;
           try {

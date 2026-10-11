@@ -169,8 +169,11 @@ test("schedule id collision owned by another center is rejected by the upsert", 
   );
 });
 
-test("replaying an already-applied schedule operation acknowledges its ledger entry without reapplying it", async () => {
+test("replaying an already-applied schedule update logs safe diagnostics without reapplying it", async () => {
   const originalWithTransaction = db.withTransaction;
+  const originalConsoleInfo = console.info;
+  const diagnosticLogs = [];
+  console.info = (entry) => diagnosticLogs.push(JSON.parse(entry));
   let mutationStarted = false;
   db.withTransaction = (callback) => callback({
     async query(sql) {
@@ -193,18 +196,27 @@ test("replaying an already-applied schedule operation acknowledges its ledger en
 
   try {
     const result = await SyncProcessor.processPush(centerId, "schedule-user", "schedule-device", [{
-      operationId: "schedule-create-already-applied",
+      operationId: "schedule-update-already-applied",
       centerId,
-      operationType: "CREATE",
+      operationType: "UPDATE",
       entityType: "group_schedule",
       entityId: scheduleId,
       payload: { groupId, dayOfWeek: 2, startTime: "10:00", endTime: "11:00" },
     }]);
 
-    assert.deepEqual(result.syncedOperationIds, ["schedule-create-already-applied"]);
+    assert.deepEqual(result.syncedOperationIds, ["schedule-update-already-applied"]);
     assert.deepEqual(result.conflicts, []);
     assert.equal(mutationStarted, false);
+    assert.deepEqual(
+      diagnosticLogs.map((entry) => entry.phase),
+      ["idempotency_check", "already_applied"],
+    );
+    assert.equal(diagnosticLogs[0].operationId, "schedule-update-already-applied");
+    assert.equal(diagnosticLogs[0].entityType, "group_schedule");
+    assert.equal(diagnosticLogs[0].serviceVersion, require("../package.json").version);
+    assert.equal(Object.prototype.hasOwnProperty.call(diagnosticLogs[0], "payload"), false);
   } finally {
     db.withTransaction = originalWithTransaction;
+    console.info = originalConsoleInfo;
   }
 });
