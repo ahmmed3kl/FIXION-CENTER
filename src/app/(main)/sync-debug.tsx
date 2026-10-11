@@ -54,6 +54,7 @@ export default function SyncDebugScreen() {
   const [loading, setLoading] = useState(true);
   const [lastResult, setLastResult] = useState("");
   const [loadError, setLoadError] = useState("");
+  const [retryingOperationId, setRetryingOperationId] = useState<string | null>(null);
   const [diagnostics, setDiagnostics] = useState(ConnectivityService.getDiagnostics());
 
   const load = useCallback(() => {
@@ -80,7 +81,7 @@ export default function SyncDebugScreen() {
   }, []));
 
   const syncNow = async () => {
-    if (!activeCenter) return;
+    if (!activeCenter || retryingOperationId) return;
     setRefreshing(true);
     try {
       const result = await SyncEngine.syncCenterNow(activeCenter.id);
@@ -93,6 +94,30 @@ export default function SyncDebugScreen() {
     }
   };
 
+  const retryOperation = async (operation: SyncOperation) => {
+    if (!activeCenter || retryingOperationId) return;
+    setRetryingOperationId(operation.operationId);
+    setLastResult("");
+    try {
+      const result = await SyncEngine.retryLegacyGroupScheduleUpdate(
+        activeCenter.id,
+        operation.operationId,
+      );
+      setLastResult(
+        result === "synced"
+          ? `تم تأكيد العملية ${operation.operationId} من الخادم.`
+          : `أعاد الخادم تعارضًا جديدًا للعملية ${operation.operationId}.`,
+      );
+    } catch (error: any) {
+      setLastResult(
+        `فشلت إعادة محاولة ${operation.operationId}: ${error?.message || "خطأ غير معروف"}`,
+      );
+    } finally {
+      load();
+      setRetryingOperationId(null);
+    }
+  };
+
   if (!activeCenter) {
     return <SafeAreaView style={styles.safe}><Text style={styles.empty}>No active center.</Text></SafeAreaView>;
   }
@@ -101,7 +126,7 @@ export default function SyncDebugScreen() {
     <SafeAreaView style={styles.safe}>
       <ScrollView
         contentContainerStyle={styles.content}
-        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={syncNow} />}
+        refreshControl={<RefreshControl refreshing={refreshing || retryingOperationId !== null} onRefresh={syncNow} />}
       >
         <View style={styles.titleRow}>
           <View>
@@ -153,7 +178,7 @@ export default function SyncDebugScreen() {
           </Text>
         </View>
 
-        <TouchableOpacity style={styles.syncButton} onPress={syncNow} disabled={refreshing}>
+        <TouchableOpacity style={styles.syncButton} onPress={syncNow} disabled={refreshing || retryingOperationId !== null}>
           {refreshing ? <ActivityIndicator color={Colors.white} /> : <Ionicons name="sync-outline" size={20} color={Colors.white} />}
           <Text style={styles.syncButtonText}>Sync now</Text>
         </TouchableOpacity>
@@ -188,6 +213,26 @@ export default function SyncDebugScreen() {
             <Text style={styles.meta}>Entity: {operation.entityId}</Text>
             <Text style={styles.meta}>{formatDate(operation.createdAt)} · attempts: {operation.retryCount || 0}</Text>
             {operation.lastError ? <Text style={styles.error} selectable>{operation.lastError}</Text> : null}
+            {operation.status === "conflict" &&
+              operation.entityType === "group_schedule" &&
+              operation.operationType.toUpperCase() === "UPDATE" &&
+              /column\s+["']?updated_at["']?\s+does not exist/i.test(operation.lastError || "") &&
+              !/TEACHER_SCHEDULE_CONFLICT/i.test(operation.lastError || "") ? (
+                <TouchableOpacity
+                  style={styles.retryButton}
+                  onPress={() => retryOperation(operation)}
+                  disabled={retryingOperationId !== null || refreshing}
+                  accessibilityRole="button"
+                  accessibilityLabel={`إعادة محاولة العملية ${operation.operationId}`}
+                >
+                  {retryingOperationId === operation.operationId
+                    ? <ActivityIndicator color={Colors.white} />
+                    : <Ionicons name="reload-outline" size={18} color={Colors.white} />}
+                  <Text style={styles.syncButtonText}>
+                    {retryingOperationId === operation.operationId ? "جارٍ إعادة المحاولة" : "إعادة محاولة هذه العملية"}
+                  </Text>
+                </TouchableOpacity>
+              ) : null}
           </View>
         ))}
 
@@ -229,6 +274,7 @@ const createStyles = () => StyleSheet.create({
   connectionWarning: { color: Colors.warningText },
   connectionHint: { color: Colors.slate500, fontSize: 12, textAlign: "right" },
   syncButton: { backgroundColor: Colors.primary, borderRadius: 14, minHeight: 50, alignItems: "center", justifyContent: "center", flexDirection: "row", gap: 8, elevation: 3 },
+  retryButton: { backgroundColor: Colors.slate800, borderRadius: 12, minHeight: 46, paddingHorizontal: Spacing.md, alignItems: "center", justifyContent: "center", flexDirection: "row", gap: 8, marginTop: Spacing.sm },
   syncButtonText: { color: Colors.white, fontWeight: "800", fontSize: 15 },
   result: { color: Colors.slate600, textAlign: "center", fontSize: 12 },
   statsGrid: { flexDirection: "row", flexWrap: "wrap", gap: Spacing.sm },

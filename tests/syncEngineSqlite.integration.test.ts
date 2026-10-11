@@ -12,6 +12,8 @@ import { ConnectivityService } from "../src/core/connectivity";
 import { DatabaseService, SqlDatabase } from "../src/core/database";
 import { SyncEngine, SyncRepository } from "../src/core/sync";
 
+jest.mock("expo-device", () => ({ modelName: null }));
+
 interface NativeStatement {
   all(...parameters: any[]): unknown[];
   get(...parameters: any[]): unknown;
@@ -158,6 +160,41 @@ class InvalidChangeAdapter extends SharedServerAdapter {
       hasMore: false,
       serverTimestamp: new Date().toISOString(),
     };
+  }
+}
+
+class SpecificRetryAdapter implements ISyncApiAdapter {
+  calls: SyncOperationPayload[][] = [];
+  response: PushSyncResponse = {
+    success: true,
+    syncedOperationIds: [],
+    conflicts: [],
+    serverCursor: "100",
+    processedAt: new Date().toISOString(),
+  };
+
+  async pushOperations(
+    _centerId: string,
+    operations: SyncOperationPayload[],
+  ): Promise<PushSyncResponse> {
+    this.calls.push(operations);
+    return this.response;
+  }
+
+  async pullChanges(
+    _centerId: string,
+    cursor: string,
+  ): Promise<PullSyncResponse> {
+    return {
+      changes: [],
+      nextCursor: cursor,
+      hasMore: false,
+      serverTimestamp: new Date().toISOString(),
+    };
+  }
+
+  async bootstrapCenter(_centerId: string): Promise<BootstrapResponse> {
+    throw new Error("Unexpected bootstrap request");
   }
 }
 
@@ -331,5 +368,125 @@ describe("SyncEngine against independent persistent SQLite databases", () => {
       "SELECT id FROM teachers WHERE center_id = ? AND id = 'unsupported-entity'",
       [centerId],
     )).toBeNull();
+  });
+
+  it("retries only the selected legacy group schedule update with its original operation id and payload", async () => {
+    const centerId = `engine-targeted-retry-${Date.now()}`;
+    const database = createClientDatabase("targeted-retry", centerId);
+    const targetOperationId = "legacy-schedule-update-10";
+    SyncRepository.enqueueOperation({
+      operationId: "other-schedule-history",
+      centerId,
+      userId: "retry-user",
+      deviceId: "retry-device",
+      operationType: "UPDATE",
+      entityType: "group_schedule",
+      entityId: "legacy-schedule-id",
+      payload: { id: "legacy-schedule-id", startTime: "08:00", endTime: "09:00" },
+    });
+    database.runSync(
+      `UPDATE sync_operations
+       SET status = 'conflict', last_error = 'Unrelated historical conflict'
+       WHERE operation_id = ?`,
+      ["other-schedule-history"],
+    );
+    const originalPayload = {
+      id: "legacy-schedule-id",
+      groupId: "legacy-group-id",
+      dayOfWeek: 2,
+      startTime: "10:00",
+      endTime: "11:00",
+      updatedAt: "2026-10-10T10:00:00.000Z",
+    };
+    SyncRepository.enqueueOperation({
+      operationId: targetOperationId,
+      centerId,
+      userId: "retry-user",
+      deviceId: "retry-device",
+      operationType: "UPDATE",
+      entityType: "group_schedule",
+      entityId: "legacy-schedule-id",
+      payload: originalPayload,
+    });
+    database.runSync(
+      `UPDATE sync_operations
+       SET status = 'conflict', retry_count = 10,
+           last_error = 'column "updated_at" does not exist'
+       WHERE operation_id = ?`,
+      [targetOperationId],
+    );
+    SyncRepository.enqueueOperation({
+      operationId: "unrelated-pending-operation",
+      centerId,
+      userId: "retry-user",
+      deviceId: "retry-device",
+      operationType: "UPDATE",
+      entityType: "group",
+      entityId: "unrelated-group-id",
+      payload: { id: "unrelated-group-id" },
+    });
+
+    const adapter = new SpecificRetryAdapter();
+    SyncEngine.setAdapter(adapter);
+    try {
+      adapter.response.syncedOperationIds = [targetOperationId];
+      const result = await SyncEngine.retryLegacyGroupScheduleUpdate(
+        centerId,
+        targetOperationId,
+      );
+
+      expect(result).toBe("synced");
+      expect(adapter.calls).toHaveLength(1);
+      expect(adapter.calls[0]).toHaveLength(1);
+      expect(adapter.calls[0][0]).toMatchObject({
+        operationId: targetOperationId,
+        centerId,
+        operationType: "UPDATE",
+        entityType: "group_schedule",
+        entityId: "legacy-schedule-id",
+        payload: originalPayload,
+      });
+      expect(SyncRepository.getByOperationId(targetOperationId)?.retryCount).toBe(10);
+      expect(SyncRepository.getByOperationId(targetOperationId)?.status).toBe("synced");
+      expect(SyncRepository.getByOperationId("unrelated-pending-operation")?.status).toBe("pending");
+      expect(SyncRepository.getByOperationId("other-schedule-history")?.status).toBe("conflict");
+    } finally {
+      SyncEngine.setAdapter(originalAdapter);
+    }
+  });
+
+  it("rejects targeted retry for a teacher schedule conflict without sending it", async () => {
+    const centerId = `engine-targeted-conflict-${Date.now()}`;
+    const database = createClientDatabase("targeted-conflict", centerId);
+    const operationId = "legacy-schedule-teacher-conflict";
+    SyncRepository.enqueueOperation({
+      operationId,
+      centerId,
+      userId: "retry-user",
+      deviceId: "retry-device",
+      operationType: "UPDATE",
+      entityType: "group_schedule",
+      entityId: "legacy-schedule-id",
+      payload: { id: "legacy-schedule-id" },
+    });
+    database.runSync(
+      `UPDATE sync_operations
+       SET status = 'conflict', retry_count = 10,
+           last_error = 'TEACHER_SCHEDULE_CONFLICT: column "updated_at" does not exist'
+       WHERE operation_id = ?`,
+      [operationId],
+    );
+
+    const adapter = new SpecificRetryAdapter();
+    SyncEngine.setAdapter(adapter);
+    try {
+      await expect(
+        SyncEngine.retryLegacyGroupScheduleUpdate(centerId, operationId),
+      ).rejects.toThrow("العملية غير مؤهلة لإعادة المحاولة الآمنة");
+      expect(adapter.calls).toHaveLength(0);
+      expect(SyncRepository.getByOperationId(operationId)?.status).toBe("conflict");
+    } finally {
+      SyncEngine.setAdapter(originalAdapter);
+    }
   });
 });

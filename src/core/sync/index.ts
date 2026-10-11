@@ -964,7 +964,10 @@ export class SyncRepository {
     );
   }
 
-  static markAsSynced(operationId: string): void {
+  static markAsSynced(
+    operationId: string,
+    options?: { resolveOnlyThisOperation?: boolean },
+  ): void {
     const db = DatabaseService.getDb();
     const syncedAt = new Date().toISOString();
     const operation = db.getFirstSync<{
@@ -986,7 +989,14 @@ export class SyncRepository {
     // A successful repair is authoritative for the entity. Retire older
     // failed/conflicted attempts for the same record so historical retries do
     // not keep the dashboard stuck on "sync problem" forever.
-    if (operation) {
+    if (operation && options?.resolveOnlyThisOperation) {
+      db.runSync(
+        `UPDATE sync_conflicts
+         SET resolved_at = COALESCE(resolved_at, ?)
+         WHERE center_id = ? AND operation_id = ? AND resolved_at IS NULL`,
+        [syncedAt, operation.centerId, operationId],
+      );
+    } else if (operation) {
       db.runSync(
         `UPDATE sync_operations
          SET status = 'synced', synced_at = ?, next_retry_at = NULL,
@@ -1415,6 +1425,116 @@ export class SyncEngine {
 
   static getBackoffDelayMs(retryCount: number): number {
     return Math.min(1000 * Math.pow(2, retryCount), 60000);
+  }
+
+  private static async withSyncLocks<T>(
+    centerId: string,
+    task: () => Promise<T>,
+  ): Promise<T> {
+    const previous = this.syncLocks.get(centerId);
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const queueTail = previous ? previous.catch(() => {}).then(() => current) : current;
+    this.syncLocks.set(centerId, queueTail);
+    if (previous) await previous.catch(() => {});
+
+    const databasePrevious = this.databaseSyncLock;
+    let databaseRelease!: () => void;
+    const databaseCurrent = new Promise<void>((resolve) => {
+      databaseRelease = resolve;
+    });
+    this.databaseSyncLock = databaseCurrent;
+    if (databasePrevious) await databasePrevious.catch(() => {});
+
+    try {
+      return await task();
+    } finally {
+      databaseRelease();
+      if (this.databaseSyncLock === databaseCurrent) {
+        this.databaseSyncLock = null;
+      }
+      release();
+      if (this.syncLocks.get(centerId) === queueTail) {
+        this.syncLocks.delete(centerId);
+      }
+    }
+  }
+
+  static async retryLegacyGroupScheduleUpdate(
+    centerId: string,
+    operationId: string,
+  ): Promise<"synced" | "conflict"> {
+    if (!centerId || !operationId) {
+      throw new Error("مركز أو معرّف العملية غير صالح.");
+    }
+
+    return this.withSyncLocks(centerId, async () => {
+      const operation = SyncRepository.getByOperationId(operationId);
+      const lastError = operation?.lastError || "";
+      const isLegacyColumnError =
+        /column\s+["']?updated_at["']?\s+does not exist/i.test(lastError);
+      const isTeacherScheduleConflict = /TEACHER_SCHEDULE_CONFLICT/i.test(lastError);
+
+      if (
+        !operation ||
+        operation.centerId !== centerId ||
+        operation.entityType !== "group_schedule" ||
+        operation.operationType.toUpperCase() !== "UPDATE" ||
+        operation.status !== "conflict" ||
+        !isLegacyColumnError ||
+        isTeacherScheduleConflict
+      ) {
+        throw new Error("العملية غير مؤهلة لإعادة المحاولة الآمنة.");
+      }
+
+      SyncRepository.markAsSyncing(operationId);
+      try {
+        const response = await this.adapter.pushOperations(centerId, [{
+          operationId: operation.operationId,
+          centerId: operation.centerId,
+          userId: operation.userId,
+          deviceId: operation.deviceId,
+          operationType: operation.operationType,
+          entityType: operation.entityType,
+          entityId: operation.entityId,
+          payload: typeof operation.payload === "string"
+            ? JSON.parse(operation.payload || "{}")
+            : operation.payload,
+          createdAt: operation.createdAt,
+          retryCount: operation.retryCount,
+        }]);
+
+        if (response.syncedOperationIds.includes(operationId)) {
+          SyncRepository.markAsSynced(operationId, { resolveOnlyThisOperation: true });
+          return "synced";
+        }
+
+        const conflict = response.conflicts.find((item) => item.operationId === operationId);
+        if (conflict) {
+          SyncRepository.markAsConflict(
+            operationId,
+            `تضارب مع الخادم: ${conflict.reason} (${conflict.resolution})`,
+            { serverState: conflict.serverState, resolution: conflict.resolution },
+          );
+          return "conflict";
+        }
+
+        const reason = "لم يؤكد الخادم قبول العملية ولم يُرجع تعارضًا لها.";
+        SyncRepository.markAsFailed(operationId, reason);
+        throw new Error(reason);
+      } catch (error: any) {
+        const current = SyncRepository.getByOperationId(operationId);
+        if (current?.status === "syncing") {
+          SyncRepository.markAsFailed(
+            operationId,
+            error?.message || "تعذر الحصول على نتيجة إعادة المحاولة من الخادم.",
+          );
+        }
+        throw error;
+      }
+    });
   }
 
   /**
@@ -2985,33 +3105,7 @@ export class SyncEngine {
     state: SyncEngineState;
     arabicMessage: string;
   }> {
-    const previous = this.syncLocks.get(centerId);
-    let release!: () => void;
-    const current = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    const queueTail = previous ? previous.catch(() => {}).then(() => current) : current;
-    this.syncLocks.set(centerId, queueTail);
-    if (previous) await previous.catch(() => {});
-    const databasePrevious = this.databaseSyncLock;
-    let databaseRelease!: () => void;
-    const databaseCurrent = new Promise<void>((resolve) => {
-      databaseRelease = resolve;
-    });
-    this.databaseSyncLock = databaseCurrent;
-    if (databasePrevious) await databasePrevious.catch(() => {});
-    try {
-      return await this.runSyncCenterNow(centerId, options);
-    } finally {
-      databaseRelease();
-      if (this.databaseSyncLock === databaseCurrent) {
-        this.databaseSyncLock = null;
-      }
-      release();
-      if (this.syncLocks.get(centerId) === queueTail) {
-        this.syncLocks.delete(centerId);
-      }
-    }
+    return this.withSyncLocks(centerId, () => this.runSyncCenterNow(centerId, options));
   }
 
   private static async runSyncCenterNow(
