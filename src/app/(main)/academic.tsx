@@ -164,9 +164,17 @@ export default function AcademicScreen() {
 
   const filteredTeachers = smartSearch(teachers, teacherSearch, [{ get: (teacher) => teacher.name, weight: 1.2 }, { get: (teacher) => teacher.phone }]);
 
-  const formatTimeForName = (value: string) => {
+  const formatTimeForName = (value: unknown) => {
+    if (typeof value !== "string") return "وقت غير متاح";
     const [hour, minute] = value.split(":").map(Number);
-    if (!Number.isFinite(hour) || !Number.isFinite(minute)) return value;
+    if (
+      !Number.isInteger(hour) ||
+      !Number.isInteger(minute) ||
+      hour < 0 ||
+      hour > 23 ||
+      minute < 0 ||
+      minute > 59
+    ) return "وقت غير متاح";
     const suffix = hour >= 12 ? "م" : "ص";
     const displayHour = hour % 12 || 12;
     return `${String(displayHour).padStart(2, "0")}:${String(minute).padStart(2, "0")} ${suffix}`;
@@ -1123,7 +1131,16 @@ export default function AcademicScreen() {
                   );
                 })}
               </View>
-              {selectedScheduleDays.slice().sort((a, b) => a - b).map((day) => (
+              {(Array.isArray(selectedScheduleDays) ? selectedScheduleDays : [])
+                .map(Number)
+                .filter((day, index, days) =>
+                  Number.isInteger(day) &&
+                  day >= 0 &&
+                  day < DAYS_OF_WEEK.length &&
+                  days.indexOf(day) === index
+                )
+                .sort((a, b) => a - b)
+                .map((day) => (
                 <View key={day} style={styles.dayTimeRow}>
                   <Text style={styles.dayTimeLabel}>{DAYS_OF_WEEK[day]}</Text>
                   {(["start", "end"] as const).map((field) => (
