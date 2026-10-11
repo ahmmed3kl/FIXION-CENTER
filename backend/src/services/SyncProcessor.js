@@ -611,12 +611,15 @@ class SyncProcessor {
     // not apply to this explicit recovery operation.
     if (operationType === "REPAIR_AFTER_SERVER_RESET") return;
     if (!entityId) return;
+    // group_schedules has no updated_at column in the canonical schema, so
+    // schedule edits cannot use timestamp-based stale-write validation.
+    if (entityType === "group_schedule") return;
     const tableByType = {
       student: "students", teacher: "teachers", subject: "subjects",
       group: "groups", session: "sessions", enrollment: "student_group_enrollments",
       package: "packages", debt_cycle: "debt_cycles",
       package_subscription: "student_package_subscriptions",
-      group_schedule: "group_schedules", student_card: "student_cards",
+      student_card: "student_cards",
       package_teacher_override: "package_subject_teacher_overrides",
       grade_exam: "grade_exams", grade_score: "grade_scores",
       homework_evaluation_status: "homework_evaluation_statuses",
@@ -1624,7 +1627,14 @@ class SyncProcessor {
 
       case "group_schedule": {
         const sched = payload;
-        const schedId = sched.id || context.entityId || `sched-${Date.now()}`;
+        if (
+          sched.id &&
+          context.entityId &&
+          String(sched.id) !== String(context.entityId)
+        ) {
+          throw new Error("GROUP_SCHEDULE_ID_MISMATCH");
+        }
+        const schedId = context.entityId || sched.id || `sched-${Date.now()}`;
         const operation = String(context.operationType || "").toUpperCase();
         if (["DELETE", "REMOVE"].includes(operation) || sched.status === "inactive") {
           await client.query(
@@ -1655,7 +1665,8 @@ class SyncProcessor {
         // teacher, including partial overlaps (15:00-17:00 vs 16:00-18:00).
         await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`schedule:${centerId}:${groupRes.rows[0].teacher_id}:${dayOfWeek}`]);
         const conflict = await client.query(
-          `SELECT gs.start_time, gs.end_time, g.name AS group_name
+          `SELECT gs.id AS schedule_id, gs.group_id, gs.day_of_week,
+                  gs.start_time, gs.end_time, g.name AS group_name
            FROM group_schedules gs
            JOIN groups g ON g.center_id = gs.center_id AND g.id = gs.group_id
            WHERE gs.center_id = $1 AND gs.id <> $2 AND gs.day_of_week = $3
@@ -1665,16 +1676,20 @@ class SyncProcessor {
           [centerId, schedId, dayOfWeek, groupRes.rows[0].teacher_id, endTime, startTime],
         );
         if (conflict.rows[0]) {
-          throw new Error(`TEACHER_SCHEDULE_CONFLICT:${conflict.rows[0].group_name || "group"}:${conflict.rows[0].start_time}-${conflict.rows[0].end_time}`);
+          const existingSchedule = conflict.rows[0];
+          throw new Error(
+            `TEACHER_SCHEDULE_CONFLICT:${existingSchedule.group_name || "group"}:${existingSchedule.start_time}-${existingSchedule.end_time}:schedule=${existingSchedule.schedule_id}:group=${existingSchedule.group_id}:day=${existingSchedule.day_of_week}`,
+          );
         }
-        await client.query(
+        const scheduleWrite = await client.query(
           `INSERT INTO group_schedules (id, center_id, group_id, day_of_week, start_time, end_time, created_at)
            VALUES ($1, $2, $3, $4, $5, $6, NOW())
            ON CONFLICT (id) DO UPDATE SET
              group_id = EXCLUDED.group_id,
              day_of_week = EXCLUDED.day_of_week,
              start_time = EXCLUDED.start_time,
-             end_time = EXCLUDED.end_time;`,
+             end_time = EXCLUDED.end_time
+           WHERE group_schedules.center_id = EXCLUDED.center_id;`,
           [
             schedId,
             centerId,
@@ -1684,6 +1699,14 @@ class SyncProcessor {
             endTime,
           ],
         );
+        if (scheduleWrite.rowCount === 0) {
+          throw new AppError(
+            "GROUP_SCHEDULE_BELONGS_TO_OTHER_CENTER",
+            "Group schedule belongs to another center.",
+            "موعد المجموعة تابع لمركز آخر.",
+            403,
+          );
+        }
         break;
       }
 
