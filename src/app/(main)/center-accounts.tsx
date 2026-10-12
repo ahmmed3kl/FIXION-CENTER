@@ -15,7 +15,7 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { ApiClient } from "../../core/api";
-import { Permission, PermissionService, resolveUserPermissions } from "../../core/permissions";
+import { Permission, PermissionService, resolveUserPermissions, RolePermissions } from "../../core/permissions";
 import { Colors, Spacing, Typography, useTheme } from "../../core/theme";
 import { useAuthStore } from "../../features/auth/useAuthStore";
 import {
@@ -59,6 +59,16 @@ export default function CenterAccountsScreen() {
   const [password, setPassword] = useState("");
   const [role, setRole] = useState<"manager" | "assistant">("manager");
   const [selectedPermissions, setSelectedPermissions] = useState<Permission[]>([]);
+  const [editingAccount, setEditingAccount] = useState<Account | null>(null);
+  const [editName, setEditName] = useState("");
+  const [editEmail, setEditEmail] = useState("");
+  const [editRole, setEditRole] = useState<"manager" | "assistant">("assistant");
+  const [editSaving, setEditSaving] = useState(false);
+  const [resettingAccount, setResettingAccount] = useState<Account | null>(null);
+  const [newPassword, setNewPassword] = useState("");
+  const [passwordConfirmation, setPasswordConfirmation] = useState("");
+  const [accountActionError, setAccountActionError] = useState("");
+  const [accountActionSaving, setAccountActionSaving] = useState(false);
 
   const load = useCallback(async () => {
     if (!canManage) {
@@ -93,13 +103,75 @@ export default function CenterAccountsScreen() {
     void load();
   }, [load]));
 
+  const defaultPermissionsFor = (accountRole: Account["role"]) =>
+    RolePermissions[accountRole].filter((permission) => managerPermissions.includes(permission));
+
   const openCreateForm = () => {
+    const initialRole: Account["role"] = user?.role === "manager" ? "assistant" : "manager";
     setName("");
     setEmail("");
     setPassword("");
-    setRole(user?.role === "manager" ? "assistant" : "manager");
-    setSelectedPermissions([]);
+    setRole(initialRole);
+    setSelectedPermissions(defaultPermissionsFor(initialRole));
     setOpen(true);
+  };
+
+  const openEditForm = (account: Account) => {
+    setEditingAccount(account);
+    setEditName(account.fullName);
+    setEditEmail(account.email);
+    setEditRole(account.role);
+    setAccountActionError("");
+  };
+
+  const saveAccountProfile = async () => {
+    if (!editingAccount || editSaving) return;
+    setEditSaving(true);
+    setAccountActionError("");
+    try {
+      await ApiClient.getInstance().patch(
+        "/center/users/" + editingAccount.id,
+        { fullName: editName, email: editEmail, role: editRole },
+        requestConfig,
+      );
+      setEditingAccount(null);
+      await load();
+      Alert.alert("تم التحديث", "تم حفظ بيانات الحساب.");
+    } catch (saveError: any) {
+      setAccountActionError(saveError?.userMessage || saveError?.message || "تعذر تعديل بيانات الحساب.");
+    } finally {
+      setEditSaving(false);
+    }
+  };
+
+  const openPasswordReset = (account: Account) => {
+    setResettingAccount(account);
+    setNewPassword("");
+    setPasswordConfirmation("");
+    setAccountActionError("");
+  };
+
+  const resetAccountPassword = async () => {
+    if (!resettingAccount || accountActionSaving) return;
+    if (newPassword !== passwordConfirmation) {
+      setAccountActionError("كلمتا المرور غير متطابقتين.");
+      return;
+    }
+    setAccountActionSaving(true);
+    setAccountActionError("");
+    try {
+      await ApiClient.getInstance().post(
+        "/center/users/" + resettingAccount.id + "/reset-password",
+        { password: newPassword },
+        requestConfig,
+      );
+      setResettingAccount(null);
+      Alert.alert("تم التحديث", "تم تغيير كلمة مرور الحساب.");
+    } catch (resetError: any) {
+      setAccountActionError(resetError?.userMessage || resetError?.message || "تعذر تغيير كلمة المرور.");
+    } finally {
+      setAccountActionSaving(false);
+    }
   };
 
   const createAccount = async () => {
@@ -243,6 +315,28 @@ export default function CenterAccountsScreen() {
               <Ionicons name="chevron-back" size={19} color={colors.slate400} />
               <TouchableOpacity
                 accessibilityRole="button"
+                accessibilityLabel={"تعديل بيانات " + item.fullName}
+                onPress={(event) => {
+                  event.stopPropagation();
+                  openEditForm(item);
+                }}
+                style={styles.rowAction}
+              >
+                <Ionicons name="create-outline" size={19} color={colors.primary} />
+              </TouchableOpacity>
+              <TouchableOpacity
+                accessibilityRole="button"
+                accessibilityLabel={"تغيير كلمة مرور " + item.fullName}
+                onPress={(event) => {
+                  event.stopPropagation();
+                  openPasswordReset(item);
+                }}
+                style={styles.rowAction}
+              >
+                <Ionicons name="key-outline" size={18} color={colors.primary} />
+              </TouchableOpacity>
+              <TouchableOpacity
+                accessibilityRole="button"
                 accessibilityLabel={item.status === "active" ? "تعطيل الحساب" : "تفعيل الحساب"}
                 onPress={(event) => {
                   event.stopPropagation();
@@ -289,7 +383,10 @@ export default function CenterAccountsScreen() {
                       key={accountRole}
                       accessibilityRole="button"
                       accessibilityState={{ selected: active }}
-                      onPress={() => setRole(accountRole)}
+                      onPress={() => {
+                        setRole(accountRole);
+                        setSelectedPermissions(defaultPermissionsFor(accountRole));
+                      }}
                       style={[
                         styles.role,
                         { borderColor: colors.border },
@@ -363,6 +460,47 @@ export default function CenterAccountsScreen() {
           </View>
         </View>
       </Modal>
+
+      <Modal visible={Boolean(editingAccount)} transparent animationType="slide" onRequestClose={() => setEditingAccount(null)}>
+        <View style={styles.backdrop}>
+          <View style={[styles.sheet, { backgroundColor: colors.cardBackground }]}>
+            <Text style={[styles.sheetTitle, { color: colors.textPrimary }]}>تعديل بيانات الحساب</Text>
+            <AppInput label="الاسم" value={editName} onChangeText={setEditName} />
+            <AppInput label="البريد الإلكتروني" value={editEmail} onChangeText={setEditEmail} keyboardType="email-address" autoCapitalize="none" />
+            {user?.role !== "manager" ? (
+              <View style={styles.roleRow}>
+                {(["manager", "assistant"] as const).map((accountRole) => {
+                  const active = editRole === accountRole;
+                  return <TouchableOpacity key={accountRole} accessibilityRole="button" accessibilityState={{ selected: active }} onPress={() => setEditRole(accountRole)} style={[styles.role, { borderColor: colors.border }, active && { backgroundColor: colors.primary, borderColor: colors.primary }]}>
+                    <Text style={[styles.roleText, { color: active ? colors.white : colors.textPrimary }]}>{accountRole === "manager" ? "مدير" : "مساعد"}</Text>
+                  </TouchableOpacity>;
+                })}
+              </View>
+            ) : null}
+            {accountActionError ? <Text style={styles.error}>{accountActionError}</Text> : null}
+            <View style={styles.buttons}>
+              <AppButton title={editSaving ? "جارٍ الحفظ..." : "حفظ البيانات"} onPress={() => void saveAccountProfile()} disabled={editSaving || !editingAccount} style={{ flex: 1 }} />
+              <AppButton title="إلغاء" variant="outline" onPress={() => setEditingAccount(null)} disabled={editSaving} style={{ flex: 1 }} />
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal visible={Boolean(resettingAccount)} transparent animationType="slide" onRequestClose={() => setResettingAccount(null)}>
+        <View style={styles.backdrop}>
+          <View style={[styles.sheet, { backgroundColor: colors.cardBackground }]}>
+            <Text style={[styles.sheetTitle, { color: colors.textPrimary }]}>تغيير كلمة مرور {resettingAccount?.fullName}</Text>
+            <AppInput label="كلمة المرور الجديدة" value={newPassword} onChangeText={setNewPassword} secureTextEntry />
+            <AppInput label="تأكيد كلمة المرور" value={passwordConfirmation} onChangeText={setPasswordConfirmation} secureTextEntry />
+            <Text style={[styles.permissionHint, { color: colors.textSecondary }]}>12 حرفًا على الأقل، مع حرف ورقم.</Text>
+            {accountActionError ? <Text style={styles.error}>{accountActionError}</Text> : null}
+            <View style={styles.buttons}>
+              <AppButton title={accountActionSaving ? "جارٍ التحديث..." : "تحديث كلمة المرور"} onPress={() => void resetAccountPassword()} disabled={accountActionSaving || !resettingAccount} style={{ flex: 1 }} />
+              <AppButton title="إلغاء" variant="outline" onPress={() => setResettingAccount(null)} disabled={accountActionSaving} style={{ flex: 1 }} />
+            </View>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -383,6 +521,7 @@ const styles = StyleSheet.create({
   row: { flexDirection: "row-reverse", alignItems: "center", gap: 10, padding: 14, borderWidth: 1, borderRadius: 16, marginBottom: 9 },
   icon: { width: 40, height: 40, borderRadius: 12, alignItems: "center", justifyContent: "center" },
   rowCopy: { flex: 1, alignItems: "flex-end" },
+  rowAction: { padding: 4 },
   nameText: { fontSize: 15, fontWeight: "900" },
   meta: { fontSize: 11, marginTop: 4, textAlign: "right" },
   error: { color: Colors.dangerText, textAlign: "right", marginBottom: 10 },

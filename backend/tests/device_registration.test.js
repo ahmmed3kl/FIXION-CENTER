@@ -23,6 +23,7 @@ async function run() {
         }],
       };
     }
+    if (sql.includes("FROM centers WHERE id = $1")) return { rows: [{ status: "active" }] };
     if (sql.includes("FROM user_centers uc")) return { rows: [] };
     if (sql.includes("INSERT INTO devices")) {
       upserts.push({ sql, values });

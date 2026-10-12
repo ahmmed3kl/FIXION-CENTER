@@ -1,13 +1,16 @@
 import { Ionicons } from "@expo/vector-icons";
 import { useFocusEffect, useRouter } from "expo-router";
+import type { ComponentProps } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+    Image,
     RefreshControl,
     ScrollView,
     StyleSheet,
     Text,
     TouchableOpacity,
     View,
+    useWindowDimensions,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { ConnectivityService } from "../../core/connectivity";
@@ -31,12 +34,17 @@ import {
 import { AppCard } from "../../shared/components";
 import { ConnectivityState } from "../../shared/types";
 
+const DASHBOARD_NAVY = "#0F172A";
+
 export default function DashboardScreen() {
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(), [colors]);
   const router = useRouter();
-  const { currentUser, activeCenter, activeCenterId, availableCenters } =
+  const { width: windowWidth } = useWindowDimensions();
+  const { currentUser, activeCenter, activeCenterId } =
     useAuthStore();
+  const accountName = currentUser?.fullName?.trim();
+  const activeCenterName = activeCenter?.name?.trim() || "المركز التعليمي";
   const userPermissions = resolveUserPermissions(currentUser);
   const canCreateAttendance = PermissionService.hasPermission(userPermissions, "attendance.create");
   const canViewAttendance = PermissionService.hasAnyPermission(userPermissions, ["attendance.view", "attendance.create"]);
@@ -143,41 +151,65 @@ export default function DashboardScreen() {
         : "sync-outline";
 
   return (
-    <SafeAreaView style={styles.safeArea}>
-      {/* Top App Header */}
-      <View style={styles.headerBar}>
-        <TouchableOpacity style={styles.syncStatusButton} onPress={handleSyncNow} disabled={!canManageSync} accessibilityState={{ disabled: !canManageSync }}>
-          <Ionicons name={syncIcon as any} size={17} color={syncState === "online" ? "#A7F3D0" : "#FFE08A"} />
-          <Text style={styles.syncStatusText}>{syncLabel}</Text>
-          {syncStats.pending > 0 ? <Text style={styles.syncPendingText}>({syncStats.pending})</Text> : null}
-        </TouchableOpacity>
+    <SafeAreaView edges={["top"]} style={[styles.safeArea, { backgroundColor: DASHBOARD_NAVY }]}>
+      <View style={[styles.headerBar, { backgroundColor: DASHBOARD_NAVY }]}>
         <View style={styles.brandLockup}>
-          <Text style={styles.brandWord}>FIXION</Text>
-          <Text style={styles.brandTagline}>For a smarter education</Text>
+          <Image
+            source={require("../../../assets/images/fixion-wordmark.png")}
+            resizeMode="contain"
+            accessibilityLabel="FIXION"
+            style={styles.brandLogo}
+          />
         </View>
         <TouchableOpacity
-          style={styles.centerSelector}
-          onPress={() => availableCenters.length > 1 && router.push("/(main)/center-switch")}
+          style={[
+            styles.syncStatusButton,
+            syncState === "online" ? styles.syncStatusOnline : null,
+            syncState === "error" ? styles.syncStatusError : null,
+          ]}
+          onPress={handleSyncNow}
+          disabled={!canManageSync}
+          accessibilityState={{ disabled: !canManageSync }}
         >
-          <Ionicons name="business-outline" size={15} color="#D9F5FF" />
-          <Text style={styles.centerSelectorText} numberOfLines={1}>{activeCenter?.name || "المركز التعليمي"}</Text>
-          <Ionicons name="chevron-down" size={13} color="#A9D8EA" />
+          <Ionicons
+            name={syncIcon as any}
+            size={16}
+            color={syncState === "online" ? "#A7F3D0" : syncState === "error" ? "#FCA5A5" : "#FFE08A"}
+          />
+          <Text style={styles.syncStatusText}>{syncLabel}</Text>
+          {syncStats.pending > 0 ? <Text style={styles.syncPendingText}>({syncStats.pending})</Text> : null}
         </TouchableOpacity>
       </View>
 
       <ScrollView
-        contentContainerStyle={styles.scrollContent}
+        style={styles.dashboardScroll}
+        contentContainerStyle={[
+          styles.scrollContent,
+          { maxWidth: windowWidth >= 720 ? 680 : undefined },
+        ]}
+        showsVerticalScrollIndicator={false}
         refreshControl={
           <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
         }
       >
-        {/* HERO ACTION: SCAN CARD */}
+        <View style={styles.greetingRow}>
+          <View style={styles.greetingCopy}>
+            <Text style={styles.greetingTitle}>
+              {accountName
+                ? <>أهلًا، <Text style={styles.greetingName}>{accountName}</Text></>
+                : "أهلًا بك"}
+            </Text>
+            <Text style={styles.greetingSubtitle} numberOfLines={1}>
+              يوم موفق • <Text>{`\u2068${activeCenterName}\u2069`}</Text>
+            </Text>
+          </View>
+        </View>
+
         {canCreateAttendance ? <TouchableOpacity
           activeOpacity={0.85}
           onPress={() => router.push("/(main)/scanner")}
           style={styles.heroBanner}
         >
-          <View style={styles.heroGlow} />
           <View style={styles.heroContent}>
             <View style={styles.heroIconWrapper}>
               <Ionicons name="scan" size={32} color={Colors.white} />
@@ -226,101 +258,78 @@ export default function DashboardScreen() {
 
         {/* TODAY SUMMARY CARD */}
         {canViewAttendance ? <>
-        <View style={styles.sectionHeadingRow}>
-          <Text style={styles.sectionHeader}>{Strings.todaySummaryTitle}</Text>
-          <View style={styles.todayBadge}><Ionicons name="calendar-outline" size={14} color={Colors.primary} /><Text style={styles.todayBadgeText}>اليوم</Text></View>
-        </View>
         <AppCard style={styles.summaryCard}>
+          <View style={styles.sectionHeadingRow}>
+            <View style={styles.sectionTitleGroup}>
+              <Ionicons name="stats-chart" size={17} color={Colors.primary} />
+              <Text style={styles.sectionHeader}>{Strings.todaySummaryTitle}</Text>
+            </View>
+            <View style={styles.todayBadge}><Ionicons name="calendar-outline" size={14} color={Colors.primary} /><Text style={styles.todayBadgeText}>اليوم</Text></View>
+          </View>
           <View style={styles.metricGrid}>
-            <View
-              style={[
-                styles.metricBox,
-                { backgroundColor: Colors.primaryLight },
-              ]}
-            >
-              <Text
-                style={[styles.metricNumber, { color: Colors.primaryDark }]}
-              >
-                {formatNumber(summary?.expectedCount || 0)}
-              </Text>
-              <Text style={[styles.metricLabel, { color: Colors.primaryDark }]}>
-                {Strings.expectedAttendance}
-              </Text>
-            </View>
-
-            <View
-              style={[
-                styles.metricBox,
-                { backgroundColor: Colors.successLight },
-              ]}
-            >
-              <Text
-                style={[styles.metricNumber, { color: Colors.successText }]}
-              >
-                {formatNumber(summary?.presentCount || 0)}
-              </Text>
-              <Text style={[styles.metricLabel, { color: Colors.successText }]}>
-                {Strings.presentAttendance}
-              </Text>
-            </View>
-
-            <View
-              style={[
-                styles.metricBox,
-                { backgroundColor: Colors.warningLight },
-              ]}
-            >
-              <Text
-                style={[styles.metricNumber, { color: Colors.warningText }]}
-              >
-                {formatNumber(summary?.lateCount || 0)}
-              </Text>
-              <Text style={[styles.metricLabel, { color: Colors.warningText }]}>
-                {Strings.lateAttendance}
-              </Text>
-            </View>
-
-            <View
-              style={[
-                styles.metricBox,
-                { backgroundColor: Colors.dangerLight },
-              ]}
-            >
-              <Text style={[styles.metricNumber, { color: Colors.dangerText }]}>
-                {formatNumber(summary?.absentCount || 0)}
-              </Text>
-              <Text style={[styles.metricLabel, { color: Colors.dangerText }]}>
-                {Strings.absentAttendance}
-              </Text>
-            </View>
-            <View
-              style={[
-                styles.metricBox,
-                { backgroundColor: Colors.warningLight },
-              ]}
-            >
-              <Text style={[styles.metricNumber, { color: Colors.warningText }]}>
-                {formatNumber(summary?.makeupCount || 0)}
-              </Text>
-              <Text style={[styles.metricLabel, { color: Colors.warningText }]}>
-                تعويض
-              </Text>
-            </View>
+            <MetricTile
+              styles={styles}
+              icon="calendar"
+              label={Strings.expectedAttendance}
+              value={formatNumber(summary?.expectedCount || 0)}
+              color={Colors.primary}
+              textColor={Colors.primaryDark}
+              backgroundColor={Colors.primaryMuted}
+            />
+            <MetricTile
+              styles={styles}
+              icon="people"
+              label={Strings.presentAttendance}
+              value={formatNumber(summary?.presentCount || 0)}
+              color={Colors.success}
+              textColor={Colors.successText}
+              backgroundColor={Colors.successLight}
+            />
+            <MetricTile
+              styles={styles}
+              icon="time"
+              label={Strings.lateAttendance}
+              value={formatNumber(summary?.lateCount || 0)}
+              color={Colors.warning}
+              textColor={Colors.warningText}
+              backgroundColor={Colors.warningLight}
+            />
+            <MetricTile
+              styles={styles}
+              icon="close-circle"
+              label={Strings.absentAttendance}
+              value={formatNumber(summary?.absentCount || 0)}
+              color={Colors.danger}
+              textColor={Colors.dangerText}
+              backgroundColor={Colors.dangerLight}
+            />
+            <MetricTile
+              styles={styles}
+              icon="repeat"
+              label="تعويض"
+              value={formatNumber(summary?.makeupCount || 0)}
+              color={Colors.warning}
+              textColor={Colors.warningText}
+              backgroundColor={Colors.warningLight}
+              wide
+            />
           </View>
         </AppCard>
         </> : null}
 
         {/* FINANCIAL & SESSIONS ROW */}
-        {canViewFinance || canViewSessions ? <View style={styles.twoColumnRow}>
+        {canViewFinance || canViewSessions ? <View style={[styles.twoColumnRow, { direction: "rtl" }]}>
           {/* Today Collections */}
           {canViewFinance ? <AppCard style={[styles.halfCard, !canViewSessions ? { width: "100%" } : null]}>
             <View style={styles.cardHeaderRow}>
-              <Ionicons name="cash-outline" size={20} color={Colors.success} />
               <Text style={styles.cardTitle}>
                 {Strings.todayCollectionsTitle}
               </Text>
+              <View style={[styles.detailIcon, { backgroundColor: Colors.successLight }]}>
+                <Ionicons name="cash-outline" size={19} color={Colors.success} />
+              </View>
             </View>
-            <Text style={styles.financialAmount}>
+            <Text numberOfLines={1} adjustsFontSizeToFit style={styles.financialAmount}>
               {formatCurrency(summary?.todayCollections || 0)}
             </Text>
           </AppCard> : null}
@@ -328,22 +337,21 @@ export default function DashboardScreen() {
           {/* Today Sessions */}
           {canViewSessions ? <AppCard style={[styles.halfCard, !canViewFinance ? { width: "100%" } : null]}>
             <View style={styles.cardHeaderRow}>
-              <Ionicons
-                name="calendar-outline"
-                size={20}
-                color={Colors.primary}
-              />
               <Text style={styles.cardTitle}>{Strings.todaySessionsTitle}</Text>
+              <View style={[styles.detailIcon, { backgroundColor: Colors.primaryLight }]}>
+                <Ionicons name="calendar-outline" size={19} color={Colors.primary} />
+              </View>
             </View>
             <View style={styles.sessionStatusRow}>
-              <Text style={styles.sessionStatusText}>
-                {Strings.openSessions}:{" "}
-                {formatNumber(summary?.openSessions || 0)}
-              </Text>
-              <Text style={styles.sessionStatusTextMuted}>
-                {Strings.closedSessions}:{" "}
-                {formatNumber(summary?.closedSessions || 0)}
-              </Text>
+              <View style={styles.sessionCountBlock}>
+                <Text style={styles.sessionCount}>{formatNumber(summary?.openSessions || 0)}</Text>
+                <Text style={styles.sessionCountLabel}>{Strings.openSessions}</Text>
+              </View>
+              <View style={styles.sessionCountDivider} />
+              <View style={styles.sessionCountBlock}>
+                <Text style={styles.sessionCountMuted}>{formatNumber(summary?.closedSessions || 0)}</Text>
+                <Text style={styles.sessionCountLabel}>{Strings.closedSessions}</Text>
+              </View>
             </View>
           </AppCard> : null}
         </View> : null}
@@ -352,106 +360,137 @@ export default function DashboardScreen() {
   );
 }
 
+function MetricTile({
+  icon,
+  label,
+  value,
+  color,
+  textColor,
+  backgroundColor,
+  styles,
+  wide = false,
+}: {
+  icon: ComponentProps<typeof Ionicons>["name"];
+  label: string;
+  value: string;
+  color: string;
+  textColor: string;
+  backgroundColor: string;
+  styles: ReturnType<typeof createStyles>;
+  wide?: boolean;
+}) {
+  return (
+    <View style={[styles.metricBox, { backgroundColor }, wide ? styles.metricBoxWide : null]}>
+      <View style={[styles.metricIcon, { backgroundColor: Colors.white }]}>
+        <Ionicons name={icon} size={22} color={color} />
+      </View>
+      <View style={styles.metricCopy}>
+        <Text style={[styles.metricNumber, { color: textColor }]}>{value}</Text>
+        <Text style={[styles.metricLabel, { color: textColor }]}>{label}</Text>
+      </View>
+    </View>
+  );
+}
+
 const createStyles = () => StyleSheet.create({
   safeArea: {
     flex: 1,
+    backgroundColor: DASHBOARD_NAVY,
+  },
+  dashboardScroll: {
     backgroundColor: Colors.background,
+    flex: 1,
   },
   headerBar: {
     paddingHorizontal: Spacing.lg,
-    height: 76,
+    height: 64,
     flexDirection: "row",
     alignItems: "center",
-    gap: Spacing.sm,
-    backgroundColor: Colors.slate900,
-    borderBottomWidth: 1,
-    borderBottomColor: Colors.primaryDark,
-    shadowColor: Colors.slate900,
-    shadowOpacity: 0.16,
-    shadowRadius: 12,
-    shadowOffset: { width: 0, height: 4 },
-    elevation: 6,
+    justifyContent: "space-between",
+    borderBottomLeftRadius: 26,
+    borderBottomRightRadius: 26,
     direction: "ltr",
   },
   syncStatusButton: {
-    minWidth: 102,
-    height: 34,
-    borderRadius: 17,
-    paddingHorizontal: 10,
-    backgroundColor: "rgba(37,99,235,0.24)",
+    minWidth: 104,
+    height: 36,
+    borderRadius: BorderRadius.full,
+    paddingHorizontal: 12,
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
     gap: 5,
+    backgroundColor: "rgba(245, 158, 11, 0.2)",
+    direction: "rtl",
   },
-  syncStatusText: { color: Colors.white, fontSize: 11, fontWeight: "700" },
+  syncStatusOnline: { backgroundColor: "rgba(16, 185, 129, 0.2)" },
+  syncStatusError: { backgroundColor: "rgba(239, 68, 68, 0.2)" },
+  syncStatusText: { color: Colors.white, fontSize: 12, fontWeight: "700" },
   syncPendingText: { color: "#FFE08A", fontSize: 10, fontWeight: "800" },
-  brandLockup: { width: 82, alignItems: "flex-start", direction: "ltr" },
-  brandWord: { color: Colors.white, fontSize: 19, fontWeight: "900", letterSpacing: 1.2 },
-  brandTagline: { color: "#89B6C9", fontSize: 5.5, letterSpacing: 0.3, marginTop: -1 },
-  centerSelector: {
+  brandLockup: {
+    width: 108,
+    height: 38,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  brandLogo: {
+    width: "100%",
+    height: "100%",
+  },
+  greetingRow: {
+    minHeight: 66,
+    justifyContent: "center",
+    marginBottom: Spacing.md,
+  },
+  greetingCopy: {
     flex: 1,
-    maxWidth: 175,
-    minWidth: 120,
-    height: 36,
-    borderRadius: 18,
-    paddingHorizontal: 10,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 5,
-    backgroundColor: "#0B4568",
-    borderWidth: 1,
-    borderColor: "#17658D",
+    alignItems: "flex-end",
   },
-  centerSelectorText: { color: Colors.white, fontSize: 11, fontWeight: "700", flexShrink: 1, textAlign: "center", writingDirection: "rtl" },
-  headerActions: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: Spacing.sm,
+  greetingTitle: {
+    color: Colors.slate900,
+    fontSize: 25,
+    fontWeight: "800",
+    textAlign: "right",
+    writingDirection: "rtl",
   },
-  logoutButton: {
-    width: 34,
-    height: 34,
-    borderRadius: 17,
-    backgroundColor: "#B4233D",
-    alignItems: "center",
-    justifyContent: "center",
+  greetingName: {
+    color: Colors.primary,
   },
-  headerIconButton: {
-    width: 36,
-    height: 36,
-    borderRadius: 12,
-    backgroundColor: "#0B4568",
-    alignItems: "center",
-    justifyContent: "center",
+  greetingSubtitle: {
+    color: Colors.slate500,
+    fontSize: 13,
+    fontWeight: "500",
+    marginTop: 5,
+    textAlign: "right",
+    writingDirection: "rtl",
   },
-  notificationBadge: { position: "absolute", top: -4, right: -4, minWidth: 16, height: 16, borderRadius: 8, paddingHorizontal: 3, backgroundColor: "#F0445E", alignItems: "center", justifyContent: "center", borderWidth: 1, borderColor: "#062D49" },
-  notificationBadgeText: { color: Colors.white, fontSize: 9, fontWeight: "800" },
-  avatarButton: { width: 36, height: 36, borderRadius: 18, backgroundColor: "#D8F2FF", alignItems: "center", justifyContent: "center" },
-  avatarText: { color: "#0B4568", fontSize: 11, fontWeight: "900" },
   scrollContent: {
-    padding: Spacing.lg,
+    width: "100%",
+    alignSelf: "center",
+    paddingHorizontal: Spacing.lg,
+    paddingTop: Spacing.md,
     paddingBottom: Spacing.xxxl,
   },
   heroBanner: {
-    backgroundColor: Colors.primaryDark,
-    borderRadius: 26,
-    padding: Spacing.xl,
-    marginBottom: Spacing.xl,
-    minHeight: 154,
+    backgroundColor: Colors.primary,
+    borderRadius: BorderRadius.xl,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.sm,
+    marginBottom: Spacing.md,
+    minHeight: 108,
     overflow: "hidden",
-    ...Shadows.elevated,
+    ...Shadows.subtle,
   },
-  heroGlow: { position: "absolute", width: 180, height: 180, borderRadius: 90, backgroundColor: "rgba(96,165,250,0.22)", left: -55, top: -75 },
   heroContent: {
     flexDirection: "row",
     alignItems: "center",
+    minHeight: 88,
+    direction: "rtl",
   },
   heroIconWrapper: {
-    width: 58,
-    height: 58,
-    borderRadius: 18,
+    width: 54,
+    height: 54,
+    borderRadius: BorderRadius.lg,
     backgroundColor: "rgba(255, 255, 255, 0.18)",
     alignItems: "center",
     justifyContent: "center",
@@ -459,52 +498,87 @@ const createStyles = () => StyleSheet.create({
   },
   heroTextWrapper: {
     flex: 1,
+    alignItems: "flex-end",
+    paddingHorizontal: Spacing.sm,
   },
   heroTitle: {
-    ...Typography.h2,
+    ...Typography.h3,
     color: Colors.white,
+    textAlign: "right",
   },
-  heroEyebrow: { color: "#BFDBFE", fontSize: 11, fontWeight: "700", marginBottom: 3, textAlign: "right" },
+  heroEyebrow: { color: "#DBEAFE", fontSize: 10, fontWeight: "700", marginBottom: 2, textAlign: "right" },
   heroSubtitle: {
     ...Typography.caption,
-    color: Colors.primaryLight,
-    marginTop: 2,
+    color: "#DBEAFE",
+    marginTop: 1,
+    fontSize: 12,
+    lineHeight: 17,
+    textAlign: "right",
   },
   sectionHeader: {
-    ...Typography.bodyBold,
-    color: Colors.slate800,
-    marginBottom: 0,
+    ...Typography.h3,
+    color: Colors.slate900,
+    fontSize: 16,
+    lineHeight: 22,
   },
-  sectionHeadingRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: Spacing.sm },
-  todayBadge: { flexDirection: "row", alignItems: "center", gap: 5, backgroundColor: Colors.primaryLight, borderRadius: BorderRadius.full, paddingHorizontal: 10, paddingVertical: 5 },
+  sectionHeadingRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: Spacing.md, direction: "rtl" },
+  sectionTitleGroup: { flexDirection: "row", alignItems: "center", gap: Spacing.sm },
+  todayBadge: { flexDirection: "row", alignItems: "center", gap: 5, backgroundColor: Colors.primaryMuted, borderRadius: BorderRadius.full, paddingHorizontal: 10, paddingVertical: 5 },
   todayBadgeText: { fontSize: 11, fontWeight: "700", color: Colors.primaryDark },
   summaryCard: {
-    padding: Spacing.lg,
-    marginBottom: Spacing.lg,
+    padding: Spacing.md,
+    marginBottom: Spacing.md,
     borderRadius: BorderRadius.xl,
+    borderWidth: 1,
+    shadowOpacity: 0,
+    shadowRadius: 0,
+    elevation: 0,
   },
   metricGrid: {
     flexDirection: "row",
     flexWrap: "wrap",
     justifyContent: "space-between",
-    gap: Spacing.sm,
+    columnGap: Spacing.sm,
+    rowGap: Spacing.sm,
+    direction: "rtl",
   },
   metricBox: {
     width: "48%",
-    minHeight: 96,
-    paddingVertical: Spacing.sm,
-    borderRadius: BorderRadius.xl,
+    minHeight: 80,
+    padding: Spacing.sm,
+    borderRadius: BorderRadius.lg,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    direction: "ltr",
+  },
+  metricBoxWide: {
+    width: "100%",
+    minHeight: 68,
+    justifyContent: "flex-start",
+    paddingHorizontal: Spacing.md,
+  },
+  metricIcon: {
+    width: 42,
+    height: 42,
+    borderRadius: 24,
     alignItems: "center",
     justifyContent: "center",
+    opacity: 0.88,
+  },
+  metricCopy: {
+    minWidth: 54,
+    alignItems: "flex-end",
   },
   metricNumber: {
-    fontSize: 22,
+    fontSize: 25,
+    lineHeight: 29,
     fontWeight: "800",
   },
   metricLabel: {
     fontSize: 12,
     fontWeight: "600",
-    marginTop: 4,
+    marginTop: 2,
   },
   twoColumnRow: {
     flexDirection: "row",
@@ -512,37 +586,75 @@ const createStyles = () => StyleSheet.create({
   },
   halfCard: {
     flex: 1,
-    padding: Spacing.lg,
-    minHeight: 118,
+    padding: Spacing.md,
+    minHeight: 144,
     borderRadius: BorderRadius.xl,
+    borderWidth: 1,
+    shadowOpacity: 0,
+    shadowRadius: 0,
+    elevation: 0,
   },
   cardHeaderRow: {
     flexDirection: "row",
     alignItems: "center",
-    gap: Spacing.xs,
+    justifyContent: "space-between",
     marginBottom: Spacing.sm,
+    direction: "rtl",
+  },
+  detailIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    alignItems: "center",
+    justifyContent: "center",
   },
   cardTitle: {
-    ...Typography.captionBold,
-    color: Colors.slate700,
+    ...Typography.bodyBold,
+    color: Colors.slate800,
+    textAlign: "right",
+    fontSize: 14,
   },
   financialAmount: {
-    fontSize: 18,
-    fontWeight: "700",
+    fontSize: 22,
+    fontWeight: "800",
     color: Colors.successText,
-    marginTop: Spacing.xs,
+    marginTop: Spacing.md,
+    textAlign: "right",
   },
   sessionStatusRow: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-around",
     marginTop: Spacing.xs,
   },
-  sessionStatusText: {
-    ...Typography.captionBold,
+  sessionCountBlock: {
+    flex: 1,
+    alignItems: "center",
+    gap: 2,
+  },
+  sessionCount: {
+    fontSize: 24,
+    lineHeight: 28,
+    fontWeight: "800",
     color: Colors.primaryDark,
   },
-  sessionStatusTextMuted: {
+  sessionCountMuted: {
+    fontSize: 24,
+    lineHeight: 28,
+    fontWeight: "800",
+    color: Colors.slate500,
+  },
+  sessionCountLabel: {
     ...Typography.caption,
     color: Colors.slate500,
-    marginTop: 2,
+    fontSize: 11,
+    lineHeight: 16,
+  },
+  sessionCountDivider: {
+    width: 1,
+    height: 38,
+    backgroundColor: Colors.border,
   },
   warningBanner: {
     backgroundColor: "#FEF3C7",

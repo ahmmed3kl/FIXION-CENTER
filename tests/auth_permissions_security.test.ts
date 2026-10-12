@@ -147,6 +147,14 @@ describe("Auth and Permissions Security & Bootstrap Suite", () => {
       expect(resolved).toContain("students.view");
     });
 
+    it("admin with the center-account empty marker remains globally privileged", () => {
+      const resolved = resolveUserPermissions({
+        role: "admin",
+        permissions: { __explicit_empty__: true },
+      });
+      expect(resolved).toEqual(RolePermissions.admin);
+    });
+
     it("owner with corrupted [] from session restore cache is repaired to full owner permissions", () => {
       const user = {
         id: "usr-owner-corrupted",

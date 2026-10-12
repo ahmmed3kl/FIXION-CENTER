@@ -3,7 +3,7 @@ const bcrypt = require("bcryptjs");
 const crypto = require("crypto");
 const db = require("../db");
 const { AppError } = require("../middleware/errorHandler");
-const { authMiddleware, requirePermission } = require("../middleware/auth");
+const { authMiddleware, requirePermission, defaultPermissionsForRole } = require("../middleware/auth");
 
 const router = express.Router();
 router.use(authMiddleware, requirePermission("users.manage"));
@@ -61,7 +61,7 @@ function validateRole(role) { if (!roles.has(role)) throw new AppError("VALIDATI
 router.get("/", async (req, res, next) => {
   try {
     const params = [req.centerId];
-    const selfFilter = req.user?.role === "manager" ? " AND id <> $2" : "";
+    const selfFilter = req.user?.role === "manager" ? " AND role='assistant' AND id <> $2" : "";
     if (selfFilter) params.push(req.user.id);
     const result = await db.query(`SELECT ${safeFields} FROM users WHERE center_id=$1 AND role IN ('manager','assistant')${selfFilter} ORDER BY created_at DESC`, params);
     res.json({ items: result.rows.map(safeUser) });
@@ -76,22 +76,50 @@ router.post("/", async (req, res, next) => {
     if (fullName.length < 2 || !/^\S+@\S+\.\S+$/.test(email) || !passwordValid(req.body.password)) throw new AppError("VALIDATION_ERROR", "Invalid account fields.", "راجع الاسم والبريد وكلمة المرور.", 400);
     validateRole(role);
     if (req.user?.role === "manager" && role !== "assistant") throw new AppError("FORBIDDEN", "Managers can only create assistant accounts.", "مدير السنتر يمكنه إضافة حسابات المساعدين فقط.", 403);
-    const permissions = cleanPermissions(req.body.permissions);
+
+    const hasPermissionOverride = Object.prototype.hasOwnProperty.call(req.body, "permissions");
+    let permissions = hasPermissionOverride ? cleanPermissions(req.body.permissions) : defaultPermissionsForRole(role);
+    if (!hasPermissionOverride && req.user?.role === "manager") {
+      permissions = Object.fromEntries(Object.keys(permissions)
+        .filter((key) => key !== "*" && (req.user.permissions?.[key] === true || req.user.permissions?.["*"] === true))
+        .map((key) => [key, true]));
+    }
+    if (!Object.keys(permissions).length) permissions = { __explicit_empty__: true };
     assertManagerCanGrantPermissions(req.user, permissions);
+
     const hash = await bcrypt.hash(req.body.password, 12);
-    const result = await db.query(`INSERT INTO users (id,center_id,full_name,email,phone,password_hash,role,permissions,status) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'active') RETURNING ${safeFields}`, [`user-${crypto.randomUUID()}`, req.centerId, fullName, email, req.body.phone || null, hash, role, JSON.stringify(permissions)]);
-    res.status(201).json({ user: safeUser(result.rows[0]) });
+    const user = await db.withTransaction(async (client) => {
+      await client.query("SELECT id FROM centers WHERE id=$1 FOR UPDATE", [req.centerId]);
+      const existing = await client.query("SELECT id FROM users WHERE LOWER(email)=$1 LIMIT 1", [email]);
+      if (existing.rows[0]) throw new AppError("CONFLICT", "An account with this email already exists.", "يوجد حساب بهذا البريد الإلكتروني بالفعل.", 409);
+      const inserted = await client.query(
+        "INSERT INTO users (id,center_id,full_name,email,phone,password_hash,role,permissions,status) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'active') RETURNING " + safeFields,
+        ["user-" + crypto.randomUUID(), req.centerId, fullName, email, req.body.phone || null, hash, role, JSON.stringify(permissions)],
+      );
+      const created = inserted.rows[0];
+      await client.query(
+        "INSERT INTO user_centers (id,user_id,center_id,role,is_primary) VALUES ($1,$2,$3,$4,TRUE)",
+        ["uc-" + crypto.randomUUID(), created.id, req.centerId, role],
+      );
+      return created;
+    });
+    res.status(201).json({ user: safeUser(user) });
   } catch (error) { next(error); }
 });
-
 router.patch("/:userId", async (req, res, next) => {
   try {
     if (req.user?.role === "manager" && req.params.userId === req.user.id) throw new AppError("FORBIDDEN", "Managers cannot edit their own account here.", "لا يمكن لمدير السنتر تعديل حسابه من هنا.", 403);
-    const before = await db.query(`SELECT ${safeFields} FROM users WHERE center_id=$1 AND id=$2 AND role IN ('manager','assistant')`, [req.centerId, req.params.userId]);
+    const managedRoleFilter = req.user?.role === "manager" ? " AND role='assistant'" : "";
+    const before = await db.query(`SELECT ${safeFields} FROM users WHERE center_id=$1 AND id=$2 AND role IN ('manager','assistant')${managedRoleFilter}`, [req.centerId, req.params.userId]);
     if (!before.rows[0]) throw new AppError("NOT_FOUND", "Account not found.", "الحساب غير موجود.", 404);
     const keys = [], values = [];
+    let emailToCheck;
     if (req.body.fullName !== undefined) { const value = String(req.body.fullName).trim(); if (value.length < 2) throw new AppError("VALIDATION_ERROR", "Invalid name.", "اسم الحساب غير صحيح.", 400); keys.push("full_name"); values.push(value); }
-    if (req.body.email !== undefined) { const value = String(req.body.email).trim().toLowerCase(); if (!/^\S+@\S+\.\S+$/.test(value)) throw new AppError("VALIDATION_ERROR", "Invalid email.", "البريد الإلكتروني غير صحيح.", 400); keys.push("email"); values.push(value); }
+    if (req.body.email !== undefined) {
+      emailToCheck = String(req.body.email).trim().toLowerCase();
+      if (!/^\S+@\S+\.\S+$/.test(emailToCheck)) throw new AppError("VALIDATION_ERROR", "Invalid email.", "البريد الإلكتروني غير صحيح.", 400);
+      keys.push("email"); values.push(emailToCheck);
+    }
     if (req.body.role !== undefined) {
       validateRole(req.body.role);
       if (req.user?.role === "manager" && req.body.role !== "assistant") {
@@ -110,8 +138,44 @@ router.patch("/:userId", async (req, res, next) => {
     }
     if (!keys.length) throw new AppError("VALIDATION_ERROR", "No editable fields.", "لا توجد بيانات قابلة للتعديل.", 400);
     values.push(req.centerId, req.params.userId);
-    const result = await db.query(`UPDATE users SET ${keys.map((key, index) => `${key}=$${index + 1}`).join(",")},updated_at=NOW() WHERE center_id=$${values.length - 1} AND id=$${values.length} AND role IN ('manager','assistant') RETURNING ${safeFields}`, values);
-    res.json({ user: safeUser(result.rows[0]) });
+    const result = await db.withTransaction(async (client) => {
+      if (emailToCheck) {
+        const duplicate = await client.query(
+          "SELECT id FROM users WHERE LOWER(email)=$1 AND id<>$2 LIMIT 1",
+          [emailToCheck, req.params.userId],
+        );
+        if (duplicate.rows[0]) throw new AppError("CONFLICT", "An account with this email already exists.", "يوجد حساب بهذا البريد الإلكتروني بالفعل.", 409);
+      }
+      const updated = await client.query(
+        `UPDATE users SET ${keys.map((key, index) => `${key}=$${index + 1}`).join(",")},updated_at=NOW()
+         WHERE center_id=$${values.length - 1} AND id=$${values.length} AND role IN ('manager','assistant')${managedRoleFilter}
+         RETURNING ${safeFields}`,
+        values,
+      );
+      if (!updated.rows[0]) throw new AppError("NOT_FOUND", "Account not found.", "الحساب غير موجود.", 404);
+      if (req.body.role !== undefined) {
+        await client.query("UPDATE user_centers SET role=$1 WHERE user_id=$2 AND center_id=$3", [req.body.role, req.params.userId, req.centerId]);
+      }
+      return updated.rows[0];
+    });
+    res.json({ user: safeUser(result) });
+  } catch (error) { next(error); }
+});
+
+router.post("/:userId/reset-password", async (req, res, next) => {
+  try {
+    if (req.user?.role === "manager" && req.params.userId === req.user.id) {
+      throw new AppError("FORBIDDEN", "Managers cannot reset their own password here.", "لا يمكن لمدير السنتر تغيير كلمة مروره من هنا.", 403);
+    }
+    if (!passwordValid(req.body.password)) {
+      throw new AppError("VALIDATION_ERROR", "Invalid password.", "كلمة المرور يجب أن تكون 12 حرفًا على الأقل وتحتوي على حرف ورقم.", 400);
+    }
+    const result = await db.query(
+      `UPDATE users SET password_hash=$1,updated_at=NOW() WHERE center_id=$2 AND id=$3 AND role IN ('manager','assistant')${req.user?.role === "manager" ? " AND role='assistant'" : ""} RETURNING id`,
+      [await bcrypt.hash(req.body.password, 12), req.centerId, req.params.userId],
+    );
+    if (!result.rows[0]) throw new AppError("NOT_FOUND", "Account not found.", "الحساب غير موجود.", 404);
+    res.json({ success: true });
   } catch (error) { next(error); }
 });
 
@@ -120,7 +184,7 @@ router.post("/:userId/:action", async (req, res, next) => {
     if (req.user?.role === "manager" && req.params.userId === req.user.id) throw new AppError("FORBIDDEN", "Managers cannot change their own account status.", "لا يمكن لمدير السنتر تغيير حالة حسابه من هنا.", 403);
     if (!["activate", "deactivate"].includes(req.params.action)) throw new AppError("NOT_FOUND", "Action not found.", "الإجراء غير موجود.", 404);
     const status = req.params.action === "activate" ? "active" : "inactive";
-    const result = await db.query(`UPDATE users SET status=$1,updated_at=NOW() WHERE center_id=$2 AND id=$3 AND role IN ('manager','assistant') RETURNING ${safeFields}`, [status, req.centerId, req.params.userId]);
+    const result = await db.query(`UPDATE users SET status=$1,updated_at=NOW() WHERE center_id=$2 AND id=$3 AND role IN ('manager','assistant')${req.user?.role === "manager" ? " AND role='assistant'" : ""} RETURNING ${safeFields}`, [status, req.centerId, req.params.userId]);
     if (!result.rows[0]) throw new AppError("NOT_FOUND", "Account not found.", "الحساب غير موجود.", 404);
     res.json({ user: safeUser(result.rows[0]) });
   } catch (error) { next(error); }

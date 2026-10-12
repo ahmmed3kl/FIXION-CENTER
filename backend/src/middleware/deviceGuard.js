@@ -11,6 +11,7 @@ const { normalizeDeviceModelName } = require("../services/deviceMetadata");
 async function deviceGuard(req, res, next) {
   try {
     const deviceId = req.headers["x-device-id"];
+    const reportedDeviceName = normalizeDeviceModelName(req.headers["x-device-name"]);
     if (!deviceId) {
       throw new AppError(
         "DEVICE_REQUIRED",
@@ -40,7 +41,7 @@ async function deviceGuard(req, res, next) {
           deviceId,
           req.centerId,
           req.user ? req.user.id : null,
-          normalizeDeviceModelName(req.headers["x-device-name"]),
+          reportedDeviceName,
           req.headers["x-platform"] || "android",
           req.headers["x-app-version"] || "1.0.0",
         ],
@@ -74,6 +75,11 @@ async function deviceGuard(req, res, next) {
         "تم تعطيل هذا الجهاز أو إلغاء ترخيصه. لا يمكن مزامنة البيانات.",
         403,
       );
+    }
+
+    if (reportedDeviceName && device.center_id === req.centerId) {
+      await db.query("UPDATE devices SET device_name=$1,updated_at=NOW() WHERE id=$2", [reportedDeviceName, deviceId]);
+      device.device_name = reportedDeviceName;
     }
 
     // Attach device context to request

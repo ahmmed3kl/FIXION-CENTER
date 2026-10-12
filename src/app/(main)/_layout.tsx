@@ -6,7 +6,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { canAccessRoute, resolvePermissionRouteName } from "../../core/permissions/routeAccess";
 import { resolveUserPermissions } from "../../core/permissions";
 import { Strings } from "../../core/localization";
-import { Colors, useTheme } from "../../core/theme";
+import { useTheme } from "../../core/theme";
 import { useAuthStore } from "../../features/auth/useAuthStore";
 
 export default function MainLayout() {
@@ -36,43 +36,41 @@ export default function MainLayout() {
         tabBarActiveTintColor: colors.primary,
         tabBarInactiveTintColor: colors.slate400,
         tabBarStyle: {
-          height: (compactLandscape ? 52 : 64) + insets.bottom,
-          paddingBottom: (compactLandscape ? 4 : 8) + insets.bottom,
-          paddingTop: compactLandscape ? 3 : 8,
+          height: (compactLandscape ? 46 : 54) + insets.bottom,
+          paddingBottom: (compactLandscape ? 2 : 4) + insets.bottom,
+          paddingTop: compactLandscape ? 2 : 5,
           backgroundColor: colors.cardBackground,
           borderTopColor: colors.border,
           borderTopWidth: 1,
-          elevation: 10,
-          shadowColor: colors.slate900,
-          shadowOpacity: 0.08,
-          shadowRadius: 12,
-          shadowOffset: { width: 0, height: -4 },
+          borderTopLeftRadius: 22,
+          borderTopRightRadius: 22,
+          elevation: 0,
+          shadowOpacity: 0,
+          shadowRadius: 0,
         },
         tabBarLabelStyle: {
           fontSize: compactLandscape ? 10 : 12,
           fontWeight: "700",
           marginTop: 1,
         },
-        tabBarItemStyle: { minHeight: compactLandscape ? 40 : 48 },
+        tabBarItemStyle: { minHeight: compactLandscape ? 38 : 44, flex: 1 },
         tabBarHideOnKeyboard: true,
       }}
     >
       <Tabs.Screen
-        name="students"
+        name="more"
         options={{
-          title: Strings.tabStudents,
-          tabBarIcon: ({ color, size }) => (
-            <Ionicons name="people-outline" size={size} color={color} />
-          ),
+          title: Strings.tabMore,
+          tabBarIcon: ({ color, size }) => <Ionicons name="menu-outline" size={size} color={color} />,
         }}
       />
       <Tabs.Screen
         name="index"
         options={{
           title: Strings.tabDashboard,
-          tabBarIcon: ({ focused }) => (
-            <View style={[styles.homeTabIcon, { backgroundColor: colors.primary }, focused ? [styles.homeTabIconActive, { backgroundColor: colors.primaryDark }] : null]}>
-              <Ionicons name="home" size={24} color={colors.white} />
+          tabBarIcon: ({ focused, color, size }) => (
+            <View style={[styles.homeTabIcon, focused ? { backgroundColor: colors.primaryLight } : null]}>
+              <Ionicons name={focused ? "home" : "home-outline"} size={size} color={color} />
             </View>
           ),
         }}
@@ -87,10 +85,12 @@ export default function MainLayout() {
         }}
       />
       <Tabs.Screen
-        name="more"
+        name="students"
         options={{
-          title: "المزيد",
-          tabBarIcon: ({ color, size }) => <Ionicons name="menu-outline" size={size} color={color} />,
+          title: Strings.tabStudents,
+          tabBarIcon: ({ color, size }) => (
+            <Ionicons name="people-outline" size={size} color={color} />
+          ),
         }}
       />
       <Tabs.Screen name="deleted-students" options={{ href: null, title: "الطلاب المحذوفون" }} />
@@ -156,22 +156,11 @@ export default function MainLayout() {
 
 const styles = StyleSheet.create({
   homeTabIcon: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    backgroundColor: Colors.primary,
+    minWidth: 56,
+    height: 34,
+    paddingHorizontal: 16,
+    borderRadius: 16,
     alignItems: "center",
     justifyContent: "center",
-    marginBottom: 16,
-    transform: [{ translateY: -7 }],
-    shadowColor: Colors.primary,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 6,
-    elevation: 4,
-  },
-  homeTabIconActive: {
-    backgroundColor: Colors.primaryDark,
-    transform: [{ translateY: -7 }, { scale: 1.05 }],
   },
 });

@@ -19,7 +19,7 @@ describe("Security & Data Integrity Audit Suite", () => {
     SyncEngine.clearRateLimitForTesting();
   });
 
-  describe("Point 1: Permission Fallback & Least Privilege Verification", () => {
+  describe("Point 1: Persisted Permissions & Least Privilege Verification", () => {
     it("role === admin receives full Admin permissions", () => {
       const perms = resolveUserPermissions({ role: "admin" });
       expect(perms).toEqual(RolePermissions.admin);
@@ -38,12 +38,12 @@ describe("Security & Data Integrity Audit Suite", () => {
       expect(perms).not.toContain<Permission>("teachers.create");
     });
 
-    it("secretary with missing permissions (undefined) receives ONLY secretary permissions, NEVER elevated to Admin", () => {
+    it("secretary with missing permissions receives no permissions", () => {
       const perms = resolveUserPermissions({
         role: "secretary",
         permissions: undefined,
       });
-      expect(perms).toEqual(RolePermissions.secretary);
+      expect(perms).toEqual([]);
       expect(perms).not.toContain<Permission>("teachers.create");
       expect(perms).not.toContain<Permission>("groups.create");
       expect(perms).not.toContain<Permission>("payments.reverse");
@@ -56,12 +56,12 @@ describe("Security & Data Integrity Audit Suite", () => {
       );
     });
 
-    it("secretary with null permissions receives role defaults, while an explicit empty array denies access", () => {
+    it("secretary with null permissions receives no defaults, while an explicit empty array denies access", () => {
       const permsNull = resolveUserPermissions({
         role: "secretary",
         permissions: null,
       });
-      expect(permsNull).toEqual(RolePermissions.secretary);
+      expect(permsNull).toEqual([]);
       expect(permsNull).not.toContain<Permission>("teachers.create");
 
       const permsEmpty = resolveUserPermissions({
@@ -72,12 +72,12 @@ describe("Security & Data Integrity Audit Suite", () => {
       expect(PermissionService.hasPermission(permsEmpty, "students.view")).toBe(false);
     });
 
-    it("accountant with malformed/missing permissions receives ONLY accountant permissions, NEVER elevated to Admin", () => {
+    it("accountant with empty permissions receives no role defaults", () => {
       const perms = resolveUserPermissions({
         role: "accountant",
         permissions: {},
       });
-      expect(perms).toEqual(RolePermissions.accountant);
+      expect(perms).toEqual([]);
       expect(perms).not.toContain<Permission>("teachers.create");
       expect(perms).not.toContain<Permission>("students.create");
       expect(PermissionService.hasPermission(perms, "teachers.create")).toBe(
@@ -88,12 +88,12 @@ describe("Security & Data Integrity Audit Suite", () => {
       );
     });
 
-    it("manager with missing permissions receives ONLY manager permissions, NEVER elevated to Admin", () => {
+    it("manager with missing permissions receives no role defaults", () => {
       const perms = resolveUserPermissions({
         role: "manager",
         permissions: null,
       });
-      expect(perms).toEqual(RolePermissions.manager);
+      expect(perms).toEqual([]);
       expect(perms).not.toContain<Permission>("payments.reverse");
       expect(PermissionService.hasPermission(perms, "payments.reverse")).toBe(
         false,

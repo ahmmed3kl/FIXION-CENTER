@@ -3,9 +3,7 @@ const config = require("../config");
 const db = require("../db");
 const { AppError } = require("./errorHandler");
 
-// Keep server-side defaults aligned with the mobile role fallback. Platform
-// user creation historically stored `{}` and relied on the client to infer
-// permissions, which made offline UI and online sync disagree.
+// Defaults are persisted at account creation and never inferred during authentication.
 const ROLE_DEFAULT_PERMISSIONS = {
   admin: "*",
   owner: "*",
@@ -15,15 +13,22 @@ const ROLE_DEFAULT_PERMISSIONS = {
   accountant: ["dashboard.view","students.view","groups.view","enrollments.view","packages.view","payments.view","payments.create","payments.reverse","reports.view","reports.attendance.view","reports.financial.view","sessions.view","daily_closing.view","daily_closing.close"],
 };
 
+function defaultPermissionsForRole(role) {
+  const defaults = ROLE_DEFAULT_PERMISSIONS[role] || [];
+  return defaults === "*" ? { "*": true } : Object.fromEntries(defaults.map((key) => [key, true]));
+}
+
 function resolveLivePermissions(user) {
+  if (user.role === "admin" || user.role === "owner") {
+    return defaultPermissionsForRole(user.role);
+  }
   let value = user.permissions;
   if (typeof value === "string") {
-    try { value = JSON.parse(value); } catch { value = {}; }
+    try { value = JSON.parse(value); } catch { return {}; }
   }
   if (Array.isArray(value)) return Object.fromEntries(value.map((key) => [key, true]));
-  if (value && typeof value === "object" && Object.keys(value).length) return value;
-  const defaults = ROLE_DEFAULT_PERMISSIONS[user.role] || [];
-  return defaults === "*" ? { "*": true } : Object.fromEntries(defaults.map((key) => [key, true]));
+  if (value && typeof value === "object") return value;
+  return {};
 }
 
 /**
@@ -192,4 +197,5 @@ module.exports = {
   authMiddleware,
   requirePermission,
   resolveLivePermissions,
+  defaultPermissionsForRole,
 };

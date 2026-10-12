@@ -47,6 +47,12 @@ export class StudentColorRepository {
         throw new NotFoundError("تعذر العثور على الطالب في المركز الحالي.");
       }
 
+      DatabaseService.notifyLocalChange({
+        centerId: activeCenterId,
+        entityType: "student_color",
+        entityId: studentId,
+      });
+
       AuditService.recordEvent({
         operationId,
         centerId: activeCenterId,

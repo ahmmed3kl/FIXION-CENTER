@@ -52,4 +52,24 @@ describe("device model reporting", () => {
       ["center-device-model-test", "device-model-refresh-test"],
     )?.device_name).toBe("POCO F3");
   });
+
+  it("keeps a known model and the same device row when a reconnect has no model", () => {
+    const db = DatabaseService.getDb();
+    db.runSync(
+      `INSERT INTO devices (id, center_id, user_id, device_name, device_identifier, status, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      ["stable-device-row", "center-known-model-test", "user-known-model-test", "iPhone 15 Pro Max", "device-model-refresh-test", "active", new Date(0).toISOString()],
+    );
+    const device = DeviceRepository.registerOrGetDevice({
+      centerId: "center-known-model-test",
+      userId: "user-known-model-test",
+      deviceName: "موديل غير معروف",
+    });
+    expect(device.id).toBe("stable-device-row");
+    expect(device.deviceName).toBe("iPhone 15 Pro Max");
+    expect(db.getAllSync<{ id: string }>(
+      "SELECT id FROM devices WHERE center_id = ? AND device_identifier = ?",
+      ["center-known-model-test", "device-model-refresh-test"],
+    )).toHaveLength(1);
+  });
 });

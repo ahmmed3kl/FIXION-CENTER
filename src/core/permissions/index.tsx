@@ -183,9 +183,7 @@ const baseRolePermissions: Record<"admin" | "manager" | "secretary" | "accountan
   ],
 };
 
-// Keep the mobile role model aligned with the backend. Owners have the full
-// administrative set; assistants use the operational secretary set. This
-// prevents valid backend users from becoming permissionless when offline.
+// Keep the account-creation defaults aligned with the backend role policies.
 export const RolePermissions: Record<UserRole, Permission[]> = {
   ...baseRolePermissions,
   // A center manager is the operational administrator of that center. Keep
@@ -230,9 +228,9 @@ const legacyPermissionAliases: Record<string, Permission[]> = {
  * 2. Granular operational roles (manager, assistant, secretary, accountant):
  *    - Preserve their explicit permissions array or granular object flags strictly.
  *    - An explicit empty array [] REMAINS [] (zero permissions) - NEVER elevated.
+ *    - Missing or empty permissions remain empty. Role defaults are persisted only
+ *      when an account is created, not inferred during session resolution.
  *    - If permissions are an object with specific keys, only those mapped keys are granted.
- *    - If permissions are completely absent (undefined/null or empty {}), falls back to that
- *      role's default permissions only when no explicit restriction exists.
  * 3. Unknown role / malformed: NEVER elevate to Admin.
  */
 export function resolveUserPermissions(
@@ -271,7 +269,7 @@ export function resolveUserPermissions(
 
     // Explicit empty flag used by backend centerUsers ({ __explicit_empty__: true })
     if (user.permissions.__explicit_empty__ === true) {
-      return [];
+      return isSuperUserRole ? RolePermissions.admin : [];
     }
 
     const mapped = new Set<Permission>();
@@ -296,12 +294,11 @@ export function resolveUserPermissions(
     }
   }
 
-  // 3. Strict role-based permissions fallback (when permissions are missing/absent or empty {} for admin/owner)
-  if (role && RolePermissions[role]) {
-    return RolePermissions[role];
-  }
+  // Admin and owner roles are authoritative regardless of an absent permission
+  // payload. Operational roles receive defaults only when their account is created.
+  if (isSuperUserRole) return RolePermissions.admin;
 
-  // 4. Unknown role / malformed: NEVER elevate.
+  // Missing and malformed permission payloads for other roles fail closed.
   return [];
 }
 

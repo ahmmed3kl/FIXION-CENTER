@@ -4,12 +4,14 @@ const crypto = require("crypto");
 const db = require("../db");
 const { AppError } = require("../middleware/errorHandler");
 const { platformAuthMiddleware } = require("../middleware/platformAuth");
+const { defaultPermissionsForRole } = require("../middleware/auth");
 const { record } = require("../services/auditService");
 
 const router = express.Router({ mergeParams: true });
 router.use(platformAuthMiddleware);
 
 const roles = new Set(["admin", "assistant", "secretary", "accountant", "manager"]);
+const creatableRoles = new Set(["admin", "manager", "assistant"]);
 const statuses = new Set(["active", "inactive", "suspended"]);
 const safeFields = "id,center_id,full_name,email,phone,role,permissions,status,created_at,updated_at";
 
@@ -97,44 +99,47 @@ router.post("/", async (req, res, next) => {
     const email = String(req.body.email || "").trim().toLowerCase();
     const role = String(req.body.role || "");
     const password = req.body.password;
-    if (
-      name.length < 2 ||
-      name.length > 255 ||
-      !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ||
-      !roles.has(role) ||
-      !validatePassword(password)
-    ) {
+    if (name.length < 2 || name.length > 255 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || !creatableRoles.has(role) || !validatePassword(password)) {
       throw new AppError("VALIDATION_ERROR", "Invalid user fields.", "راجع بيانات المستخدم وكلمة المرور.", 400);
     }
-    if (role === "admin") {
-      const existing = await db.query(
-        "SELECT 1 FROM users WHERE center_id=$1 AND role='admin' AND status='active' LIMIT 1",
-        [req.params.centerId],
-      );
-      if (existing.rows.length) {
-        throw new AppError("CONFLICT", "An active center admin already exists.", "يوجد مسؤول نشط بالفعل لهذا المركز.", 409);
-      }
-    }
+    const permissions = defaultPermissionsForRole(role);
     const hash = await bcrypt.hash(password, 12);
-    const result = await db.query(
-      `INSERT INTO users (id,center_id,full_name,email,phone,password_hash,role,permissions,status)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,'{}','active') RETURNING ${safeFields}`,
-      [`user-${crypto.randomUUID()}`, req.params.centerId, name, email, req.body.phone || null, hash, role],
-    );
+    const user = await db.withTransaction(async (client) => {
+      const center = await client.query("SELECT id FROM centers WHERE id=$1 FOR UPDATE", [req.params.centerId]);
+      if (!center.rows[0]) throw new AppError("NOT_FOUND", "Center not found.", "المركز غير موجود.", 404);
+      const duplicate = await client.query("SELECT id FROM users WHERE LOWER(email)=$1 LIMIT 1", [email]);
+      if (duplicate.rows[0]) throw new AppError("CONFLICT", "An account with this email already exists.", "يوجد حساب بهذا البريد الإلكتروني بالفعل.", 409);
+      if (role === "admin") {
+        const existingAdmin = await client.query(
+          "SELECT 1 FROM users WHERE center_id=$1 AND role='admin' AND status='active' LIMIT 1",
+          [req.params.centerId],
+        );
+        if (existingAdmin.rows.length) {
+          throw new AppError("CONFLICT", "An active center admin already exists.", "يوجد مسؤول نشط بالفعل لهذا المركز.", 409);
+        }
+      }
+      const inserted = await client.query(
+        "INSERT INTO users (id,center_id,full_name,email,phone,password_hash,role,permissions,status) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'active') RETURNING " + safeFields,
+        ["user-" + crypto.randomUUID(), req.params.centerId, name, email, req.body.phone || null, hash, role, JSON.stringify(permissions)],
+      );
+      const created = inserted.rows[0];
+      await client.query(
+        "INSERT INTO user_centers (id,user_id,center_id,role,is_primary) VALUES ($1,$2,$3,$4,TRUE)",
+        ["uc-" + crypto.randomUUID(), created.id, req.params.centerId, role],
+      );
+      return created;
+    });
     await record({
       actor: req.platformAdmin,
       centerId: req.params.centerId,
       action: "user.created",
       entityType: "user",
-      entityId: result.rows[0].id,
-      after: auditState(result.rows[0]),
+      entityId: user.id,
+      after: auditState(user),
     });
-    res.status(201).json({ user: safeUser(result.rows[0]) });
-  } catch (error) {
-    next(error);
-  }
+    res.status(201).json({ user: safeUser(user) });
+  } catch (error) { next(error); }
 });
-
 router.patch("/:userId", async (req, res, next) => {
   try {
     const result = await db.withTransaction(async (client) => {
@@ -163,6 +168,13 @@ router.patch("/:userId", async (req, res, next) => {
         const email = String(req.body.email).trim().toLowerCase();
         if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
           throw new AppError("VALIDATION_ERROR", "Invalid email.", "البريد الإلكتروني غير صحيح.", 400);
+        }
+        const duplicate = await client.query(
+          "SELECT id FROM users WHERE LOWER(email)=$1 AND id<>$2 LIMIT 1",
+          [email, req.params.userId],
+        );
+        if (duplicate.rows[0]) {
+          throw new AppError("CONFLICT", "An account with this email already exists.", "يوجد حساب بهذا البريد الإلكتروني بالفعل.", 409);
         }
         keys.push("email");
         values.push(email);
@@ -206,6 +218,9 @@ router.patch("/:userId", async (req, res, next) => {
          WHERE center_id=$${values.length - 1} AND id=$${values.length} RETURNING ${safeFields}`,
         values,
       );
+      if (req.body.role !== undefined) {
+        await client.query("UPDATE user_centers SET role=$1 WHERE user_id=$2", [req.body.role, req.params.userId]);
+      }
       await record({
         client,
         actor: req.platformAdmin,
