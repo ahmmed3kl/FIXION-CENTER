@@ -144,7 +144,7 @@ export class SessionRepository {
       `SELECT s.id, s.center_id as centerId, s.student_code as studentCode,
               s.full_name as fullName, s.card_code as cardCode, s.phone,
               s.parent_phone as parentPhone, s.grade, s.status,
-              s.student_type as studentType, s.notes,
+              s.student_type as studentType, s.student_color as studentColor, s.notes,
               s.created_at as createdAt, s.updated_at as updatedAt
        FROM session_expected_students expected
        JOIN students s ON s.id = expected.student_id AND s.center_id = expected.center_id
@@ -162,7 +162,7 @@ export class SessionRepository {
       `SELECT st.id, st.center_id as centerId, st.student_code as studentCode,
               st.full_name as fullName, st.card_code as cardCode, st.phone,
               st.parent_phone as parentPhone, st.grade, st.status,
-              st.student_type as studentType, st.notes,
+              st.student_type as studentType, st.student_color as studentColor, st.notes,
               st.created_at as createdAt, st.updated_at as updatedAt
        FROM sessions session
        JOIN student_group_enrollments enrollment
@@ -180,7 +180,8 @@ export class SessionRepository {
               packageStudent.full_name as fullName, packageStudent.card_code as cardCode,
               packageStudent.phone, packageStudent.parent_phone as parentPhone,
               packageStudent.grade, packageStudent.status,
-              packageStudent.student_type as studentType, packageStudent.notes,
+              packageStudent.student_type as studentType,
+              packageStudent.student_color as studentColor, packageStudent.notes,
               packageStudent.created_at as createdAt, packageStudent.updated_at as updatedAt
        FROM sessions packageSession
        JOIN student_package_subscriptions packageSubscription

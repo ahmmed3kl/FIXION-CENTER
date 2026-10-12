@@ -145,6 +145,35 @@ function run() {
     entityType: "unrecognized_entity",
     operationType: "UPDATE",
   }, "No sync permission policy");
+  assert.throws(
+    () => assertSyncPermission(request(["teachers.update"]), {
+      entityType: "teacher",
+      operationType: "UPDATE",
+      payload: { id: "teacher-1", weekStartDay: 3 },
+    }),
+    (error) => error.code === "FORBIDDEN" && error.statusCode === 403,
+  );
+  assert.throws(
+    () => assertSyncPermission(request(["teachers.update"]), {
+      entityType: "teacher",
+      operationType: "UPDATE",
+      payload: { id: "teacher-1", week_start_day: 3 },
+    }),
+    (error) => error.code === "FORBIDDEN" && error.statusCode === 403,
+  );
+  assertSyncPermission({ user: { role: "admin", permissions: [] } }, {
+    entityType: "teacher",
+    operationType: "UPDATE",
+    payload: { id: "teacher-1", weekStartDay: 3 },
+  });
+  assert.throws(
+    () => assertSyncPermission({ user: { role: "owner", permissions: [] } }, {
+      entityType: "teacher",
+      operationType: "UPDATE",
+      payload: { id: "teacher-1", weekStartDay: 3 },
+    }),
+    (error) => error.code === "FORBIDDEN" && error.statusCode === 403,
+  );
   assert.equal(canReadSyncEntity("payment", { role: "assistant", permissions: ["students.view"] }), false);
   assert.equal(canReadSyncEntity("group", { role: "assistant", permissions: ["groups.view"] }), true);
   assert.equal(canReadSyncEntity("student_group_enrollment", { role: "assistant", permissions: ["groups.view"] }), false);

@@ -20,7 +20,7 @@ import { Colors, Spacing, useTheme } from "../../core/theme";
 import { useServiceVisibility } from "../../core/services/ServiceVisibilityContext";
 import { useAuthStore } from "../../features/auth/useAuthStore";
 import { useLocalDataRevision } from "../../core/database/useLocalDataRevision";
-import { AbsenceReportsService, AbsenceSessionReport, AbsenceSessionSummary, CompensationReportRow } from "../../features/attendance/AbsenceReportsService";
+import { AbsenceReportsService, AbsenceSessionReport, AbsenceSessionSummary, CompensationReportRow, MonthlyCrossGroupMakeupRow, MonthlyNeverAttendedRow } from "../../features/attendance/AbsenceReportsService";
 import { NotificationService } from "../../features/notifications/NotificationService";
 import { AbsenceNoteRepository } from "../../features/attendance/AbsenceNoteRepository";
 import { getStudentColorPresentation } from "../../features/students/studentColor";
@@ -36,6 +36,7 @@ import { formatLocalDate } from "../../shared/utils/date";
 
 type SessionGroup = { id?: string; name: string; items: AbsenceSessionSummary[] };
 type AbsenceSendStatus = "sent" | "failed" | "partial" | "queued" | "no_contact" | "not_absent";
+type MonthlyReportSection = "sessions" | "never-attended" | "cross-group-makeups";
 
 function SessionGroupList({
   groups,
@@ -210,6 +211,9 @@ export default function AbsenceReportsScreen() {
   const localDataRevision = useLocalDataRevision();
   const [month, setMonth] = useState(() => monthKey(new Date()));
   const [sessions, setSessions] = useState<AbsenceSessionSummary[]>([]);
+  const [monthlyNeverAttended, setMonthlyNeverAttended] = useState<MonthlyNeverAttendedRow[]>([]);
+  const [monthlyCrossGroupMakeups, setMonthlyCrossGroupMakeups] = useState<MonthlyCrossGroupMakeupRow[]>([]);
+  const [monthlySection, setMonthlySection] = useState<MonthlyReportSection>("sessions");
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [absenceSentBefore, setAbsenceSentBefore] = useState(false);
   const [selectionMode, setSelectionMode] = useState(false);
@@ -259,9 +263,14 @@ export default function AbsenceReportsScreen() {
     setLoading(true);
     setError("");
     try {
-      setSessions(AbsenceReportsService.getSessionsForMonth(month));
+      const monthSessions = AbsenceReportsService.getSessionsForMonth(month);
+      setSessions(monthSessions);
+      setMonthlyNeverAttended(AbsenceReportsService.getMonthlyNeverAttended(month, monthSessions));
+      setMonthlyCrossGroupMakeups(AbsenceReportsService.getMonthlyCrossGroupMakeups(month, monthSessions));
     } catch (err: any) {
       setSessions([]);
+      setMonthlyNeverAttended([]);
+      setMonthlyCrossGroupMakeups([]);
       setError(err?.message || "تعذر تحميل جلسات الشهر.");
     } finally {
       setLoading(false);
@@ -559,7 +568,83 @@ export default function AbsenceReportsScreen() {
     </SafeAreaView>;
   }
 
-  return <SafeAreaView style={styles.safe}><ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}><View style={styles.pageHeader}><View><Text style={styles.eyebrow}>الحضور والغياب</Text><Text style={styles.title}>تقارير الغياب</Text><Text style={styles.subtitle}>راجع جلسات المجموعات وحالات الطلاب الفعلية.</Text></View><View style={styles.headerIcon}><Ionicons name="bar-chart-outline" size={23} color={Colors.primary} /></View></View><View style={styles.monthPicker}><TouchableOpacity onPress={() => setMonth((value) => shiftMonth(value, -1))}><Ionicons name="chevron-forward" size={20} color={Colors.slate600} /></TouchableOpacity><View style={styles.monthCenter}><Text style={styles.monthLabel}>{monthLabel(month)}</Text><Text style={styles.monthHint}>الشهر المحدد</Text></View><TouchableOpacity onPress={() => setMonth((value) => shiftMonth(value, 1))}><Ionicons name="chevron-back" size={20} color={Colors.slate600} /></TouchableOpacity></View>{loading ? <View style={styles.loadingBox}><ActivityIndicator color={Colors.primary} /><Text style={styles.muted}>جارٍ تحميل الجلسات...</Text></View> : error ? <View style={styles.errorBox}><Text style={styles.errorText}>{error}</Text><TouchableOpacity onPress={loadSessions}><Text style={styles.retryText}>إعادة المحاولة</Text></TouchableOpacity></View> : <SessionGroupList groups={groupedSessions} onPress={openSession} />}{!loading && !error && !sessions.length ? <EmptyMessage text="لا توجد جلسات في هذا الشهر." /> : null}</ScrollView></SafeAreaView>;
+  return (
+    <SafeAreaView style={styles.safe}>
+      <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
+        <View style={styles.pageHeader}>
+          <View>
+            <Text style={styles.eyebrow}>الحضور والغياب</Text>
+            <Text style={styles.title}>تقارير الغياب</Text>
+            <Text style={styles.subtitle}>راجع جلسات المجموعات وحالات الطلاب الفعلية.</Text>
+          </View>
+          <View style={styles.headerIcon}><Ionicons name="bar-chart-outline" size={23} color={Colors.primary} /></View>
+        </View>
+        <View style={styles.monthPicker}>
+          <TouchableOpacity onPress={() => setMonth((value) => shiftMonth(value, -1))}><Ionicons name="chevron-forward" size={20} color={Colors.slate600} /></TouchableOpacity>
+          <View style={styles.monthCenter}>
+            <Text style={styles.monthLabel}>{monthLabel(month)}</Text>
+            <Text style={styles.monthHint}>الشهر المحدد</Text>
+          </View>
+          <TouchableOpacity onPress={() => setMonth((value) => shiftMonth(value, 1))}><Ionicons name="chevron-back" size={20} color={Colors.slate600} /></TouchableOpacity>
+        </View>
+        <View style={styles.monthSections}>
+          {([
+            ["sessions", `الجلسات (${sessions.length})`],
+            ["never-attended", `لم يحضروا مطلقًا (${monthlyNeverAttended.length})`],
+            ["cross-group-makeups", `تعويض بمجموعة أخرى (${monthlyCrossGroupMakeups.length})`],
+          ] as const).map(([section, label]) => (
+            <TouchableOpacity
+              key={section}
+              accessibilityRole="button"
+              accessibilityState={{ selected: monthlySection === section }}
+              style={[styles.monthSectionButton, monthlySection === section && styles.monthSectionButtonActive]}
+              onPress={() => setMonthlySection(section)}
+            >
+              <Text style={[styles.monthSectionText, monthlySection === section && styles.monthSectionTextActive]}>{label}</Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+        {loading ? (
+          <View style={styles.loadingBox}><ActivityIndicator color={Colors.primary} /><Text style={styles.muted}>جارٍ تحميل التقارير...</Text></View>
+        ) : error ? (
+          <View style={styles.errorBox}><Text style={styles.errorText}>{error}</Text><TouchableOpacity onPress={loadSessions}><Text style={styles.retryText}>إعادة المحاولة</Text></TouchableOpacity></View>
+        ) : monthlySection === "sessions" ? (
+          <>
+            <SessionGroupList groups={groupedSessions} onPress={openSession} />
+            {!sessions.length ? <EmptyMessage text="لا توجد جلسات في هذا الشهر." /> : null}
+          </>
+        ) : monthlySection === "never-attended" ? (
+          <>
+            {monthlyNeverAttended.map((row) => (
+              <StudentRow
+                key={`${row.student.id}:${row.teacherNames.join(",")}:${row.subjectName}:${row.cycleStartDate}`}
+                student={row.student}
+                status="لم يحضر"
+                statusTone="orange"
+                note={`المدرس: ${row.teacherNames.join("، ") || "—"} · المادة: ${row.subjectName || "—"} · دورة الشرح: ${formatDate(row.cycleStartDate)} – ${formatDate(row.cycleEndDate)} · المجموعات: ${row.groupNames.join("، ") || "—"}`}
+                onPress={() => router.push({ pathname: "/(main)/students", params: { studentId: row.student.id } } as any)}
+              />
+            ))}
+            {!monthlyNeverAttended.length ? <EmptyMessage text="لا يوجد طالب متوقع لم يحضر حصة عادية أو تعويضًا مرتبطًا بحصص المدرس والمادة خلال دورة الشرح في الشهر المحدد." /> : null}
+          </>
+        ) : (
+          <>
+            {monthlyCrossGroupMakeups.map((row) => (
+              <StudentRow
+                key={row.attendance.id}
+                student={row.student}
+                status="تعويض"
+                statusTone="green"
+                note={`غاب في ${row.originalSession.groupName || "مجموعة"} (${formatDate(row.originalSession.sessionDate)}) · عوّض في ${row.targetSession.groupName || "مجموعة"} (${formatDate(row.targetSession.sessionDate)})`}
+                onPress={() => router.push({ pathname: "/(main)/students", params: { studentId: row.student.id } } as any)}
+              />
+            ))}
+            {!monthlyCrossGroupMakeups.length ? <EmptyMessage text="لا توجد حالات تعويض مسجلة في مجموعة أخرى خلال هذا الشهر." /> : null}
+          </>
+        )}
+      </ScrollView>
+    </SafeAreaView>
+  );
 }
 
 function Counter({ label, value, tone }: { label: string; value: number; tone: "blue" | "green" | "red" | "purple" }) { return <View style={styles.counter}><Text style={[styles.counterValue, tone === "green" && styles.green, tone === "red" && styles.red, tone === "purple" && styles.purple]}>{value}</Text><Text style={styles.counterLabel}>{label}</Text></View>; }
@@ -635,6 +720,11 @@ const createStyles = () => StyleSheet.create({
   groupReportHeaderCopy: { flex: 1, alignItems: "flex-end" },
   groupReportHint: { color: Colors.slate500, fontSize: 10, marginTop: 3 },
   safe: { flex: 1, backgroundColor: Colors.background }, content: { padding: 16, paddingBottom: 34, gap: 10 }, centered: { flex: 1, alignItems: "center", justifyContent: "center", gap: 9, padding: 24, backgroundColor: Colors.background }, pageHeader: { flexDirection: "row-reverse", alignItems: "center", gap: 12, paddingVertical: 5 }, detailHeader: { flexDirection: "row-reverse", alignItems: "center", gap: 10, paddingVertical: 5 }, headerCopy: { flex: 1, alignItems: "flex-end" }, headerIcon: { width: 45, height: 45, borderRadius: 14, alignItems: "center", justifyContent: "center", backgroundColor: Colors.primaryLight }, backButton: { width: 40, height: 40, borderRadius: 12, alignItems: "center", justifyContent: "center", backgroundColor: Colors.white, borderWidth: 1, borderColor: Colors.border }, eyebrow: { color: Colors.primary, fontSize: 11, fontWeight: "800", textAlign: "right" }, title: { color: Colors.slate900, fontSize: 25, fontWeight: "900", marginTop: 2, textAlign: "right" }, subtitle: { color: Colors.slate500, fontSize: 12, marginTop: 3, textAlign: "right" }, monthPicker: { minHeight: 58, borderRadius: 15, backgroundColor: Colors.white, borderWidth: 1, borderColor: Colors.border, flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 14 }, monthCenter: { alignItems: "center" }, monthLabel: { color: Colors.slate900, fontSize: 16, fontWeight: "800" }, monthHint: { color: Colors.slate500, fontSize: 10, marginTop: 2 }, sessionCard: { backgroundColor: Colors.white, borderRadius: 15, borderWidth: 1, borderColor: Colors.border, padding: 12 }, sessionCardTop: { flexDirection: "row-reverse", gap: 7, alignItems: "flex-start" }, chevron: { width: 25, height: 25, alignItems: "center", justifyContent: "center" }, sessionCopy: { flex: 1, alignItems: "flex-end" }, sessionName: { color: Colors.slate900, fontSize: 15, fontWeight: "800" }, sessionMeta: { color: Colors.slate600, fontSize: 11, marginTop: 2 }, sessionDate: { color: Colors.slate500, fontSize: 10, marginTop: 4 }, cardCounters: { flexDirection: "row-reverse", borderTopWidth: 1, borderTopColor: Colors.slate100, marginTop: 10, paddingTop: 9, justifyContent: "space-between" }, counter: { alignItems: "center", minWidth: 45 }, counterValue: { color: Colors.primary, fontSize: 17, fontWeight: "900" }, counterLabel: { color: Colors.slate500, fontSize: 10, marginTop: 1 }, green: { color: Colors.successText }, red: { color: Colors.dangerText }, purple: { color: "#7C3AED" }, sessionInfo: { backgroundColor: Colors.white, borderRadius: 15, borderWidth: 1, borderColor: Colors.border, padding: 12 }, sessionInfoLine: { color: Colors.slate600, fontSize: 12, textAlign: "right" }, counterRow: { flexDirection: "row-reverse", justifyContent: "space-between", marginTop: 10 }, tabRow: { flexDirection: "row-reverse", backgroundColor: Colors.white, borderRadius: 13, padding: 4, borderWidth: 1, borderColor: Colors.border }, tab: { flex: 1, alignItems: "center", paddingVertical: 10, borderRadius: 10 }, tabActive: { backgroundColor: Colors.primary }, tabText: { color: Colors.slate600, fontSize: 11, fontWeight: "800" }, tabTextActive: { color: Colors.white }, searchWrap: { minHeight: 44, borderRadius: 11, backgroundColor: Colors.white, borderWidth: 1, borderColor: Colors.border, flexDirection: "row-reverse", alignItems: "center", gap: 8, paddingHorizontal: 11 }, inputHost: { flex: 1 }, searchInput: { color: Colors.slate800, fontSize: 13, textAlign: "right", minHeight: 40 }, actionRow: { flexDirection: "row-reverse", alignItems: "center", justifyContent: "space-between", marginTop: 2 }, sectionTitle: { color: Colors.slate900, fontSize: 16, fontWeight: "800", textAlign: "right" }, sendButton: { flexDirection: "row-reverse", alignItems: "center", gap: 5, paddingHorizontal: 11, minHeight: 34, borderRadius: 9, backgroundColor: Colors.primary }, sendButtonText: { color: Colors.white, fontSize: 11, fontWeight: "800" },
+  monthSections: { flexDirection: "row-reverse", flexWrap: "wrap", gap: 6 },
+  monthSectionButton: { flexGrow: 1, minHeight: 38, alignItems: "center", justifyContent: "center", paddingHorizontal: 8, paddingVertical: 6, borderRadius: 10, borderWidth: 1, borderColor: Colors.border, backgroundColor: Colors.white },
+  monthSectionButtonActive: { backgroundColor: Colors.primary, borderColor: Colors.primary },
+  monthSectionText: { color: Colors.slate600, fontSize: 9, fontWeight: "800", textAlign: "center" },
+  monthSectionTextActive: { color: Colors.white },
   studentRow: { backgroundColor: Colors.white, borderRadius: 13, borderWidth: 1, borderColor: Colors.border, padding: 8, flexDirection: "row-reverse", alignItems: "center", gap: 7 },
   studentRowSelected: { borderColor: Colors.primary, backgroundColor: Colors.primaryMuted },
   studentMain: { flex: 1, minWidth: 0, flexDirection: "row-reverse", alignItems: "center", gap: 9 },

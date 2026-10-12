@@ -21,6 +21,15 @@ import { SessionRepository } from "../sessions/SessionRepository";
 import { StudentRepository } from "../students/StudentRepository";
 import { AttendanceRepository } from "./AttendanceRepository";
 import { AttendanceSessionService } from "./AttendanceSessionService";
+import { getLocalDateOnly } from "../../shared/utils/date";
+import {
+  DEFAULT_TEACHER_WEEK_START_DAY,
+  getTeacherWeekBounds,
+  isTeacherMakeupCycleOpen,
+  isWithinTeacherWeekCycle,
+  TEACHER_MAKEUP_CYCLE_EXPIRED_ERROR,
+  TEACHER_MAKEUP_CYCLE_EXPIRED_MESSAGE,
+} from "../../shared/utils/teacherWeeks";
 
 function generateUUID(): string {
   return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
@@ -267,6 +276,7 @@ export class MakeupService {
   static getNextEligibleSession(
     studentId: string,
     originalAbsenceSessionId: string,
+    targetSessionId?: string,
   ): Session | null {
     const { centerId } = this.getActiveContext();
     const originalSession = SessionRepository.findById(
@@ -277,6 +287,13 @@ export class MakeupService {
     }
 
     const db = DatabaseService.getDb();
+    const teacherWeek = db.getFirstSync<{ weekStartDay?: number | null }>(
+      "SELECT week_start_day as weekStartDay FROM teachers WHERE center_id = ? AND id = ?",
+      [centerId, originalSession.teacherId],
+    );
+    const weekStartDay = teacherWeek?.weekStartDay ?? DEFAULT_TEACHER_WEEK_START_DAY;
+    const originalWeek = getTeacherWeekBounds(originalSession.sessionDate, weekStartDay);
+    if (getLocalDateOnly() > originalWeek.endDate) return null;
     // Get all candidate sessions for same subject & teacher chronologically after originalSession
     const allSessions = db.getAllSync<Session>(
       `SELECT s.id, s.center_id as centerId, s.group_id as groupId, s.schedule_id as scheduleId,
@@ -287,7 +304,7 @@ export class MakeupService {
        FROM sessions s
        JOIN groups g ON g.center_id = s.center_id AND g.id = s.group_id
        WHERE s.center_id = ? AND s.id != ?
-         AND s.status NOT IN ('cancelled', 'closed')
+         AND s.status <> 'cancelled'
        ORDER BY s.session_date ASC, s.start_time ASC`,
       [
         centerId,
@@ -307,7 +324,11 @@ export class MakeupService {
         s.sessionDate > originalSession.sessionDate ||
         (s.sessionDate === originalSession.sessionDate &&
           s.startTime > originalSession.startTime);
-      return isAfter;
+      if (!isAfter) return false;
+      if (!isWithinTeacherWeekCycle(originalSession.sessionDate, s.sessionDate, weekStartDay)) {
+        return false;
+      }
+      return true;
     });
 
     if (candidateSessions.length === 0) {
@@ -328,6 +349,7 @@ export class MakeupService {
       const candidateExpected = AttendanceSessionService.isExpected(
         candidate.id,
         studentId,
+        true,
       );
       const attended = db.getFirstSync<any>(
         `SELECT id FROM attendance WHERE center_id = ? AND session_id = ? AND student_id = ?`,
@@ -341,7 +363,13 @@ export class MakeupService {
         if (candidateExpected || !candidateHasSnapshot) return null;
         continue;
       }
-      if (!candidateExpected && candidateHasSnapshot) continue;
+      if (!candidateExpected) {
+        if (candidate.id === targetSessionId && candidate.status === "open") {
+          return candidate;
+        }
+        continue;
+      }
+      if (candidate.status === "closed") return null;
       return candidate;
     }
 
@@ -372,9 +400,23 @@ export class MakeupService {
     if (!host || host.status !== "open" || !host.subjectId || !host.teacherId) {
       return { eligible: false };
     }
+    const weekStart = db.getFirstSync<{ weekStartDay?: number | null }>(
+      "SELECT week_start_day as weekStartDay FROM teachers WHERE center_id = ? AND id = ?",
+      [centerId, host.teacherId],
+    );
+    const weekStartDay = weekStart?.weekStartDay ?? DEFAULT_TEACHER_WEEK_START_DAY;
+    if (!isTeacherMakeupCycleOpen(
+      host.sessionDate,
+      host.sessionDate,
+      weekStartDay,
+      getLocalDateOnly(),
+    )) {
+      return { eligible: false };
+    }
 
     const sessions = db.getAllSync<Session>(
       `SELECT s.id, s.center_id as centerId, s.group_id as groupId,
+             s.session_date as sessionDate,
               COALESCE(s.subject_id, g.subject_id) as subjectId,
               COALESCE(s.teacher_id, g.teacher_id) as teacherId,
               s.session_date as sessionDate, s.start_time as startTime,
@@ -416,7 +458,13 @@ export class MakeupService {
           source.centerId !== centerId || source.id === sessionId ||
           source.groupId === host.groupId || source.status === "cancelled" ||
           source.subjectId !== host.subjectId || source.teacherId !== host.teacherId ||
-          !isBeforeHost
+          !isBeforeHost ||
+          !isTeacherMakeupCycleOpen(
+            source.sessionDate,
+            host.sessionDate,
+            weekStartDay,
+            getLocalDateOnly(),
+          )
         ) return false;
 
         const hasSnapshot = snapshotSessionIds.has(source.id);
@@ -445,7 +493,7 @@ export class MakeupService {
       );
       if (attendedOrCovered || alreadyMadeUp) continue;
 
-      if (this.getNextEligibleSession(studentId, source.id)?.id === sessionId) {
+      if (this.getNextEligibleSession(studentId, source.id, sessionId)?.id === sessionId) {
         return {
           eligible: true,
           sourceGroupId: source.groupId,
@@ -532,6 +580,22 @@ export class MakeupService {
     isLate?: boolean;
     checkInTime?: string;
   }): Promise<Attendance> {
+    const originalSession = SessionRepository.findById(params.originalAbsenceId);
+    if (originalSession) {
+      const db = DatabaseService.getDb();
+      const teacherWeek = db.getFirstSync<{ weekStartDay?: number | null }>(
+        "SELECT week_start_day as weekStartDay FROM teachers WHERE center_id = ? AND id = ?",
+        [originalSession.centerId, originalSession.teacherId],
+      );
+      const weekStartDay = teacherWeek?.weekStartDay ?? DEFAULT_TEACHER_WEEK_START_DAY;
+      if (getLocalDateOnly() > getTeacherWeekBounds(originalSession.sessionDate, weekStartDay).endDate) {
+        throw new ConflictError(
+          TEACHER_MAKEUP_CYCLE_EXPIRED_ERROR,
+          TEACHER_MAKEUP_CYCLE_EXPIRED_MESSAGE,
+        );
+      }
+    }
+
     const existingAttendance = AttendanceRepository.getStudentAttendanceInSession(
       params.sessionId,
       params.studentId,
@@ -555,7 +619,7 @@ export class MakeupService {
     );
     const nextEligible = sharedEligibility.eligible
       ? { id: params.sessionId }
-      : this.getNextEligibleSession(params.studentId, params.originalAbsenceId);
+      : this.getNextEligibleSession(params.studentId, params.originalAbsenceId, params.sessionId);
     if (!nextEligible || nextEligible.id !== params.sessionId ||
         (sharedEligibility.eligible && sharedEligibility.originalAbsenceId !== params.originalAbsenceId)) {
       throw new ValidationError(

@@ -128,6 +128,22 @@ function requiredPermission(operation) {
 
 function assertSyncPermission(req, operation) {
   const entity = String(operation.entityType || operation.entity_type || "").toLowerCase();
+  const payload = getPayload(operation);
+  const teacher = entity === "teacher" || entity.startsWith("teacher_")
+    ? payload.teacher || payload
+    : {};
+  const changesTeacherWeekStart = hasOwn(teacher, "weekStartDay") || hasOwn(teacher, "week_start_day");
+  if (
+    changesTeacherWeekStart &&
+    req.user.role !== "admin"
+  ) {
+    throw new AppError(
+      "FORBIDDEN",
+      "Only center administrators can change a teacher week start day.",
+      "إعداد بداية أسبوع المدرس متاح للأدمن فقط.",
+      403,
+    );
+  }
   const permission = requiredPermission(operation);
   if (req.user.role === "admin" || req.user.role === "owner") return;
 

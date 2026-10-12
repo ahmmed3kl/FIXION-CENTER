@@ -104,6 +104,22 @@ async function ensureSchemaCompatibility() {
   `);
   await pool.query("ALTER TABLE students ALTER COLUMN card_code DROP NOT NULL");
   await pool.query("ALTER TABLE students ADD COLUMN IF NOT EXISTS student_color VARCHAR(32)");
+  await pool.query(`
+    ALTER TABLE teachers
+      ADD COLUMN IF NOT EXISTS week_start_day SMALLINT NOT NULL DEFAULT 6;
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+         WHERE conname = 'chk_teacher_week_start_day'
+           AND conrelid = 'teachers'::regclass
+      ) THEN
+        ALTER TABLE teachers
+          ADD CONSTRAINT chk_teacher_week_start_day
+          CHECK (week_start_day BETWEEN 0 AND 6);
+      END IF;
+    END $$;
+  `);
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS grade_exams (

@@ -40,7 +40,7 @@ export const routePermissions: Partial<Record<string, Permission[]>> = {
   closing: ["daily_closing.view"],
 };
 
-const unrestrictedRoutes = new Set(["more", "center-switch"]);
+const unrestrictedRoutes = new Set(["more"]);
 const routeAllPermissions: Partial<Record<string, Permission[]>> = {
   "group-details": ["groups.view"],
 };

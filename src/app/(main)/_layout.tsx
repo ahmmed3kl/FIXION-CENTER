@@ -8,6 +8,11 @@ import { resolveUserPermissions } from "../../core/permissions";
 import { Strings } from "../../core/localization";
 import { useTheme } from "../../core/theme";
 import { useAuthStore } from "../../features/auth/useAuthStore";
+import { canSwitchCenters } from "../../features/auth/centerAccess";
+
+export const unstable_settings = {
+  anchor: "index",
+} as const;
 
 export default function MainLayout() {
   const router = useRouter();
@@ -19,7 +24,9 @@ export default function MainLayout() {
   const { height, width } = useWindowDimensions();
   const compactLandscape = width > height && height < 520;
   const routeName = resolvePermissionRouteName(segments);
-  const routeAllowed = canAccessRoute(routeName, userPermissions);
+  const routeAllowed = routeName === "center-switch"
+    ? canSwitchCenters(currentUser)
+    : canAccessRoute(routeName, userPermissions);
 
   useEffect(() => {
     if (!routeAllowed) router.replace("/(main)/more" as any);

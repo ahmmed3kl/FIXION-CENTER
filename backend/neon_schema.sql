@@ -105,6 +105,7 @@ CREATE TABLE IF NOT EXISTS teachers (
     phone VARCHAR(32),
     status VARCHAR(32) NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
     notes TEXT,
+    week_start_day SMALLINT NOT NULL DEFAULT 6 CHECK (week_start_day BETWEEN 0 AND 6),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     server_revision BIGINT NOT NULL DEFAULT 1

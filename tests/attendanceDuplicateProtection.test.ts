@@ -1,9 +1,10 @@
 import { DatabaseService } from "../src/core/database";
 import { ConflictError, DuplicateAttendanceError, ForbiddenError } from "../src/core/errors";
 import { Strings } from "../src/core/localization";
-import { SyncRepository } from "../src/core/sync";
+import { SyncEngine, SyncRepository } from "../src/core/sync";
 import { AttendanceRepository } from "../src/features/attendance/AttendanceRepository";
 import { AttendanceSessionService } from "../src/features/attendance/AttendanceSessionService";
+import { recordScannedAttendanceIfEligible } from "../src/features/attendance/barcodeAttendance";
 import { AuditService } from "../src/core/audit";
 import { useAuthStore } from "../src/features/auth/useAuthStore";
 import { SessionRepository } from "../src/features/sessions/SessionRepository";
@@ -127,6 +128,71 @@ describe("attendance duplicate protection", () => {
     expect(SyncRepository.getRecentOperations("center-1", 1000)
       .filter((operation) => operation.operationType === "attendance.create"))
       .toHaveLength(operationsBefore.length + 1);
+  });
+
+  it("persists an eligible regular scan locally and queues one operation while sync is offline", async () => {
+    const db = DatabaseService.getDb();
+    const sessionId = "sess-barcode-offline";
+    db.runSync(
+      `INSERT INTO sessions
+       (id, center_id, group_id, subject_id, teacher_id, session_date, start_time, end_time, status, created_at)
+       VALUES (?, 'center-1', 'grp-1', 'subj-1', 'teach-1', '2099-10-08', '10:00', '12:00', 'open', '2026-09-20')`,
+      [sessionId],
+    );
+    db.runSync(
+      `INSERT INTO session_expected_students
+       (id, center_id, session_id, student_id, created_at)
+       VALUES (?, 'center-1', ?, 'std-1', '2026-09-20')`,
+      [`exp-${sessionId}`, sessionId],
+    );
+    const attendanceParams = {
+      isBarcodeScan: true,
+      isExpectedInSession: AttendanceSessionService.isExpected(sessionId, "std-1"),
+      isMakeupEligible: false,
+      isAlreadyAttended: AttendanceRepository.isAlreadyAttended(sessionId, "std-1"),
+      isSessionOpen: true,
+    };
+
+    const syncOffline = jest.spyOn(SyncEngine, "syncCenterNow")
+      .mockRejectedValue(new Error("offline"));
+    try {
+      let attendanceId = "";
+      await recordScannedAttendanceIfEligible(attendanceParams, async () => {
+        const attendance = await AttendanceRepository.recordAttendance({
+          studentId: "std-1",
+          sessionId,
+          status: "present",
+          isLate: false,
+        });
+        attendanceId = attendance.id;
+      });
+      expect(attendanceId).toBeTruthy();
+      expect(AttendanceRepository.getStudentAttendanceInSession(sessionId, "std-1")?.id)
+        .toBe(attendanceId);
+      expect(SyncRepository.getRecentOperations("center-1", 1000).filter(
+        (operation) => operation.operationType === "attendance.create"
+          && operation.entityId === attendanceId,
+      )).toHaveLength(1);
+      expect(syncOffline).toHaveBeenCalledTimes(1);
+
+      await recordScannedAttendanceIfEligible({
+        ...attendanceParams,
+        isAlreadyAttended: AttendanceRepository.isAlreadyAttended(sessionId, "std-1"),
+      }, async () => {
+        await AttendanceRepository.recordAttendance({
+          studentId: "std-1",
+          sessionId,
+          status: "present",
+          isLate: false,
+        });
+      });
+      expect(SyncRepository.getRecentOperations("center-1", 1000).filter(
+        (operation) => operation.operationType === "attendance.create"
+          && operation.entityId === attendanceId,
+      )).toHaveLength(1);
+    } finally {
+      jest.restoreAllMocks();
+    }
   });
 
   it("does not treat a previous attendance in another session as a duplicate", async () => {

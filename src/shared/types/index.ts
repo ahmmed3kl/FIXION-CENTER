@@ -147,6 +147,7 @@ export interface Teacher {
   phone?: string;
   status?: "active" | "inactive";
   notes?: string | null;
+  weekStartDay?: number;
   createdAt?: string;
   updatedAt?: string | null;
 }

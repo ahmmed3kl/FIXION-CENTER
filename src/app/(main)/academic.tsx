@@ -112,6 +112,8 @@ export default function AcademicScreen() {
   const [editingGroup, setEditingGroup] = useState<Group | null>(null);
   const [groupSchedules, setGroupSchedules] = useState<GroupSchedule[]>([]);
   const [isAddScheduleOpen, setIsAddScheduleOpen] = useState(false);
+  const [weekStartTeacher, setWeekStartTeacher] = useState<Teacher | null>(null);
+  const [savingWeekStart, setSavingWeekStart] = useState(false);
 
   // Forms State
   const [teacherName, setTeacherName] = useState("");
@@ -503,6 +505,7 @@ export default function AcademicScreen() {
     "teachers.create",
   );
   const canUpdateTeacher = PermissionService.hasPermission(permissions, "teachers.update");
+  const canManageTeacherWeekStart = currentUser?.role === "admin";
   const canDeactivateTeacher = PermissionService.hasPermission(permissions, "teachers.deactivate");
   const canCreateSubject = PermissionService.hasPermission(
     permissions,
@@ -636,12 +639,18 @@ export default function AcademicScreen() {
                     {item.notes && (
                       <Text style={styles.itemNotes}>{item.notes}</Text>
                     )}
+                    {canManageTeacherWeekStart ? (
+                      <Text style={styles.itemNotes}>
+                        بداية أسبوع الشرح: {DAYS_OF_WEEK[item.weekStartDay ?? 6]}
+                      </Text>
+                    ) : null}
                   </View>
                   <StatusBadge
                     text={item.status === "active" ? "نشط" : "معطل"}
                     type={item.status === "active" ? "success" : "neutral"}
                   />
-                  {(canUpdateTeacher || canDeactivateTeacher) && <View style={styles.itemActions}>
+                  {(canUpdateTeacher || canDeactivateTeacher || canManageTeacherWeekStart) && <View style={styles.itemActions}>
+                    {canManageTeacherWeekStart && <TouchableOpacity accessibilityRole="button" accessibilityLabel="تعديل بداية أسبوع المدرس" onPress={() => setWeekStartTeacher(item)}><Ionicons name="calendar-outline" size={20} color={Colors.primary} /></TouchableOpacity>}
                     {canUpdateTeacher && <TouchableOpacity onPress={() => openTeacherEditor(item)}><Ionicons name="create-outline" size={20} color={Colors.primary} /></TouchableOpacity>}
                     {canDeactivateTeacher && <TouchableOpacity onPress={() => toggleTeacherStatus(item)}><Ionicons name={item.status === "active" ? "pause-circle-outline" : "play-circle-outline"} size={20} color={item.status === "active" ? Colors.danger : Colors.success} /></TouchableOpacity>}
                     {canDeactivateTeacher && <TouchableOpacity onPress={() => deleteTeacher(item)}><Ionicons name="trash-outline" size={20} color={Colors.danger} /></TouchableOpacity>}
@@ -1373,6 +1382,55 @@ export default function AcademicScreen() {
           </View>
         </View>
       </Modal>
+      <Modal
+        visible={Boolean(weekStartTeacher)}
+        animationType="fade"
+        transparent
+        onRequestClose={() => { if (!savingWeekStart) setWeekStartTeacher(null); }}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.smallModalCard}>
+            <Text style={styles.modalTitle}>بداية أسبوع الشرح</Text>
+            <Text style={styles.inputLabel}>{weekStartTeacher?.name || "المدرس"}</Text>
+            <View style={styles.weekStartChoices}>
+              {DAYS_OF_WEEK.map((day, dayIndex) => (
+                <TouchableOpacity
+                  key={day}
+                  disabled={savingWeekStart}
+                  style={[
+                    styles.weekStartChoice,
+                    (weekStartTeacher?.weekStartDay ?? 6) === dayIndex && styles.chipActive,
+                  ]}
+                  onPress={() => {
+                    if (!weekStartTeacher) return;
+                    setSavingWeekStart(true);
+                    try {
+                      const updated = TeacherRepository.updateWeekStartDay(weekStartTeacher.id, dayIndex);
+                      setTeachers((current) => current.map((teacher) => teacher.id === updated.id ? updated : teacher));
+                      setWeekStartTeacher(null);
+                    } catch (error: any) {
+                      Alert.alert("خطأ", error?.message || "تعذر حفظ بداية أسبوع المدرس.");
+                    } finally {
+                      setSavingWeekStart(false);
+                    }
+                  }}
+                >
+                  <Text style={[
+                    styles.chipText,
+                    (weekStartTeacher?.weekStartDay ?? 6) === dayIndex && styles.chipTextActive,
+                  ]}>{day}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+            <AppButton
+              title="إلغاء"
+              variant="outline"
+              disabled={savingWeekStart}
+              onPress={() => setWeekStartTeacher(null)}
+            />
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -1487,6 +1545,8 @@ const createStyles = () => StyleSheet.create({
     marginBottom: Spacing.sm,
   },
   itemActions: { flexDirection: "row", alignItems: "center", gap: 10, marginLeft: 8 },
+  weekStartChoices: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginBottom: Spacing.md },
+  weekStartChoice: { paddingVertical: 8, paddingHorizontal: 12, borderRadius: 16, backgroundColor: Colors.slate100 },
   itemName: {
     fontSize: 14,
     fontWeight: "700",

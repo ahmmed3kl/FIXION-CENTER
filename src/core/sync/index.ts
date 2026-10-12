@@ -1944,8 +1944,8 @@ export class SyncEngine {
       if (Array.isArray(data.teachers)) {
         for (const t of data.teachers) {
           db.runSync(
-            `INSERT INTO teachers (id, center_id, name, phone, status, notes, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT(id) DO UPDATE SET name=excluded.name, phone=excluded.phone, status=excluded.status, notes=excluded.notes, updated_at=excluded.updated_at`,
+            `INSERT INTO teachers (id, center_id, name, phone, status, notes, week_start_day, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET name=excluded.name, phone=excluded.phone, status=excluded.status, notes=excluded.notes, week_start_day=excluded.week_start_day, updated_at=excluded.updated_at`,
             [
               t.id,
               t.center_id || centerId,
@@ -1953,6 +1953,7 @@ export class SyncEngine {
               t.phone || null,
               t.status || "active",
               t.notes || null,
+              t.week_start_day ?? t.weekStartDay ?? 6,
               t.created_at || new Date().toISOString(),
               t.updated_at || new Date().toISOString(),
             ],
@@ -2833,18 +2834,66 @@ export class SyncEngine {
         ) {
           const t = data.teacher || data;
           const teacherId = t.id || change.entityId;
+          const existingTeacher = db.getFirstSync<any>(
+            `SELECT name, phone, status, notes, week_start_day as weekStartDay,
+                    created_at as createdAt, updated_at as updatedAt
+             FROM teachers WHERE center_id = ? AND id = ?`,
+            [centerId, teacherId],
+          );
+          const hasTeacherField = (...keys: string[]) =>
+            keys.some((key) => Object.prototype.hasOwnProperty.call(t, key));
+          let resolvedWeekStartDay =
+            t.week_start_day ?? t.weekStartDay ?? existingTeacher?.weekStartDay ?? 6;
+          const incomingTeacherUpdatedAt =
+            t.updated_at ?? t.updatedAt ?? change.serverTimestamp;
+          if (hasTeacherField("week_start_day", "weekStartDay") && existingTeacher) {
+            const pendingTeacherUpdates = db.getAllSync<{
+              operationId: string;
+              payload: unknown;
+            }>(
+              `SELECT operation_id as operationId, payload
+               FROM sync_operations
+               WHERE center_id = ? AND entity_type IN ('teacher', 'teacher_created', 'teacher_updated')
+                 AND entity_id = ? AND status IN ('pending', 'syncing', 'failed', 'conflict')`,
+              [centerId, teacherId],
+            );
+            const pendingWeekUpdates = pendingTeacherUpdates
+              .filter((operation) => {
+                const payload = parseOperationPayload(operation.payload);
+                return Object.prototype.hasOwnProperty.call(payload, "weekStartDay") ||
+                  Object.prototype.hasOwnProperty.call(payload, "week_start_day");
+              })
+              .filter((operation) => operation.operationId !== change.operationId)
+              .map((operation) => parseOperationPayload(operation.payload));
+            const incomingTime = Date.parse(String(incomingTeacherUpdatedAt || ""));
+            const existingTime = Date.parse(String(existingTeacher.updatedAt || ""));
+            const staleAgainstPendingBase = pendingWeekUpdates.some((payload) => {
+              const baseTime = Date.parse(String(payload.baseUpdatedAt || ""));
+              return Number.isFinite(incomingTime) &&
+                Number.isFinite(baseTime) &&
+                incomingTime <= baseTime;
+            });
+            const staleAgainstLocalVersion = pendingWeekUpdates.length === 0 &&
+              Number.isFinite(incomingTime) &&
+              Number.isFinite(existingTime) &&
+              incomingTime < existingTime;
+            if (staleAgainstPendingBase || staleAgainstLocalVersion) {
+              resolvedWeekStartDay = existingTeacher.weekStartDay ?? 6;
+            }
+          }
           db.runSync(
-            `INSERT INTO teachers (id, center_id, name, phone, status, notes, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT(id) DO UPDATE SET name=excluded.name, phone=excluded.phone, status=excluded.status, notes=excluded.notes, updated_at=excluded.updated_at`,
+            `INSERT INTO teachers (id, center_id, name, phone, status, notes, week_start_day, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET name=excluded.name, phone=excluded.phone, status=excluded.status, notes=excluded.notes, week_start_day=excluded.week_start_day, updated_at=excluded.updated_at`,
             [
               teacherId,
               centerId,
-              t.name || "معلم",
-              t.phone || null,
-              t.status || "active",
-              t.notes || null,
-              t.created_at || new Date().toISOString(),
-              t.updated_at || new Date().toISOString(),
+              t.name ?? existingTeacher?.name ?? "معلم",
+              hasTeacherField("phone") ? t.phone : existingTeacher?.phone ?? null,
+              t.status ?? existingTeacher?.status ?? "active",
+              hasTeacherField("notes") ? t.notes : existingTeacher?.notes ?? null,
+              resolvedWeekStartDay,
+              t.created_at ?? t.createdAt ?? existingTeacher?.createdAt ?? new Date().toISOString(),
+              incomingTeacherUpdatedAt ?? existingTeacher?.updatedAt ?? new Date().toISOString(),
             ],
           );
           if (t.cascadeGroups === true && (t.status || "") === "inactive") {

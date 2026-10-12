@@ -4,6 +4,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { DatabaseService, MIGRATIONS, SqlDatabase } from "../src/core/database";
 
+const CURRENT_MIGRATION_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;
+
 function sqliteValue(value: unknown): string {
   if (value === null || value === undefined) return "NULL";
   if (typeof value === "number") return String(value);
@@ -165,10 +167,69 @@ describe("SQLite migration ordering and upgrades", () => {
     )?.name).toBe("server_revision");
     expect(database.getFirstSync<{ user_version: number }>(
       "PRAGMA user_version",
-    )?.user_version).toBe(23);
+    )?.user_version).toBe(CURRENT_MIGRATION_VERSION);
   });
 
-  it("can run again at v23 without duplicate migration records or schema changes", () => {
+  it("adds the teacher week field without changing existing rows or pending outbox operations", () => {
+    const database = new SqliteCliDatabase(path.join(tempDirectory, "pending-outbox-upgrade.sqlite"));
+    database.execSync(`
+      CREATE TABLE schema_migrations (
+        version INTEGER PRIMARY KEY,
+        name TEXT NOT NULL,
+        applied_at TEXT NOT NULL
+      );
+    `);
+    for (const migration of MIGRATIONS.filter((item) => item.version < 27)) {
+      migration.up(database);
+      database.runSync(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
+        [migration.version, migration.name, "2026-10-01T00:00:00.000Z"],
+      );
+    }
+    database.runSync(
+      "INSERT INTO centers (id, name, code) VALUES (?, ?, ?)",
+      ["upgrade-center", "Upgrade Center", "UPGRADE"],
+    );
+    database.runSync(
+      `INSERT INTO teachers (id, center_id, name, status, created_at, updated_at)
+       VALUES (?, ?, ?, 'active', ?, ?)`,
+      ["upgrade-teacher", "upgrade-center", "Preserved Teacher", "2026-10-01", "2026-10-01"],
+    );
+    database.runSync(
+      `INSERT INTO sync_operations
+         (id, operation_id, center_id, user_id, device_id, operation_type,
+          entity_type, entity_id, payload, status, created_at, retry_count)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, 0)`,
+      [
+        "upgrade-operation-row",
+        "upgrade-pending-operation",
+        "upgrade-center",
+        "upgrade-user",
+        "upgrade-device",
+        "UPDATE",
+        "teacher",
+        "upgrade-teacher",
+        JSON.stringify({ id: "upgrade-teacher", weekStartDay: 2 }),
+        "2026-10-01T12:00:00.000Z",
+      ],
+    );
+
+    DatabaseService.runMigrations(database);
+
+    expect(database.getFirstSync<{ name: string; week_start_day: number }>(
+      "SELECT name, week_start_day FROM teachers WHERE center_id = ? AND id = ?",
+      ["upgrade-center", "upgrade-teacher"],
+    )).toEqual({ name: "Preserved Teacher", week_start_day: 6 });
+    expect(database.getFirstSync<{ status: string; payload: string }>(
+      "SELECT status, payload FROM sync_operations WHERE operation_id = ?",
+      "upgrade-pending-operation",
+    )).toEqual({
+      status: "pending",
+      payload: JSON.stringify({ id: "upgrade-teacher", weekStartDay: 2 }),
+    });
+  });
+
+  it("can run again at the current version without duplicate migration records or schema changes", () => {
     const database = new SqliteCliDatabase(path.join(tempDirectory, "rerun.sqlite"));
     DatabaseService.runMigrations(database);
 
@@ -188,7 +249,7 @@ describe("SQLite migration ordering and upgrades", () => {
     );
     expect(database.getFirstSync<{ user_version: number }>(
       "PRAGMA user_version",
-    )?.user_version).toBe(23);
+    )?.user_version).toBe(CURRENT_MIGRATION_VERSION);
   });
 
   it("repairs missing sync metadata when the migration ledger already marks it applied", () => {
@@ -226,6 +287,6 @@ describe("SQLite migration ordering and upgrades", () => {
     )?.name).toBe("Keep Center");
     expect(database.getFirstSync<{ user_version: number }>(
       "PRAGMA user_version",
-    )?.user_version).toBe(23);
+    )?.user_version).toBe(CURRENT_MIGRATION_VERSION);
   });
 });

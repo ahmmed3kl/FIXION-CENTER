@@ -17,7 +17,7 @@ export default function SelectCenterScreen() {
 
   useEffect(() => {
     if (isAuthenticated) {
-      router.replace("/(main)");
+      router.replace("/(main)/index");
     } else {
       router.replace("/(auth)/login");
     }

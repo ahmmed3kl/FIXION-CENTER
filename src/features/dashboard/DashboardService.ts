@@ -16,6 +16,26 @@ export interface DashboardSummary {
   todayCollections: number;
 }
 
+export function getRegularExpectedStudentIds(
+  snapshotStudentIds: string[],
+  currentRosterStudentIds: string[],
+  makeupAttendanceStudentIds: string[],
+  sessionIsOpen: boolean,
+): string[] {
+  const currentRoster = new Set(currentRosterStudentIds);
+  const snapshotOrFallback = snapshotStudentIds.length > 0
+    ? snapshotStudentIds
+    : currentRosterStudentIds;
+  const expectedIds = new Set(snapshotOrFallback);
+  if (sessionIsOpen) {
+    currentRosterStudentIds.forEach((studentId) => expectedIds.add(studentId));
+  }
+  const makeupAttendees = new Set(makeupAttendanceStudentIds);
+  return Array.from(expectedIds).filter(
+    (studentId) => !makeupAttendees.has(studentId) || currentRoster.has(studentId),
+  );
+}
+
 /** Dashboard metrics are based on today's timetable and durable history. */
 export class DashboardService {
   private static lastGoodByCenter = new Map<string, DashboardSummary>();
@@ -152,16 +172,19 @@ export class DashboardService {
           ).map((row: any) => String(row.studentId ?? row.student_id)).filter(Boolean)
         : [];
       const rosterForDate = expectedForGroup(group.id, session?.subjectId || group.subjectId, session?.teacherId || group.teacherId);
-      if (!expectedIds.length) expectedIds = rosterForDate;
-      // An open session is live operational state. If a student is enrolled
-      // while the session is running, include them immediately so the
-      // dashboard shows the new expected/absent count without a second session.
-      if (session?.status === "open") {
-        expectedIds = Array.from(new Set([...expectedIds, ...rosterForDate]));
-      }
-      // Defensive deduplication for legacy databases that may contain the
-      // same expected-student snapshot row more than once.
-      expectedIds = Array.from(new Set(expectedIds));
+      const makeupAttendanceStudentIds = session
+        ? db.getAllSync<any>(
+            `SELECT student_id as studentId FROM attendance
+             WHERE center_id = ? AND session_id = ? AND attendance_type = 'makeup'`,
+            [centerId, session.id],
+          ).map((row: any) => String(row.studentId ?? row.student_id)).filter(Boolean)
+        : [];
+      expectedIds = getRegularExpectedStudentIds(
+        expectedIds,
+        rosterForDate,
+        makeupAttendanceStudentIds,
+        session?.status === "open",
+      );
       // A student enrolled in two timetable slots for the same group is still
       // one expected student for the dashboard's daily headline. Attendance
       // details remain counted per concrete session below.

@@ -31,7 +31,8 @@ export class AbsenceService {
     const expectedStudents = db.getAllSync<any>(
       `SELECT s.id, s.center_id as centerId, s.student_code as studentCode,
               s.full_name as fullName, s.phone, s.parent_phone as parentPhone,
-              s.grade, s.status, s.student_type as studentType
+              s.grade, s.status, s.student_type as studentType,
+              s.student_color as studentColor
        FROM session_expected_students ses
        JOIN students s ON ses.student_id = s.id
        WHERE ses.center_id = ? AND ses.session_id = ?`,

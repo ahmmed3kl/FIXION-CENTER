@@ -1,5 +1,6 @@
 import { AuditService } from "../../core/audit";
 import { DatabaseService } from "../../core/database";
+import { LocalDataEvents } from "../../core/database/localDataEvents";
 import { DeviceService } from "../../core/device";
 import {
     ForbiddenError,
@@ -13,6 +14,7 @@ import {
 } from "../../core/permissions";
 import { SyncEngine, SyncRepository } from "../../core/sync";
 import { Teacher } from "../../shared/types";
+import { DEFAULT_TEACHER_WEEK_START_DAY } from "../../shared/utils/teacherWeeks";
 import { isEgyptianPhone, isValidName, normalizeDigits, ValidationMessages } from "../../shared/utils/validation";
 import { useAuthStore } from "../auth/useAuthStore";
 
@@ -48,7 +50,8 @@ export class TeacherRepository {
 
     const db = DatabaseService.getDb();
     const rows = db.getAllSync<Teacher>(
-      `SELECT id, center_id as centerId, name, phone, status, notes, created_at as createdAt, updated_at as updatedAt
+      `SELECT id, center_id as centerId, name, phone, status, notes,
+              week_start_day as weekStartDay, created_at as createdAt, updated_at as updatedAt
        FROM teachers
        WHERE center_id = ?
        ORDER BY name ASC`,
@@ -66,7 +69,8 @@ export class TeacherRepository {
 
     const db = DatabaseService.getDb();
     const row = db.getFirstSync<Teacher>(
-      `SELECT id, center_id as centerId, name, phone, status, notes, created_at as createdAt, updated_at as updatedAt
+      `SELECT id, center_id as centerId, name, phone, status, notes,
+              week_start_day as weekStartDay, created_at as createdAt, updated_at as updatedAt
        FROM teachers
        WHERE center_id = ? AND id = ?`,
       [centerId, teacherId],
@@ -231,6 +235,65 @@ export class TeacherRepository {
       status,
       updatedAt: now,
     };
+  }
+
+  static updateWeekStartDay(teacherId: string, weekStartDay: number): Teacher {
+    const { centerId, user } = this.getActiveContext();
+    if (user.role !== "admin") {
+      throw new ForbiddenError("إعداد بداية أسبوع المدرس متاح للأدمن فقط.");
+    }
+    if (!Number.isInteger(weekStartDay) || weekStartDay < 0 || weekStartDay > 6) {
+      throw new ValidationError("يوم بداية الأسبوع غير صالح.");
+    }
+
+    const existing = this.findById(teacherId);
+    if (!existing) throw new NotFoundError("المعلم غير موجود.");
+    const db = DatabaseService.getDb();
+    const now = new Date().toISOString();
+    const oldWeekStartDay = existing.weekStartDay ?? DEFAULT_TEACHER_WEEK_START_DAY;
+    if (oldWeekStartDay === weekStartDay) return existing;
+
+    const payload = {
+      id: teacherId,
+      teacherId,
+      weekStartDay,
+      baseUpdatedAt: existing.updatedAt ?? null,
+      updatedAt: now,
+    };
+    const operationId = `op-teach-week-start-${Date.now()}-${teacherId}`;
+    const deviceId = DeviceService.getDeviceIdSync();
+    DatabaseService.runInTransaction(() => {
+      db.runSync(
+        "UPDATE teachers SET week_start_day = ?, updated_at = ? WHERE center_id = ? AND id = ?",
+        [weekStartDay, now, centerId, teacherId],
+      );
+      AuditService.recordEvent({
+        operationId,
+        centerId,
+        userId: user.id,
+        deviceId,
+        entityType: "teacher",
+        entityId: teacherId,
+        action: "teacher.week_start_day.update",
+        payload: { oldWeekStartDay, weekStartDay },
+      });
+      SyncRepository.enqueueOperation({
+        operationId,
+        centerId,
+        userId: user.id,
+        deviceId,
+        operationType: "UPDATE",
+        entityType: "teacher",
+        entityId: teacherId,
+        payload,
+      });
+    });
+
+    SyncEngine.syncCenterNow(centerId).catch((error) => {
+      console.warn("Auto-sync teacher week-start notice:", error);
+    });
+    LocalDataEvents.emit({ centerId, entityType: "teacher", entityId: teacherId });
+    return { ...existing, weekStartDay, updatedAt: now };
   }
 
   static deactivateTeacher(teacherId: string): void {

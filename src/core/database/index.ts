@@ -1212,6 +1212,21 @@ export const MIGRATIONS: Migration[] = [
       `);
     },
   },
+  {
+    version: 27,
+    name: "teacher_week_start_day",
+    up: (db: SqlDatabase) => {
+      try {
+        db.execSync(
+          "ALTER TABLE teachers ADD COLUMN week_start_day INTEGER NOT NULL DEFAULT 6;",
+        );
+      } catch (error) {
+        if (!String((error as any)?.message || error).toLowerCase().includes("duplicate column")) {
+          throw error;
+        }
+      }
+    },
+  },
 ];
 
 // In-Memory SQLite Mock for Jest / Test environments
@@ -2373,6 +2388,7 @@ class InMemorySqliteMock implements SqlDatabase {
                 grade: student.grade,
                 status: student.status,
                 studentType: student.student_type || "registered",
+                studentColor: student.student_color ?? null,
                 notes: student.notes || null,
                 createdAt: student.created_at,
                 updatedAt: student.updated_at || null,
@@ -3170,6 +3186,7 @@ class InMemorySqliteMock implements SqlDatabase {
                 grade: student.grade,
                 status: student.status,
                 studentType: student.student_type || "registered",
+                studentColor: student.student_color ?? null,
                 notes: student.notes || null,
                 createdAt: student.created_at,
                 updatedAt: student.updated_at || null,
@@ -3200,6 +3217,29 @@ class InMemorySqliteMock implements SqlDatabase {
         return list
           .filter(
             (r) => r.center_id === params[0] && r.student_id === params[1],
+          )
+          .map((r) => ({
+            id: r.id,
+            centerId: r.center_id,
+            sessionId: r.session_id,
+            studentId: r.student_id,
+            center_id: r.center_id,
+            session_id: r.session_id,
+            student_id: r.student_id,
+          })) as T[];
+      }
+      if (
+        params.length >= 3 &&
+        trimmed.includes("center_id = ?") &&
+        trimmed.includes("session_id = ?") &&
+        trimmed.includes("student_id = ?")
+      ) {
+        return list
+          .filter(
+            (r) =>
+              r.center_id === params[0] &&
+              r.session_id === params[1] &&
+              r.student_id === params[2],
           )
           .map((r) => ({
             id: r.id,

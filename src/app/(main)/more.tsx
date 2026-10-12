@@ -6,9 +6,13 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { canAccessRoute } from "../../core/permissions/routeAccess";
 import { resolveUserPermissions } from "../../core/permissions";
 import { Spacing, Typography, useTheme } from "../../core/theme";
+import { canSwitchCenters } from "../../features/auth/centerAccess";
 import { useAuthStore } from "../../features/auth/useAuthStore";
 
+const centerSwitchPath = "/center-switch";
+
 const items = [
+  { label: "تبديل السناتر", caption: "التبديل بين السناتر المصرح بها", route: centerSwitchPath, icon: "business-outline" as const, tint: "#EFF6FF" },
   { label: "مركز المزامنة", caption: "تابع العمليات والأخطاء", route: "/(main)/sync-debug", icon: "bug-outline" as const, tint: "#EEF2FF" },
   { label: "الإدارة الأكاديمية", caption: "المراحل والمدرسون والمجموعات", route: "/(main)/academic", icon: "school-outline" as const, tint: "#ECFDF5" },
   { label: "رصد الدرجات", caption: "الامتحانات ودرجات الطلاب", route: "/(main)/grade-groups", icon: "reader-outline" as const, tint: "#EFF6FF" },
@@ -32,6 +36,7 @@ export default function MoreScreen() {
   const logout = useAuthStore((state) => state.logout);
   const currentUser = useAuthStore((state) => state.currentUser);
   const userPermissions = resolveUserPermissions(currentUser);
+  const canManageCenterSwitch = canSwitchCenters(currentUser);
   const canManageHomework = canAccessRoute("homework-evaluations", userPermissions);
   const canAdjustDebt = canAccessRoute("debt-adjustments", userPermissions);
   const confirmLogout = () => Alert.alert("تسجيل الخروج", "هل تريد تسجيل الخروج من هذا الجهاز؟", [
@@ -51,9 +56,11 @@ export default function MoreScreen() {
           <Switch value={isDarkMode} onValueChange={toggleDarkMode} trackColor={{ false: colors.slate300, true: colors.primary }} thumbColor={colors.white}/>
         </View>
         <Text style={[styles.sectionTitle, { color: colors.textPrimary }]}>أدوات المركز</Text>
-        <View style={styles.grid}>{items.map((item) => {
+        <View style={styles.grid}>{items.filter((item) => item.route !== centerSwitchPath || canManageCenterSwitch).map((item) => {
           const routeName = item.route.split("/").pop() || "";
-          const allowed = canAccessRoute(routeName, userPermissions);
+          const allowed = routeName === "center-switch"
+            ? canManageCenterSwitch
+            : canAccessRoute(routeName, userPermissions);
           return <TouchableOpacity key={item.route} style={[styles.item, { width: gridItemWidth, backgroundColor: colors.cardBackground, borderColor: colors.border }]} onPress={() => allowed ? router.push(item.route as any) : Alert.alert("القسم مقفول", "لا تملك صلاحية الوصول إلى هذا القسم.")} activeOpacity={0.78} accessibilityState={{ disabled: !allowed }}><View style={[styles.itemIcon, { backgroundColor: isDarkMode ? colors.slate100 : item.tint }]}><Ionicons name={item.icon} size={22} color={allowed ? colors.primary : colors.slate400} /></View><View style={styles.itemCopy}><Text style={[styles.label, { color: allowed ? colors.textPrimary : colors.textSecondary }]}>{item.label}</Text><Text style={[styles.itemCaption, { color: colors.textSecondary }]} numberOfLines={1}>{allowed ? item.caption : "الصلاحية غير متاحة"}</Text></View><Ionicons name={allowed ? "chevron-back" : "lock-closed"} size={18} color={colors.slate400} /></TouchableOpacity>;
         })}</View>
         <TouchableOpacity style={[styles.item, { width: "100%", minHeight: 82, flexDirection: "row-reverse", alignItems: "center", gap: 12, backgroundColor: colors.cardBackground, borderColor: colors.border }]} onPress={() => canManageHomework ? router.push("/(main)/homework-evaluations" as any) : Alert.alert("القسم مقفول", "لا تملك صلاحية الوصول إلى هذا القسم.")} activeOpacity={0.78} accessibilityState={{ disabled: !canManageHomework }}><View style={[styles.itemIcon, { backgroundColor: isDarkMode ? colors.slate100 : "#ECFDF5" }]}><Ionicons name={canManageHomework ? "checkmark-circle-outline" : "lock-closed"} size={22} color={canManageHomework ? colors.primary : colors.slate400} /></View><View style={styles.itemCopy}><Text style={[styles.label, { color: canManageHomework ? colors.textPrimary : colors.textSecondary }]}>تقييم الواجب</Text><Text style={[styles.itemCaption, { color: colors.textSecondary }]} numberOfLines={1}>{canManageHomework ? "إدارة الحالات المتاحة لتقييم الواجب" : "الصلاحية غير متاحة"}</Text></View><Ionicons name={canManageHomework ? "chevron-back" : "lock-closed"} size={18} color={colors.slate400} /></TouchableOpacity>

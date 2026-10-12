@@ -1,4 +1,5 @@
 import { canAccessRoute, resolvePermissionRouteName } from "../src/core/permissions/routeAccess";
+import { canSwitchCenters } from "../src/features/auth/centerAccess";
 
 describe("route permission access", () => {
   it("denies direct access to protected routes without read permission", () => {
@@ -27,6 +28,17 @@ describe("route permission access", () => {
   it("finds protected route names whether or not the router includes its group segment", () => {
     expect(resolvePermissionRouteName(["(main)", "groups"])).toBe("groups");
     expect(resolvePermissionRouteName(["groups", "[groupId]"])).toBe("groups");
+  });
+
+  it("resolves the center-switch route and restricts it to administrative roles", () => {
+    const routeName = resolvePermissionRouteName(["(main)", "center-switch"]);
+    expect(routeName).toBe("center-switch");
+    expect(canSwitchCenters({ role: "admin" })).toBe(true);
+    expect(canSwitchCenters({ role: "owner" })).toBe(true);
+    expect(canSwitchCenters({ role: "manager" })).toBe(false);
+    expect(canSwitchCenters({ role: "assistant" })).toBe(false);
+    expect(canSwitchCenters({ role: "accountant" })).toBe(false);
+    expect(canSwitchCenters({ role: "secretary" })).toBe(false);
   });
 
   it("resolves the main route group to the dashboard while its index route initializes", () => {

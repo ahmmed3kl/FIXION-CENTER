@@ -1,7 +1,9 @@
-import { I18nManager } from "react-native";
+import { I18nManager, Platform } from "react-native";
 
 // Force RTL layout for Arabic
 export function initializeRTL() {
+  if (Platform.OS === "web") return;
+
   // iOS does not always pick up forceRTL when it is called conditionally
   // during a warm reload. Apply all RTL flags on every cold start; the root
   // view also receives direction: rtl so the current render is correct.

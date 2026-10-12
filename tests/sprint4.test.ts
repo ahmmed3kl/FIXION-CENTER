@@ -1,4 +1,5 @@
 import { DatabaseService } from "../src/core/database";
+import { CardRangeRepository } from "../src/features/students/CardRangeRepository";
 import {
     ConflictError,
     ForbiddenError,
@@ -28,6 +29,9 @@ describe("Sprint 4 - FIXION Packages, Makeups & Unified Attendance/Financial Int
     // 2. Login as Admin for center-1 setup
     await useAuthStore.getState().login("01000000001", "123456");
     await useAuthStore.getState().selectCenter("center-1");
+    CardRangeRepository.replaceCenterRanges("center-1", [
+      { id: "test-card-range-sprint4", startCode: "000000", endCode: "999999" },
+    ]);
   });
 
   describe("1. SQLite Schema Migration 4 Verification", () => {
@@ -649,16 +653,21 @@ describe("Sprint 4 - FIXION Packages, Makeups & Unified Attendance/Financial Int
         [student.id],
       );
 
-      // Next eligible session: 2026-11-08 10:00 (subj-1, teach-1)
+      // Next eligible session in the same Saturday-Friday teacher cycle.
       db.runSync(
         `INSERT INTO sessions (id, center_id, group_id, subject_id, teacher_id, session_price, session_date, start_time, end_time, status, created_at)
-         VALUES ('sess-next-elg', 'center-1', 'grp-1', 'subj-1', 'teach-1', 100, '2026-11-08', '10:00', '12:00', 'open', '2026-09-20')`,
+         VALUES ('sess-next-elg', 'center-1', 'grp-1', 'subj-1', 'teach-1', 100, '2026-11-02', '10:00', '12:00', 'open', '2026-09-20')`,
+      );
+      db.runSync(
+        `INSERT INTO session_expected_students (id, center_id, session_id, student_id, created_at)
+         VALUES ('exp-next-elg', 'center-1', 'sess-next-elg', ?, '2026-09-20')`,
+        [student.id],
       );
 
-      // Third session: 2026-11-15 10:00 (subj-1, teach-1)
+      // Third session: the next eligible session after the makeup opportunity.
       db.runSync(
         `INSERT INTO sessions (id, center_id, group_id, subject_id, teacher_id, session_price, session_date, start_time, end_time, status, created_at)
-         VALUES ('sess-third-elg', 'center-1', 'grp-1', 'subj-1', 'teach-1', 100, '2026-11-15', '10:00', '12:00', 'open', '2026-09-20')`,
+         VALUES ('sess-third-elg', 'center-1', 'grp-1', 'subj-1', 'teach-1', 100, '2026-11-03', '10:00', '12:00', 'open', '2026-09-20')`,
       );
     });
 

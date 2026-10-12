@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { ApiClient } from "../../core/api";
 import { AuditService } from "../../core/audit";
+import { LocalDataEvents } from "../../core/database/localDataEvents";
 import { DeviceRepository, DeviceService } from "../../core/device";
 import { ForbiddenError } from "../../core/errors";
 import {
@@ -10,6 +11,7 @@ import { SecureStorageService } from "../../core/storage";
 import { SyncEngine } from "../../core/sync";
 import { Center, User } from "../../shared/types";
 import { AuthRepository } from "./AuthRepository";
+import { canSwitchCenters } from "./centerAccess";
 
 // Automatically logout when receiving a 401 Unauthorized from API
 ApiClient.setUnauthorizedHandler(async () => {
@@ -109,9 +111,12 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
 
   selectCenter: async (centerId: string) => {
-    const { availableCenters, currentUser } = get();
+    const { activeCenterId, availableCenters, currentUser } = get();
     if (!currentUser || !currentUser.centerIds.includes(centerId)) {
       throw new ForbiddenError("المركز المحدد غير متاح لهذا المستخدم");
+    }
+    if (centerId !== activeCenterId && !canSwitchCenters(currentUser)) {
+      throw new ForbiddenError("صلاحية تبديل السناتر متاحة للأدمن فقط.");
     }
 
     const center = availableCenters.find((c) => c.id === centerId);
@@ -142,6 +147,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       activeCenterId: centerId,
       activeCenter: center,
     });
+    LocalDataEvents.emit({ centerId, entityType: "center", entityId: centerId });
 
     // Switching context must hydrate the selected center before its screens
     // read repositories. Offline/local data remains available if sync fails.

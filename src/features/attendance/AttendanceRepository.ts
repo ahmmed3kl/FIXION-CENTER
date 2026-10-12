@@ -11,6 +11,12 @@ import { PermissionService } from "../../core/permissions";
 import { SyncEngine, SyncRepository } from "../../core/sync";
 import { Attendance, AttendanceType, StudentGroupAttendanceSummary } from "../../shared/types";
 import { getLocalDateOnly } from "../../shared/utils/date";
+import {
+  DEFAULT_TEACHER_WEEK_START_DAY,
+  isTeacherMakeupCycleOpen,
+  TEACHER_MAKEUP_CYCLE_EXPIRED_ERROR,
+  TEACHER_MAKEUP_CYCLE_EXPIRED_MESSAGE,
+} from "../../shared/utils/teacherWeeks";
 import { useAuthStore } from "../auth/useAuthStore";
 import { AttendanceSessionService } from "./AttendanceSessionService";
 
@@ -183,6 +189,22 @@ export class AttendanceRepository {
         if (!isAfter || session.subjectId !== source.subjectId || session.teacherId !== source.teacherId) {
           throw new ConflictError("التعويض يجب أن يكون في الحصة التالية لنفس المادة والمدرس.");
         }
+        const teacherWeek = db.getFirstSync<{ weekStartDay?: number | null }>(
+          "SELECT week_start_day as weekStartDay FROM teachers WHERE center_id = ? AND id = ?",
+          [centerId, source.teacherId],
+        );
+        const weekStartDay = teacherWeek?.weekStartDay ?? DEFAULT_TEACHER_WEEK_START_DAY;
+        if (!isTeacherMakeupCycleOpen(
+          source.sessionDate,
+          session.sessionDate,
+          weekStartDay,
+          getLocalDateOnly(),
+        )) {
+          throw new ConflictError(
+            TEACHER_MAKEUP_CYCLE_EXPIRED_ERROR,
+            TEACHER_MAKEUP_CYCLE_EXPIRED_MESSAGE,
+          );
+        }
 
         const sourceExpected = db.getFirstSync<any>(
           `SELECT 1 FROM session_expected_students WHERE center_id = ? AND session_id = ? AND student_id = ?`,
@@ -216,7 +238,7 @@ export class AttendanceRepository {
         )) {
           throw new ConflictError("تم تسجيل تعويض لهذا الغياب مسبقًا.");
         }
-        const earlierSession = db.getFirstSync<any>(
+        const betweenSessions = db.getAllSync<any>(
           `SELECT s.id
            FROM sessions s
            JOIN groups g ON g.center_id = s.center_id AND g.id = s.group_id
@@ -226,7 +248,7 @@ export class AttendanceRepository {
              AND s.status <> 'cancelled'
              AND (s.session_date > ? OR (s.session_date = ? AND s.start_time > ?))
              AND (s.session_date < ? OR (s.session_date = ? AND s.start_time < ?))
-           ORDER BY s.session_date ASC, s.start_time ASC LIMIT 1`,
+           ORDER BY s.session_date ASC, s.start_time ASC`,
           [
             centerId,
             source.subjectId,
@@ -239,7 +261,9 @@ export class AttendanceRepository {
             session.startTime,
           ],
         );
-        if (earlierSession) {
+        if (betweenSessions.some((candidate) =>
+          AttendanceSessionService.isExpected(candidate.id, params.studentId, true),
+        )) {
           throw new ConflictError("لا يمكن تعويض غير الحصة التالية المؤهلة.");
         }
       }

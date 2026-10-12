@@ -6,7 +6,10 @@ import {
   RolePermissions,
   resolveUserPermissions,
 } from "../src/core/permissions";
+import { SyncEngine } from "../src/core/sync";
+import { canSwitchCenters } from "../src/features/auth/centerAccess";
 import { useAuthStore } from "../src/features/auth/useAuthStore";
+import { Center, User } from "../src/shared/types";
 import { StudentRepository } from "../src/features/students/StudentRepository";
 
 describe("Auth and Permissions Security & Bootstrap Suite", () => {
@@ -121,6 +124,45 @@ describe("Auth and Permissions Security & Bootstrap Suite", () => {
       expect(resolved).toContain("students.view");
       expect(resolved).toContain("payments.reverse");
       expect(resolved).toContain("settings.view");
+    });
+
+    describe("Center switching authorization", () => {
+      it.each(["manager", "assistant", "accountant", "secretary"] as const)(
+        "%s cannot switch centers even if its session contains broad permissions",
+        async (role) => {
+          const centers: Center[] = [
+            { id: "center-1", name: "Center One", code: "C1" },
+            { id: "center-2", name: "Center Two", code: "C2" },
+          ];
+          const user: User = {
+            id: `user-${role}`,
+            fullName: "Test User",
+            phone: "01000000000",
+            role,
+            centerIds: centers.map((center) => center.id),
+            permissions: RolePermissions.admin,
+          };
+          useAuthStore.setState({
+            currentUser: user,
+            activeCenterId: "center-1",
+            activeCenter: centers[0],
+            availableCenters: centers,
+            isAuthenticated: true,
+          });
+          const sync = jest.spyOn(SyncEngine, "syncCenterNow");
+
+          await expect(useAuthStore.getState().selectCenter("center-2"))
+            .rejects.toBeInstanceOf(ForbiddenError);
+          expect(useAuthStore.getState().activeCenterId).toBe("center-1");
+          expect(sync).not.toHaveBeenCalled();
+          expect(canSwitchCenters(user)).toBe(false);
+          sync.mockRestore();
+        },
+      );
+
+      it.each(["admin", "owner"] as const)("%s is an authorized center administrator", (role) => {
+        expect(canSwitchCenters({ role })).toBe(true);
+      });
     });
 
     it('owner with {"*": true} gets full owner permissions', () => {

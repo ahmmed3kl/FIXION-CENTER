@@ -45,6 +45,10 @@ export default function DashboardScreen() {
     useAuthStore();
   const accountName = currentUser?.fullName?.trim();
   const activeCenterName = activeCenter?.name?.trim() || "المركز التعليمي";
+  const today = new Date();
+  const formatArabicDatePart = (value: number) =>
+    new Intl.NumberFormat("ar-EG", { minimumIntegerDigits: 2, useGrouping: false }).format(value);
+  const todayLabel = `${today.toLocaleDateString("ar-EG", { weekday: "long" })} ${formatArabicDatePart(today.getDate())}/${formatArabicDatePart(today.getMonth() + 1)}/${formatArabicDatePart(today.getFullYear())}`;
   const userPermissions = resolveUserPermissions(currentUser);
   const canCreateAttendance = PermissionService.hasPermission(userPermissions, "attendance.create");
   const canViewAttendance = PermissionService.hasAnyPermission(userPermissions, ["attendance.view", "attendance.create"]);
@@ -155,7 +159,7 @@ export default function DashboardScreen() {
       <View style={[styles.headerBar, { backgroundColor: DASHBOARD_NAVY }]}>
         <View style={styles.brandLockup}>
           <Image
-            source={require("../../../assets/images/fixion-wordmark.png")}
+            source={require("../../../assets/images/fixion-dashboard-logo.png")}
             resizeMode="contain"
             accessibilityLabel="FIXION"
             style={styles.brandLogo}
@@ -264,7 +268,7 @@ export default function DashboardScreen() {
               <Ionicons name="stats-chart" size={17} color={Colors.primary} />
               <Text style={styles.sectionHeader}>{Strings.todaySummaryTitle}</Text>
             </View>
-            <View style={styles.todayBadge}><Ionicons name="calendar-outline" size={14} color={Colors.primary} /><Text style={styles.todayBadgeText}>اليوم</Text></View>
+            <View style={styles.todayBadge}><Ionicons name="calendar-outline" size={14} color={Colors.primary} /><Text style={styles.todayBadgeText} numberOfLines={1}>{todayLabel}</Text></View>
           </View>
           <View style={styles.metricGrid}>
             <MetricTile
@@ -441,10 +445,12 @@ const createStyles = () => StyleSheet.create({
     minHeight: 66,
     justifyContent: "center",
     marginBottom: Spacing.md,
+    direction: "rtl",
   },
   greetingCopy: {
     flex: 1,
-    alignItems: "flex-end",
+    alignItems: "flex-start",
+    direction: "rtl",
   },
   greetingTitle: {
     color: Colors.slate900,
@@ -555,7 +561,7 @@ const createStyles = () => StyleSheet.create({
   metricBoxWide: {
     width: "100%",
     minHeight: 68,
-    justifyContent: "flex-start",
+    justifyContent: "space-between",
     paddingHorizontal: Spacing.md,
   },
   metricIcon: {
@@ -567,18 +573,23 @@ const createStyles = () => StyleSheet.create({
     opacity: 0.88,
   },
   metricCopy: {
+    flex: 1,
     minWidth: 54,
     alignItems: "flex-end",
+    paddingRight: Spacing.xs,
   },
   metricNumber: {
     fontSize: 25,
     lineHeight: 29,
     fontWeight: "800",
+    textAlign: "right",
   },
   metricLabel: {
     fontSize: 12,
     fontWeight: "600",
     marginTop: 2,
+    textAlign: "right",
+    writingDirection: "rtl",
   },
   twoColumnRow: {
     flexDirection: "row",

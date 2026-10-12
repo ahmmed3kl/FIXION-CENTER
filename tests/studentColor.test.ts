@@ -1,5 +1,7 @@
 import { DatabaseService } from "../src/core/database";
 import { SyncEngine, SyncRepository } from "../src/core/sync";
+import { AbsenceService } from "../src/features/attendance/AbsenceService";
+import { SessionRepository } from "../src/features/sessions/SessionRepository";
 import { StudentColorRepository } from "../src/features/students/StudentColorRepository";
 import { StudentRepository } from "../src/features/students/StudentRepository";
 import { Permission, User } from "../src/shared/types";
@@ -90,6 +92,35 @@ describe("persistent student colors", () => {
       "SELECT status FROM attendance WHERE id = ?",
       ["color-attendance"],
     )?.status).toBe("present");
+  });
+
+  it("provides the saved color to attendance scans, expected rosters, and absence reports", () => {
+    const sessionId = "student-color-report-session";
+    const now = new Date().toISOString();
+    const db = DatabaseService.getDb();
+    db.runSync(
+      `INSERT INTO sessions (id, center_id, group_id, session_date, start_time, end_time, status)
+       VALUES (?, ?, ?, ?, ?, ?, 'open')`,
+      [sessionId, CENTER_ID, "student-color-group", "2026-10-12", "09:00", "10:00"],
+    );
+    db.runSync(
+      `INSERT INTO session_expected_students (id, center_id, session_id, student_id, created_at)
+       VALUES (?, ?, ?, ?, ?)`,
+      [`expected-${sessionId}`, CENTER_ID, sessionId, STUDENT_ID, now],
+    );
+
+    StudentColorRepository.setColor(STUDENT_ID, "lavender");
+    expect(StudentRepository.findByCardCode("00123")?.studentColor).toBe("lavender");
+    expect(StudentRepository.findByIdForAttendance(STUDENT_ID)?.studentColor).toBe("lavender");
+    expect(StudentRepository.getAllForAttendance().find((student) => student.id === STUDENT_ID)?.studentColor)
+      .toBe("lavender");
+
+    setUser(["students.view", "students.update", "attendance.view"]);
+    expect(SessionRepository.getExpectedStudents(sessionId)).toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: STUDENT_ID, studentColor: "lavender" })]),
+    );
+    expect(AbsenceService.getAbsenteesForSession(sessionId).find((student) => student.id === STUDENT_ID)?.studentColor)
+      .toBe("lavender");
   });
 
   it("rejects unauthorized, invalid, and out-of-center color changes", () => {

@@ -198,6 +198,29 @@ class SpecificRetryAdapter implements ISyncApiAdapter {
   }
 }
 
+class StaleTeacherUpdateAdapter extends SharedServerAdapter {
+  async pushOperations(
+    _centerId: string,
+    operations: SyncOperationPayload[],
+  ): Promise<PushSyncResponse> {
+    this.pushCalls += 1;
+    return {
+      success: true,
+      syncedOperationIds: [],
+      conflicts: operations.map((operation) => ({
+        operationId: operation.operationId,
+        entityType: operation.entityType,
+        entityId: operation.entityId,
+        reason: "STALE_UPDATE: server has a newer version of this record.",
+        resolution: "server_wins",
+        serverState: { weekStartDay: 4 },
+      })),
+      serverCursor: String(this.sequence),
+      processedAt: new Date().toISOString(),
+    };
+  }
+}
+
 describe("SyncEngine against independent persistent SQLite databases", () => {
   let tempDirectory: string;
   let originalDatabase: SqlDatabase;
@@ -352,6 +375,147 @@ describe("SyncEngine against independent persistent SQLite databases", () => {
     const rateLimited = await SyncEngine.syncCenterNow(centerId);
     expect(rateLimited.state).toBe("online");
     expect(server.pullCalls).toBe(pullsBeforeRateLimit);
+  });
+
+  it("synchronizes a teacher week-start change from one persistent device database to another", async () => {
+    const centerId = `teacher-week-sync-${Date.now()}`;
+    const teacherId = "shared-week-teacher";
+    const timestamp = new Date().toISOString();
+    const firstDevice = createClientDatabase("teacher-week-device-1", centerId);
+    const secondDevice = createClientDatabase("teacher-week-device-2", centerId);
+    for (const database of [firstDevice, secondDevice]) {
+      database.runSync(
+        `INSERT INTO teachers (id, center_id, name, status, week_start_day, created_at, updated_at)
+         VALUES (?, ?, 'Shared teacher', 'active', 6, ?, ?)`,
+        [teacherId, centerId, timestamp, timestamp],
+      );
+    }
+
+    const server = new SharedServerAdapter();
+    SyncEngine.setAdapter(server);
+    try {
+      const changedAt = new Date(Date.now() + 1).toISOString();
+      firstDevice.runSync(
+        "UPDATE teachers SET week_start_day = ?, updated_at = ? WHERE center_id = ? AND id = ?",
+        [2, changedAt, centerId, teacherId],
+      );
+      DatabaseService.setMockDb(firstDevice);
+      SyncRepository.enqueueOperation({
+        operationId: "teacher-week-device-1-update",
+        centerId,
+        userId: "admin-user",
+        deviceId: "device-1",
+        operationType: "UPDATE",
+        entityType: "teacher",
+        entityId: teacherId,
+        payload: {
+          id: teacherId,
+          teacherId,
+          weekStartDay: 2,
+          baseUpdatedAt: timestamp,
+          updatedAt: changedAt,
+        },
+      });
+
+      const firstSync = await SyncEngine.syncCenterNow(centerId);
+      expect(firstSync.errors).toBe(0);
+
+      DatabaseService.setMockDb(secondDevice);
+      SyncEngine.clearRateLimitForTesting();
+      const secondSync = await SyncEngine.syncCenterNow(centerId);
+      expect(secondSync.errors).toBe(0);
+      expect(secondDevice.getFirstSync<{ week_start_day: number; name: string }>(
+        "SELECT week_start_day, name FROM teachers WHERE center_id = ? AND id = ?",
+        [centerId, teacherId],
+      )).toEqual({ week_start_day: 2, name: "Shared teacher" });
+    } finally {
+      SyncEngine.setAdapter(originalAdapter);
+    }
+  });
+
+  it("keeps a newer server week-start over an older pending local edit through conflict resolution and restart", async () => {
+    const centerId = `teacher-week-stale-${Date.now()}`;
+    const teacherId = "stale-week-teacher";
+    const baseUpdatedAt = "2026-10-01T10:00:00.000Z";
+    const localUpdatedAt = "2026-10-02T10:00:00.000Z";
+    const serverUpdatedAt = "2026-10-03T10:00:00.000Z";
+    const device = createClientDatabase("teacher-week-stale-device", centerId);
+    device.runSync(
+      `INSERT INTO teachers (id, center_id, name, status, week_start_day, created_at, updated_at)
+       VALUES (?, ?, 'Teacher', 'active', 6, ?, ?)`,
+      [teacherId, centerId, baseUpdatedAt, baseUpdatedAt],
+    );
+    device.runSync(
+      "UPDATE teachers SET week_start_day = ?, updated_at = ? WHERE center_id = ? AND id = ?",
+      [2, localUpdatedAt, centerId, teacherId],
+    );
+    SyncRepository.enqueueOperation({
+      operationId: "old-pending-week-start",
+      centerId,
+      userId: "admin-user",
+      deviceId: "offline-device",
+      operationType: "UPDATE",
+      entityType: "teacher",
+      entityId: teacherId,
+      payload: {
+        id: teacherId,
+        teacherId,
+        weekStartDay: 2,
+        baseUpdatedAt,
+        updatedAt: localUpdatedAt,
+      },
+    });
+
+    const server = new StaleTeacherUpdateAdapter();
+    server.sequence = 101;
+    server.changes.push({
+      sequenceNumber: 101,
+      operationId: "newer-server-week-start",
+      entityType: "teacher",
+      entityId: teacherId,
+      action: "update",
+      data: {
+        id: teacherId,
+        name: "Teacher",
+        status: "active",
+        weekStartDay: 4,
+        updatedAt: serverUpdatedAt,
+      },
+      serverTimestamp: serverUpdatedAt,
+    });
+    SyncEngine.setAdapter(server);
+    DatabaseService.setMockDb(device);
+    try {
+      const firstSync = await SyncEngine.syncCenterNow(centerId);
+      expect(firstSync.conflicts).toBe(1);
+      expect(device.getFirstSync<{ week_start_day: number }>(
+        "SELECT week_start_day FROM teachers WHERE center_id = ? AND id = ?",
+        [centerId, teacherId],
+      )).toEqual({ week_start_day: 4 });
+      expect(SyncRepository.getByOperationId("old-pending-week-start")?.status).toBe("conflict");
+      expect(SyncRepository.getConflicts(centerId).map((conflict) => conflict.operationId))
+        .toContain("old-pending-week-start");
+
+      SyncEngine.clearRateLimitForTesting();
+      const resolvedSync = await SyncEngine.syncCenterNow(centerId);
+      expect(resolvedSync.errors).toBe(0);
+      expect(SyncRepository.getByOperationId("old-pending-week-start")?.status).toBe("synced");
+      expect(SyncRepository.getConflicts(centerId)).toHaveLength(0);
+
+      const closedIndex = openedDatabases.indexOf(device);
+      if (closedIndex >= 0) openedDatabases.splice(closedIndex, 1);
+      device.close();
+      const reopenedDevice = new RealSqliteDatabase(device.filename);
+      openedDatabases.push(reopenedDevice);
+      DatabaseService.setMockDb(reopenedDevice);
+      expect(reopenedDevice.getFirstSync<{ week_start_day: number }>(
+        "SELECT week_start_day FROM teachers WHERE center_id = ? AND id = ?",
+        [centerId, teacherId],
+      )).toEqual({ week_start_day: 4 });
+      expect(SyncRepository.getByOperationId("old-pending-week-start")?.status).toBe("synced");
+    } finally {
+      SyncEngine.setAdapter(originalAdapter);
+    }
   });
 
   it("keeps the persisted cursor unchanged when real SyncEngine cannot apply a pull batch", async () => {

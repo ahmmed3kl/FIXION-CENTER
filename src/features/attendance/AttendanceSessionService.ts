@@ -12,6 +12,8 @@ import { GroupScheduleRepository } from "../groups/GroupScheduleRepository";
 import { AuditService } from "../../core/audit";
 import { calculateSessionAttendanceCounts } from "./AttendanceCalculations";
 import { stableSessionId } from "../../shared/utils/stableIds";
+import { DEFAULT_TEACHER_WEEK_START_DAY, isTeacherMakeupCycleOpen } from "../../shared/utils/teacherWeeks";
+import { getLocalDateOnly } from "../../shared/utils/date";
 
 export interface AttendanceSummary {
   total: number;
@@ -50,7 +52,9 @@ export class AttendanceSessionService {
     );
     if (!session?.teacherId) return { eligible: false };
     const source = db.getFirstSync<any>(
-      `SELECT g.id as groupId, g.name as groupName, s.id as originalSessionId
+      `SELECT g.id as groupId, g.name as groupName, s.id as originalSessionId,
+              s.session_date as originalSessionDate,
+              COALESCE(sourceTeacher.week_start_day, 6) as weekStartDay
        FROM sessions s
        JOIN groups g ON g.center_id = s.center_id AND g.id = s.group_id
        LEFT JOIN teachers sourceTeacher ON sourceTeacher.center_id = g.center_id AND sourceTeacher.id = COALESCE(s.teacher_id, g.teacher_id)
@@ -100,7 +104,15 @@ export class AttendanceSessionService {
        ORDER BY s.session_date DESC, s.start_time DESC LIMIT 1`,
       [activeCenterId, session.sessionDate, session.sessionDate, session.startTime, session.teacherId, session.teacherName || "", session.groupId, session.subjectId, session.subjectName || "", studentId, studentId, studentId, studentId, studentId],
     );
-    if (source) {
+    if (
+      source &&
+      isTeacherMakeupCycleOpen(
+        source.originalSessionDate,
+        session.sessionDate,
+        source.weekStartDay ?? DEFAULT_TEACHER_WEEK_START_DAY,
+        getLocalDateOnly(),
+      )
+    ) {
       return {
         eligible: true,
         sourceGroupId: source.groupId,
@@ -378,7 +390,7 @@ export class AttendanceSessionService {
     return session;
   }
 
-  static isExpected(sessionId: string, studentId: string): boolean {
+  static isExpected(sessionId: string, studentId: string, includeClosed = false): boolean {
     const { activeCenterId } = useAuthStore.getState();
     if (!activeCenterId) return false;
     const db = DatabaseService.getDb();
@@ -386,7 +398,11 @@ export class AttendanceSessionService {
       "SELECT id, center_id as centerId, group_id as groupId, subject_id as subjectId, teacher_id as teacherId, session_date as sessionDate, status FROM sessions WHERE center_id = ? AND id = ?",
       [activeCenterId, sessionId],
     );
-    if (!rawSession || (rawSession.status !== "open" && rawSession.status !== "scheduled")) return false;
+    if (
+      !rawSession ||
+      (rawSession.status !== "open" && rawSession.status !== "scheduled" &&
+        !(includeClosed && rawSession.status === "closed"))
+    ) return false;
 
     // Older locally-generated sessions may not have the historical subject and
     // teacher snapshot columns populated. Resolve those values from the group
@@ -429,6 +445,7 @@ export class AttendanceSessionService {
       [session.centerId, session.groupId, studentId, session.sessionDate, session.sessionDate],
     ));
     if (enrolled) {
+      if (rawSession.status === "closed") return true;
       const now = new Date().toISOString();
       db.runSync(
         "INSERT OR IGNORE INTO session_expected_students (id, center_id, session_id, student_id, created_at) VALUES (?, ?, ?, ?, ?)",
@@ -481,6 +498,7 @@ export class AttendanceSessionService {
     ));
     if (!packageEligible) return false;
 
+    if (rawSession.status === "closed") return true;
     const now = new Date().toISOString();
     db.runSync(
       "INSERT OR IGNORE INTO session_expected_students (id, center_id, session_id, student_id, created_at) VALUES (?, ?, ?, ?, ?)",

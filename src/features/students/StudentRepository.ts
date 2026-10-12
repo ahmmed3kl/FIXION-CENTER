@@ -305,6 +305,16 @@ export class StudentRepository {
     return rows.map((row) => ({ ...row, cardCode: this.resolveCardCode(centerId, row) || "" }));
   }
 
+  /** Loads a student selected in an attendance flow without requiring student-list access. */
+  static findByIdForAttendance(studentId: string): Student | null {
+    const { user } = this.getActiveContext();
+    const canRead = PermissionService.hasPermission(user.permissions, "students.view") ||
+      PermissionService.hasPermission(user.permissions, "attendance.view") ||
+      PermissionService.hasPermission(user.permissions, "attendance.create");
+    if (!canRead) throw new ForbiddenError("ليس لديك صلاحية عرض الطلاب للحضور.");
+    return this.findByIdInternal(studentId, false);
+  }
+
   static createStudent(dto: CreateStudentDTO, options: CreateStudentOptions = {}): Student {
     const { centerId, user } = this.getActiveContext();
     if (!PermissionService.hasPermission(user.permissions, "students.create")) {

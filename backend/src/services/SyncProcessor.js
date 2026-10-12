@@ -1648,22 +1648,30 @@ class SyncProcessor {
       case "teacher_updated": {
         const tch = payload.teacher || payload;
         const teacherId = tch.id || tch.teacherId || context.entityId;
+        const hasTeacherField = (...keys) =>
+          keys.some((key) => Object.prototype.hasOwnProperty.call(tch, key));
         await client.query(
-          `INSERT INTO teachers (id, center_id, name, phone, status, notes, created_at, updated_at)
-           VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
+          `INSERT INTO teachers (id, center_id, name, phone, status, notes, week_start_day, created_at, updated_at)
+           VALUES ($1, $2, COALESCE(NULLIF($3, ''), 'معلم بدون اسم'), $4, COALESCE($5, 'active'), $6, COALESCE($7, 6), NOW(), NOW())
            ON CONFLICT (id) DO UPDATE SET
-             name = EXCLUDED.name,
-             phone = EXCLUDED.phone,
-             status = EXCLUDED.status,
-             notes = EXCLUDED.notes,
+             name = CASE WHEN $8 THEN EXCLUDED.name ELSE teachers.name END,
+             phone = CASE WHEN $9 THEN EXCLUDED.phone ELSE teachers.phone END,
+             status = CASE WHEN $10 THEN EXCLUDED.status ELSE teachers.status END,
+             notes = CASE WHEN $11 THEN EXCLUDED.notes ELSE teachers.notes END,
+             week_start_day = CASE WHEN $7 IS NULL THEN teachers.week_start_day ELSE EXCLUDED.week_start_day END,
              updated_at = NOW();`,
           [
             teacherId,
             centerId,
-            tch.name || "معلم بدون اسم",
-            tch.phone || null,
-            tch.status || "active",
-            tch.notes || null,
+            tch.name ?? null,
+            tch.phone ?? null,
+            tch.status ?? null,
+            tch.notes ?? null,
+            tch.weekStartDay ?? tch.week_start_day ?? null,
+            hasTeacherField("name"),
+            hasTeacherField("phone"),
+            hasTeacherField("status"),
+            hasTeacherField("notes"),
           ],
         );
         break;
