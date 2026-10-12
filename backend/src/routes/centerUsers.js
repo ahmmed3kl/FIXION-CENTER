@@ -38,6 +38,24 @@ function cleanPermissions(value) {
   // An intentional all-off account must not inherit role defaults.
   return Object.keys(permissions).length ? permissions : { __explicit_empty__: true };
 }
+function assertManagerCanGrantPermissions(user, permissions) {
+  if (user?.role !== "manager") return;
+  const current = user.permissions || {};
+  const missing = Object.keys(permissions).filter((permission) => {
+    if (permission === "__explicit_empty__") return false;
+    return Array.isArray(current)
+      ? !current.includes(permission) && !current.includes("*")
+      : current[permission] !== true && current["*"] !== true;
+  });
+  if (missing.length) {
+    throw new AppError(
+      "FORBIDDEN",
+      `Managers cannot grant permissions they do not have: ${missing.join(", ")}`,
+      "لا يمكن لمدير السنتر منح صلاحيات لا يملكها.",
+      403,
+    );
+  }
+}
 function validateRole(role) { if (!roles.has(role)) throw new AppError("VALIDATION_ERROR", "Invalid center account role.", "نوع الحساب يجب أن يكون مديرًا أو مساعدًا.", 400); }
 
 router.get("/", async (req, res, next) => {
@@ -59,6 +77,7 @@ router.post("/", async (req, res, next) => {
     validateRole(role);
     if (req.user?.role === "manager" && role !== "assistant") throw new AppError("FORBIDDEN", "Managers can only create assistant accounts.", "مدير السنتر يمكنه إضافة حسابات المساعدين فقط.", 403);
     const permissions = cleanPermissions(req.body.permissions);
+    assertManagerCanGrantPermissions(req.user, permissions);
     const hash = await bcrypt.hash(req.body.password, 12);
     const result = await db.query(`INSERT INTO users (id,center_id,full_name,email,phone,password_hash,role,permissions,status) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'active') RETURNING ${safeFields}`, [`user-${crypto.randomUUID()}`, req.centerId, fullName, email, req.body.phone || null, hash, role, JSON.stringify(permissions)]);
     res.status(201).json({ user: safeUser(result.rows[0]) });
@@ -73,8 +92,18 @@ router.patch("/:userId", async (req, res, next) => {
     const keys = [], values = [];
     if (req.body.fullName !== undefined) { const value = String(req.body.fullName).trim(); if (value.length < 2) throw new AppError("VALIDATION_ERROR", "Invalid name.", "اسم الحساب غير صحيح.", 400); keys.push("full_name"); values.push(value); }
     if (req.body.email !== undefined) { const value = String(req.body.email).trim().toLowerCase(); if (!/^\S+@\S+\.\S+$/.test(value)) throw new AppError("VALIDATION_ERROR", "Invalid email.", "البريد الإلكتروني غير صحيح.", 400); keys.push("email"); values.push(value); }
-    if (req.body.role !== undefined) { validateRole(req.body.role); keys.push("role"); values.push(req.body.role); }
-    if (req.body.permissions !== undefined) { keys.push("permissions"); values.push(JSON.stringify(cleanPermissions(req.body.permissions))); }
+    if (req.body.role !== undefined) {
+      validateRole(req.body.role);
+      if (req.user?.role === "manager" && req.body.role !== "assistant") {
+        throw new AppError("FORBIDDEN", "Managers cannot promote accounts to manager.", "لا يمكن لمدير السنتر ترقية الحساب إلى مدير.", 403);
+      }
+      keys.push("role"); values.push(req.body.role);
+    }
+    if (req.body.permissions !== undefined) {
+      const permissions = cleanPermissions(req.body.permissions);
+      assertManagerCanGrantPermissions(req.user, permissions);
+      keys.push("permissions"); values.push(JSON.stringify(permissions));
+    }
     if (req.body.password !== undefined && req.body.password !== "") {
       if (!passwordValid(req.body.password)) throw new AppError("VALIDATION_ERROR", "Invalid password.", "كلمة المرور يجب أن تكون 12 حرفًا على الأقل وتحتوي على حرف ورقم.", 400);
       keys.push("password_hash"); values.push(await bcrypt.hash(req.body.password, 12));

@@ -8,6 +8,7 @@ import { PermissionService } from "../../core/permissions";
 import { Colors, Spacing, Typography, useTheme } from "../../core/theme";
 import { useAuthStore } from "../../features/auth/useAuthStore";
 import { StudentRepository } from "../../features/students/StudentRepository";
+import { getStudentColorPresentation } from "../../features/students/studentColor";
 import { Student } from "../../shared/types";
 import { formatDisplayIdentifier } from "../../shared/utils/formatters";
 import { smartSearch } from "../../shared/utils/smartSearch";
@@ -84,7 +85,13 @@ export default function DeletedStudentsScreen() {
   };
 
   const renderStudent = ({ item }: { item: Student }) => (
-    <View style={[styles.studentRow, { backgroundColor: colors.cardBackground, borderColor: colors.border }]}>
+    <View style={[
+      styles.studentRow,
+      { backgroundColor: colors.cardBackground, borderColor: colors.border },
+      getStudentColorPresentation(item.studentColor).accentColor
+        ? { borderRightColor: getStudentColorPresentation(item.studentColor).accentColor, borderRightWidth: 3 }
+        : null,
+    ]}>
       <View style={styles.studentCopy}>
         <Text style={[styles.studentName, { color: colors.textPrimary }]}>{item.fullName}</Text>
         <Text style={[styles.studentMeta, { color: colors.textSecondary }]}>

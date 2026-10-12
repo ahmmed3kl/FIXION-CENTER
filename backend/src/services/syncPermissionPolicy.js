@@ -4,8 +4,22 @@ function getOperationType(operation) {
   return String(operation.operationType || operation.operation_type || "").toLowerCase();
 }
 
+function getPayload(operation) {
+  const value = operation.payload;
+  if (value && typeof value === "object") return value;
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+  return {};
+}
+
 function getAction(operation) {
-  return String(operation.payload?.action || "").toLowerCase();
+  return String(getPayload(operation).action || "").toLowerCase();
 }
 
 function hasPermission(permissions, permission) {
@@ -24,9 +38,13 @@ function hasOwn(object, key) {
 
 function requiredPermission(operation) {
   const entity = String(operation.entityType || operation.entity_type || "").toLowerCase();
-  const operationType = getOperationType(operation);
-  const payload = operation.payload || {};
+  const payload = getPayload(operation);
   const action = getAction(operation);
+  const isResetRepair = getOperationType(operation) === "repair_after_server_reset";
+  // Reset recovery rebuilds rows that are missing from the server snapshot.
+  // Authorize the replay as the create action it performs, while preserving
+  // explicit payload actions and entity-specific lifecycle permissions.
+  const operationType = isResetRepair && !action ? "create" : getOperationType(operation);
 
   if (entity.includes("student_card")) return "students.cards.manage";
   if (entity === "teacher_subject" || entity === "teacher_subject_assigned") {
@@ -51,6 +69,12 @@ function requiredPermission(operation) {
   }
   if (entity === "group_schedule") return "groups.schedule.manage";
   if (entity === "group" || entity.startsWith("group_")) {
+    if (
+      isResetRepair &&
+      (action === "delete" || action === "deactivate" || payload.status === "inactive")
+    ) {
+      return "groups.deactivate";
+    }
     if (operationType === "create" || action === "create") return "groups.create";
     if (
       operationType === "delete" ||
@@ -66,6 +90,7 @@ function requiredPermission(operation) {
     return "center.settings.manage";
   }
   if (entity === "enrollment" || entity === "student_group_enrollment") {
+    if (isResetRepair && (action === "end" || payload.status === "ended")) return "enrollments.end";
     if (operationType === "create" || action === "create") return "enrollments.create";
     if (operationType === "delete" || action === "end" || payload.status === "ended") return "enrollments.end";
     return "enrollments.update";
@@ -77,8 +102,10 @@ function requiredPermission(operation) {
     return "sessions.update";
   }
   if (entity === "attendance" || entity === "attendance_marked" || entity === "advance_coverage") {
+    if (action === "attendance.cancel") return "attendance.edit";
     return "attendance.create";
   }
+  if (entity === "absence_note") return "attendance.edit";
   if (entity === "payment_reversal") return "payments.reverse";
   if (entity === "debt_adjustment") return "payments.adjust";
   if (entity === "payment" || entity === "payment_collected" || entity === "debt_cycle") {
@@ -100,10 +127,6 @@ function requiredPermission(operation) {
 }
 
 function assertSyncPermission(req, operation) {
-  if (String(operation.operationType || operation.operation_type || "").toUpperCase() === "REPAIR_AFTER_SERVER_RESET") {
-    return;
-  }
-
   const entity = String(operation.entityType || operation.entity_type || "").toLowerCase();
   const permission = requiredPermission(operation);
   if (req.user.role === "admin" || req.user.role === "owner") return;
@@ -128,13 +151,39 @@ function assertSyncPermission(req, operation) {
       403,
     );
   }
-  if (hasPermission(permissions, permission)) return;
-  throw new AppError(
-    "FORBIDDEN",
-    `Missing required permission: ${permission}`,
-    "ليس لديك الصلاحية الكافية لمزامنة هذه العملية.",
-    403,
-  );
+  if (!hasPermission(permissions, permission)) {
+    throw new AppError(
+      "FORBIDDEN",
+      `Missing required permission: ${permission}`,
+      "ليس لديك الصلاحية الكافية لمزامنة هذه العملية.",
+      403,
+    );
+  }
+
+  if (entity === "attendance" || entity === "attendance_marked") {
+    const payload = getPayload(operation);
+    if (String(payload.action || "").toLowerCase() === "attendance.cancel") return;
+    const attendanceType = String(
+      payload.attendanceType || payload.attendance_type || "present",
+    ).toLowerCase();
+    const requiredAttendancePermissions = [];
+    if (attendanceType === "makeup") {
+      requiredAttendancePermissions.push("attendance.makeup");
+    }
+    if (payload.isExternal === true || payload.is_external === true) {
+      requiredAttendancePermissions.push("attendance.external");
+    }
+    for (const required of requiredAttendancePermissions) {
+      if (!hasPermission(permissions, required)) {
+        throw new AppError(
+          "FORBIDDEN",
+          `Missing required permission: ${required}`,
+          "ليس لديك الصلاحية الكافية لمزامنة هذا النوع من الحضور.",
+          403,
+        );
+      }
+    }
+  }
 }
 
 function canReadSyncEntity(entityType, user) {
@@ -157,6 +206,8 @@ function canReadSyncEntity(entityType, user) {
                 ? ["sessions.view", "attendance.view"]
                 : entity === "attendance" || entity === "attendance_marked"
                   ? ["attendance.view"]
+                  : entity === "absence_note"
+                    ? ["attendance.view", "reports.attendance.view", "reports.view"]
                   : ["payment", "payment_collected", "payment_reversal", "debt_adjustment", "debt_cycle", "advance_coverage"].includes(entity)
                     ? ["payments.view", "payments.debt.view", "reports.financial.view"]
                     : entity === "package" || entity.startsWith("package_")
@@ -194,6 +245,7 @@ function filterBootstrapSnapshot(snapshot, user) {
     expectedStudents: "session",
     enrollments: "student_group_enrollment",
     attendance: "attendance",
+    absenceNotes: "absence_note",
     payments: "payment",
     paymentReversals: "payment_reversal",
     debtAdjustments: "debt_adjustment",

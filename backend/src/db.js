@@ -71,6 +71,23 @@ async function withTransaction(callback) {
  */
 async function ensureSchemaCompatibility() {
   await pool.query(`
+    CREATE TABLE IF NOT EXISTS card_ranges (
+      id VARCHAR(64) PRIMARY KEY,
+      center_id VARCHAR(64) NOT NULL REFERENCES centers(id) ON DELETE CASCADE,
+      start_code VARCHAR(64) NOT NULL,
+      end_code VARCHAR(64) NOT NULL,
+      status VARCHAR(32) NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CONSTRAINT uq_card_range_identity UNIQUE (center_id, start_code, end_code),
+      CONSTRAINT chk_card_range_digits CHECK (start_code ~ '^[0-9]+$' AND end_code ~ '^[0-9]+$'),
+      CONSTRAINT chk_card_range_same_length CHECK (length(start_code) = length(end_code)),
+      CONSTRAINT chk_card_range_order CHECK (start_code <= end_code)
+    );
+    CREATE INDEX IF NOT EXISTS idx_card_ranges_codes
+      ON card_ranges(center_id, status, start_code, end_code);
+  `);
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS center_data_state (
       center_id VARCHAR(64) PRIMARY KEY,
       reset_generation BIGINT NOT NULL DEFAULT 0,
@@ -81,6 +98,7 @@ async function ensureSchemaCompatibility() {
       ON CONFLICT (center_id) DO NOTHING;
   `);
   await pool.query("ALTER TABLE students ALTER COLUMN card_code DROP NOT NULL");
+  await pool.query("ALTER TABLE students ADD COLUMN IF NOT EXISTS student_color VARCHAR(32)");
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS grade_exams (
@@ -319,6 +337,25 @@ async function ensureSchemaCompatibility() {
   await pool.query(`
     ALTER TABLE notification_deliveries
       ADD COLUMN IF NOT EXISTS provider_message_id VARCHAR(128);
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS absence_notes (
+      id VARCHAR(64) PRIMARY KEY,
+      center_id VARCHAR(64) NOT NULL REFERENCES centers(id) ON DELETE CASCADE,
+      session_id VARCHAR(64) NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+      student_id VARCHAR(64) NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+      note_text TEXT NOT NULL CHECK (length(btrim(note_text)) > 0),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ,
+      created_by VARCHAR(64) NOT NULL,
+      created_by_name VARCHAR(255),
+      updated_by VARCHAR(64),
+      CONSTRAINT uq_absence_note_center_session_student
+        UNIQUE (center_id, session_id, student_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_absence_notes_student
+      ON absence_notes(center_id, student_id, session_id);
   `);
 
   // Payment rows are also rebuilt during bootstrap.  Older Neon databases

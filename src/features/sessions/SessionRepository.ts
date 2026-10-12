@@ -91,6 +91,48 @@ export class SessionRepository {
     );
   }
 
+  static getActivationTimestamps(sessionIds: string[]): Map<string, string> {
+    const ids = Array.from(new Set(sessionIds.filter(Boolean)));
+    if (ids.length === 0) return new Map();
+
+    const { centerId } = this.getActiveContext();
+    const db = DatabaseService.getDb();
+    const requestedIds = new Set(ids);
+    const activationTimes = new Map<string, string>();
+
+    for (let offset = 0; offset < ids.length; offset += 400) {
+      const batch = ids.slice(offset, offset + 400);
+      const rows = db.getAllSync<{
+        sessionId?: string;
+        entityId?: string;
+        action: string;
+        timestamp: string;
+      }>(
+        `SELECT entity_id as sessionId, action, timestamp
+         FROM audit_logs
+         WHERE center_id = ? AND entity_type = 'session'
+           AND entity_id IN (${batch.map(() => "?").join(",")})
+           AND action IN ('session.attendance_start', 'session.activated', 'session_reopened')
+         ORDER BY timestamp DESC`,
+        [centerId, ...batch],
+      );
+      for (const row of rows) {
+        const sessionId = String(row.sessionId || row.entityId || "");
+        if (
+          !requestedIds.has(sessionId) ||
+          !["session.attendance_start", "session.activated", "session_reopened"].includes(row.action) ||
+          !row.timestamp
+        ) {
+          continue;
+        }
+        const previous = activationTimes.get(sessionId);
+        if (!previous || row.timestamp > previous) activationTimes.set(sessionId, row.timestamp);
+      }
+    }
+
+    return activationTimes;
+  }
+
   /** Read-only expected-student snapshot for a historical session. */
   static getExpectedStudents(sessionId: string): Student[] {
     const { centerId, user } = this.getActiveContext();

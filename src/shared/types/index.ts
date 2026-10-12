@@ -118,6 +118,7 @@ export interface Student {
   grade: string;
   status: "active" | "inactive";
   studentType?: "registered" | "external";
+  studentColor?: string | null;
   notes?: string | null;
   deletedAt?: string | null;
   deletedBy?: string | null;

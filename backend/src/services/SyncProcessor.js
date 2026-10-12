@@ -149,6 +149,7 @@ const SYNC_ENTITY_PRIORITY = {
   session: 80,
   attendance: 90,
   makeup: 90,
+  absence_note: 95,
   payment: 100,
   payment_reversal: 100,
   debt_adjustment: 100,
@@ -178,7 +179,24 @@ function orderSyncOperations(operations) {
   const base = [...operations].sort((a, b) => {
     const priorityA = SYNC_ENTITY_PRIORITY[canonicalSyncEntity(a.entityType)] ?? 500;
     const priorityB = SYNC_ENTITY_PRIORITY[canonicalSyncEntity(b.entityType)] ?? 500;
-    return priorityA - priorityB || String(a.createdAt || "").localeCompare(String(b.createdAt || ""));
+    const priorityOrder = priorityA - priorityB;
+    if (priorityOrder !== 0) return priorityOrder;
+    const createdAtOrder = String(a.createdAt || "").localeCompare(String(b.createdAt || ""));
+    if (createdAtOrder !== 0) return createdAtOrder;
+    if (
+      canonicalSyncEntity(a.entityType) === "attendance" &&
+      canonicalSyncEntity(b.entityType) === "attendance" &&
+      String(a.entityId || "") === String(b.entityId || "")
+    ) {
+      const typeOrder = (type) => {
+        const normalized = String(type || "").toLowerCase();
+        return normalized === "create" || normalized === "attendance.create"
+          ? 0
+          : normalized === "update" ? 1 : 2;
+      };
+      return typeOrder(a.operationType) - typeOrder(b.operationType);
+    }
+    return 0;
   });
   const byEntity = new Map(base.map((operation) => [
     `${canonicalSyncEntity(operation.entityType)}:${String(operation.entityId || "")}`,
@@ -271,6 +289,82 @@ class SyncProcessor {
     return alias.rows[0]?.canonical_id
       ? String(alias.rows[0].canonical_id)
       : null;
+  }
+
+  static async isStudentEligibleForSessionGroup(client, {
+    centerId,
+    groupId,
+    sessionDate,
+    subjectId,
+    teacherId,
+    groupGrade,
+    studentId,
+    allowSameTeacherCompensation = false,
+  }) {
+    const enrollment = await client.query(
+      `SELECT 1
+         FROM student_group_enrollments e
+         JOIN students st ON st.center_id = e.center_id AND st.id = e.student_id
+        WHERE e.center_id = $1 AND e.group_id = $2 AND e.student_id = $3
+          AND e.status IN ('active', 'transferred', 'withdrawn', 'completed')
+          AND e.joined_at::date <= $4::date
+          AND (e.ended_at IS NULL OR e.ended_at::date >= $4::date)
+        LIMIT 1`,
+      [centerId, groupId, studentId, sessionDate],
+    );
+    if (enrollment.rows.length > 0) return true;
+
+    const packageSubscription = await client.query(
+      `SELECT 1
+         FROM student_package_subscriptions sps
+         JOIN package_subjects ps
+           ON ps.center_id = sps.center_id
+          AND ps.package_id = sps.package_id
+         JOIN students st ON st.center_id = sps.center_id AND st.id = sps.student_id
+         LEFT JOIN package_subject_teacher_overrides selected
+           ON selected.center_id = sps.center_id
+          AND selected.subscription_id = sps.id
+          AND selected.subject_id = ps.subject_id
+        WHERE sps.center_id = $1 AND sps.student_id = $2
+          AND sps.status IN ('active', 'paused', 'cancelled', 'completed')
+          AND sps.start_date <= $3::date
+          AND (sps.end_date IS NULL OR sps.end_date >= $3::date)
+          AND ps.subject_id = $4
+          AND (ps.group_id = $5 OR selected.group_id = $5)
+          AND COALESCE(selected.teacher_id, ps.default_teacher_id) = $6
+          AND (selected.id IS NULL OR selected.group_id = $5)
+          AND (
+            selected.id IS NOT NULL
+            OR NOT EXISTS (
+              SELECT 1 FROM package_subject_teacher_overrides any_selection
+               WHERE any_selection.center_id = sps.center_id
+                 AND any_selection.subscription_id = sps.id
+            )
+          )
+        LIMIT 1`,
+      [centerId, studentId, sessionDate, subjectId, groupId, teacherId],
+    );
+    if (packageSubscription.rows.length > 0) return true;
+
+    if (!allowSameTeacherCompensation || !teacherId || !groupGrade) return false;
+
+    const sameLevelCompensation = await client.query(
+      `SELECT 1
+         FROM student_group_enrollments e
+         JOIN students st ON st.center_id = e.center_id AND st.id = e.student_id
+         JOIN groups enrolled_group
+           ON enrolled_group.center_id = e.center_id
+          AND enrolled_group.id = e.group_id
+        WHERE e.center_id = $1 AND e.student_id = $2
+          AND e.group_id <> $3 AND e.status = 'active'
+          AND e.joined_at::date <= $4::date
+          AND (e.ended_at IS NULL OR e.ended_at::date >= $4::date)
+          AND enrolled_group.teacher_id = $5
+          AND LOWER(TRIM(enrolled_group.grade)) = LOWER(TRIM($6))
+        LIMIT 1`,
+      [centerId, studentId, groupId, sessionDate, teacherId, groupGrade],
+    );
+    return sameLevelCompensation.rows.length > 0;
   }
 
   /**
@@ -530,7 +624,11 @@ class SyncProcessor {
             Object.prototype.hasOwnProperty.call(studentAuditState, "deletedAt")
           );
           const studentIsArchived = Boolean(studentAuditState.deleted_at || studentAuditState.deletedAt);
-          const auditAction = hasStudentArchiveMutation
+          const auditAction = entityType === "attendance" && payload?.action === "attendance.cancel"
+            ? "attendance.cancel"
+            : entityType === "student_color" && ["student.color.update", "student.color.reset"].includes(String(payload?.action || ""))
+            ? String(payload.action)
+            : hasStudentArchiveMutation
             ? (studentIsArchived ? "student.delete" : "student.restore")
             : `${entityType || "entity"}.${operationType || "mutate"}`;
           await client.query(
@@ -606,6 +704,7 @@ class SyncProcessor {
     const tableByType = {
       student: "students",
       student_created: "students",
+      student_color: "students",
       teacher: "teachers",
       teacher_created: "teachers",
       teacher_updated: "teachers",
@@ -648,6 +747,9 @@ class SyncProcessor {
     // not apply to this explicit recovery operation.
     if (operationType === "REPAIR_AFTER_SERVER_RESET") return;
     if (!entityId) return;
+    // Student color is an independent visual preference. It updates only its
+    // own column, so unrelated student edits must not make it stale.
+    if (entityType === "student_color") return;
     // group_schedules has no updated_at column in the canonical schema, so
     // schedule edits cannot use timestamp-based stale-write validation.
     if (entityType === "group_schedule") return;
@@ -732,6 +834,29 @@ class SyncProcessor {
     const { centerId, userId, operationId, operationType, entityType, payload } = context;
 
     switch (entityType) {
+      case "student_color": {
+        const studentId = payload.studentId || payload.student_id || context.entityId;
+        const color = payload.studentColor ?? payload.student_color ?? null;
+        const allowedColors = new Set(["lavender", "sand", "slate", "rose", "aqua", "peach"]);
+        if (color !== null && !allowedColors.has(String(color))) {
+          throw new AppError("INVALID_STUDENT_COLOR", "Invalid student color.", "لون الطالب المحدد غير صالح.", 400);
+        }
+        const owner = await client.query(
+          `SELECT id, deleted_at FROM students WHERE center_id = $1 AND id = $2 FOR UPDATE`,
+          [centerId, studentId],
+        );
+        if (!owner.rows[0]) {
+          throw new AppError("STUDENT_NOT_FOUND", "Student is outside the authenticated center.", "الطالب غير موجود في المركز الحالي.", 404);
+        }
+        if (owner.rows[0].deleted_at) {
+          throw new AppError("STUDENT_ARCHIVED", "Cannot change color for an archived student.", "لا يمكن تغيير لون طالب مؤرشف.", 409);
+        }
+        await client.query(
+          `UPDATE students SET student_color = $1 WHERE center_id = $2 AND id = $3`,
+          [color, centerId, studentId],
+        );
+        break;
+      }
       case "student":
       case "student_created": {
         const student = payload.student || payload;
@@ -945,13 +1070,104 @@ class SyncProcessor {
       case "attendance":
       case "attendance_marked": {
         const att = payload;
+        const attendanceSessionId = att.session_id || att.sessionId;
+        const attendanceStudentId = att.student_id || att.studentId;
+        if (
+          String(operationType || "").toUpperCase() === "UPDATE" &&
+          String(att.action || "").toLowerCase() === "attendance.cancel"
+        ) {
+          const attendanceId = att.id || context.entityId;
+          if (!attendanceId || !attendanceSessionId || !attendanceStudentId) {
+            throw new Error("ATTENDANCE_CANCEL_TARGET_REQUIRED");
+          }
+          const target = await client.query(
+            `SELECT a.id, a.status
+               FROM attendance a
+               JOIN sessions s ON s.center_id = a.center_id AND s.id = a.session_id
+               JOIN students st ON st.center_id = a.center_id AND st.id = a.student_id
+              WHERE a.center_id = $1 AND a.id = $2
+                AND a.session_id = $3 AND a.student_id = $4
+                AND s.group_id IS NOT NULL AND st.deleted_at IS NULL
+              FOR UPDATE OF a`,
+            [centerId, attendanceId, attendanceSessionId, attendanceStudentId],
+          );
+          if (!target.rows[0]) {
+            throw new Error("ATTENDANCE_CANCEL_TARGET_NOT_FOUND: attendance is outside the authenticated center or does not match the requested session and student.");
+          }
+          if (target.rows[0].status !== "absent") {
+            const update = await client.query(
+              `UPDATE attendance
+                  SET status = 'absent', is_late = FALSE
+                WHERE center_id = $1 AND id = $2 AND session_id = $3
+                  AND student_id = $4 AND status <> 'absent'`,
+              [centerId, attendanceId, attendanceSessionId, attendanceStudentId],
+            );
+            if (update.rowCount !== 1) {
+              throw new Error("ATTENDANCE_CANCEL_CONFLICT: attendance changed before cancellation.");
+            }
+          }
+          break;
+        }
         const sessionDateRes = await client.query(
-          "SELECT session_date FROM sessions WHERE center_id = $1::varchar AND id = $2::varchar",
-          [centerId, att.session_id || att.sessionId],
+          `SELECT s.session_date, s.group_id, s.subject_id, s.teacher_id,
+                  g.grade AS group_grade,
+                  g.subject_id AS group_subject_id, g.teacher_id AS group_teacher_id
+             FROM sessions s
+             JOIN groups g ON g.center_id = s.center_id AND g.id = s.group_id
+             JOIN students st ON st.center_id = s.center_id
+                              AND st.id = $3 AND st.deleted_at IS NULL
+            WHERE s.center_id = $1::varchar AND s.id = $2::varchar`,
+          [centerId, attendanceSessionId, attendanceStudentId],
         );
+        const attendanceSession = sessionDateRes.rows[0];
+        if (!attendanceSession) {
+          throw new Error("ATTENDANCE_TARGET_NOT_FOUND: session or student is outside the authenticated center.");
+        }
+
+        const attendanceType = String(
+          att.attendance_type || att.attendanceType || "present",
+        ).toLowerCase();
+        const isExternal = Boolean(att.is_external ?? att.isExternal);
+        if (!isExternal && attendanceType !== "makeup") {
+          const expected = await client.query(
+            `SELECT 1 FROM session_expected_students
+              WHERE center_id = $1 AND session_id = $2 AND student_id = $3
+              LIMIT 1`,
+            [centerId, attendanceSessionId, attendanceStudentId],
+          );
+          const snapshot = await client.query(
+            `SELECT 1 FROM session_expected_students
+              WHERE center_id = $1 AND session_id = $2
+              LIMIT 1`,
+            [centerId, attendanceSessionId],
+          );
+          const relationshipEligible =
+            await SyncProcessor.isStudentEligibleForSessionGroup(client, {
+              centerId,
+              groupId: attendanceSession.group_id,
+              sessionDate: attendanceSession.session_date,
+              subjectId:
+                attendanceSession.subject_id ||
+                attendanceSession.group_subject_id,
+              teacherId:
+                attendanceSession.teacher_id ||
+                attendanceSession.group_teacher_id,
+              groupGrade: attendanceSession.group_grade,
+              studentId: attendanceStudentId,
+            });
+          if (
+            !relationshipEligible ||
+            (expected.rows.length === 0 && snapshot.rows.length > 0)
+          ) {
+            throw new Error(
+              "ATTENDANCE_NOT_EXPECTED: student is not in this session's group roster.",
+            );
+          }
+        }
+
         const checkInTime = normalizeTimestamp(
           att.check_in_time || att.checkInTime,
-          sessionDateRes.rows[0]?.session_date,
+          attendanceSession.session_date,
         );
         const rawAttendanceStatus = att.status;
         const normalizedAttendanceStatus = normalizeAttendanceStatus(
@@ -973,7 +1189,7 @@ class SyncProcessor {
             checkInTime,
             normalizedAttendanceStatus,
             isLate,
-            att.attendance_type || att.attendanceType || "present",
+            attendanceType,
             att.original_absence_id || att.originalAbsenceId || null,
             operationId,
           ],
@@ -991,6 +1207,84 @@ class SyncProcessor {
         if (existingAttendance.rows[0] && existingAttendance.rows[0].operation_id !== operationId) {
           throw new Error("ATTENDANCE_ALREADY_RECORDED: student already has attendance for this session.");
         }
+        break;
+      }
+
+      case "absence_note": {
+        const note = payload.note || payload;
+        const noteSessionId = note.session_id || note.sessionId;
+        const noteStudentId = note.student_id || note.studentId;
+        const noteText = String(note.note_text || note.text || "").trim();
+        if (!noteSessionId || !noteStudentId || !noteText || !note.id) {
+          throw new Error("ABSENCE_NOTE_TARGET_REQUIRED");
+        }
+
+        const session = await client.query(
+          `SELECT s.id, s.status
+             FROM sessions s
+             JOIN groups g ON g.center_id = s.center_id AND g.id = s.group_id
+             JOIN students st ON st.center_id = s.center_id AND st.id = $3
+                                 AND st.deleted_at IS NULL
+             JOIN session_expected_students expected
+               ON expected.center_id = s.center_id
+              AND expected.session_id = s.id
+              AND expected.student_id = st.id
+            WHERE s.center_id = $1 AND s.id = $2
+            FOR UPDATE OF s`,
+          [centerId, noteSessionId, noteStudentId],
+        );
+        if (!session.rows[0] || !["open", "closed"].includes(session.rows[0].status)) {
+          throw new Error("ABSENCE_NOTE_TARGET_NOT_FOUND: session or student is outside the authenticated center or session roster.");
+        }
+
+        const attendance = await client.query(
+          `SELECT status, attendance_type
+             FROM attendance
+            WHERE center_id = $1 AND session_id = $2 AND student_id = $3
+            FOR UPDATE`,
+          [centerId, noteSessionId, noteStudentId],
+        );
+        if (
+          attendance.rows[0] &&
+          attendance.rows[0].attendance_type !== "makeup" &&
+          ["present", "late"].includes(String(attendance.rows[0].status).toLowerCase())
+        ) {
+          throw new Error("ABSENCE_NOTE_STUDENT_PRESENT: a note cannot be saved for a student marked present.");
+        }
+        const advanceCoverage = await client.query(
+          `SELECT 1 FROM advance_coverages
+            WHERE center_id = $1 AND student_id = $2
+              AND target_future_session_id = $3
+            LIMIT 1`,
+          [centerId, noteStudentId, noteSessionId],
+        );
+        if (advanceCoverage.rows.length) {
+          throw new Error("ABSENCE_NOTE_ADVANCE_COVERAGE: the student is covered for this session.");
+        }
+
+        await client.query(
+          `INSERT INTO absence_notes
+             (id, center_id, session_id, student_id, note_text, created_at,
+              updated_at, created_by, created_by_name, updated_by)
+           VALUES ($1, $2, $3, $4, $5, COALESCE($6::timestamptz, NOW()),
+                   COALESCE($7::timestamptz, NOW()), $8, $9, $10)
+           ON CONFLICT (center_id, session_id, student_id) DO UPDATE SET
+             note_text = EXCLUDED.note_text,
+             updated_at = EXCLUDED.updated_at,
+             updated_by = EXCLUDED.updated_by`,
+          [
+            note.id,
+            centerId,
+            noteSessionId,
+            noteStudentId,
+            noteText,
+            note.created_at || note.createdAt || null,
+            note.updated_at || note.updatedAt || null,
+            note.created_by || note.createdBy || userId,
+            note.created_by_name || note.createdByName || null,
+            note.updated_by || note.updatedBy || userId,
+          ],
+        );
         break;
       }
 
@@ -1190,6 +1484,22 @@ class SyncProcessor {
         if (!sessionId || !groupId || !sessionDate || !startTime || !endTime) {
           throw new Error("Session requires group, date, start time, and end time.");
         }
+        const sessionGroupRes = await client.query(
+          `SELECT id, subject_id, teacher_id, grade
+             FROM groups
+            WHERE center_id = $1::varchar AND id = $2::varchar`,
+          [centerId, groupId],
+        );
+        const sessionGroup = sessionGroupRes.rows[0];
+        if (!sessionGroup) {
+          throw new Error(
+            "SESSION_GROUP_NOT_FOUND: group is outside the authenticated center.",
+          );
+        }
+        const rosterSubjectId =
+          existingSession?.subject_id || sessionGroup.subject_id;
+        const rosterTeacherId =
+          existingSession?.teacher_id || sessionGroup.teacher_id;
         // Older APKs generated random session ids. If that row already exists
         // under the same natural schedule/date key, reconcile it to the
         // canonical server row instead of tripping the unique index.
@@ -1279,6 +1589,23 @@ class SyncProcessor {
         // leave the existing manifest untouched.
         if (Array.isArray(sess.expectedStudentIds)) {
           for (const studentId of sess.expectedStudentIds) {
+            if (
+              typeof studentId !== "string" ||
+              !(await SyncProcessor.isStudentEligibleForSessionGroup(client, {
+                centerId,
+                groupId,
+                sessionDate,
+                subjectId: rosterSubjectId,
+                teacherId: rosterTeacherId,
+                groupGrade: sessionGroup.grade,
+                studentId,
+                allowSameTeacherCompensation: true,
+              }))
+            ) {
+              throw new Error(
+                "SESSION_ROSTER_STUDENT_NOT_ELIGIBLE: student is outside this group, level, or allowed compensation scope.",
+              );
+            }
             await client.query(
               `INSERT INTO session_expected_students (id, center_id, session_id, student_id)
               SELECT $1::varchar, $2::varchar, $3::varchar, s.id

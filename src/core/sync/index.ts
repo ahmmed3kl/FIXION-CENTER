@@ -14,6 +14,7 @@ import { DatabaseError } from "../errors";
 import { Logger } from "../logger";
 import { getLocalDateOnly } from "../../shared/utils/date";
 import { CardRangeRepository } from "../../features/students/CardRangeRepository";
+import { isStudentColor } from "../../features/students/studentColor";
 
 export type SyncEngineState = "online" | "offline" | "syncing" | "error";
 
@@ -63,6 +64,7 @@ export function getOperationPriority(entityType: string): number {
   if (e === "session" || e === "session_created") return 1;
   if (e === "attendance" || e === "advance_coverage" || e === "makeup")
     return 2;
+  if (e === "absence_note") return 3;
   if (e === "payment" || e === "payment_reversal" || e === "debt_adjustment")
     return 3;
   if (e === "session_closing" || e === "daily_closing") return 4;
@@ -97,6 +99,7 @@ const REPAIR_DEPENDENCY_PRIORITY: Record<string, number> = {
   debt_cycle: 75,
   session: 80,
   attendance: 90,
+  absence_note: 95,
   makeup: 90,
   advance_coverage: 90,
   payment: 100,
@@ -313,7 +316,22 @@ function orderOperationsByDependencies(rows: SyncOperation[]): SyncOperation[] {
       const pB = getOperationPriority(b.entityType);
       if (pA !== pB) return pA - pB;
     }
-    return a.createdAt.localeCompare(b.createdAt);
+    const createdAtOrder = a.createdAt.localeCompare(b.createdAt);
+    if (createdAtOrder !== 0) return createdAtOrder;
+    if (
+      canonicalEntityType(a.entityType) === "attendance" &&
+      canonicalEntityType(b.entityType) === "attendance" &&
+      a.entityId === b.entityId
+    ) {
+      const typeOrder = (type: string) => {
+        const normalized = type.toLowerCase();
+        return normalized === "create" || normalized === "attendance.create"
+          ? 0
+          : normalized === "update" ? 1 : 2;
+      };
+      return typeOrder(a.operationType) - typeOrder(b.operationType);
+    }
+    return 0;
   });
 
   const byKey = new Map<string, SyncOperation>();
@@ -347,7 +365,7 @@ function orderOperationsByDependencies(rows: SyncOperation[]): SyncOperation[] {
       refs.push(["subject", value("subjectId", "subject_id")]);
     }
     if (entity === "group_schedule") refs.push(["group", value("groupId", "group_id")]);
-    if (entity === "attendance" || entity === "makeup" || entity === "advance_coverage") {
+    if (entity === "attendance" || entity === "makeup" || entity === "advance_coverage" || entity === "absence_note") {
       refs.push(["session", value("sessionId", "session_id", "advanceSessionId", "advance_session_id", "targetFutureSessionId", "target_future_session_id")]);
       refs.push(["student", value("studentId", "student_id")]);
     }
@@ -366,7 +384,9 @@ function orderOperationsByDependencies(rows: SyncOperation[]): SyncOperation[] {
       refs.push(["student", value("studentId", "student_id")]);
       refs.push(["group", value("groupId", "group_id")]);
     }
-    if (entity === "student_card") refs.push(["student", value("studentId", "student_id")]);
+    if (entity === "student_card" || entity === "student_color") {
+      refs.push(["student", value("studentId", "student_id") || operation.entityId]);
+    }
     if (entity === "package_subject") refs.push(["package", value("packageId", "package_id")]);
     if (entity === "package_subscription") {
       refs.push(["student", value("studentId", "student_id")]);
@@ -1360,7 +1380,7 @@ export class SyncRepository {
       "session_homework_evaluations", "homework_evaluation_statuses",
       "notification_deliveries", "notification_events", "notification_templates",
       "payment_reversals", "payments", "debt_adjustments", "advance_coverages",
-      "attendance", "session_expected_students", "sessions", "debt_cycles",
+      "absence_notes", "attendance", "session_expected_students", "sessions", "debt_cycles",
       "package_subject_teacher_overrides", "student_package_subscriptions",
       "package_subjects", "packages", "student_group_enrollments", "student_cards",
       "students", "group_schedules", "groups", "teacher_subjects", "teachers",
@@ -1388,6 +1408,7 @@ export class SyncEngine {
   private static currentState: SyncEngineState = "online";
   /** One in-flight sync pipeline per center; callers queue behind it. */
   private static readonly syncLocks = new Map<string, Promise<void>>();
+  private static readonly cardRangeRefreshes = new Map<string, Promise<void>>();
   /** SQLite is a single native connection; serialize pipelines across centers too. */
   private static databaseSyncLock: Promise<void> | null = null;
   private static lastSyncAttempt = new Map<string, number>();
@@ -1404,6 +1425,39 @@ export class SyncEngine {
 
   static getAdapter(): ISyncApiAdapter {
     return this.adapter;
+  }
+
+  static async refreshCardRanges(centerId: string): Promise<void> {
+    if (ConnectivityService.getState() === "offline") {
+      CardRangeRepository.assertTrustedRangesAvailable(centerId);
+      return;
+    }
+    const inFlight = this.cardRangeRefreshes.get(centerId);
+    if (inFlight) return inFlight;
+    const fetchRanges = this.adapter.getCardRanges;
+    if (!fetchRanges) {
+      throw new Error("تعذر تحميل نطاق البطاقات من الخادم.");
+    }
+    const refresh = (async () => {
+      try {
+        const ranges = await fetchRanges.call(this.adapter, centerId);
+        CardRangeRepository.replaceCenterRanges(centerId, ranges);
+      } catch (error) {
+        if (ConnectivityService.getState() === "offline") {
+          CardRangeRepository.assertTrustedRangesAvailable(centerId);
+          return;
+        }
+        throw new Error("تعذر تحميل نطاق البطاقات الموثوق لهذا المركز. تحقق من الاتصال والصلاحية ثم أعد المحاولة.");
+      }
+    })();
+    this.cardRangeRefreshes.set(centerId, refresh);
+    try {
+      await refresh;
+    } finally {
+      if (this.cardRangeRefreshes.get(centerId) === refresh) {
+        this.cardRangeRefreshes.delete(centerId);
+      }
+    }
   }
 
   static getState(): SyncEngineState {
@@ -1556,6 +1610,7 @@ export class SyncEngine {
       session: new Set((snapshot.sessions || []).map((row: any) => String(row.id))),
       expected_student: new Set((snapshot.expectedStudents || []).map((row: any) => String(row.id))),
       attendance: new Set((snapshot.attendance || []).map((row: any) => String(row.id))),
+      absence_note: new Set((snapshot.absenceNotes || []).map((row: any) => String(row.id))),
       payment: new Set((snapshot.payments || []).map((row: any) => String(row.id))),
       student: new Set((snapshot.students || []).map((row: any) => String(row.id))),
       enrollment: new Set((snapshot.enrollments || []).map((row: any) => String(row.id))),
@@ -1688,6 +1743,16 @@ export class SyncEngine {
       [centerId],
     );
     for (const row of attendance) queue("attendance", row.id, row);
+
+    const absenceNotes = db.getAllSync<any>(
+      `SELECT id, session_id as sessionId, student_id as studentId,
+              note_text as text, created_at as createdAt, updated_at as updatedAt,
+              created_by as createdBy, created_by_name as createdByName,
+              updated_by as updatedBy
+       FROM absence_notes WHERE center_id = ?`,
+      [centerId],
+    );
+    for (const note of absenceNotes) queue("absence_note", note.id, note);
 
     const payments = db.getAllSync<any>(
       `SELECT id, student_id as studentId, amount, payment_type as paymentType,
@@ -1990,7 +2055,14 @@ export class SyncEngine {
       if (Array.isArray(data.students)) {
         for (const std of data.students) {
           const localStudent = db.getFirstSync<any>(
-            "SELECT deleted_at, deleted_by FROM students WHERE center_id = ? AND id = ?",
+            "SELECT deleted_at, deleted_by, student_color FROM students WHERE center_id = ? AND id = ?",
+            [centerId, std.id],
+          );
+          const pendingColorChange = db.getFirstSync<{ operationId: string }>(
+            `SELECT operation_id as operationId FROM sync_operations
+             WHERE center_id = ? AND entity_type = 'student_color' AND entity_id = ?
+               AND status IN ('pending', 'syncing', 'failed', 'conflict')
+             LIMIT 1`,
             [centerId, std.id],
           );
           const hasDeletedAt = Object.prototype.hasOwnProperty.call(std, "deleted_at") || Object.prototype.hasOwnProperty.call(std, "deletedAt");
@@ -2006,9 +2078,9 @@ export class SyncEngine {
             ? (Object.prototype.hasOwnProperty.call(std, "card_code") ? std.card_code : std.cardCode) ?? null
             : studentCode;
           db.runSync(
-            `INSERT INTO students (id, center_id, student_code, full_name, card_code, phone, parent_phone, grade, status, student_type, notes, deleted_at, deleted_by, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT(id) DO UPDATE SET student_code=excluded.student_code, card_code=excluded.card_code, full_name=excluded.full_name, phone=excluded.phone, parent_phone=excluded.parent_phone, grade=excluded.grade, status=excluded.status, student_type=excluded.student_type, notes=excluded.notes, deleted_at=excluded.deleted_at, deleted_by=excluded.deleted_by, updated_at=excluded.updated_at`,
+            `INSERT INTO students (id, center_id, student_code, full_name, card_code, phone, parent_phone, grade, status, student_type, notes, deleted_at, deleted_by, created_at, updated_at, student_color)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET student_code=excluded.student_code, card_code=excluded.card_code, full_name=excluded.full_name, phone=excluded.phone, parent_phone=excluded.parent_phone, grade=excluded.grade, status=excluded.status, student_type=excluded.student_type, notes=excluded.notes, deleted_at=excluded.deleted_at, deleted_by=excluded.deleted_by, updated_at=excluded.updated_at, student_color=excluded.student_color`,
             [
               std.id,
               std.center_id || centerId,
@@ -2025,6 +2097,7 @@ export class SyncEngine {
               deletedBy,
               std.created_at || new Date().toISOString(),
               std.updated_at || new Date().toISOString(),
+              pendingColorChange ? localStudent?.student_color ?? null : std.student_color || std.studentColor || null,
             ],
           );
         }
@@ -2194,6 +2267,31 @@ export class SyncEngine {
             ON CONFLICT(id) DO UPDATE SET status=excluded.status, check_in_time=excluded.check_in_time, is_late=excluded.is_late, attendance_type=excluded.attendance_type, original_absence_id=excluded.original_absence_id
             ON CONFLICT(session_id, student_id) DO UPDATE SET status=excluded.status, check_in_time=excluded.check_in_time, is_late=excluded.is_late, attendance_type=excluded.attendance_type, original_absence_id=excluded.original_absence_id`,
             [a.id, a.center_id || centerId, a.student_id || a.studentId, a.session_id || a.sessionId, a.check_in_time || a.checkInTime || a.created_at || new Date().toISOString(), (a.is_late || a.isLate) ? "late" : (a.status || "present"), a.is_late || a.isLate ? 1 : 0, a.attendance_type || a.attendanceType || "present", a.original_absence_id || a.originalAbsenceId || null, a.operation_id || a.operationId || `bootstrap-attendance-${a.id}`]);
+        }
+        if (Array.isArray(data.absenceNotes)) {
+          for (const note of data.absenceNotes) {
+            db.runSync(
+              `INSERT INTO absence_notes
+                (id, center_id, session_id, student_id, note_text, created_at,
+                 updated_at, created_by, created_by_name, updated_by)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(center_id, session_id, student_id) DO UPDATE SET
+                 note_text=excluded.note_text, updated_at=excluded.updated_at,
+                 updated_by=excluded.updated_by`,
+              [
+                note.id,
+                note.center_id || note.centerId || centerId,
+                note.session_id || note.sessionId,
+                note.student_id || note.studentId,
+                note.note_text || note.text,
+                note.created_at || note.createdAt || new Date().toISOString(),
+                note.updated_at || note.updatedAt || null,
+                note.created_by || note.createdBy || "system",
+                note.created_by_name || note.createdByName || null,
+                note.updated_by || note.updatedBy || null,
+              ],
+            );
+          }
         }
       }
       if (Array.isArray(data.payments)) {
@@ -2382,11 +2480,28 @@ export class SyncEngine {
         const entityType = change.entityType;
         const data = change.data || {};
 
-        if (entityType === "student" || entityType === "student_created") {
+        if (entityType === "student_color") {
+          const studentId = String(data.studentId || data.student_id || change.entityId || "");
+          const color = data.studentColor ?? data.student_color ?? null;
+          if (color !== null && !isStudentColor(color)) {
+            throw new Error("Student color sync change contains an unsupported color.");
+          }
+          const studentInCenter = db.getFirstSync<{ id: string }>(
+            "SELECT id FROM students WHERE center_id = ? AND id = ?",
+            [centerId, studentId],
+          );
+          if (!studentInCenter) {
+            throw new Error("Student color sync change is outside the active center or student is missing.");
+          }
+          db.runSync(
+            "UPDATE students SET student_color = ? WHERE center_id = ? AND id = ?",
+            [color, centerId, studentId],
+          );
+        } else if (entityType === "student" || entityType === "student_created") {
           const s = data.student || data;
           const studentId = s.id || change.entityId;
           const existingStudent = db.getFirstSync<any>(
-            `SELECT student_code, card_code, full_name, phone, parent_phone, grade, status, student_type, notes, deleted_at, deleted_by, created_at, updated_at
+            `SELECT student_code, card_code, full_name, phone, parent_phone, grade, status, student_type, notes, student_color, deleted_at, deleted_by, created_at, updated_at
              FROM students WHERE center_id = ? AND id = ?`,
             [centerId, studentId],
           );
@@ -2417,9 +2532,9 @@ export class SyncEngine {
           const cardWasProvided = !existingStudent && Boolean(data.card || cardCode);
 
           db.runSync(
-            `INSERT INTO students (id, center_id, student_code, full_name, card_code, phone, parent_phone, grade, status, student_type, notes, deleted_at, deleted_by, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT(id) DO UPDATE SET student_code=excluded.student_code, card_code=excluded.card_code, full_name=excluded.full_name, phone=excluded.phone, parent_phone=excluded.parent_phone, grade=excluded.grade, status=excluded.status, student_type=excluded.student_type, notes=excluded.notes, deleted_at=excluded.deleted_at, deleted_by=excluded.deleted_by, updated_at=excluded.updated_at`,
+            `INSERT INTO students (id, center_id, student_code, full_name, card_code, phone, parent_phone, grade, status, student_type, notes, deleted_at, deleted_by, created_at, updated_at, student_color)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET student_code=excluded.student_code, card_code=excluded.card_code, full_name=excluded.full_name, phone=excluded.phone, parent_phone=excluded.parent_phone, grade=excluded.grade, status=excluded.status, student_type=excluded.student_type, notes=excluded.notes, deleted_at=excluded.deleted_at, deleted_by=excluded.deleted_by, updated_at=excluded.updated_at, student_color=COALESCE(excluded.student_color, students.student_color)`,
             [
               studentId,
               centerId,
@@ -2436,6 +2551,7 @@ export class SyncEngine {
               deletedBy,
               s.created_at || existingStudent?.created_at || new Date().toISOString(),
               s.updated_at || s.updatedAt || existingStudent?.updated_at || new Date().toISOString(),
+              s.student_color || s.studentColor || existingStudent?.student_color || null,
             ],
           );
 
@@ -2841,6 +2957,29 @@ export class SyncEngine {
               att.attendance_type || att.attendanceType || "present",
               att.original_absence_id || att.originalAbsenceId || null,
               change.operationId || `srv-op-${change.sequenceNumber || Date.now()}`,
+            ],
+          );
+        } else if (entityType === "absence_note") {
+          const note = data.note || data;
+          db.runSync(
+            `INSERT INTO absence_notes
+              (id, center_id, session_id, student_id, note_text, created_at,
+               updated_at, created_by, created_by_name, updated_by)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(center_id, session_id, student_id) DO UPDATE SET
+               note_text=excluded.note_text, updated_at=excluded.updated_at,
+               updated_by=excluded.updated_by`,
+            [
+              note.id || change.entityId,
+              centerId,
+              note.session_id || note.sessionId,
+              note.student_id || note.studentId,
+              note.note_text || note.text,
+              note.created_at || note.createdAt || new Date().toISOString(),
+              note.updated_at || note.updatedAt || null,
+              note.created_by || note.createdBy || "system",
+              note.created_by_name || note.createdByName || null,
+              note.updated_by || note.updatedBy || null,
             ],
           );
         } else if (entityType === "payment") {

@@ -16,6 +16,15 @@ const router = express.Router();
 const { requireService } = require("../middleware/serviceGuard");
 const { getServiceKeyForEntity } = require("../services/serviceCatalog");
 
+function withBootstrapQueryContext(promise, table) {
+  return promise.catch((error) => {
+    if (error && typeof error === "object") {
+      error.bootstrapTable = table;
+    }
+    throw error;
+  });
+}
+
 /**
  * Full snapshot bootstrap for center
  * Supplies all authoritative domain tables directly from PostgreSQL
@@ -47,6 +56,7 @@ router.get(
           expectedStudentsRes,
           enrollmentsRes,
           attendanceRes,
+          absenceNotesRes,
           paymentsRes,
           paymentReversalsRes,
           debtAdjustmentsRes,
@@ -81,6 +91,7 @@ router.get(
           client.query("SELECT * FROM session_expected_students WHERE center_id = $1", [centerId]),
           client.query("SELECT * FROM student_group_enrollments WHERE center_id = $1", [centerId]),
           client.query("SELECT * FROM attendance WHERE center_id = $1", [centerId]),
+          client.query("SELECT * FROM absence_notes WHERE center_id = $1", [centerId]),
           client.query("SELECT * FROM payments WHERE center_id = $1", [centerId]),
           client.query("SELECT * FROM payment_reversals WHERE center_id = $1", [centerId]),
           client.query("SELECT * FROM debt_adjustments WHERE center_id = $1", [centerId]),
@@ -100,7 +111,10 @@ router.get(
           client.query("SELECT * FROM homework_evaluation_statuses WHERE center_id = $1", [centerId]),
           client.query("SELECT * FROM session_homework_evaluations WHERE center_id = $1", [centerId]),
           client.query("SELECT * FROM center_academic_stages WHERE center_id = $1", [centerId]).catch(() => ({ rows: [] })),
-          client.query("SELECT id, center_id, start_code, end_code, status, created_at, updated_at FROM card_ranges WHERE center_id = $1", [centerId]),
+          withBootstrapQueryContext(
+            client.query("SELECT id, center_id, start_code, end_code, status, created_at, updated_at FROM card_ranges WHERE center_id = $1", [centerId]),
+            "card_ranges",
+          ),
           client.query("SELECT reset_generation, updated_at FROM center_data_state WHERE center_id = $1", [centerId]),
           client.query("SELECT COALESCE(MAX(server_seq), 0) as max_seq FROM server_sync_operations WHERE center_id = $1", [centerId]),
         ]);
@@ -118,6 +132,7 @@ router.get(
         expectedStudents: expectedStudentsRes.rows,
         enrollments: enrollmentsRes.rows,
         attendance: attendanceRes.rows,
+        absenceNotes: absenceNotesRes.rows,
         payments: paymentsRes.rows,
         paymentReversals: paymentReversalsRes.rows,
         debtAdjustments: debtAdjustmentsRes.rows,
@@ -152,6 +167,27 @@ router.get(
   },
 );
 
+router.get(
+  "/card-ranges",
+  authMiddleware,
+  deviceGuard,
+  requirePermission("students.create"),
+  async (req, res, next) => {
+    try {
+      const result = await db.query(
+        `SELECT id, center_id, start_code, end_code, status, created_at, updated_at
+         FROM card_ranges
+         WHERE center_id = $1
+         ORDER BY start_code ASC, id ASC`,
+        [req.centerId],
+      );
+      res.json({ centerId: req.centerId, cardRanges: result.rows });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
 /**
  * Destructive center reset for a new term. The generation is incremented so
  * every online APK clears its local operational database on next bootstrap.
@@ -167,7 +203,7 @@ router.post("/reset", authMiddleware, deviceGuard, requirePermission("center.res
         "session_homework_evaluations", "homework_evaluation_statuses",
         "notification_deliveries", "notification_events", "notification_templates",
         "payment_reversals", "payments", "debt_adjustments", "advance_coverages",
-        "attendance", "session_expected_students", "sessions", "debt_cycles",
+        "absence_notes", "attendance", "session_expected_students", "sessions", "debt_cycles",
         "package_subject_teacher_overrides", "student_package_subscriptions",
         "package_subjects", "packages", "student_group_enrollments",
         "student_cards", "students", "group_schedules", "groups",

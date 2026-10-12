@@ -1,10 +1,11 @@
 import React from "react";
 import { Ionicons } from "@expo/vector-icons";
-import { useRouter } from "expo-router";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useFocusEffect, useRouter } from "expo-router";
+import { useCallback, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
+  Modal,
   ScrollView,
   StyleSheet,
   Text,
@@ -18,13 +19,23 @@ import { PermissionService } from "../../core/permissions";
 import { Colors, Spacing, useTheme } from "../../core/theme";
 import { useServiceVisibility } from "../../core/services/ServiceVisibilityContext";
 import { useAuthStore } from "../../features/auth/useAuthStore";
+import { useLocalDataRevision } from "../../core/database/useLocalDataRevision";
 import { AbsenceReportsService, AbsenceSessionReport, AbsenceSessionSummary, CompensationReportRow } from "../../features/attendance/AbsenceReportsService";
 import { NotificationService } from "../../features/notifications/NotificationService";
+import { AbsenceNoteRepository } from "../../features/attendance/AbsenceNoteRepository";
+import { getStudentColorPresentation } from "../../features/students/studentColor";
+import {
+  absenceNotificationOperationPrefix,
+  beginAbsenceRecipientSelection,
+  hasValidNotificationContact,
+  toggleAbsenceRecipientSelection,
+} from "../../features/notifications/absenceNotificationSelection";
 import { smartSearch } from "../../shared/utils/smartSearch";
 import { Attendance, Student } from "../../shared/types";
 import { formatLocalDate } from "../../shared/utils/date";
 
 type SessionGroup = { id?: string; name: string; items: AbsenceSessionSummary[] };
+type AbsenceSendStatus = "sent" | "failed" | "partial" | "queued" | "no_contact" | "not_absent";
 
 function SessionGroupList({
   groups,
@@ -196,16 +207,25 @@ export default function AbsenceReportsScreen() {
   // free of global mutations.
   const services = useServiceVisibility();
   const currentUser = useAuthStore((state) => state.currentUser);
+  const localDataRevision = useLocalDataRevision();
   const [month, setMonth] = useState(() => monthKey(new Date()));
   const [sessions, setSessions] = useState<AbsenceSessionSummary[]>([]);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [absenceSentBefore, setAbsenceSentBefore] = useState(false);
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedAbsentStudentIds, setSelectedAbsentStudentIds] = useState<Set<string>>(new Set());
+  const [absenceSendStatuses, setAbsenceSendStatuses] = useState<Record<string, AbsenceSendStatus>>({});
+  const [sendingSelectedAbsences, setSendingSelectedAbsences] = useState(false);
+  const sendingSelectedAbsencesRef = useRef(false);
   const [report, setReport] = useState<AbsenceSessionReport | null>(null);
   const [search, setSearch] = useState("");
   const [tab, setTab] = useState<"absent" | "present" | "compensation">("absent");
   const [loading, setLoading] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
   const [error, setError] = useState("");
+  const [noteTarget, setNoteTarget] = useState<Student | null>(null);
+  const [absenceNoteText, setAbsenceNoteText] = useState("");
+  const [savingAbsenceNote, setSavingAbsenceNote] = useState(false);
   const groupedSessions = useMemo(() => {
     const groups = new Map<string, SessionGroup>();
     sessions.forEach((item) => {
@@ -233,6 +253,8 @@ export default function AbsenceReportsScreen() {
   }, [sessions]);
 
   const canView = PermissionService.hasAnyPermission(currentUser?.permissions || [], ["attendance.view", "reports.attendance.view", "reports.view"]);
+  const canEditAbsenceNotes = PermissionService.hasPermission(currentUser?.permissions || [], "attendance.edit");
+  const canSendAbsenceNotifications = PermissionService.hasPermission(currentUser?.permissions || [], "notifications.send");
   const loadSessions = useCallback(() => {
     setLoading(true);
     setError("");
@@ -246,10 +268,28 @@ export default function AbsenceReportsScreen() {
     }
   }, [month]);
 
-  useEffect(() => { if (services.loaded && canView) loadSessions(); }, [canView, loadSessions, services.loaded]);
+  useFocusEffect(useCallback(() => {
+    if (!services.loaded || !canView) return;
+    loadSessions();
+    if (selectedSessionId) {
+      try {
+        setReport(AbsenceReportsService.getSessionReport(selectedSessionId));
+      } catch (err: any) {
+        setError(err?.message || "تعذر تحديث ملاحظات الحصة.");
+      }
+    }
+  }, [canView, loadSessions, localDataRevision, month, selectedSessionId, services.loaded]));
+
+  useFocusEffect(useCallback(() => () => {
+    setSelectionMode(false);
+    setSelectedAbsentStudentIds(new Set());
+  }, []));
 
   const openSession = (sessionId: string) => {
     setSelectedSessionId(sessionId);
+    setSelectionMode(false);
+    setSelectedAbsentStudentIds(new Set());
+    setAbsenceSendStatuses({});
     try { setAbsenceSentBefore(NotificationService.hasAbsenceNotification(sessionId)); } catch { setAbsenceSentBefore(false); }
     setReport(null);
     setSearch("");
@@ -268,6 +308,130 @@ export default function AbsenceReportsScreen() {
   const filteredAbsent = useMemo(() => report ? smartSearch(report.absent, search, [{ get: (student) => student.fullName }, { get: (student) => student.studentCode }]) : [], [report, search]);
   const filteredPresent = useMemo(() => report ? report.present.filter(({ student }) => smartSearch([student], search, [{ get: (item) => item.fullName }, { get: (item) => item.studentCode }]).length) : [], [report, search]);
   const filteredCompensation = useMemo(() => report ? report.compensation.filter(({ student }) => smartSearch([student], search, [{ get: (item) => item.fullName }, { get: (item) => item.studentCode }]).length) : [], [report, search]);
+
+  const openAbsenceNote = (student: Student) => {
+    setAbsenceNoteText(report?.absenceNotes[student.id] || "");
+    setNoteTarget(student);
+  };
+
+  const saveAbsenceNote = () => {
+    if (!selectedSessionId || !noteTarget || savingAbsenceNote) return;
+    setSavingAbsenceNote(true);
+    try {
+      AbsenceNoteRepository.save(selectedSessionId, noteTarget.id, absenceNoteText);
+      setReport(AbsenceReportsService.getSessionReport(selectedSessionId));
+      setNoteTarget(null);
+    } catch (err: any) {
+      Alert.alert("تعذر حفظ الملاحظة", err?.message || "حاول مرة أخرى.");
+    } finally {
+      setSavingAbsenceNote(false);
+    }
+  };
+
+  const toggleAbsentStudentSelection = (studentId: string) => {
+    setSelectedAbsentStudentIds((selected) => toggleAbsenceRecipientSelection(selected, studentId));
+  };
+
+  const enterAbsenceSelection = (studentId: string) => {
+    setSelectionMode(true);
+    setSelectedAbsentStudentIds(beginAbsenceRecipientSelection(studentId));
+  };
+
+  const cancelAbsenceSelection = () => {
+    setSelectionMode(false);
+    setSelectedAbsentStudentIds(new Set());
+  };
+
+  const sendSelectedAbsences = () => {
+    if (!report || !selectedSessionId || !selectedAbsentStudentIds.size || sendingSelectedAbsencesRef.current) return;
+    if (!services.isEnabled("notifications")) {
+      Alert.alert("الإشعارات غير مفعلة", "فعّل خدمة الإشعارات لهذا المركز من إدارة المنصة.");
+      return;
+    }
+    if (!canSendAbsenceNotifications) {
+      Alert.alert("غير مسموح", "ليس لديك صلاحية إرسال الإشعارات.");
+      return;
+    }
+    const count = selectedAbsentStudentIds.size;
+    Alert.alert(
+      "تأكيد إرسال إشعار الغياب",
+      `سيتم تجهيز إشعارات الغياب لـ ${count} طالب${count === 1 ? "" : "اً"} محدد${count === 1 ? "" : "ين"} فقط. هل تريد المتابعة؟`,
+      [
+        { text: "إلغاء", style: "cancel" },
+        { text: "تأكيد الإرسال", onPress: () => { void executeSelectedAbsenceSend(); } },
+      ],
+    );
+  };
+
+  const executeSelectedAbsenceSend = async () => {
+    if (!report || !selectedSessionId || sendingSelectedAbsencesRef.current) return;
+    sendingSelectedAbsencesRef.current = true;
+    setSendingSelectedAbsences(true);
+    const studentIds = Array.from(selectedAbsentStudentIds);
+    const statusUpdates: Record<string, AbsenceSendStatus> = {};
+    const details: string[] = [];
+
+    try {
+      const refreshedReport = AbsenceReportsService.getSessionReport(selectedSessionId);
+      const currentStudents = new Map(refreshedReport.absent.map((student) => [student.id, student]));
+      for (const studentId of studentIds) {
+        const student = currentStudents.get(studentId);
+        if (!student) {
+          statusUpdates[studentId] = "not_absent";
+          details.push("طالب محدد: لم يعد غائبًا عن هذه الحصة.");
+          continue;
+        }
+        if (!hasValidNotificationContact(student.parentPhone, student.phone)) {
+          statusUpdates[studentId] = "no_contact";
+          details.push(`${student.fullName}: لا توجد وسيلة تواصل صالحة.`);
+          continue;
+        }
+        try {
+          const events = NotificationService.notifyAbsentees({
+            sessionId: selectedSessionId,
+            selectedStudentIds: [studentId],
+            operationPrefix: absenceNotificationOperationPrefix(selectedSessionId, studentId),
+          });
+          const event = events[0];
+          const dispatch = await NotificationService.sendPendingDeliveries(event.id);
+          const deliveryStatus = NotificationService.getDeliveryStatusCounts(event.id);
+          const status: AbsenceSendStatus = deliveryStatus.failed > 0
+            ? deliveryStatus.sent > 0 || deliveryStatus.pending > 0 || deliveryStatus.sending > 0
+              ? "partial"
+              : "failed"
+            : deliveryStatus.pending > 0 || deliveryStatus.sending > 0
+              ? "queued"
+              : dispatch.sent > 0 || deliveryStatus.sent > 0
+                ? "sent"
+                : "failed";
+          statusUpdates[studentId] = status;
+          const statusLabel = status === "sent"
+            ? "تم الإرسال"
+            : status === "partial"
+              ? "إرسال جزئي"
+            : status === "queued"
+              ? "قيد الإرسال"
+              : "فشل الإرسال";
+          details.push(`${student.fullName}: ${statusLabel}${deliveryStatus.failed ? ` (${deliveryStatus.failed} وسيلة فاشلة)` : ""}.`);
+        } catch (sendError: any) {
+          statusUpdates[studentId] = "failed";
+          details.push(`${student.fullName}: تعذر الإرسال${sendError?.message ? ` (${sendError.message})` : ""}.`);
+        }
+      }
+      setAbsenceSendStatuses((previous) => ({ ...previous, ...statusUpdates }));
+      setSelectionMode(false);
+      setSelectedAbsentStudentIds(new Set());
+      Alert.alert(
+        "نتيجة إرسال إشعارات الغياب",
+        `المحددون: ${studentIds.length}\n${details.join("\n")}`,
+      );
+    } catch (error: any) {
+      Alert.alert("تعذر إرسال الإشعارات", error?.message || "حدث خطأ أثناء تحديث بيانات الغياب.");
+    } finally {
+      sendingSelectedAbsencesRef.current = false;
+      setSendingSelectedAbsences(false);
+    }
+  };
 
   const sendAll = async () => {
     if (absenceSentBefore) {
@@ -307,10 +471,92 @@ export default function AbsenceReportsScreen() {
       <View style={styles.sessionInfo}><Text style={styles.sessionInfoLine}>{formatDate(report.session.sessionDate)}  •  {formatTimeArabic(report.session.startTime)} - {formatTimeArabic(report.session.endTime)}</Text><View style={styles.counterRow}><Counter label="الكل" value={report.expected.length} tone="blue" /><Counter label="حاضر" value={report.present.length} tone="green" /><Counter label="غائب" value={report.absent.length} tone="red" /><Counter label="تعويض" value={report.compensated} tone="purple" /></View></View>
       <View style={styles.tabRow}>{[["absent", "الغائبين", report.absent.length], ["present", "الحاضرين", report.present.length], ["compensation", "تعويض", report.compensation.length]].map(([key, label, count]) => <TouchableOpacity key={String(key)} onPress={() => setTab(key as typeof tab)} style={[styles.tab, tab === key && styles.tabActive]}><Text style={[styles.tabText, tab === key && styles.tabTextActive]}>{label} ({count})</Text></TouchableOpacity>)}</View>
       <View style={styles.searchWrap}><Ionicons name="search-outline" size={18} color={Colors.slate400} /><TextInputLike value={search} onChangeText={setSearch} placeholder="ابحث باسم الطالب أو الكود" /></View>
-      {tab === "absent" ? <><View style={styles.actionRow}><Text style={styles.sectionTitle}>الطلاب الغائبون</Text><TouchableOpacity style={styles.sendButton} onPress={sendAll}><Ionicons name="send-outline" size={15} color="#FFF" /><Text style={styles.sendButtonText}>إرسال للكل</Text></TouchableOpacity></View>{filteredAbsent.map((student) => <StudentRow key={student.id} student={student} onPress={() => router.push({ pathname: "/(main)/students", params: { studentId: student.id } } as any)} />)}{!filteredAbsent.length ? <EmptyMessage text={search ? "لا توجد نتائج مطابقة." : "لا يوجد غياب مسجل لهذه الحصة."} /> : null}</> : null}
+      {tab === "absent" ? <>
+        {selectionMode ? (
+          <View style={styles.selectionToolbar}>
+            <View style={styles.selectionToolbarCopy}>
+              <Text style={styles.selectionCount}>تم تحديد {selectedAbsentStudentIds.size} طالب</Text>
+              <Text style={styles.selectionHint}>سيصل الإشعار للمحددين فقط</Text>
+            </View>
+            <TouchableOpacity
+              accessibilityRole="button"
+              disabled={!selectedAbsentStudentIds.size || sendingSelectedAbsences}
+              style={[styles.sendSelectedButton, (!selectedAbsentStudentIds.size || sendingSelectedAbsences) && styles.disabledButton]}
+              onPress={sendSelectedAbsences}
+            >
+              {sendingSelectedAbsences ? <ActivityIndicator size="small" color={Colors.white} /> : <Ionicons name="send-outline" size={15} color={Colors.white} />}
+              <Text style={styles.sendButtonText}>إرسال المحددين</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              accessibilityRole="button"
+              disabled={sendingSelectedAbsences}
+              style={styles.cancelSelectionButton}
+              onPress={cancelAbsenceSelection}
+            >
+              <Text style={styles.cancelSelectionText}>إلغاء</Text>
+            </TouchableOpacity>
+          </View>
+        ) : (
+          <View style={styles.actionRow}>
+            <View>
+              <Text style={styles.sectionTitle}>الطلاب الغائبون</Text>
+              <Text style={styles.selectionHint}>اضغط مطولًا على طالب لتحديد مستلمي الإشعار</Text>
+            </View>
+            {canSendAbsenceNotifications ? <TouchableOpacity style={styles.sendButton} onPress={sendAll}><Ionicons name="send-outline" size={15} color="#FFF" /><Text style={styles.sendButtonText}>إرسال للكل</Text></TouchableOpacity> : null}
+          </View>
+        )}
+        {filteredAbsent.map((student) => (
+          <StudentRow
+            key={student.id}
+            student={student}
+            note={report.absenceNotes[student.id]}
+            selected={selectedAbsentStudentIds.has(student.id)}
+            selectionMode={selectionMode}
+            sendStatus={absenceSendStatuses[student.id]}
+            onToggleSelection={() => toggleAbsentStudentSelection(student.id)}
+            onLongPress={canSendAbsenceNotifications ? () => enterAbsenceSelection(student.id) : undefined}
+            onNotePress={!selectionMode && canEditAbsenceNotes ? () => openAbsenceNote(student) : undefined}
+            onPress={() => {
+              if (selectionMode) toggleAbsentStudentSelection(student.id);
+              else router.push({ pathname: "/(main)/students", params: { studentId: student.id } } as any);
+            }}
+          />
+        ))}
+        {!filteredAbsent.length ? <EmptyMessage text={search ? "لا توجد نتائج مطابقة." : "لا يوجد غياب مسجل لهذه الحصة."} /> : null}
+      </> : null}
       {tab === "present" ? <>{filteredPresent.map(({ student, attendance }) => <StudentRow key={student.id} student={student} status={attendanceLabel(attendance)} statusTone={attendance.status === "late" ? "orange" : "green"} onPress={() => router.push({ pathname: "/(main)/students", params: { studentId: student.id } } as any)} />)}{!filteredPresent.length ? <EmptyMessage text={search ? "لا توجد نتائج مطابقة." : "لا يوجد حضور مسجل لهذه الحصة."} /> : null}</> : null}
       {tab === "compensation" ? <>{filteredCompensation.map((row) => <CompensationRow key={`${row.student.id}-${row.kind}-${row.attendance?.id || row.opportunity?.nextEligibleSessionId || "advance"}`} row={row} onPress={() => router.push({ pathname: "/(main)/students", params: { studentId: row.student.id } } as any)} />)}{!filteredCompensation.length ? <EmptyMessage text={search ? "لا توجد نتائج مطابقة." : "لا توجد بيانات تعويض لهذه الحصة."} /> : null}</> : null}
-    </ScrollView></SafeAreaView>;
+    </ScrollView>
+    <Modal visible={Boolean(noteTarget)} transparent animationType="fade" onRequestClose={() => { if (!savingAbsenceNote) setNoteTarget(null); }}>
+      <View style={styles.modalOverlay}>
+        <View style={styles.noteModal}>
+          <Text style={styles.noteModalTitle}>ملاحظة الغياب</Text>
+          <Text style={styles.noteModalHint}>{noteTarget?.fullName || ""} · {report.session.groupName || "الجلسة المحددة"}</Text>
+          <TextInput
+            value={absenceNoteText}
+            onChangeText={setAbsenceNoteText}
+            placeholder="اكتب سبب الغياب"
+            placeholderTextColor={Colors.slate400}
+            multiline
+            textAlignVertical="top"
+            style={styles.noteInput}
+          />
+          <View style={styles.noteActions}>
+            <TouchableOpacity
+              disabled={savingAbsenceNote || !absenceNoteText.trim()}
+              onPress={saveAbsenceNote}
+              style={[styles.noteSave, (savingAbsenceNote || !absenceNoteText.trim()) && styles.noteSaveDisabled]}
+            >
+              <Text style={styles.noteSaveText}>{savingAbsenceNote ? "جارٍ الحفظ..." : "حفظ الملاحظة"}</Text>
+            </TouchableOpacity>
+            <TouchableOpacity disabled={savingAbsenceNote} onPress={() => setNoteTarget(null)} style={styles.noteCancel}>
+              <Text style={styles.noteCancelText}>إلغاء</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </View>
+    </Modal>
+    </SafeAreaView>;
   }
 
   return <SafeAreaView style={styles.safe}><ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}><View style={styles.pageHeader}><View><Text style={styles.eyebrow}>الحضور والغياب</Text><Text style={styles.title}>تقارير الغياب</Text><Text style={styles.subtitle}>راجع جلسات المجموعات وحالات الطلاب الفعلية.</Text></View><View style={styles.headerIcon}><Ionicons name="bar-chart-outline" size={23} color={Colors.primary} /></View></View><View style={styles.monthPicker}><TouchableOpacity onPress={() => setMonth((value) => shiftMonth(value, -1))}><Ionicons name="chevron-forward" size={20} color={Colors.slate600} /></TouchableOpacity><View style={styles.monthCenter}><Text style={styles.monthLabel}>{monthLabel(month)}</Text><Text style={styles.monthHint}>الشهر المحدد</Text></View><TouchableOpacity onPress={() => setMonth((value) => shiftMonth(value, 1))}><Ionicons name="chevron-back" size={20} color={Colors.slate600} /></TouchableOpacity></View>{loading ? <View style={styles.loadingBox}><ActivityIndicator color={Colors.primary} /><Text style={styles.muted}>جارٍ تحميل الجلسات...</Text></View> : error ? <View style={styles.errorBox}><Text style={styles.errorText}>{error}</Text><TouchableOpacity onPress={loadSessions}><Text style={styles.retryText}>إعادة المحاولة</Text></TouchableOpacity></View> : <SessionGroupList groups={groupedSessions} onPress={openSession} />}{!loading && !error && !sessions.length ? <EmptyMessage text="لا توجد جلسات في هذا الشهر." /> : null}</ScrollView></SafeAreaView>;
@@ -320,7 +566,63 @@ function Counter({ label, value, tone }: { label: string; value: number; tone: "
 
 function SessionCard({ item, onPress }: { item: AbsenceSessionSummary; onPress: () => void }) { return <TouchableOpacity activeOpacity={0.8} onPress={onPress} style={styles.sessionCard}><View style={styles.sessionCardTop}><View style={styles.chevron}><Ionicons name="chevron-back" size={19} color={Colors.slate400} /></View><View style={styles.sessionCopy}><Text numberOfLines={1} style={styles.sessionName}>{item.session.groupName || "مجموعة"}</Text><Text numberOfLines={1} style={styles.sessionMeta}>{item.session.subjectName || ""}  •  {item.session.teacherName || "مدرس غير محدد"}</Text><Text style={styles.sessionDate}>{formatDate(item.session.sessionDate)}  •  {formatTimeArabic(item.session.startTime)}</Text></View></View><View style={styles.cardCounters}><Counter label="الكل" value={item.total} tone="blue" /><Counter label="حاضر" value={item.present} tone="green" /><Counter label="غائب" value={item.absent} tone="red" /><Counter label="تعويض" value={item.compensated} tone="purple" /></View></TouchableOpacity>; }
 
-function StudentRow({ student, status, statusTone, onPress }: { student: Student; status?: string; statusTone?: "green" | "orange"; onPress: () => void }) { return <TouchableOpacity activeOpacity={0.8} onPress={onPress} style={styles.studentRow}><View style={styles.studentAvatar}><Ionicons name="person-outline" size={18} color={Colors.primary} /></View><View style={styles.studentCopy}><Text style={styles.studentName}>{student.fullName}</Text><Text style={styles.studentCode}>كود الطالب: {student.studentCode || "—"}</Text></View>{status ? <View style={[styles.statusPill, statusTone === "green" ? styles.statusGreen : styles.statusOrange]}><Text style={styles.statusPillText}>{status}</Text></View> : null}<Ionicons name="chevron-back" size={17} color={Colors.slate400} /></TouchableOpacity>; }
+function StudentRow({ student, status, statusTone, note, selected = false, selectionMode = false, sendStatus, onToggleSelection, onLongPress, onNotePress, onPress }: { student: Student; status?: string; statusTone?: "green" | "orange"; note?: string; selected?: boolean; selectionMode?: boolean; sendStatus?: AbsenceSendStatus; onToggleSelection?: () => void; onLongPress?: () => void; onNotePress?: () => void; onPress: () => void }) {
+  const studentColor = getStudentColorPresentation(student.studentColor);
+  const sendStatusLabel = sendStatus === "sent"
+    ? "تم الإرسال"
+    : sendStatus === "partial"
+      ? "إرسال جزئي"
+    : sendStatus === "failed"
+      ? "فشل الإرسال"
+      : sendStatus === "queued"
+        ? "قيد الإرسال"
+        : sendStatus === "no_contact"
+          ? "لا توجد وسيلة تواصل صالحة"
+          : sendStatus === "not_absent"
+            ? "لم يعد غائبًا"
+            : null;
+  return (
+    <View style={[
+      styles.studentRow,
+      studentColor.backgroundColor ? { backgroundColor: studentColor.backgroundColor } : null,
+      selected && styles.studentRowSelected,
+    ]}>
+      <TouchableOpacity
+        activeOpacity={0.8}
+        accessibilityRole="button"
+        accessibilityState={selectionMode ? { selected } : undefined}
+        onPress={onPress}
+        onLongPress={onLongPress}
+        style={styles.studentMain}
+      >
+        <View style={styles.studentAvatar}><Ionicons name="person-outline" size={18} color={Colors.primary} /></View>
+        <View style={styles.studentCopy}>
+          <Text style={styles.studentName}>{student.fullName}</Text>
+          <Text style={styles.studentCode}>كود الطالب: {student.studentCode || "—"}</Text>
+          {note ? <Text style={styles.absenceNotePreview}>ملاحظة: {note}</Text> : null}
+          {sendStatusLabel ? <Text style={[styles.absenceSendStatus, sendStatus === "failed" || sendStatus === "partial" || sendStatus === "no_contact" ? styles.absenceSendStatusError : null]}>{sendStatusLabel}</Text> : null}
+        </View>
+        {selectionMode ? (
+          <View style={[styles.selectionCheck, selected && styles.selectionCheckSelected]}>
+            {selected ? <Ionicons name="checkmark" size={17} color={Colors.white} /> : null}
+          </View>
+        ) : null}
+        {status ? <View style={[styles.statusPill, statusTone === "green" ? styles.statusGreen : styles.statusOrange]}><Text style={styles.statusPillText}>{status}</Text></View> : null}
+        {!selectionMode ? <Ionicons name="chevron-back" size={17} color={Colors.slate400} /> : null}
+      </TouchableOpacity>
+      {onNotePress ? (
+        <TouchableOpacity
+          accessibilityRole="button"
+          accessibilityLabel={note ? "تعديل ملاحظة الغياب" : "إضافة ملاحظة غياب"}
+          onPress={onNotePress}
+          style={styles.absenceNoteButton}
+        >
+          <Ionicons name={note ? "create-outline" : "chatbox-ellipses-outline"} size={17} color={Colors.primary} />
+        </TouchableOpacity>
+      ) : null}
+    </View>
+  );
+}
 
 function CompensationRow({ row, onPress }: { row: CompensationReportRow; onPress: () => void }) { const label = row.kind === "completed" ? "تم التعويض" : row.kind === "advanced" ? "تغطية مسبقة" : "مؤهل للتعويض"; return <StudentRow student={row.student} status={label} statusTone={row.kind === "eligible" ? "orange" : "green"} onPress={onPress} />; }
 
@@ -332,6 +634,34 @@ const createStyles = () => StyleSheet.create({
   groupReportHeader: { minHeight: 62, backgroundColor: Colors.white, borderRadius: 15, borderWidth: 1, borderColor: Colors.border, paddingHorizontal: 14, paddingVertical: 10, flexDirection: "row-reverse", alignItems: "center", gap: 10 },
   groupReportHeaderCopy: { flex: 1, alignItems: "flex-end" },
   groupReportHint: { color: Colors.slate500, fontSize: 10, marginTop: 3 },
-  safe: { flex: 1, backgroundColor: Colors.background }, content: { padding: 16, paddingBottom: 34, gap: 10 }, centered: { flex: 1, alignItems: "center", justifyContent: "center", gap: 9, padding: 24, backgroundColor: Colors.background }, pageHeader: { flexDirection: "row-reverse", alignItems: "center", gap: 12, paddingVertical: 5 }, detailHeader: { flexDirection: "row-reverse", alignItems: "center", gap: 10, paddingVertical: 5 }, headerCopy: { flex: 1, alignItems: "flex-end" }, headerIcon: { width: 45, height: 45, borderRadius: 14, alignItems: "center", justifyContent: "center", backgroundColor: Colors.primaryLight }, backButton: { width: 40, height: 40, borderRadius: 12, alignItems: "center", justifyContent: "center", backgroundColor: Colors.white, borderWidth: 1, borderColor: Colors.border }, eyebrow: { color: Colors.primary, fontSize: 11, fontWeight: "800", textAlign: "right" }, title: { color: Colors.slate900, fontSize: 25, fontWeight: "900", marginTop: 2, textAlign: "right" }, subtitle: { color: Colors.slate500, fontSize: 12, marginTop: 3, textAlign: "right" }, monthPicker: { minHeight: 58, borderRadius: 15, backgroundColor: Colors.white, borderWidth: 1, borderColor: Colors.border, flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 14 }, monthCenter: { alignItems: "center" }, monthLabel: { color: Colors.slate900, fontSize: 16, fontWeight: "800" }, monthHint: { color: Colors.slate500, fontSize: 10, marginTop: 2 }, sessionCard: { backgroundColor: Colors.white, borderRadius: 15, borderWidth: 1, borderColor: Colors.border, padding: 12 }, sessionCardTop: { flexDirection: "row-reverse", gap: 7, alignItems: "flex-start" }, chevron: { width: 25, height: 25, alignItems: "center", justifyContent: "center" }, sessionCopy: { flex: 1, alignItems: "flex-end" }, sessionName: { color: Colors.slate900, fontSize: 15, fontWeight: "800" }, sessionMeta: { color: Colors.slate600, fontSize: 11, marginTop: 2 }, sessionDate: { color: Colors.slate500, fontSize: 10, marginTop: 4 }, cardCounters: { flexDirection: "row-reverse", borderTopWidth: 1, borderTopColor: Colors.slate100, marginTop: 10, paddingTop: 9, justifyContent: "space-between" }, counter: { alignItems: "center", minWidth: 45 }, counterValue: { color: Colors.primary, fontSize: 17, fontWeight: "900" }, counterLabel: { color: Colors.slate500, fontSize: 10, marginTop: 1 }, green: { color: Colors.successText }, red: { color: Colors.dangerText }, purple: { color: "#7C3AED" }, sessionInfo: { backgroundColor: Colors.white, borderRadius: 15, borderWidth: 1, borderColor: Colors.border, padding: 12 }, sessionInfoLine: { color: Colors.slate600, fontSize: 12, textAlign: "right" }, counterRow: { flexDirection: "row-reverse", justifyContent: "space-between", marginTop: 10 }, tabRow: { flexDirection: "row-reverse", backgroundColor: Colors.white, borderRadius: 13, padding: 4, borderWidth: 1, borderColor: Colors.border }, tab: { flex: 1, alignItems: "center", paddingVertical: 10, borderRadius: 10 }, tabActive: { backgroundColor: Colors.primary }, tabText: { color: Colors.slate600, fontSize: 11, fontWeight: "800" }, tabTextActive: { color: Colors.white }, searchWrap: { minHeight: 44, borderRadius: 11, backgroundColor: Colors.white, borderWidth: 1, borderColor: Colors.border, flexDirection: "row-reverse", alignItems: "center", gap: 8, paddingHorizontal: 11 }, inputHost: { flex: 1 }, searchInput: { color: Colors.slate800, fontSize: 13, textAlign: "right", minHeight: 40 }, actionRow: { flexDirection: "row-reverse", alignItems: "center", justifyContent: "space-between", marginTop: 2 }, sectionTitle: { color: Colors.slate900, fontSize: 16, fontWeight: "800", textAlign: "right" }, sendButton: { flexDirection: "row-reverse", alignItems: "center", gap: 5, paddingHorizontal: 11, minHeight: 34, borderRadius: 9, backgroundColor: Colors.primary }, sendButtonText: { color: Colors.white, fontSize: 11, fontWeight: "800" }, studentRow: { backgroundColor: Colors.white, borderRadius: 13, borderWidth: 1, borderColor: Colors.border, padding: 11, flexDirection: "row-reverse", alignItems: "center", gap: 9 }, studentAvatar: { width: 34, height: 34, borderRadius: 11, backgroundColor: Colors.primaryLight, alignItems: "center", justifyContent: "center" }, studentCopy: { flex: 1, alignItems: "flex-end" }, studentName: { color: Colors.slate900, fontSize: 13, fontWeight: "800" }, studentCode: { color: Colors.slate500, fontSize: 10, marginTop: 3 }, statusPill: { borderRadius: 8, paddingHorizontal: 8, paddingVertical: 5 }, statusGreen: { backgroundColor: Colors.successLight }, statusOrange: { backgroundColor: Colors.warningLight }, statusPillText: { color: Colors.slate700, fontSize: 10, fontWeight: "800" }, loadingBox: { alignItems: "center", gap: 8, paddingVertical: 45 }, errorBox: { backgroundColor: Colors.dangerLight, borderColor: Colors.danger, borderWidth: 1, borderRadius: 12, padding: 14, gap: 8, alignItems: "center" }, errorText: { color: Colors.dangerText, fontSize: 12, textAlign: "center" }, retryText: { color: Colors.primary, fontWeight: "800" }, emptyBox: { alignItems: "center", justifyContent: "center", gap: 8, paddingVertical: 42 }, emptyTitle: { color: Colors.slate800, fontSize: 16, fontWeight: "800", textAlign: "center" }, emptyText: { color: Colors.slate500, fontSize: 12, textAlign: "center" }, muted: { color: Colors.slate500, fontSize: 12, textAlign: "center" }, groupReport: { gap: 7, marginBottom: 8 }, groupReportTitle: { color: Colors.slate900, fontSize: 15, fontWeight: "900", textAlign: "right", paddingHorizontal: 4 }, sessionNumber: { color: Colors.primary, fontSize: 11, fontWeight: "800", textAlign: "right", marginTop: 2 },
+  safe: { flex: 1, backgroundColor: Colors.background }, content: { padding: 16, paddingBottom: 34, gap: 10 }, centered: { flex: 1, alignItems: "center", justifyContent: "center", gap: 9, padding: 24, backgroundColor: Colors.background }, pageHeader: { flexDirection: "row-reverse", alignItems: "center", gap: 12, paddingVertical: 5 }, detailHeader: { flexDirection: "row-reverse", alignItems: "center", gap: 10, paddingVertical: 5 }, headerCopy: { flex: 1, alignItems: "flex-end" }, headerIcon: { width: 45, height: 45, borderRadius: 14, alignItems: "center", justifyContent: "center", backgroundColor: Colors.primaryLight }, backButton: { width: 40, height: 40, borderRadius: 12, alignItems: "center", justifyContent: "center", backgroundColor: Colors.white, borderWidth: 1, borderColor: Colors.border }, eyebrow: { color: Colors.primary, fontSize: 11, fontWeight: "800", textAlign: "right" }, title: { color: Colors.slate900, fontSize: 25, fontWeight: "900", marginTop: 2, textAlign: "right" }, subtitle: { color: Colors.slate500, fontSize: 12, marginTop: 3, textAlign: "right" }, monthPicker: { minHeight: 58, borderRadius: 15, backgroundColor: Colors.white, borderWidth: 1, borderColor: Colors.border, flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 14 }, monthCenter: { alignItems: "center" }, monthLabel: { color: Colors.slate900, fontSize: 16, fontWeight: "800" }, monthHint: { color: Colors.slate500, fontSize: 10, marginTop: 2 }, sessionCard: { backgroundColor: Colors.white, borderRadius: 15, borderWidth: 1, borderColor: Colors.border, padding: 12 }, sessionCardTop: { flexDirection: "row-reverse", gap: 7, alignItems: "flex-start" }, chevron: { width: 25, height: 25, alignItems: "center", justifyContent: "center" }, sessionCopy: { flex: 1, alignItems: "flex-end" }, sessionName: { color: Colors.slate900, fontSize: 15, fontWeight: "800" }, sessionMeta: { color: Colors.slate600, fontSize: 11, marginTop: 2 }, sessionDate: { color: Colors.slate500, fontSize: 10, marginTop: 4 }, cardCounters: { flexDirection: "row-reverse", borderTopWidth: 1, borderTopColor: Colors.slate100, marginTop: 10, paddingTop: 9, justifyContent: "space-between" }, counter: { alignItems: "center", minWidth: 45 }, counterValue: { color: Colors.primary, fontSize: 17, fontWeight: "900" }, counterLabel: { color: Colors.slate500, fontSize: 10, marginTop: 1 }, green: { color: Colors.successText }, red: { color: Colors.dangerText }, purple: { color: "#7C3AED" }, sessionInfo: { backgroundColor: Colors.white, borderRadius: 15, borderWidth: 1, borderColor: Colors.border, padding: 12 }, sessionInfoLine: { color: Colors.slate600, fontSize: 12, textAlign: "right" }, counterRow: { flexDirection: "row-reverse", justifyContent: "space-between", marginTop: 10 }, tabRow: { flexDirection: "row-reverse", backgroundColor: Colors.white, borderRadius: 13, padding: 4, borderWidth: 1, borderColor: Colors.border }, tab: { flex: 1, alignItems: "center", paddingVertical: 10, borderRadius: 10 }, tabActive: { backgroundColor: Colors.primary }, tabText: { color: Colors.slate600, fontSize: 11, fontWeight: "800" }, tabTextActive: { color: Colors.white }, searchWrap: { minHeight: 44, borderRadius: 11, backgroundColor: Colors.white, borderWidth: 1, borderColor: Colors.border, flexDirection: "row-reverse", alignItems: "center", gap: 8, paddingHorizontal: 11 }, inputHost: { flex: 1 }, searchInput: { color: Colors.slate800, fontSize: 13, textAlign: "right", minHeight: 40 }, actionRow: { flexDirection: "row-reverse", alignItems: "center", justifyContent: "space-between", marginTop: 2 }, sectionTitle: { color: Colors.slate900, fontSize: 16, fontWeight: "800", textAlign: "right" }, sendButton: { flexDirection: "row-reverse", alignItems: "center", gap: 5, paddingHorizontal: 11, minHeight: 34, borderRadius: 9, backgroundColor: Colors.primary }, sendButtonText: { color: Colors.white, fontSize: 11, fontWeight: "800" },
+  studentRow: { backgroundColor: Colors.white, borderRadius: 13, borderWidth: 1, borderColor: Colors.border, padding: 8, flexDirection: "row-reverse", alignItems: "center", gap: 7 },
+  studentRowSelected: { borderColor: Colors.primary, backgroundColor: Colors.primaryMuted },
+  studentMain: { flex: 1, minWidth: 0, flexDirection: "row-reverse", alignItems: "center", gap: 9 },
+  studentAvatar: { width: 34, height: 34, borderRadius: 11, backgroundColor: Colors.primaryLight, alignItems: "center", justifyContent: "center" }, studentCopy: { flex: 1, minWidth: 0, alignItems: "flex-end" }, studentName: { color: Colors.slate900, fontSize: 13, fontWeight: "800", textAlign: "right" }, studentCode: { color: Colors.slate500, fontSize: 10, marginTop: 3, textAlign: "right" }, absenceNotePreview: { color: Colors.primaryDark, fontSize: 10, marginTop: 4, textAlign: "right" }, absenceNoteButton: { width: 34, height: 34, borderRadius: 10, backgroundColor: Colors.primaryMuted, alignItems: "center", justifyContent: "center" }, statusPill: { borderRadius: 8, paddingHorizontal: 8, paddingVertical: 5 }, statusGreen: { backgroundColor: Colors.successLight }, statusOrange: { backgroundColor: Colors.warningLight }, statusPillText: { color: Colors.slate700, fontSize: 10, fontWeight: "800" },
+  selectionToolbar: { flexDirection: "row-reverse", alignItems: "center", flexWrap: "wrap", gap: 7, padding: 10, borderRadius: 12, borderWidth: 1, borderColor: Colors.primaryLight, backgroundColor: Colors.white },
+  selectionToolbarCopy: { flex: 1, minWidth: 100, alignItems: "flex-end" },
+  selectionCount: { color: Colors.slate900, fontSize: 12, fontWeight: "900", textAlign: "right" },
+  selectionHint: { color: Colors.slate500, fontSize: 10, marginTop: 3, textAlign: "right" },
+  sendSelectedButton: { minHeight: 36, flexDirection: "row-reverse", alignItems: "center", justifyContent: "center", gap: 5, paddingHorizontal: 10, borderRadius: 9, backgroundColor: Colors.primary },
+  disabledButton: { opacity: 0.5 },
+  cancelSelectionButton: { minHeight: 36, justifyContent: "center", paddingHorizontal: 9, borderRadius: 9, borderWidth: 1, borderColor: Colors.border },
+  cancelSelectionText: { color: Colors.slate600, fontSize: 11, fontWeight: "700" },
+  selectionCheck: { width: 23, height: 23, borderRadius: 7, borderWidth: 1.5, borderColor: Colors.slate400, alignItems: "center", justifyContent: "center" },
+  selectionCheckSelected: { borderColor: Colors.primary, backgroundColor: Colors.primary },
+  absenceSendStatus: { color: Colors.successText, fontSize: 10, marginTop: 4, textAlign: "right" },
+  absenceSendStatusError: { color: Colors.dangerText },
+  modalOverlay: { flex: 1, justifyContent: "center", padding: 22, backgroundColor: "rgba(15, 23, 42, 0.45)" },
+  noteModal: { padding: 18, borderRadius: 16, backgroundColor: Colors.white },
+  noteModalTitle: { color: Colors.slate900, fontSize: 17, fontWeight: "900", textAlign: "right" },
+  noteModalHint: { color: Colors.slate500, fontSize: 11, marginTop: 5, textAlign: "right" },
+  noteInput: { minHeight: 112, marginTop: 14, padding: 11, borderRadius: 10, borderWidth: 1, borderColor: Colors.border, color: Colors.slate800, fontSize: 13, textAlign: "right" },
+  noteActions: { flexDirection: "row-reverse", gap: 8, marginTop: 13 },
+  noteSave: { flex: 1, minHeight: 42, borderRadius: 10, backgroundColor: Colors.primary, alignItems: "center", justifyContent: "center" },
+  noteSaveDisabled: { opacity: 0.55 },
+  noteSaveText: { color: Colors.white, fontSize: 12, fontWeight: "800" },
+  noteCancel: { minWidth: 75, minHeight: 42, borderRadius: 10, borderWidth: 1, borderColor: Colors.border, alignItems: "center", justifyContent: "center" },
+  noteCancelText: { color: Colors.slate600, fontSize: 12, fontWeight: "700" },
+  loadingBox: { alignItems: "center", gap: 8, paddingVertical: 45 }, errorBox: { backgroundColor: Colors.dangerLight, borderColor: Colors.danger, borderWidth: 1, borderRadius: 12, padding: 14, gap: 8, alignItems: "center" }, errorText: { color: Colors.dangerText, fontSize: 12, textAlign: "center" }, retryText: { color: Colors.primary, fontWeight: "800" }, emptyBox: { alignItems: "center", justifyContent: "center", gap: 8, paddingVertical: 42 }, emptyTitle: { color: Colors.slate800, fontSize: 16, fontWeight: "800", textAlign: "center" }, emptyText: { color: Colors.slate500, fontSize: 12, textAlign: "center" }, muted: { color: Colors.slate500, fontSize: 12, textAlign: "center" }, groupReport: { gap: 7, marginBottom: 8 }, groupReportTitle: { color: Colors.slate900, fontSize: 15, fontWeight: "900", textAlign: "right", paddingHorizontal: 4 }, sessionNumber: { color: Colors.primary, fontSize: 11, fontWeight: "800", textAlign: "right", marginTop: 2 },
 });
 let styles = createStyles();

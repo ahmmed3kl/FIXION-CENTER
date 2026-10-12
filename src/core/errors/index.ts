@@ -79,6 +79,16 @@ export class ConflictError extends AppError {
   }
 }
 
+export class DuplicateAttendanceError extends ConflictError {
+  constructor() {
+    super(
+      "تم تحضير الطالب مسبقًا",
+      "تم تحضير الطالب مسبقًا",
+    );
+    this.name = "DuplicateAttendanceError";
+  }
+}
+
 export class SyncError extends AppError {
   constructor(message: string, userMessage = "حدث خطأ أثناء مزامنة البيانات.") {
     super(message, "SYNC_ERROR", userMessage);

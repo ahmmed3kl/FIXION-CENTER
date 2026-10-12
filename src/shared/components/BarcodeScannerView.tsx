@@ -1,15 +1,17 @@
 import { Ionicons } from "@expo/vector-icons";
 import { CameraView, useCameraPermissions } from "expo-camera";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  Alert,
+  ActivityIndicator,
+  Modal,
   StyleSheet,
   Text,
   TouchableOpacity,
   View,
-  ViewStyle,
 } from "react-native";
-import { Colors, BorderRadius, Spacing } from "../../core/theme";
+import { SafeAreaView } from "react-native-safe-area-context";
+import { Colors, Spacing } from "../../core/theme";
+import { normalizeScannedBarcode } from "./barcodeScannerValue";
 
 export const FIXION_BARCODE_TYPES = [
   "code128",
@@ -24,7 +26,6 @@ export const FIXION_BARCODE_TYPES = [
 type Props = {
   onDetected: (data: string) => void;
   onClose: () => void;
-  style?: ViewStyle;
   allowedBarcodeTypes?: readonly string[];
   title?: string;
   hint?: string;
@@ -34,26 +35,43 @@ type Props = {
 export function BarcodeScannerView({
   onDetected,
   onClose,
-  style,
   allowedBarcodeTypes = FIXION_BARCODE_TYPES,
   title = "مسح كارت الطالب",
-  hint = "وجّه الكاميرا نحو الباركود",
+  hint = "وجّه الكاميرا نحو الباركود في أي موضع على الشاشة",
 }: Props) {
   const [permission, requestPermission] = useCameraPermissions();
   const [torch, setTorch] = useState(false);
+  const [permissionError, setPermissionError] = useState<string | null>(null);
+  const [cameraError, setCameraError] = useState<string | null>(null);
   const lockedRef = useRef(false);
+  const permissionRequestInFlightRef = useRef(false);
   const unlockTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => () => {
     if (unlockTimerRef.current) clearTimeout(unlockTimerRef.current);
   }, []);
 
+  const askForPermission = useCallback(async () => {
+    if (permissionRequestInFlightRef.current) return;
+    permissionRequestInFlightRef.current = true;
+    setPermissionError(null);
+    try {
+      await requestPermission();
+    } catch {
+      setPermissionError("تعذر طلب إذن الكاميرا. حاول مرة أخرى أو تحقق من إعدادات الجهاز.");
+    } finally {
+      permissionRequestInFlightRef.current = false;
+    }
+  }, [requestPermission]);
+
   useEffect(() => {
-    if (permission && !permission.granted && permission.canAskAgain) void requestPermission();
-  }, [permission, requestPermission]);
+    if (permission?.status === "undetermined") {
+      void askForPermission();
+    }
+  }, [askForPermission, permission]);
 
   const handleDetected = ({ data }: { data: string }) => {
-    const value = String(data || "").trim();
+    const value = normalizeScannedBarcode(data);
     if (!value || lockedRef.current) return;
     lockedRef.current = true;
     setTorch(false);
@@ -63,52 +81,106 @@ export function BarcodeScannerView({
 
   if (!permission?.granted) {
     return (
-      <View style={[styles.root, styles.permissionRoot, style]}>
-        <Ionicons name="camera-outline" size={34} color={Colors.primary} />
-        <Text style={styles.title}>{title}</Text>
-        <Text style={styles.hint}>{permission?.canAskAgain ? "اسمح باستخدام الكاميرا لمسح الكارت." : "تم رفض صلاحية الكاميرا. فعّلها من إعدادات الجهاز."}</Text>
-        <View style={styles.actions}>
-          {permission?.canAskAgain ? <TouchableOpacity style={styles.action} onPress={() => void requestPermission()}><Text style={styles.actionText}>السماح بالكاميرا</Text></TouchableOpacity> : <TouchableOpacity style={styles.action} onPress={() => Alert.alert("صلاحية الكاميرا", "افتح إعدادات الجهاز وفعّل صلاحية الكاميرا ثم حاول مرة أخرى.")}><Text style={styles.actionText}>معرفة طريقة التفعيل</Text></TouchableOpacity>}
-          <TouchableOpacity style={styles.cancelAction} onPress={onClose}><Text style={styles.cancelText}>إلغاء</Text></TouchableOpacity>
-        </View>
-      </View>
+      <Modal
+        visible
+        animationType="slide"
+        presentationStyle="fullScreen"
+        statusBarTranslucent
+        navigationBarTranslucent
+        onRequestClose={onClose}
+      >
+        <SafeAreaView style={styles.permissionRoot} edges={["top", "bottom"]}>
+          {permission ? <Ionicons name="camera-outline" size={38} color={Colors.primary} /> : <ActivityIndicator size="large" color={Colors.primary} />}
+          <Text style={styles.permissionTitle}>{title}</Text>
+          <Text style={styles.permissionHint}>
+            {!permission
+              ? "جارٍ التحقق من إذن الكاميرا..."
+              : permission.canAskAgain
+                ? "اسمح باستخدام الكاميرا لمسح الكارت."
+                : "تم رفض صلاحية الكاميرا. فعّلها من إعدادات الجهاز ثم أعد المحاولة."}
+          </Text>
+          {permissionError ? <Text style={styles.permissionError}>{permissionError}</Text> : null}
+          <View style={styles.permissionActions}>
+            {permission?.canAskAgain ? (
+              <TouchableOpacity style={styles.action} onPress={() => void askForPermission()}>
+                <Text style={styles.actionText}>السماح بالكاميرا</Text>
+              </TouchableOpacity>
+            ) : null}
+            <TouchableOpacity style={styles.cancelAction} onPress={onClose}>
+              <Text style={styles.cancelText}>إغلاق</Text>
+            </TouchableOpacity>
+          </View>
+        </SafeAreaView>
+      </Modal>
     );
   }
 
   return (
-    <View style={[styles.root, style]}>
-      <CameraView
-        style={StyleSheet.absoluteFill}
-        facing="back"
-        autofocus="on"
-        zoom={0}
-        enableTorch={torch}
-        barcodeScannerSettings={{ barcodeTypes: [...allowedBarcodeTypes] as any }}
-        onBarcodeScanned={handleDetected}
-      />
-      <View pointerEvents="none" style={styles.overlay}>
-        <View style={styles.scanFrame} />
-        <Text style={styles.overlayHint}>{hint}</Text>
+    <Modal
+      visible
+      animationType="slide"
+      presentationStyle="fullScreen"
+      statusBarTranslucent
+      navigationBarTranslucent
+      onRequestClose={onClose}
+    >
+      <View style={styles.root}>
+        <CameraView
+          style={StyleSheet.absoluteFill}
+          facing="back"
+          active
+          autofocus="on"
+          zoom={0}
+          enableTorch={torch}
+          barcodeScannerSettings={{ barcodeTypes: [...allowedBarcodeTypes] as any }}
+          onBarcodeScanned={handleDetected}
+          onMountError={(event) => setCameraError(event.message || "تعذر تشغيل معاينة الكاميرا.")}
+        />
+        <SafeAreaView style={styles.controls} edges={["top", "bottom"]}>
+          <View style={styles.topBar}>
+            <Text style={styles.title}>{title}</Text>
+            <TouchableOpacity accessibilityRole="button" accessibilityLabel="إغلاق الماسح" style={styles.iconButton} onPress={onClose}>
+              <Ionicons name="close" size={25} color={Colors.white} />
+            </TouchableOpacity>
+          </View>
+          <View pointerEvents="none" style={styles.guideArea}>
+            <View style={styles.scanFrame} />
+            {cameraError ? <Text style={styles.cameraError}>{cameraError}</Text> : null}
+            <Text style={styles.overlayHint}>{hint}</Text>
+          </View>
+          <View style={styles.actions}>
+            <TouchableOpacity style={styles.action} onPress={() => setTorch((value) => !value)}>
+              <Ionicons name={torch ? "flash" : "flash-outline"} size={19} color={Colors.white} />
+              <Text style={styles.actionText}>{torch ? "إغلاق الفلاش" : "تشغيل الفلاش"}</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.cancelAction} onPress={onClose}>
+              <Text style={styles.cancelText}>إغلاق الماسح</Text>
+            </TouchableOpacity>
+          </View>
+        </SafeAreaView>
       </View>
-      <View style={styles.topBar}><Text style={styles.title}>{title}</Text><TouchableOpacity style={styles.iconButton} onPress={onClose}><Ionicons name="close" size={23} color={Colors.white} /></TouchableOpacity></View>
-      <View style={styles.actions}><TouchableOpacity style={styles.action} onPress={() => setTorch((value) => !value)}><Ionicons name={torch ? "flash" : "flash-outline"} size={19} color={Colors.white} /><Text style={styles.actionText}>{torch ? "إغلاق الفلاش" : "تشغيل الفلاش"}</Text></TouchableOpacity><TouchableOpacity style={styles.cancelAction} onPress={onClose}><Text style={styles.cancelText}>إلغاء</Text></TouchableOpacity></View>
-    </View>
+    </Modal>
   );
 }
 
 const styles = StyleSheet.create({
-  root: { minHeight: 290, overflow: "hidden", borderRadius: BorderRadius.lg, backgroundColor: Colors.slate900, justifyContent: "space-between" },
-  permissionRoot: { padding: Spacing.lg, alignItems: "center", justifyContent: "center", gap: Spacing.sm, backgroundColor: Colors.slate50 },
+  root: { flex: 1, overflow: "hidden", backgroundColor: Colors.slate900 },
+  controls: { flex: 1, justifyContent: "space-between" },
+  permissionRoot: { flex: 1, padding: Spacing.lg, alignItems: "center", justifyContent: "center", gap: Spacing.md, backgroundColor: Colors.slate50 },
+  permissionTitle: { color: Colors.slate900, fontSize: 18, fontWeight: "900", textAlign: "center" },
+  permissionHint: { color: Colors.slate600, fontSize: 14, textAlign: "center", lineHeight: 21 },
+  permissionError: { color: Colors.dangerText, fontSize: 13, textAlign: "center", lineHeight: 20 },
+  permissionActions: { alignItems: "center", gap: Spacing.sm, marginTop: Spacing.sm },
   title: { color: Colors.white, fontSize: 16, fontWeight: "900", textAlign: "center" },
-  hint: { color: Colors.slate500, fontSize: 12, textAlign: "center", lineHeight: 19 },
-  topBar: { padding: Spacing.md, flexDirection: "row", alignItems: "center", justifyContent: "space-between", backgroundColor: "rgba(15,23,42,.45)" },
-  iconButton: { width: 38, height: 38, borderRadius: 12, alignItems: "center", justifyContent: "center", backgroundColor: "rgba(255,255,255,.18)" },
-  overlay: { ...StyleSheet.absoluteFill, alignItems: "center", justifyContent: "center" },
-  scanFrame: { width: "78%", height: 112, borderWidth: 2, borderColor: Colors.white, borderRadius: 18, backgroundColor: "transparent" },
-  overlayHint: { color: Colors.white, fontSize: 12, fontWeight: "800", marginTop: 14, backgroundColor: "rgba(15,23,42,.55)", paddingHorizontal: 12, paddingVertical: 6, borderRadius: 8 },
-  actions: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, padding: Spacing.md, backgroundColor: "rgba(15,23,42,.58)" },
-  action: { minHeight: 40, paddingHorizontal: 14, borderRadius: 10, backgroundColor: Colors.primary, alignItems: "center", justifyContent: "center", flexDirection: "row", gap: 6 },
+  topBar: { minHeight: 64, paddingHorizontal: Spacing.md, flexDirection: "row-reverse", alignItems: "center", justifyContent: "space-between", backgroundColor: "rgba(15,23,42,.62)" },
+  iconButton: { width: 48, height: 48, borderRadius: 14, alignItems: "center", justifyContent: "center", backgroundColor: "rgba(255,255,255,.18)" },
+  guideArea: { flex: 1, alignItems: "center", justifyContent: "center", paddingHorizontal: Spacing.md },
+  scanFrame: { width: "88%", height: "30%", minHeight: 150, maxHeight: 280, borderWidth: 2, borderColor: Colors.white, borderRadius: 18, backgroundColor: "transparent" },
+  overlayHint: { color: Colors.white, fontSize: 13, fontWeight: "800", marginTop: 14, textAlign: "center", backgroundColor: "rgba(15,23,42,.72)", paddingHorizontal: 14, paddingVertical: 9, borderRadius: 10 },
+  cameraError: { color: Colors.white, fontSize: 14, fontWeight: "800", textAlign: "center", marginTop: Spacing.md, backgroundColor: Colors.dangerText, paddingHorizontal: Spacing.md, paddingVertical: Spacing.sm, borderRadius: 10 },
+  actions: { flexDirection: "row-reverse", alignItems: "center", justifyContent: "center", gap: 10, padding: Spacing.md, backgroundColor: "rgba(15,23,42,.72)" },
+  action: { minHeight: 48, paddingHorizontal: 16, borderRadius: 12, backgroundColor: Colors.primary, alignItems: "center", justifyContent: "center", flexDirection: "row", gap: 6 },
   actionText: { color: Colors.white, fontSize: 12, fontWeight: "800" },
-  cancelAction: { minHeight: 40, paddingHorizontal: 16, borderRadius: 10, borderWidth: 1, borderColor: "rgba(255,255,255,.65)", alignItems: "center", justifyContent: "center" },
+  cancelAction: { minHeight: 48, paddingHorizontal: 16, borderRadius: 12, borderWidth: 1, borderColor: "rgba(255,255,255,.65)", alignItems: "center", justifyContent: "center" },
   cancelText: { color: Colors.white, fontSize: 12, fontWeight: "800" },
 });

@@ -9,6 +9,7 @@ import { EnrollmentRepository } from "../../features/enrollments/EnrollmentRepos
 import { GroupRepository } from "../../features/groups/GroupRepository";
 import { GroupScheduleRepository } from "../../features/groups/GroupScheduleRepository";
 import { StudentRepository } from "../../features/students/StudentRepository";
+import { getStudentColorPresentation } from "../../features/students/studentColor";
 import { AppInput, EmptyState } from "../../shared/components";
 import { Group, Student } from "../../shared/types";
 import { smartSearch } from "../../shared/utils/smartSearch";
@@ -107,7 +108,12 @@ export default function GroupDetailsScreen() {
           <AppInput label="بحث داخل طلاب المجموعة" value={query} onChangeText={setQuery} containerStyle={styles.search} />
         </>}
         ListEmptyComponent={<EmptyState message={query ? "مفيش طالب مطابق للبحث" : "مفيش طلبة في المجموعة دي"} />}
-        renderItem={({ item }) => <TouchableOpacity style={styles.studentRow} onPress={() => router.push({ pathname: "/(main)/students", params: { studentId: item.id } })}>
+        renderItem={({ item }) => <TouchableOpacity style={[
+          styles.studentRow,
+          getStudentColorPresentation(item.studentColor).backgroundColor
+            ? { backgroundColor: getStudentColorPresentation(item.studentColor).backgroundColor, borderColor: getStudentColorPresentation(item.studentColor).accentColor, borderRightWidth: 3 }
+            : null,
+        ]} onPress={() => router.push({ pathname: "/(main)/students", params: { studentId: item.id } })}>
           <View style={styles.studentIcon}><Ionicons name="person-outline" size={18} color={Colors.primary} /></View>
           <View style={styles.studentInfo}><Text style={styles.studentName}>{item.fullName}</Text><Text style={styles.studentMeta}>{item.studentCode} • ولي الأمر: {item.parentPhone || "-"}</Text></View>
           <Ionicons name="chevron-back" size={18} color={Colors.slate400} />

@@ -78,7 +78,7 @@ export const Strings = {
   attendanceTimePrefix: "وقت الحضور:",
   attendanceStatusPresent: "حاضر في الموعد",
   attendanceStatusLate: "متأخر",
-  duplicateScanWarning: "تم تسجيل حضور الطالب مسبقًا لهذه الحصة اليوم",
+  duplicateScanWarning: "تم تحضير الطالب مسبقًا",
   unregisteredCardError: "الكارت غير مسجل في هذا المركز",
   newStudentRegisterPrompt: "تسجيل طالب جديد",
 

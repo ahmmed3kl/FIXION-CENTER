@@ -35,20 +35,34 @@ export class CardRangeRepository {
     });
 
     const db = DatabaseService.getDb();
-    db.runSync("DELETE FROM card_ranges WHERE center_id = ?", [centerId]);
-    for (const { range, startCode, endCode } of normalizedRanges) {
-      db.runSync(
-        `INSERT INTO card_ranges (id, center_id, start_code, end_code, status, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        [
-          range.id,
-          centerId,
-          startCode,
-          endCode,
-          range.status === "inactive" ? "inactive" : "active",
-          range.created_at || range.createdAt || new Date().toISOString(),
-          range.updated_at || range.updatedAt || null,
-        ],
+    DatabaseService.runInTransaction(() => {
+      db.runSync("DELETE FROM card_ranges WHERE center_id = ?", [centerId]);
+      for (const { range, startCode, endCode } of normalizedRanges) {
+        db.runSync(
+          `INSERT INTO card_ranges (id, center_id, start_code, end_code, status, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [
+            range.id,
+            centerId,
+            startCode,
+            endCode,
+            range.status === "inactive" ? "inactive" : "active",
+            range.created_at || range.createdAt || new Date().toISOString(),
+            range.updated_at || range.updatedAt || null,
+          ],
+        );
+      }
+    });
+  }
+
+  static assertTrustedRangesAvailable(centerId: string): void {
+    const range = DatabaseService.getDb().getFirstSync<{ id: string }>(
+      `SELECT id FROM card_ranges WHERE center_id = ? AND status = 'active' LIMIT 1`,
+      [centerId],
+    );
+    if (!range) {
+      throw new ValidationError(
+        "لا تتوفر إعدادات نطاق بطاقات موثوقة لهذا المركز. اتصل بالإنترنت لمزامنتها قبل إضافة الطالب.",
       );
     }
   }

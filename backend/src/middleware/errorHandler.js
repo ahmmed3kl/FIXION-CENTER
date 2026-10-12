@@ -42,8 +42,19 @@ function errorHandler(err, req, res, next) {
     });
   }
 
-  // Default internal server error - never leak SQL, stack traces, or credentials
-  console.error("[Internal Server Error]", err.message);
+  // Keep the response generic while recording enough server-side context to diagnose failures.
+  console.error("[Internal Server Error]", JSON.stringify({
+    message: err.message,
+    code: err.code,
+    schema: err.schema,
+    table: err.table || err.bootstrapTable,
+    column: err.column,
+    constraint: err.constraint,
+    method: req.method,
+    path: req.path,
+    centerId: req.centerId,
+    stack: err.stack,
+  }));
   return res.status(500).json({
     error: {
       code: "INTERNAL_ERROR",

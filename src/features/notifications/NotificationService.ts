@@ -418,6 +418,28 @@ export class NotificationService {
     return { sent, failed };
   }
 
+  static getDeliveryStatusCounts(eventId: string): Record<NotificationDelivery["status"], number> {
+    const { centerId, user } = this.getActiveContext();
+    if (
+      !PermissionService.hasPermission(user.permissions, "notifications.view") &&
+      !PermissionService.hasPermission(user.permissions, "notifications.send")
+    ) {
+      throw new ForbiddenError("ليس لديك صلاحية عرض حالة الإشعارات.");
+    }
+    const rows = DatabaseService.getDb().getAllSync<{ status: NotificationDelivery["status"] }>(
+      `SELECT status FROM notification_deliveries
+       WHERE center_id = ? AND notification_event_id = ?`,
+      [centerId, eventId],
+    );
+    return rows.reduce<Record<NotificationDelivery["status"], number>>(
+      (counts, row) => {
+        counts[row.status] = (counts[row.status] || 0) + 1;
+        return counts;
+      },
+      { pending: 0, sending: 0, sent: 0, failed: 0 },
+    );
+  }
+
   /**
    * Builds the template variable map for a student and session.
    */

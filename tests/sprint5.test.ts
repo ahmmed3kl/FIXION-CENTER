@@ -247,6 +247,75 @@ describe("Sprint 5 - FIXION Operational Layer Test Suite", () => {
       ).toBe(true);
     });
 
+    it("sends to only the confirmed selected students and reuses the same events on retry", async () => {
+      const selectedStudentIds = ["std-1", "std-2", "std-3"];
+      const operationPrefix = "op-abs-selection-confirmed-test";
+      const events = NotificationService.notifyAbsentees({
+        sessionId: "sess-1",
+        selectedStudentIds,
+        operationPrefix,
+      });
+
+      expect(events.map((event) => event.studentId).sort()).toEqual([...selectedStudentIds].sort());
+      for (const event of events) {
+        expect(NotificationService.getDeliveryStatusCounts(event.id)).toMatchObject({
+          pending: 2,
+          sent: 0,
+          failed: 0,
+        });
+      }
+
+      const db = DatabaseService.getDb();
+      for (const studentId of selectedStudentIds) {
+        const event = db.getFirstSync<any>(
+          `SELECT student_id as studentId FROM notification_events
+           WHERE center_id = ? AND operation_id = ?`,
+          ["center-1", `${operationPrefix}-${studentId}`],
+        );
+        expect(event?.studentId).toBe(studentId);
+      }
+      expect(db.getFirstSync<any>(
+        `SELECT id FROM notification_events
+         WHERE center_id = ? AND operation_id = ?`,
+        ["center-1", `${operationPrefix}-std-4`],
+      )).toBeNull();
+
+      const results = await Promise.all(
+        events.map((event) => NotificationService.sendPendingDeliveries(event.id)),
+      );
+      expect(results.every((result) => result.failed === 0)).toBe(true);
+
+      const retryEvents = NotificationService.notifyAbsentees({
+        sessionId: "sess-1",
+        selectedStudentIds,
+        operationPrefix,
+      });
+      expect(retryEvents.map((event) => event.id)).toEqual(events.map((event) => event.id));
+      const retryDispatch = await Promise.all(
+        retryEvents.map((event) => NotificationService.sendPendingDeliveries(event.id)),
+      );
+      expect(retryDispatch.every((result) => result.sent === 0 && result.failed === 0)).toBe(true);
+    });
+
+    it("rejects manual absence notifications without send permission", () => {
+      const currentUser = useAuthStore.getState().currentUser!;
+      useAuthStore.setState({
+        currentUser: {
+          ...currentUser,
+          permissions: currentUser.permissions.filter((permission) => permission !== "notifications.send"),
+        },
+      });
+      try {
+        expect(() => NotificationService.notifyAbsentees({
+          sessionId: "sess-1",
+          selectedStudentIds: ["std-1"],
+          operationPrefix: "op-abs-selection-forbidden",
+        })).toThrow(ForbiddenError);
+      } finally {
+        useAuthStore.setState({ currentUser });
+      }
+    });
+
     it("10. retrieves notification history for student and session", () => {
       const sessionEvents = NotificationService.getEventsForSession("sess-1");
       expect(sessionEvents.length).toBeGreaterThanOrEqual(1);

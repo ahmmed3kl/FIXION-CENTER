@@ -25,6 +25,7 @@ export interface BootstrapResponse {
   expectedStudents?: any[];
   enrollments: any[];
   attendance?: any[];
+  absenceNotes?: any[];
   payments?: any[];
   paymentReversals?: any[];
   debtAdjustments?: any[];
@@ -65,6 +66,8 @@ export interface ISyncApiAdapter {
   ): Promise<PullSyncResponse>;
 
   bootstrapCenter(centerId: string): Promise<BootstrapResponse>;
+
+  getCardRanges?(centerId: string): Promise<CardRangeRecord[]>;
 }
 
 // Different timeouts for different sync operations
@@ -243,6 +246,27 @@ export class HttpSyncApiAdapter implements ISyncApiAdapter {
       throw err;
     }
   }
+
+  async getCardRanges(centerId: string): Promise<CardRangeRecord[]> {
+    const client = ApiClient.getInstance();
+    const deviceId = await DeviceService.getDeviceId();
+    await this.ensureDeviceRegistered(centerId, deviceId);
+    const response = await client.get<{ centerId: string; cardRanges: CardRangeRecord[] }>(
+      "/sync/card-ranges",
+      {
+        timeout: PULL_TIMEOUT_MS,
+        headers: {
+          "X-Center-Id": centerId,
+          "X-Device-Id": deviceId,
+        },
+      },
+    );
+    ConnectivityService.recordApiSuccess();
+    if (response.data.centerId !== centerId) {
+      throw new Error("استجاب الخادم بنطاق بطاقات لمركز مختلف.");
+    }
+    return response.data.cardRanges;
+  }
 }
 
 /**
@@ -252,6 +276,7 @@ export class MockSyncApiAdapter implements ISyncApiAdapter {
   private currentCursorSeq = 1000;
   private failNextPush = false;
   private conflictOperationIds = new Set<string>();
+  private cardRanges: CardRangeRecord[] = [];
 
   setFailNextPush(fail: boolean) {
     this.failNextPush = fail;
@@ -329,5 +354,13 @@ export class MockSyncApiAdapter implements ISyncApiAdapter {
       latestServerSeq: 1000,
       timestamp: new Date().toISOString(),
     };
+  }
+
+  async getCardRanges(): Promise<CardRangeRecord[]> {
+    return this.cardRanges.map((range) => ({ ...range }));
+  }
+
+  setCardRanges(ranges: CardRangeRecord[]): void {
+    this.cardRanges = ranges.map((range) => ({ ...range }));
   }
 }

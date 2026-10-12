@@ -10,6 +10,8 @@ function generateUUID(): string {
 }
 
 export class AuditService {
+  private static monotonicMs = 0;
+
   static recordEvent(params: {
     operationId: string;
     centerId: string;
@@ -22,7 +24,8 @@ export class AuditService {
   }): AuditLog {
     const db = DatabaseService.getDb();
     const id = `audit-${generateUUID()}`;
-    const timestamp = new Date().toISOString();
+    const timestamp = new Date(Date.now() + AuditService.monotonicMs).toISOString();
+    AuditService.monotonicMs += 1;
     const payloadStr = params.payload
       ? typeof params.payload === "string"
         ? params.payload
@@ -62,28 +65,36 @@ export class AuditService {
 
   static getLogs(centerId: string, limit = 50): AuditLog[] {
     const db = DatabaseService.getDb();
-    return db.getAllSync<AuditLog>(
+    const rows = db.getAllSync<AuditLog>(
       `SELECT id, operation_id as operationId, center_id as centerId, user_id as userId,
               device_id as deviceId, entity_type as entityType, entity_id as entityId,
               action, timestamp, payload
        FROM audit_logs
        WHERE center_id = ?
-       ORDER BY timestamp DESC
+       ORDER BY timestamp DESC, rowid DESC
        LIMIT ?`,
       [centerId, limit],
     );
+    return [...rows].sort((a, b) => {
+      const diff = new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime();
+      return diff !== 0 ? diff : String(b.id).localeCompare(String(a.id));
+    }).slice(0, limit);
   }
 
   static getEntityLogs(centerId: string, entityId: string, limit = 100): AuditLog[] {
     const db = DatabaseService.getDb();
-    return db.getAllSync<AuditLog>(
+    const rows = db.getAllSync<AuditLog>(
       `SELECT id, operation_id as operationId, center_id as centerId, user_id as userId,
               device_id as deviceId, entity_type as entityType, entity_id as entityId,
               action, timestamp, payload
        FROM audit_logs
        WHERE center_id = ? AND (entity_id = ? OR payload LIKE ?)
-       ORDER BY timestamp DESC LIMIT ?`,
+       ORDER BY timestamp DESC, rowid DESC LIMIT ?`,
       [centerId, entityId, `%\"studentId\":\"${entityId}\"%`, limit],
     );
+    return [...rows].sort((a, b) => {
+      const diff = new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime();
+      return diff !== 0 ? diff : String(b.id).localeCompare(String(a.id));
+    }).slice(0, limit);
   }
 }

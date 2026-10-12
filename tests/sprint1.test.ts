@@ -1,6 +1,6 @@
 import { AuditService } from "../src/core/audit";
 import { DatabaseService } from "../src/core/database";
-import { ConflictError } from "../src/core/errors";
+import { ConflictError, DuplicateAttendanceError } from "../src/core/errors";
 import { PermissionService, RolePermissions } from "../src/core/permissions";
 import { SyncRepository } from "../src/core/sync";
 import { AttendanceRepository } from "../src/features/attendance/AttendanceRepository";
@@ -197,6 +197,11 @@ describe("Sprint 1 - FIXION Mobile App Foundation & Complete Working Flow", () =
         true,
       );
 
+      const attendanceBefore = AttendanceRepository.getSessionAttendance("sess-1")
+        .filter((record) => record.studentId === "std-2");
+      const operationsBefore = SyncRepository.getRecentOperations("center-1", 1000)
+        .filter((operation) => attendanceBefore.some((record) => record.id === operation.entityId));
+
       await expect(
         AttendanceRepository.recordAttendance({
           studentId: "std-2",
@@ -204,7 +209,12 @@ describe("Sprint 1 - FIXION Mobile App Foundation & Complete Working Flow", () =
           status: "present",
           isLate: false,
         }),
-      ).rejects.toThrow(ConflictError);
+      ).rejects.toThrow(DuplicateAttendanceError);
+      expect(AttendanceRepository.getSessionAttendance("sess-1")
+        .filter((record) => record.studentId === "std-2")).toEqual(attendanceBefore);
+      expect(SyncRepository.getRecentOperations("center-1", 1000)
+        .filter((operation) => attendanceBefore.some((record) => record.id === operation.entityId)))
+        .toEqual(operationsBefore);
     });
   });
 

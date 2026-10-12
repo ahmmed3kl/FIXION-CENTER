@@ -1,6 +1,8 @@
 import { calculateAbsenceReportCounts, calculateSessionAttendanceCounts } from "../src/features/attendance/AbsenceReportsService";
 import { Attendance, Student } from "../src/shared/types";
 
+jest.mock("expo-device", () => ({ modelName: "Test Device" }));
+
 const student = (id: string): Student => ({
   id,
   centerId: "center-1",

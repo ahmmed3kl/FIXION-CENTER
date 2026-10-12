@@ -192,6 +192,8 @@ CREATE TABLE IF NOT EXISTS students (
     CONSTRAINT uq_center_student_code UNIQUE (center_id, student_code)
 );
 
+ALTER TABLE students ADD COLUMN IF NOT EXISTS student_color VARCHAR(32);
+
 -- Physical Cards Lifecycle (tracks issuance, replacement, lost cards)
 CREATE TABLE IF NOT EXISTS student_cards (
     id VARCHAR(64) PRIMARY KEY,
@@ -268,6 +270,22 @@ CREATE TABLE IF NOT EXISTS attendance (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT uq_session_attendance UNIQUE (session_id, student_id)
 );
+
+CREATE TABLE IF NOT EXISTS absence_notes (
+    id VARCHAR(64) PRIMARY KEY,
+    center_id VARCHAR(64) NOT NULL REFERENCES centers(id) ON DELETE CASCADE,
+    session_id VARCHAR(64) NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    student_id VARCHAR(64) NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+    note_text TEXT NOT NULL CHECK (length(btrim(note_text)) > 0),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ,
+    created_by VARCHAR(64) NOT NULL,
+    created_by_name VARCHAR(255),
+    updated_by VARCHAR(64),
+    CONSTRAINT uq_absence_note_center_session_student UNIQUE (center_id, session_id, student_id)
+);
+CREATE INDEX IF NOT EXISTS idx_absence_notes_student
+    ON absence_notes(center_id, student_id, session_id);
 
 -- ------------------------------------------------------------------------------
 -- 6. EVENT-ORIENTED FINANCIAL SYSTEM (Immutable Ledger, No Stored Balances)

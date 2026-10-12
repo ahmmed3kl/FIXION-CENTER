@@ -3,6 +3,7 @@ import { DatabaseService, LocalDataEvents } from "../../core/database";
 import { DeviceService } from "../../core/device";
 import {
     ConflictError,
+    DuplicateAttendanceError,
     ForbiddenError,
     UnauthorizedError,
 } from "../../core/errors";
@@ -19,6 +20,14 @@ function generateUUID(): string {
     const v = c === "x" ? r : (r & 0x3) | 0x8;
     return v.toString(16);
   });
+}
+
+export interface StudentAttendanceHistoryRecord extends Omit<Attendance, "status"> {
+  status: Attendance["status"] | "absent" | "excused" | "attended_elsewhere";
+  sessionDate: string;
+  startTime: string;
+  isDerivedAbsence: boolean;
+  absenceNote?: string | null;
 }
 
 export class AttendanceRepository {
@@ -251,7 +260,7 @@ export class AttendanceRepository {
 
     // Check duplicate
     if (this.isAlreadyAttended(params.sessionId, params.studentId)) {
-      throw new ConflictError("تم تسجيل حضور الطالب مسبقًا لهذه الحصة.");
+      throw new DuplicateAttendanceError();
     }
 
     const attendanceId = `att-${generateUUID()}`;
@@ -295,7 +304,7 @@ export class AttendanceRepository {
       );
     } catch (err: any) {
       if (err?.message?.includes("UNIQUE")) {
-        throw new ConflictError("تم تسجيل حضور الطالب مسبقًا لهذه الحصة.");
+        throw new DuplicateAttendanceError();
       }
       throw err;
     }
@@ -462,29 +471,249 @@ export class AttendanceRepository {
   /**
    * Retrieves attendance history for a student across all sessions in the active center.
    */
-  static getStudentAttendance(studentId: string): Attendance[] {
+  static getStudentAttendance(studentId: string): StudentAttendanceHistoryRecord[] {
     const { centerId, user } = this.getActiveContext();
     if (!PermissionService.hasAnyPermission(user.permissions, ["attendance.view", "reports.attendance.view", "reports.view"])) {
       throw new ForbiddenError("ليس لديك صلاحية عرض بيانات الحضور.");
     }
     const db = DatabaseService.getDb();
-    return db.getAllSync<any>(
+    const attendanceRows = db.getAllSync<any>(
       `SELECT a.id, a.center_id as centerId, a.student_id as studentId, a.session_id as sessionId,
               a.check_in_time as checkInTime, a.status, a.is_late = 1 as isLate,
               a.attendance_type as attendanceType, a.original_absence_id as originalAbsenceId,
               a.is_external = 1 as isExternal,
               a.operation_id as operationId,
+              ss.group_id as groupId, g.name as groupName, ss.session_date as sessionDate,
+              ss.start_time as startTime, subj.name as subjectName, t.name as teacherName,
+              absence_note.note_text as absenceNote,
+              0 as isDerivedAbsence
+       FROM attendance a
+       JOIN sessions ss ON ss.center_id = a.center_id AND ss.id = a.session_id
+       LEFT JOIN absence_notes absence_note
+         ON absence_note.center_id = a.center_id
+        AND absence_note.session_id = a.session_id
+        AND absence_note.student_id = a.student_id
+       LEFT JOIN groups g ON g.center_id = ss.center_id AND g.id = ss.group_id
+       LEFT JOIN subjects subj ON subj.center_id = ss.center_id
+         AND subj.id = COALESCE(ss.subject_id, g.subject_id)
+       LEFT JOIN teachers t ON t.center_id = ss.center_id
+         AND t.id = COALESCE(ss.teacher_id, g.teacher_id)
+       WHERE a.center_id = ? AND a.student_id = ?
+       ORDER BY ss.session_date DESC, ss.start_time DESC, a.check_in_time DESC`,
+      [centerId, studentId],
+    );
+    const today = getLocalDateOnly();
+    const nowTime = new Date().toTimeString().slice(0, 5);
+    const absenceRows = db.getAllSync<any>(
+      `SELECT ss.id as sessionId, ss.group_id as groupId, g.name as groupName,
+              ss.session_date as sessionDate, ss.start_time as startTime,
+              subj.name as subjectName, t.name as teacherName,
+              absence_note.note_text as absenceNote
+       FROM sessions ss
+       JOIN groups g ON g.center_id = ss.center_id AND g.id = ss.group_id
+       LEFT JOIN absence_notes absence_note
+         ON absence_note.center_id = ss.center_id
+        AND absence_note.session_id = ss.id
+        AND absence_note.student_id = ?
+       LEFT JOIN subjects subj ON subj.center_id = ss.center_id
+         AND subj.id = COALESCE(ss.subject_id, g.subject_id)
+       LEFT JOIN teachers t ON t.center_id = ss.center_id
+         AND t.id = COALESCE(ss.teacher_id, g.teacher_id)
+       WHERE ss.center_id = ? AND ss.status IN ('open', 'closed', 'completed')
+         AND (ss.session_date < ? OR (ss.session_date = ? AND ss.end_time <= ?))
+         AND (
+           EXISTS (
+             SELECT 1 FROM session_expected_students expected
+             WHERE expected.center_id = ss.center_id
+               AND expected.session_id = ss.id AND expected.student_id = ?
+           )
+           OR (
+             NOT EXISTS (
+               SELECT 1 FROM session_expected_students any_expected
+               WHERE any_expected.center_id = ss.center_id AND any_expected.session_id = ss.id
+             )
+             AND EXISTS (
+               SELECT 1 FROM student_group_enrollments enrollment
+               WHERE enrollment.center_id = ss.center_id
+                 AND enrollment.group_id = ss.group_id
+                 AND enrollment.student_id = ? AND enrollment.status = 'active'
+                 AND enrollment.start_date <= ss.session_date
+                 AND (enrollment.end_date IS NULL OR enrollment.end_date >= ss.session_date)
+             )
+           )
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM attendance recorded
+           WHERE recorded.center_id = ss.center_id
+             AND recorded.session_id = ss.id AND recorded.student_id = ?
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM advance_coverages covered
+           WHERE covered.center_id = ss.center_id
+             AND covered.student_id = ? AND covered.target_future_session_id = ss.id
+         )
+       ORDER BY ss.session_date DESC, ss.start_time DESC`,
+      [studentId, centerId, today, today, nowTime, studentId, studentId, studentId, studentId],
+    );
+
+    const records: StudentAttendanceHistoryRecord[] = attendanceRows.map((row) => ({
+      ...row,
+      isLate: Boolean(row.isLate),
+      isExternal: Boolean(row.isExternal),
+      attendanceType: row.attendanceType || "present",
+      isDerivedAbsence: false,
+    }));
+    for (const row of absenceRows) {
+      records.push({
+        id: `absence:${row.sessionId}:${studentId}`,
+        centerId,
+        studentId,
+        sessionId: row.sessionId,
+        checkInTime: "",
+        status: "absent",
+        isLate: false,
+        attendanceType: "present",
+        operationId: "",
+        groupId: row.groupId,
+        groupName: row.groupName,
+        subjectName: row.subjectName,
+        teacherName: row.teacherName,
+        sessionDate: row.sessionDate,
+        startTime: row.startTime,
+        absenceNote: row.absenceNote || null,
+        isDerivedAbsence: true,
+      });
+    }
+    return records.sort((a, b) =>
+      `${b.sessionDate} ${b.startTime} ${b.checkInTime}`.localeCompare(
+        `${a.sessionDate} ${a.startTime} ${a.checkInTime}`,
+      ),
+    );
+  }
+
+  static async cancelAttendance(attendanceId: string): Promise<StudentAttendanceHistoryRecord> {
+    const { centerId, user } = this.getActiveContext();
+    if (!PermissionService.hasPermission(user.permissions, "attendance.edit")) {
+      throw new ForbiddenError("ليس لديك صلاحية تعديل سجلات الحضور.");
+    }
+
+    const db = DatabaseService.getDb();
+    const existing = db.getFirstSync<any>(
+      `SELECT a.id, a.center_id as centerId, a.student_id as studentId,
+              a.session_id as sessionId, a.check_in_time as checkInTime,
+              a.status, a.is_late as isLate, a.attendance_type as attendanceType,
+              a.original_absence_id as originalAbsenceId,
+              a.is_external as isExternal, a.operation_id as operationId,
               ss.group_id as groupId, g.name as groupName,
+              ss.session_date as sessionDate, ss.start_time as startTime,
               subj.name as subjectName, t.name as teacherName
        FROM attendance a
        JOIN sessions ss ON ss.center_id = a.center_id AND ss.id = a.session_id
-       LEFT JOIN groups g ON g.center_id = ss.center_id AND g.id = ss.group_id
-       LEFT JOIN subjects subj ON subj.center_id = g.center_id AND subj.id = g.subject_id
-       LEFT JOIN teachers t ON t.center_id = g.center_id AND t.id = g.teacher_id
-       WHERE a.center_id = ? AND a.student_id = ?
-       ORDER BY a.check_in_time DESC`,
-      [centerId, studentId],
+       JOIN groups g ON g.center_id = ss.center_id AND g.id = ss.group_id
+       LEFT JOIN subjects subj ON subj.center_id = ss.center_id
+         AND subj.id = COALESCE(ss.subject_id, g.subject_id)
+       LEFT JOIN teachers t ON t.center_id = ss.center_id
+         AND t.id = COALESCE(ss.teacher_id, g.teacher_id)
+       JOIN students st ON st.center_id = a.center_id AND st.id = a.student_id
+       WHERE a.center_id = ? AND a.id = ?`,
+      [centerId, attendanceId],
     );
+    if (!existing) {
+      throw new ConflictError("سجل الحضور غير موجود في المركز الحالي.");
+    }
+    if (existing.status === "absent") {
+      return { ...existing, isLate: Boolean(existing.isLate), isExternal: Boolean(existing.isExternal), isDerivedAbsence: false };
+    }
+
+    const deviceId = await DeviceService.getDeviceId();
+    const operationId = `op-att-cancel-${generateUUID()}`;
+    const canceledAt = new Date().toISOString();
+    let canceled = false;
+    let result: StudentAttendanceHistoryRecord = {
+      ...existing,
+      status: "absent",
+      isLate: false,
+      isExternal: Boolean(existing.isExternal),
+      isDerivedAbsence: false,
+    };
+
+    DatabaseService.runInTransaction(() => {
+      const current = db.getFirstSync<any>(
+        `SELECT status FROM attendance WHERE center_id = ? AND id = ?`,
+        [centerId, attendanceId],
+      );
+      if (!current || current.status === "absent") return;
+
+      const updateResult = db.runSync(
+        `UPDATE attendance SET status = 'absent', is_late = 0
+         WHERE center_id = ? AND id = ? AND session_id = ? AND student_id = ?`,
+        [centerId, attendanceId, existing.sessionId, existing.studentId],
+      );
+      if (updateResult.changes !== 1) return;
+      canceled = true;
+
+      const previousEffectiveStatus = existing.isLate ? "late" : existing.status;
+
+      SyncRepository.enqueueOperation({
+        operationId,
+        centerId,
+        userId: user.id,
+        deviceId,
+        operationType: "UPDATE",
+        entityType: "attendance",
+        entityId: attendanceId,
+        payload: {
+          id: attendanceId,
+          centerId,
+          studentId: existing.studentId,
+          sessionId: existing.sessionId,
+          status: "absent",
+          isLate: false,
+          attendanceType: existing.attendanceType || "present",
+          originalAbsenceId: existing.originalAbsenceId || null,
+          action: "attendance.cancel",
+          canceledAt,
+          previousStatus: previousEffectiveStatus,
+          actorName: user.fullName,
+        },
+      });
+      AuditService.recordEvent({
+        operationId,
+        centerId,
+        userId: user.id,
+        deviceId,
+        entityType: "attendance",
+        entityId: attendanceId,
+        action: "attendance.cancel",
+        payload: {
+          studentId: existing.studentId,
+          sessionId: existing.sessionId,
+          attendanceType: existing.attendanceType || "present",
+          previousStatus: previousEffectiveStatus,
+          status: "absent",
+          actorName: user.fullName,
+          canceledAt,
+        },
+      });
+      result = { ...result, status: "absent", isLate: false };
+    });
+
+    if (!canceled) {
+      const current = db.getFirstSync<any>(
+        `SELECT status, is_late as isLate FROM attendance WHERE center_id = ? AND id = ?`,
+        [centerId, attendanceId],
+      );
+      if (current?.status !== "absent") {
+        throw new ConflictError("تعذر تحديث سجل الحضور. لم يتم إنشاء عملية مزامنة.");
+      }
+      return { ...existing, status: "absent", isLate: Boolean(current.isLate), isDerivedAbsence: false };
+    }
+
+    SyncEngine.syncCenterNow(centerId).catch((error) => {
+      console.warn("Background auto-sync attendance cancellation notice:", error);
+    });
+    LocalDataEvents.emit({ centerId, entityType: "attendance", entityId: attendanceId });
+    return result;
   }
 
   /**

@@ -1154,6 +1154,64 @@ export const MIGRATIONS: Migration[] = [
       }
     },
   },
+  {
+    version: 24,
+    name: "session_absence_notes",
+    up: (db: SqlDatabase) => {
+      db.execSync(`
+        CREATE TABLE IF NOT EXISTS absence_notes (
+          id TEXT PRIMARY KEY,
+          center_id TEXT NOT NULL,
+          session_id TEXT NOT NULL,
+          student_id TEXT NOT NULL,
+          note_text TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT,
+          created_by TEXT NOT NULL,
+          created_by_name TEXT,
+          updated_by TEXT,
+          CONSTRAINT uq_absence_note_center_session_student UNIQUE (center_id, session_id, student_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_absence_notes_student
+          ON absence_notes(center_id, student_id, session_id);
+      `);
+    },
+  },
+  {
+    version: 25,
+    name: "student_custom_color",
+    up: (db: SqlDatabase) => {
+      db.execSync("ALTER TABLE students ADD COLUMN student_color TEXT;");
+    },
+  },
+  {
+    version: 26,
+    name: "center_card_ranges",
+    up: (db: SqlDatabase) => {
+      db.execSync(`
+        CREATE TABLE IF NOT EXISTS card_ranges (
+          id TEXT PRIMARY KEY,
+          center_id TEXT NOT NULL REFERENCES centers(id) ON DELETE CASCADE,
+          start_code TEXT NOT NULL,
+          end_code TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          CONSTRAINT uq_card_range_identity UNIQUE (center_id, start_code, end_code),
+          CONSTRAINT chk_card_range_digits CHECK (
+            length(start_code) > 0 AND
+            length(end_code) > 0 AND
+            start_code NOT GLOB '*[^0-9]*' AND
+            end_code NOT GLOB '*[^0-9]*'
+          ),
+          CONSTRAINT chk_card_range_same_length CHECK (length(start_code) = length(end_code)),
+          CONSTRAINT chk_card_range_order CHECK (start_code <= end_code)
+        );
+        CREATE INDEX IF NOT EXISTS idx_card_ranges_center_status
+          ON card_ranges(center_id, status, start_code, end_code);
+      `);
+    },
+  },
 ];
 
 // In-Memory SQLite Mock for Jest / Test environments
@@ -1177,6 +1235,7 @@ class InMemorySqliteMock implements SqlDatabase {
     this.tables.set("sessions", []);
     this.tables.set("session_expected_students", []);
     this.tables.set("attendance", []);
+    this.tables.set("absence_notes", []);
     this.tables.set("student_subscriptions", []);
     this.tables.set("debt_cycles", []);
     this.tables.set("payment_reversals", []);
@@ -1388,6 +1447,19 @@ class InMemorySqliteMock implements SqlDatabase {
             throw new Error(
               "UNIQUE constraint failed: attendance.session_id, attendance.student_id",
             );
+        }
+        if (tableName === "absence_notes") {
+          const exists = list.some(
+            (r) =>
+              r.center_id === row.center_id &&
+              r.session_id === row.session_id &&
+              r.student_id === row.student_id,
+          );
+          if (exists) {
+            throw new Error(
+              "UNIQUE constraint failed: absence_notes.center_id, absence_notes.session_id, absence_notes.student_id",
+            );
+          }
         }
         if (tableName === "session_expected_students") {
           const exists = list.some(
@@ -1645,6 +1717,17 @@ class InMemorySqliteMock implements SqlDatabase {
                 : params[1];
             if (trimmed.includes("updated_by = ?")) row.updated_by = params[2];
           }
+        } else if (tableName === "absence_notes") {
+          const row = list.find(
+            (r) =>
+              r.center_id === params[params.length - 2] &&
+              r.id === params[params.length - 1],
+          );
+          if (row) {
+            row.note_text = params[0];
+            row.updated_at = params[1];
+            row.updated_by = params[2];
+          }
         } else if (tableName === "student_cards") {
           const id =
             trimmed.includes("id = ? AND (student_id = ?") ||
@@ -1773,6 +1856,8 @@ class InMemorySqliteMock implements SqlDatabase {
               if (params.length >= 2 && trimmed.includes("updated_at = ?")) {
                 row.updated_at = params[1];
               }
+            } else if (trimmed.includes("student_color = ?")) {
+              row.student_color = params[0];
             } else if (params.length >= 6) {
               row.full_name = params[0];
               row.phone = params[1];
@@ -2239,7 +2324,7 @@ class InMemorySqliteMock implements SqlDatabase {
         .sort((left, right) =>
           String(left.start_code).localeCompare(String(right.start_code)),
         )
-        .map(({ start_code, end_code }) => ({ start_code, end_code })) as T[];
+        .map((range) => ({ ...range })) as T[];
     }
 
     if (trimmed.includes("FROM sessions")) {
@@ -3035,6 +3120,32 @@ class InMemorySqliteMock implements SqlDatabase {
         })) as T[];
     }
 
+    if (trimmed.includes("FROM absence_notes")) {
+      const list = this.tables.get("absence_notes") || [];
+      const centerId = params[0];
+      const sessionId = params[1];
+      const studentId = params[2];
+      return list
+        .filter(
+          (r) =>
+            r.center_id === centerId &&
+            (!sessionId || r.session_id === sessionId) &&
+            (!studentId || r.student_id === studentId),
+        )
+        .map((r) => ({
+          id: r.id,
+          centerId: r.center_id,
+          sessionId: r.session_id,
+          studentId: r.student_id,
+          text: r.note_text,
+          createdAt: r.created_at,
+          updatedAt: r.updated_at,
+          createdBy: r.created_by,
+          createdByName: r.created_by_name,
+          updatedBy: r.updated_by,
+        })) as T[];
+    }
+
     if (trimmed.includes("FROM session_expected_students")) {
       const list = this.tables.get("session_expected_students") || [];
       if (trimmed.includes("JOIN students s") && params.length >= 2) {
@@ -3224,6 +3335,8 @@ class InMemorySqliteMock implements SqlDatabase {
         status: r.status,
         studentType: r.student_type || "registered",
         student_type: r.student_type || "registered",
+        studentColor: r.student_color || null,
+        student_color: r.student_color || null,
         notes: r.notes || null,
         deletedAt: r.deleted_at || null,
         deleted_at: r.deleted_at || null,

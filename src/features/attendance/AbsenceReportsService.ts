@@ -1,9 +1,11 @@
 import { Attendance, MakeupOpportunity, Session, Student } from "../../shared/types";
 import { AbsenceService } from "./AbsenceService";
 import { AttendanceRepository } from "./AttendanceRepository";
+import { AbsenceNoteRepository } from "./AbsenceNoteRepository";
 import { MakeupService } from "./MakeupService";
 import { SessionRepository } from "../sessions/SessionRepository";
 import { StudentRepository } from "../students/StudentRepository";
+import { sortSessionsByActivation } from "../sessions/sessionOrdering";
 export interface AbsenceSessionSummary {
   session: Session;
   sessionNumber?: number;
@@ -28,6 +30,7 @@ export interface AbsenceSessionReport {
   compensation: CompensationReportRow[];
   compensated: number;
   attendance: Attendance[];
+  absenceNotes: Record<string, string>;
 }
 
 export { calculateSessionAttendanceCounts } from "./AttendanceCalculations";
@@ -60,21 +63,20 @@ export function calculateAbsenceReportCounts(
 export class AbsenceReportsService {
   static getSessionsForMonth(month: string): AbsenceSessionSummary[] {
     const counters = new Map<string, number>();
-    const dailySessions = new Map<string, Session>();
+    const sessionsById = new Map<string, Session>();
     for (const session of SessionRepository.getSessionsForMonth(month)) {
-      if (session.status === "cancelled") continue;
-      const key = `${session.groupId}:${session.scheduleId || "legacy"}:${session.sessionDate}`;
-      // A schedule is part of the session identity. Keep one canonical row
-      // per group/schedule/day while still collapsing exact legacy duplicates.
-      if (!dailySessions.has(key)) dailySessions.set(key, session);
+      if (session.status === "cancelled" || sessionsById.has(session.id)) continue;
+      sessionsById.set(session.id, session);
     }
-    return Array.from(dailySessions.values())
+    const reportSessions = Array.from(sessionsById.values())
       // A timetable row is not an absence report. The report is created when
       // attendance is explicitly started and remains visible after manual
       // close; closing the app or passing the scheduled end time must not
       // create or remove a report.
-      .filter((session) => session.status === "open" || session.status === "closed")
-      .slice().sort((a, b) => `${a.groupId}-${a.sessionDate}-${a.startTime}`.localeCompare(`${b.groupId}-${b.sessionDate}-${b.startTime}`)).map((session) => {
+      .filter((session) => session.status === "open" || session.status === "closed");
+    const activationTimes = SessionRepository.getActivationTimestamps(reportSessions.map((session) => session.id));
+
+    return sortSessionsByActivation(reportSessions, activationTimes).map((session) => {
       const report = this.getSessionReport(session.id);
       const sessionNumber = (counters.get(session.groupId) || 0) + 1;
       counters.set(session.groupId, sessionNumber);
@@ -107,6 +109,9 @@ export class AbsenceReportsService {
         const student = byStudent.get(item.studentId) || StudentRepository.findByIdForAttendanceReport(item.studentId);
         return student ? [{ student, kind: "completed" as const, attendance: item }] : [];
       });
+    const absenceNotes = Object.fromEntries(
+      AbsenceNoteRepository.getForSession(sessionId).map((note) => [note.studentId, note.text]),
+    );
 
     for (const student of expected) {
       if (advancedStudentIds.includes(student.id)) {
@@ -118,6 +123,6 @@ export class AbsenceReportsService {
       if (opportunity) compensation.push({ student, kind: "eligible", opportunity });
     }
 
-    return { session, expected, absent: counts.absent, present, compensation, compensated: compensation.length, attendance };
+    return { session, expected, absent: counts.absent, present, compensation, compensated: compensation.length, attendance, absenceNotes };
   }
 }

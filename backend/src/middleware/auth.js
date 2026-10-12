@@ -81,6 +81,19 @@ async function authMiddleware(req, res, next) {
       );
     }
 
+    const primaryCenter = await db.query(
+      "SELECT status FROM centers WHERE id = $1",
+      [user.center_id],
+    );
+    if (!primaryCenter.rows[0] || primaryCenter.rows[0].status !== "active") {
+      throw new AppError(
+        "FORBIDDEN",
+        "Educational center account is currently suspended.",
+        "حساب المركز التعليمي معلق حالياً.",
+        403,
+      );
+    }
+
     // A user may be assigned to more than one center through user_centers.
     // The requested header is accepted only when that membership exists.
     const memberships = await db.query(

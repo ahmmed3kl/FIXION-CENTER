@@ -140,6 +140,7 @@ export default function MainLayout() {
       <Tabs.Screen name="groups" options={{ href: null }} />
       <Tabs.Screen name="grade-groups" options={{ href: null }} />
       <Tabs.Screen name="center-accounts" options={{ href: null }} />
+      <Tabs.Screen name="center-account-permissions" options={{ href: null, title: "صلاحيات الحساب" }} />
       <Tabs.Screen name="absence-reports" options={{ href: null }} />
       <Tabs.Screen name="absence-group" options={{ href: null }} />
       <Tabs.Screen name="packages" options={{ href: null }} />

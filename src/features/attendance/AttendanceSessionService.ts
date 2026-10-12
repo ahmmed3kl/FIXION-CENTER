@@ -171,7 +171,7 @@ export class AttendanceSessionService {
   /** Build the immutable roster for a session date, including package-only
    * subscribers selected for this exact subject/teacher/group. */
   static getExpectedStudentIdsForGroup(
-    group: Group,
+    group: Pick<Group, "subjectId" | "teacherId">,
     groupId: string,
     sessionDate: string,
   ): string[] {
@@ -297,8 +297,23 @@ export class AttendanceSessionService {
 
     const db = DatabaseService.getDb();
     let sessionWasActivated = false;
+    let activationOperationId: string | undefined;
     if (session.status === "scheduled") {
-      db.runSync("UPDATE sessions SET status = 'open', updated_at = ? WHERE center_id = ? AND id = ?", [new Date().toISOString(), session.centerId, session.id]);
+      const operationId = `op-session-activate-${session.id}-${Date.now()}`;
+      activationOperationId = operationId;
+      DatabaseService.runInTransaction(() => {
+        db.runSync("UPDATE sessions SET status = 'open', updated_at = ? WHERE center_id = ? AND id = ?", [new Date().toISOString(), session.centerId, session.id]);
+        AuditService.recordEvent({
+          operationId,
+          centerId: session.centerId,
+          userId: currentUser.id,
+          deviceId: DeviceService.getDeviceIdSync(),
+          entityType: "session",
+          entityId: session.id,
+          action: "session.activated",
+          payload: { groupId: session.groupId, scheduleId: session.scheduleId, sessionDate: session.sessionDate },
+        });
+      });
       sessionWasActivated = true;
     }
     // Always reconcile the expected snapshot before attendance starts. A
@@ -329,6 +344,7 @@ export class AttendanceSessionService {
       [session.centerId, session.id],
     ).map((row) => row.studentId);
     SyncRepository.enqueueOperation({
+      operationId: activationOperationId,
       centerId: session.centerId,
       userId: currentUser.id,
       deviceId,
@@ -591,7 +607,7 @@ export class AttendanceSessionService {
       `SELECT s.group_id as groupId, s.session_date as sessionDate,
               COALESCE(s.teacher_id, g.teacher_id) as teacherId,
               COALESCE(s.subject_id, g.subject_id) as subjectId,
-              t.name as teacherName
+              t.name as teacherName, g.grade as grade
        FROM sessions s
        JOIN groups g ON g.center_id = s.center_id AND g.id = s.group_id
        LEFT JOIN teachers t ON t.center_id = s.center_id
@@ -663,8 +679,19 @@ export class AttendanceSessionService {
          AND e.status = 'active'
          AND g.teacher_id = ?
          AND g.id != ?
+         AND e.start_date <= ?
+         AND (e.end_date IS NULL OR e.end_date >= ?)
+         AND LOWER(TRIM(g.grade)) = LOWER(TRIM(?))
        LIMIT 1`,
-      [activeCenterId, studentId, session.teacherId, session.groupId],
+      [
+        activeCenterId,
+        studentId,
+        session.teacherId,
+        session.groupId,
+        session.sessionDate,
+        session.sessionDate,
+        session.grade,
+      ],
     );
 
     console.log("[isEnrolledWithSameTeacher] Found other group:", otherGroup);

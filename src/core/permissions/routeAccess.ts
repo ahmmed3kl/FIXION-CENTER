@@ -19,6 +19,7 @@ export const routePermissions: Partial<Record<string, Permission[]>> = {
   "grade-groups": ["grades.view"],
   grades: ["grades.view"],
   "center-accounts": ["users.view"],
+  "center-account-permissions": ["users.manage"],
   "deleted-students": ["students.view"],
   packages: ["packages.view"],
   notifications: [

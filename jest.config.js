@@ -6,6 +6,7 @@ module.exports = {
     "^@/(.*)$": "<rootDir>/src/$1",
     "^react-native$": "<rootDir>/tests/mocks/react-native.js",
     "^expo-sqlite$": "<rootDir>/tests/mocks/expo-sqlite.js",
+    "^expo-device$": "<rootDir>/tests/mocks/expo-device.js",
     "^expo-secure-store$": "<rootDir>/tests/mocks/expo-secure-store.js",
   },
   transform: {

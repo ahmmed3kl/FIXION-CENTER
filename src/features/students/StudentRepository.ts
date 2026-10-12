@@ -90,7 +90,8 @@ export class StudentRepository {
 
     const row = db.getFirstSync<any>(
       `SELECT id, center_id as centerId, student_code as studentCode, full_name as fullName, card_code as cardCode,
-              phone, parent_phone as parentPhone, grade, status, student_type as studentType, notes,
+              phone, parent_phone as parentPhone, grade, status, student_type as studentType,
+              student_color as studentColor, notes,
               deleted_at as deletedAt, deleted_by as deletedBy,
               created_at as createdAt, updated_at as updatedAt
        FROM students
@@ -138,7 +139,8 @@ export class StudentRepository {
 
     const row = db.getFirstSync<any>(
       `SELECT id, center_id as centerId, student_code as studentCode, full_name as fullName, card_code as cardCode,
-              phone, parent_phone as parentPhone, grade, status, student_type as studentType, notes,
+              phone, parent_phone as parentPhone, grade, status, student_type as studentType,
+              student_color as studentColor, notes,
               deleted_at as deletedAt, deleted_by as deletedBy,
               created_at as createdAt, updated_at as updatedAt
        FROM students
@@ -179,7 +181,8 @@ export class StudentRepository {
     const db = DatabaseService.getDb();
     const rows = db.getAllSync<any>(
       `SELECT id, center_id as centerId, student_code as studentCode, full_name as fullName, card_code as cardCode,
-              phone, parent_phone as parentPhone, grade, status, student_type as studentType, notes,
+              phone, parent_phone as parentPhone, grade, status, student_type as studentType,
+              student_color as studentColor, notes,
               deleted_at as deletedAt, deleted_by as deletedBy, created_at as createdAt, updated_at as updatedAt
        FROM students WHERE center_id = ? AND deleted_at IS NOT NULL ORDER BY deleted_at DESC, full_name ASC`,
       [centerId],
@@ -261,7 +264,8 @@ export class StudentRepository {
 
     const rows = db.getAllSync<any>(
       `SELECT id, center_id as centerId, student_code as studentCode, full_name as fullName, card_code as cardCode,
-              phone, parent_phone as parentPhone, grade, status, student_type as studentType, notes,
+              phone, parent_phone as parentPhone, grade, status, student_type as studentType,
+              student_color as studentColor, notes,
               deleted_at as deletedAt, deleted_by as deletedBy,
               created_at as createdAt, updated_at as updatedAt
        FROM students
@@ -293,7 +297,8 @@ export class StudentRepository {
     const rows = db.getAllSync<any>(
       `SELECT id, center_id as centerId, student_code as studentCode, full_name as fullName,
               card_code as cardCode, phone, parent_phone as parentPhone, grade, status,
-              student_type as studentType, notes, created_at as createdAt, updated_at as updatedAt
+              student_type as studentType, student_color as studentColor, notes,
+              created_at as createdAt, updated_at as updatedAt
        FROM students WHERE center_id = ? AND status = 'active' AND deleted_at IS NULL
        ORDER BY full_name ASC`, [centerId],
     );

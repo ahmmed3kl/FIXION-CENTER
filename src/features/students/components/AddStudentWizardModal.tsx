@@ -1,6 +1,5 @@
 import { Ionicons as BaseIonicons } from "@expo/vector-icons";
-import { useCameraPermissions } from "expo-camera";
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   Modal,
@@ -14,6 +13,8 @@ import {
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { formatCurrency, formatTimeArabic } from "../../../core/localization";
 import { Colors, useTheme } from "../../../core/theme";
+import { ConnectivityService } from "../../../core/connectivity";
+import { SyncEngine } from "../../../core/sync";
 import { AppButton, AppInput } from "../../../shared/components";
 import { BarcodeScannerView } from "../../../shared/components/BarcodeScannerView";
 import { Group, GroupSchedule, Package, PackageSubject, Student, Teacher } from "../../../shared/types";
@@ -98,9 +99,7 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({ vi
   const { width, height } = useWindowDimensions();
   const isTablet = width >= 600;
   const styles = useMemo(() => createStyles(colors, width, height, isTablet), [colors, width, height, isTablet]);
-  const [permission, requestPermission] = useCameraPermissions();
   const [cameraActive, setCameraActive] = useState(false);
-  const [torchEnabled, setTorchEnabled] = useState(false);
   const [cardCode, setCardCode] = useState("");
   const [studentCode, setStudentCode] = useState("");
   const [scanError, setScanError] = useState<string | null>(null);
@@ -132,6 +131,7 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({ vi
   const [packageGroupIds, setPackageGroupIds] = useState<Record<string, string>>({});
   const [packageTeacherSearch, setPackageTeacherSearch] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const cardValidationInFlightRef = useRef(false);
   const currentUser = useAuthStore((state) => state.currentUser);
 
   useEffect(() => {
@@ -149,6 +149,16 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({ vi
       const packages = PackageRepository.getPackages().filter((item) => item.status === "active");
       setAvailablePackages(packages);
       setPackageOptions(Object.fromEntries(packages.map((item) => [item.id, PackageRepository.getPackageSubjects(item.id)])));
+      const centerId = useAuthStore.getState().activeCenterId;
+      if (centerId) {
+        void SyncEngine.refreshCardRanges(centerId).catch((error) => {
+          setScanError(
+            error instanceof Error
+              ? error.message
+              : "تعذر تحميل نطاق البطاقات. لن تتم إضافة الطالب حتى يتم التحقق من الكود.",
+          );
+        });
+      }
       if (initialGroupId) {
         const initialGroup = allGroups.find((g) => g.id === initialGroupId);
         if (initialGroup) {
@@ -208,7 +218,7 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({ vi
   };
 
   const resetForm = () => {
-    setCameraActive(false); setTorchEnabled(false); setCardCode(""); setStudentCode(""); setScanError(null);
+    setCameraActive(false); setCardCode(""); setStudentCode(""); setScanError(null);
     setFullName(""); setPhone(""); setParentPhone(""); setGrade(""); setNotes(""); setErrors({});
     setPhoneDuplicateWarning(false); setParentPhoneDuplicateWarning(false);
     setLevelFilter("all"); setSubjectFilter("all"); setTeacherFilter("all"); setTeacherSearch(""); setShowLevels(false); setShowSubjects(false); setShowTeachers(false); setSelectedGroupIds([]);
@@ -216,7 +226,7 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({ vi
   };
 
   const resetStudentFields = () => {
-    setCameraActive(false); setTorchEnabled(false); setCardCode(""); setStudentCode(""); setScanError(null);
+    setCameraActive(false); setCardCode(""); setStudentCode(""); setScanError(null);
     setFullName(""); setPhone(""); setParentPhone(""); setNotes(""); setErrors({});
     setPhoneDuplicateWarning(false); setParentPhoneDuplicateWarning(false); setSubmitting(false);
   };
@@ -232,17 +242,21 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({ vi
     resetForm(); onClose();
   };
 
-  const validateCard = (value: string) => {
+  const validateCard = async (value: string) => {
     const raw = value.trim();
     if (!raw) { setScanError("أدخل أو امسح كود الكارت أولاً."); return false; }
     if (!isNumericCode(raw)) { setScanError(ValidationMessages.code); return false; }
     try {
-      CardRangeRepository.assertCodeAllowed(
-        useAuthStore.getState().activeCenterId || "",
-        raw,
-      );
+      const centerId = useAuthStore.getState().activeCenterId;
+      if (!centerId) throw new Error("تعذر تحديد المركز الحالي للتحقق من نطاق البطاقة.");
+      await SyncEngine.refreshCardRanges(centerId);
+      CardRangeRepository.assertCodeAllowed(centerId, raw);
     } catch (error) {
-      setScanError(error instanceof Error ? error.message : "تعذر التحقق من نطاق البطاقة.");
+      setScanError(
+        error instanceof Error
+          ? error.message
+          : "تعذر التحقق من نطاق البطاقة. لن تتم إضافة الطالب.",
+      );
       return false;
     }
     try {
@@ -256,16 +270,18 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({ vi
     setScanError(null); setErrors((old) => ({ ...old, cardCode: undefined })); return true;
   };
 
-  const openCamera = async () => {
-    if (!permission?.granted) {
-      const result = await requestPermission();
-      if (!result.granted) { Alert.alert("إذن الكاميرا", "فعّل إذن الكاميرا لمسح كارت الطالب."); return; }
-    }
+  const openCamera = () => {
     setCameraActive(true);
   };
 
-  const onBarcodeScanned = ({ data }: { data: string }) => {
-    if (data && validateCard(data)) setCameraActive(false);
+  const onBarcodeScanned = async ({ data }: { data: string }) => {
+    if (!data || cardValidationInFlightRef.current) return;
+    cardValidationInFlightRef.current = true;
+    try {
+      if (await validateCard(data)) setCameraActive(false);
+    } finally {
+      cardValidationInFlightRef.current = false;
+    }
   };
 
   const checkPhone = (value: string, parent = false) => {
@@ -360,20 +376,39 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({ vi
   };
 
   const submit = async () => {
-    if (!validateForm()) { Alert.alert("راجع البيانات", "أكمل الحقول المطلوبة قبل إضافة الطالب."); return; }
-    const archivedCardOwner = StudentRepository.getArchivedCardOwner(cardCode.trim());
-    if (archivedCardOwner) {
-      Alert.alert(
-        "إعادة استخدام الكارت",
-        `هذا الكارت كان مرتبطًا بالطالب المؤرشف «${archivedCardOwner.fullName}». هل تريد استخدامه للطالب الجديد؟`,
-        [
-          { text: "إلغاء", style: "cancel" },
-          { text: "استخدام الكارت", onPress: () => { void createStudent(true); } },
-        ],
-      );
-      return;
+    if (submitting) return;
+    setSubmitting(true);
+    try {
+      if (!validateForm()) {
+        Alert.alert("راجع البيانات", "أكمل الحقول المطلوبة قبل إضافة الطالب.");
+        return;
+      }
+      const centerId = useAuthStore.getState().activeCenterId;
+      if (!centerId) throw new Error("تعذر تحديد المركز الحالي للتحقق من نطاق البطاقة.");
+      await SyncEngine.refreshCardRanges(centerId);
+      CardRangeRepository.assertCodeAllowed(centerId, cardCode.trim());
+      const archivedCardOwner = StudentRepository.getArchivedCardOwner(cardCode.trim());
+      if (archivedCardOwner) {
+        Alert.alert(
+          "إعادة استخدام الكارت",
+          `هذا الكارت كان مرتبطًا بالطالب المؤرشف «${archivedCardOwner.fullName}». هل تريد استخدامه للطالب الجديد؟`,
+          [
+            { text: "إلغاء", style: "cancel" },
+            { text: "استخدام الكارت", onPress: () => { void createStudent(true); } },
+          ],
+        );
+        return;
+      }
+      await createStudent(false);
+    } catch (error) {
+      const message = error instanceof Error
+        ? error.message
+        : "تعذر التحقق من نطاق البطاقة. لن تتم إضافة الطالب.";
+      setScanError(message);
+      Alert.alert("تعذر التحقق من البطاقة", message);
+    } finally {
+      setSubmitting(false);
     }
-    await createStudent(false);
   };
 
   const createStudent = async (reuseArchivedCard: boolean) => {
@@ -427,7 +462,7 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({ vi
           </View>
           <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
             <Section styles={styles} icon="card-outline" title="الكارت" hint="امسح الكارت أو أدخل الكود يدوياً">
-              {cameraActive ? <BarcodeScannerView onDetected={(data) => { if (validateCard(data)) setCameraActive(false); }} onClose={() => { setTorchEnabled(false); setCameraActive(false); }} style={styles.cameraWrap} /> : <View style={styles.codeRow}><AppInput value={cardCode} onChangeText={(value) => { setCardCode(value); setScanError(null); clearError("cardCode"); }} onBlur={() => cardCode && validateCard(cardCode)} error={scanError || errors.cardCode} placeholder="00126" keyboardType="number-pad" inputKind="cardCode" containerStyle={styles.codeInputWrap} style={styles.compactInput} /><TouchableOpacity style={styles.scanButton} onPress={openCamera}><Ionicons name="camera-outline" size={22} color="#FFF" /></TouchableOpacity></View>}
+              {cameraActive ? <BarcodeScannerView title="مسح كارت الطالب" onDetected={(data) => { void onBarcodeScanned({ data }); }} onClose={() => setCameraActive(false)} /> : <View style={styles.codeRow}><AppInput value={cardCode} onChangeText={(value) => { setCardCode(value); setScanError(null); clearError("cardCode"); }} onBlur={() => { if (cardCode) void validateCard(cardCode); }} error={scanError || errors.cardCode} placeholder="00126" keyboardType="number-pad" inputKind="cardCode" containerStyle={styles.codeInputWrap} style={styles.compactInput} /><TouchableOpacity style={styles.scanButton} onPress={openCamera}><Ionicons name="camera-outline" size={22} color="#FFF" /></TouchableOpacity></View>}
               <AppInput label="كود الطالب *" value={studentCode} onChangeText={(value) => { setStudentCode(value); clearError("studentCode"); }} error={errors.studentCode} placeholder="00126" keyboardType="number-pad" inputKind="cardCode" containerStyle={styles.field} style={styles.compactInput} />
             </Section>
 
@@ -495,5 +530,4 @@ const createStyles = (colors: typeof Colors, width = 390, height = 844, isTablet
   selectedGroupRow: { backgroundColor: "#FFF", borderRadius: 12, padding: 9, flexDirection: "row-reverse", alignItems: "center", marginBottom: 7, gap: 8 }, removeButton: { width: 32, height: 32, borderRadius: 9, alignItems: "center", justifyContent: "center", backgroundColor: "#F1F5F9" }, selectedGroupCopy: { flex: 1, alignItems: "flex-end" }, selectedGroupName: { color: "#16213B", fontWeight: "800", fontSize: 13 }, selectedGroupMeta: { color: "#65748B", fontSize: 10, marginTop: 2 },
   packageList: { flexDirection: "row-reverse", gap: 7 }, packageChoice: { maxWidth: 170, minHeight: 53, borderRadius: 11, borderWidth: 1, borderColor: "#D8E1EF", backgroundColor: "#FFF", paddingHorizontal: 11, paddingVertical: 7, justifyContent: "center" }, packageChoiceActive: { borderColor: "#7C3AED", backgroundColor: "#F8F5FF" }, packageChoiceText: { color: "#334155", fontWeight: "800", fontSize: 12, textAlign: "right" }, packageChoiceTextActive: { color: "#6D28D9" }, packagePrice: { color: "#708097", fontSize: 10, marginTop: 2, textAlign: "right" }, packageBody: { marginTop: 11 }, packageRule: { color: "#65748B", fontSize: 11, textAlign: "right", marginBottom: 1 }, subjectCard: { backgroundColor: "#FFF", borderRadius: 12, borderWidth: 1, borderColor: "#E0E7F1", padding: 9, marginTop: 7 }, subjectCardSelected: { borderColor: "#BFD4FF" }, subjectTop: { flexDirection: "row-reverse", gap: 8, alignItems: "center" }, subjectTitleCopy: { alignItems: "flex-end", flex: 1 }, subjectName: { color: "#17213A", fontSize: 13, fontWeight: "800" }, subjectSub: { color: "#718098", fontSize: 10, marginTop: 1 }, teacherPickerLabel: { color: "#64748B", fontSize: 10, textAlign: "right", marginTop: 8, marginBottom: 4 }, teacherChoices: { flexDirection: "row-reverse", gap: 6 }, teacherChoice: { flexDirection: "row-reverse", alignItems: "center", gap: 4, borderRadius: 9, paddingHorizontal: 8, paddingVertical: 6, borderWidth: 1, borderColor: "#D8E1EF", backgroundColor: "#FDFEFF" }, teacherChoiceActive: { borderColor: "#93B7FF", backgroundColor: "#EEF5FF" }, teacherChoiceText: { color: "#506079", fontSize: 11, fontWeight: "700" }, teacherChoiceTextActive: { color: "#2563EB" }, packageGroupList: { flexDirection: "row-reverse", gap: 8, paddingVertical: 3 }, packageGroupChoice: { width: Math.max(160, Math.min(isTablet ? 250 : 220, (width - 32) * 0.72)), minHeight: 92, borderRadius: 13, padding: 10, backgroundColor: "#FFF", borderWidth: 1.5, borderColor: "#D8E1EF" }, packageGroupChoiceActive: { borderColor: "#2563EB", backgroundColor: "#EEF5FF" }, packageGroupChoiceHeader: { flexDirection: "row-reverse", alignItems: "center", justifyContent: "space-between", gap: 5 }, packageGroupName: { flex: 1, color: "#17213A", fontSize: 13, fontWeight: "900", textAlign: "right" }, packageGroupTextActive: { color: "#2563EB" }, packageGroupMeta: { color: "#64748B", fontSize: 10, textAlign: "right", marginTop: 7 }, packageGroupSchedule: { color: "#2563EB", fontSize: 11, fontWeight: "800", textAlign: "right", marginTop: 5 }, subjectSummary: { color: "#526078", fontSize: 10, textAlign: "right", marginTop: 6 }, subscriptionSummary: { backgroundColor: "#EEF4FF", borderRadius: 12, padding: 10, marginTop: 10 }, summaryHeading: { flexDirection: "row-reverse", alignItems: "center", gap: 5, marginBottom: 5 }, summaryTitle: { color: "#173C7A", fontSize: 13, fontWeight: "800" }, summaryLine: { flexDirection: "row-reverse", justifyContent: "space-between", borderTopWidth: 1, borderTopColor: "#D9E6FB", paddingTop: 5, marginTop: 4 }, summaryLabel: { color: "#65748B", fontSize: 11 }, summaryValue: { color: "#233654", fontSize: 11, fontWeight: "700" }, summaryPrice: { color: "#173C7A", fontSize: 12, fontWeight: "800" },
   submitButton: { marginTop: 3, height: 52, borderRadius: 14, backgroundColor: "#2563EB" },
-  cameraWrap: { overflow: "hidden", borderRadius: 14, height: 235, backgroundColor: "#0F172A" }, camera: { flex: 1 }, cameraActions: { position: "absolute", bottom: 10, left: 10, right: 10, flexDirection: "row", justifyContent: "space-between" }, cameraAction: { backgroundColor: "rgba(15,23,42,0.75)", paddingHorizontal: 12, height: 36, borderRadius: 10, alignItems: "center", justifyContent: "center" }, cameraActionText: { color: "#FFF", fontSize: 12, fontWeight: "700" },
 });

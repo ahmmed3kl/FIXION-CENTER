@@ -1,5 +1,4 @@
 import { Ionicons } from "@expo/vector-icons";
-import { CameraView, useCameraPermissions } from "expo-camera";
 import { router, useFocusEffect, useLocalSearchParams } from "expo-router";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -12,7 +11,10 @@ import {
     View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { getUserErrorMessage } from "../../core/errors";
+import {
+  DuplicateAttendanceError,
+  getUserErrorMessage,
+} from "../../core/errors";
 import { useLocalDataRevision } from "../../core/database/useLocalDataRevision";
 import { PermissionService } from "../../core/permissions";
 import {
@@ -30,6 +32,7 @@ import {
 } from "../../core/theme";
 import { useServiceVisibility } from "../../core/services/ServiceVisibilityContext";
 import { AttendanceRepository } from "../../features/attendance/AttendanceRepository";
+import { requiresAttendanceConfirmation } from "../../features/attendance/attendanceConfirmation";
 import { AttendanceSessionService, AttendanceSummary } from "../../features/attendance/AttendanceSessionService";
 import { MakeupService } from "../../features/attendance/MakeupService";
 import { GroupScheduleRepository } from "../../features/groups/GroupScheduleRepository";
@@ -38,12 +41,14 @@ import { HomeworkEvaluationRepository } from "../../features/homework/HomeworkEv
 import { PaymentRepository } from "../../features/payments/PaymentRepository";
 import { SessionRepository } from "../../features/sessions/SessionRepository";
 import { SessionClosingService } from "../../features/sessions/SessionClosingService";
+import { sortSessionsByActivation } from "../../features/sessions/sessionOrdering";
 import { ScannerService } from "../../features/scanner/ScannerService";
 import { StudentRepository } from "../../features/students/StudentRepository";
 import { StudentNoteRepository } from "../../features/students/StudentNoteRepository";
+import { getStudentColorPresentation } from "../../features/students/studentColor";
 import { useAuthStore } from "../../features/auth/useAuthStore";
 import { getLocalDateOnly } from "../../shared/utils/date";
-import { smartSearch } from "../../shared/utils/smartSearch";
+import { searchAttendanceStudents } from "../../features/attendance/attendanceStudentSearch";
 import {
     AppButton,
     AppCard,
@@ -85,16 +90,15 @@ function ScannerContent() {
   const services = useServiceVisibility();
   const paymentsEnabled = services.isEnabled("payments");
   const currentUser = useAuthStore((state) => state.currentUser);
+  const activeCenterId = useAuthStore((state) => state.activeCenterId);
   const localDataRevision = useLocalDataRevision();
   const lastLoadedRevisionRef = useRef(localDataRevision);
   const hasInitialLoadedRef = useRef(false);
   const { attendanceSessionId, addedStudentId } = useLocalSearchParams<{ attendanceSessionId?: string; addedStudentId?: string }>();
-  const [permission, requestPermission] = useCameraPermissions();
   const [isCameraActive, setIsCameraActive] = useState(false);
-  const [cameraInstanceKey, setCameraInstanceKey] = useState(0);
-  const [isTorchOn, setIsTorchOn] = useState(false);
   const [manualCode, setManualCode] = useState("00125");
   const [isProcessing, setIsProcessing] = useState(false);
+  const attendanceSubmissionRef = useRef(false);
 
   // Flow State
   const [student, setStudent] = useState<Student | null>(null);
@@ -117,10 +121,12 @@ function ScannerContent() {
   const [allGroups, setAllGroups] = useState<Group[]>([]);
   const [showAllGroups, setShowAllGroups] = useState(false);
   const [activeSessionsByGroup, setActiveSessionsByGroup] = useState<Record<string, Session>>({});
+  const [sessionActivationTimes, setSessionActivationTimes] = useState<Map<string, string>>(() => new Map());
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null);
   const [selectedScheduleId, setSelectedScheduleId] = useState<string | null>(null);
   const [attendanceStarted, setAttendanceStarted] = useState(false);
+  const [isStartingAttendance, setIsStartingAttendance] = useState(false);
   const [attendanceSummary, setAttendanceSummary] = useState<AttendanceSummary | null>(null);
   const [makeupNotice, setMakeupNotice] = useState<{ sourceGroupName?: string; teacherName?: string; originalAbsenceId?: string } | null>(null);
   const [isClosingSession, setIsClosingSession] = useState(false);
@@ -151,6 +157,7 @@ function ScannerContent() {
   const [financialExpanded, setFinancialExpanded] = useState(true);
 
   const isScanningBlockedRef = useRef(false);
+  const isStartingAttendanceRef = useRef(false);
   const lastScannedRef = useRef<{ code: string; at: number } | null>(null);
   const returnedStudentHandledRef = useRef<string | null>(null);
 
@@ -159,6 +166,7 @@ function ScannerContent() {
       setTodayGroups(AttendanceSessionService.getTodayGroups());
       const sessions = AttendanceSessionService.getTodaySessions();
       setActiveSessionsByGroup(Object.fromEntries(sessions.map((session) => [`${session.groupId}:${session.scheduleId}`, session])));
+      setSessionActivationTimes(SessionRepository.getActivationTimestamps(sessions.map((session) => session.id)));
       setAllGroups(GroupRepository.getAll());
       setAllStudents(StudentRepository.getAllForAttendance());
       try {
@@ -168,7 +176,13 @@ function ScannerContent() {
         setHomeworkStatuses([]);
         setHomeworkError(getUserErrorMessage(error));
       }
-    } catch (error) { setSearchError(getUserErrorMessage(error)); }
+    } catch (error) {
+      setTodayGroups([]);
+      setAllGroups([]);
+      setActiveSessionsByGroup({});
+      setSessionActivationTimes(new Map());
+      setSearchError(getUserErrorMessage(error));
+    }
   }, []);
 
   useEffect(() => {
@@ -199,14 +213,29 @@ function ScannerContent() {
     }
   };
 
+  const handleAttendanceAction = () => {
+    if (!student || isAlreadyAttended || attendanceResult) return;
+    const session = eligibleSessions.find((item) => item.id === selectedSessionId)
+      || (activeSessionId ? SessionRepository.findById(activeSessionId) : null);
+    if (!session) {
+      Alert.alert(Strings.errorTitle, "لا توجد جلسة حضور محددة لهذا الطالب.");
+      return;
+    }
+
+    if (requiresAttendanceConfirmation(Boolean(makeupNotice), isExternalAttendance)) {
+      requestAttendanceConfirmation();
+      return;
+    }
+
+    void recordAttendanceFor(student, session);
+  };
+
   // Refresh when the screen becomes active. Deduplication ensures we don't
   // double-load when focus and revision fire at the same time.
   useFocusEffect(useCallback(() => {
-    if (!hasInitialLoadedRef.current || lastLoadedRevisionRef.current !== localDataRevision) {
-      hasInitialLoadedRef.current = true;
-      lastLoadedRevisionRef.current = localDataRevision;
-      refreshTodayData();
-    }
+    hasInitialLoadedRef.current = true;
+    lastLoadedRevisionRef.current = localDataRevision;
+    refreshTodayData();
   }, [refreshTodayData, localDataRevision]));
 
   // React to local data changes (attendance recorded on another screen, sync, etc.)
@@ -232,29 +261,116 @@ function ScannerContent() {
     setCurrentGroupLabel([session.groupName, session.subjectName, session.teacherName].filter(Boolean).join(" • "));
   }, [addedStudentId, attendanceSessionId]);
 
-  const startAttendance = () => {
-    const selectedGroup = (showAllGroups ? allGroups : todayGroups).find((group) => group.id === selectedGroupId);
-    if (!selectedGroup) return;
+  const startAttendance = (requestedGroupId?: string, requestedScheduleId?: string, openExistingOnly = false) => {
+    if (isStartingAttendanceRef.current) return;
+    const groupId = requestedGroupId || selectedGroupId;
+    const scheduleId = requestedScheduleId || selectedScheduleId || undefined;
+    if (!groupId) return;
+
+    isStartingAttendanceRef.current = true;
+    setIsStartingAttendance(true);
     try {
-      const sessionKey = `${selectedGroup.id}:${selectedScheduleId || ""}`;
-      const session = activeSessionsByGroup[sessionKey] || AttendanceSessionService.ensureSessionForGroup(selectedGroup.id, undefined, selectedScheduleId || undefined);
-      setActiveSessionsByGroup((current) => ({ ...current, [sessionKey]: session }));
-      setActiveSessionId(session.id);
+      setSearchError(null);
+      const selectedGroup = GroupRepository.findById(groupId);
+      if (!selectedGroup || selectedGroup.status !== "active") {
+        throw new Error("المجموعة غير موجودة أو غير مفعلة في المركز الحالي.");
+      }
+      if (!activeCenterId) throw new Error("يجب تحديد المركز الحالي.");
+
+      const sessionDate = getLocalDateOnly();
+      const session = AttendanceSessionService.ensureSessionForGroup(groupId, sessionDate, scheduleId);
+      if (
+        session.centerId !== activeCenterId ||
+        session.groupId !== selectedGroup.id ||
+        session.sessionDate !== sessionDate ||
+        (scheduleId && session.scheduleId !== scheduleId)
+      ) {
+        throw new Error("بيانات الجلسة لا تطابق المجموعة أو المركز الحالي.");
+      }
+      if (openExistingOnly && session.status !== "open") {
+        throw new Error("لم تعد هذه الجلسة نشطة. حدّث القائمة واختر الإجراء المناسب.");
+      }
+
       if (session.status === "closed") {
         if (!PermissionService.hasPermission(currentUser?.permissions, "sessions.reopen")) {
           throw new Error("ليس لديك صلاحية إعادة فتح الجلسة.");
         }
         SessionClosingService.reopenSession(session.id, "استكمال تسجيل حضور نفس الجلسة");
+      } else if (session.status !== "scheduled" && session.status !== "open") {
+        throw new Error("لا يمكن بدء الحضور لهذه الجلسة بحالتها الحالية.");
       }
       AttendanceSessionService.activate(session.id);
+
+      const activeSession: Session = session.status === "open"
+        ? session
+        : { ...session, status: "open" };
+      const sessionKey = `${selectedGroup.id}:${session.scheduleId || scheduleId || ""}`;
+      setSelectedGroupId(selectedGroup.id);
+      setSelectedScheduleId(session.scheduleId || scheduleId || null);
+      setActiveSessionsByGroup((current) => ({ ...current, [sessionKey]: activeSession }));
+      setActiveSessionId(session.id);
+      setCurrentGroupLabel([selectedGroup.name, selectedGroup.subjectName, selectedGroup.teacherName].filter(Boolean).join(" • "));
       setIsSessionClosed(false);
       setAttendanceStarted(true);
       setAttendanceSummary(AttendanceSessionService.getSummary(session.id));
-    } catch (error) { setSearchError(getUserErrorMessage(error)); }
+      refreshTodayData();
+    } catch (error) {
+      setSearchError(getUserErrorMessage(error));
+    } finally {
+      isStartingAttendanceRef.current = false;
+      setIsStartingAttendance(false);
+    }
   };
+
+  const handleGroupPress = (group: Group, scheduleId: string, activeSession?: Session) => {
+    if (isStartingAttendanceRef.current) return;
+    if (activeSession?.status === "open") {
+      startAttendance(group.id, scheduleId, true);
+      return;
+    }
+    setSelectedGroupId(group.id);
+    setSelectedScheduleId(scheduleId);
+    setActiveSessionId(null);
+    setSearchError(null);
+  };
+
+  const visibleGroupSchedules = useMemo(() => {
+    const today = getLocalDateOnly();
+    const todayDayOfWeek = new Date(`${today}T12:00:00`).getDay();
+    const entries = (showAllGroups ? allGroups : todayGroups).flatMap((group) =>
+      GroupScheduleRepository.getSchedulesForGroup(group.id)
+        .filter((schedule) => showAllGroups || schedule.dayOfWeek === todayDayOfWeek)
+        .map((schedule) => ({
+          group,
+          schedule,
+          activeSession: activeSessionsByGroup[`${group.id}:${schedule.id}`],
+        })),
+    );
+    const orderedActiveSessions = sortSessionsByActivation(
+      Object.values(activeSessionsByGroup).filter((session) => session.status === "open"),
+      sessionActivationTimes,
+    );
+    const activeSessionRank = new Map(orderedActiveSessions.map((session, index) => [session.id, index]));
+
+    return entries.sort((left, right) => {
+      const leftRank = left.activeSession?.status === "open"
+        ? activeSessionRank.get(left.activeSession.id) ?? Number.MAX_SAFE_INTEGER
+        : Number.MAX_SAFE_INTEGER;
+      const rightRank = right.activeSession?.status === "open"
+        ? activeSessionRank.get(right.activeSession.id) ?? Number.MAX_SAFE_INTEGER
+        : Number.MAX_SAFE_INTEGER;
+      if (leftRank !== rightRank) return leftRank - rightRank;
+      return left.group.id.localeCompare(right.group.id) || left.schedule.id.localeCompare(right.schedule.id);
+    });
+  }, [activeSessionsByGroup, allGroups, sessionActivationTimes, showAllGroups, todayGroups]);
+
+  const selectedSession = selectedGroupId
+    ? activeSessionsByGroup[`${selectedGroupId}:${selectedScheduleId || ""}`]
+    : undefined;
 
   // Reset student search
   const handleReset = () => {
+    setPendingAttendance(null);
     setStudent(null);
     setEligibleSessions([]);
     setSelectedSessionId(null);
@@ -413,7 +529,7 @@ function ScannerContent() {
           compensationNotice = { sourceGroupName: sameTeacher.sourceGroupName, teacherName: sameTeacher.teacherName };
         } else {
           setStudent(null);
-          setSearchError("الطالب غير مشترك مع مدرس هذه المجموعة، ولا توجد له حصة تعويضية مؤهلة.");
+          setSearchError("الطالب لا ينتمي إلى المجموعة أو المستوى المحدد، ولا توجد له حصة تعويضية مؤهلة.");
           setIsProcessing(false);
           return;
         }
@@ -441,9 +557,8 @@ function ScannerContent() {
         );
         setIsAlreadyAttended(attended);
         // Looking up/scanning a card only selects the student. Attendance is
-        // recorded after the operator explicitly presses the attendance button
-        // and confirms, so a scan can never silently create attendance or a
-        // payment (including for makeup/external students).
+        // recorded by the registration action, with explicit confirmation for
+        // makeup or external attendance.
       } else if (sessions.length > 1) {
         setSelectedSessionId(null);
         setIsAlreadyAttended(false);
@@ -473,7 +588,6 @@ function ScannerContent() {
     if (lastScannedRef.current && lastScannedRef.current.code === normalized && now - lastScannedRef.current.at < 1200) return;
     lastScannedRef.current = { code: normalized, at: now };
     isScanningBlockedRef.current = true;
-    setIsTorchOn(false);
     setIsCameraActive(false);
     setManualCode(data);
     // Cards can belong to another group; allow lookup to resolve a valid
@@ -481,17 +595,12 @@ function ScannerContent() {
     lookupCard(data, undefined, true);
   };
 
-  const attendancePickerStudents = useMemo(() => smartSearch(
-    allStudents,
-    allStudentSearch,
-    [
-      { get: (item) => item.fullName, weight: 3 },
-      { get: (item) => item.phone },
-      { get: (item) => item.parentPhone },
-      { get: (item) => item.studentCode },
-      { get: (item) => item.cardCode },
-    ],
-  ), [allStudentSearch, allStudents]);
+  const attendancePickerStudents = useMemo(() => {
+    if (!activeSessionId) return [];
+    const session = SessionRepository.findById(activeSessionId);
+    const groupGrade = allGroups.find((group) => group.id === session?.groupId)?.grade;
+    return searchAttendanceStudents(allStudents, allStudentSearch, groupGrade);
+  }, [activeSessionId, allGroups, allStudentSearch, allStudents]);
 
   const openAttendanceNotes = async () => {
     if (!student) return;
@@ -544,6 +653,8 @@ function ScannerContent() {
   };
 
   const recordAttendanceFor = async (targetStudent: Student, session: Session, makeup?: typeof makeupNotice, isExternal = false) => {
+    if (attendanceSubmissionRef.current) return;
+    attendanceSubmissionRef.current = true;
     setIsProcessing(true);
 
     try {
@@ -596,9 +707,15 @@ function ScannerContent() {
         AttendanceRepository.getStudentGroupAttendanceSummaries(targetStudent.id)
           .find((summary) => summary.groupId === session.groupId) || null,
       );
-    } catch (err: any) {
-      Alert.alert(Strings.errorTitle, getUserErrorMessage(err));
+    } catch (err: unknown) {
+      if (err instanceof DuplicateAttendanceError) {
+        setAttendanceResult(null);
+        setIsAlreadyAttended(true);
+      } else {
+        Alert.alert(Strings.errorTitle, getUserErrorMessage(err));
+      }
     } finally {
+      attendanceSubmissionRef.current = false;
       setIsProcessing(false);
     }
   };
@@ -637,7 +754,9 @@ function ScannerContent() {
       return;
     }
     if (!alreadyAttended && session.status !== "closed") {
-      setPendingAttendance({ student: createdStudent, session, makeup });
+      if (requiresAttendanceConfirmation(Boolean(makeup), false)) {
+        setPendingAttendance({ student: createdStudent, session, makeup });
+      }
     }
   }, [addedStudentId, attendanceSessionId]);
 
@@ -758,13 +877,56 @@ function ScannerContent() {
       </View>
       {!attendanceStarted ? (
         <ScrollView contentContainerStyle={styles.rebuildContent}>
-          <View style={styles.startAttendancePanel}><Text style={styles.rebuildSectionTitle}>مجموعات اليوم</Text><View style={styles.attendanceFilterRow}><TouchableOpacity style={[styles.attendanceFilter, !showAllGroups && styles.attendanceFilterActive]} onPress={() => setShowAllGroups(false)}><Text style={[styles.attendanceFilterText, !showAllGroups && styles.attendanceFilterTextActive]}>اليوم</Text></TouchableOpacity><TouchableOpacity style={[styles.attendanceFilter, showAllGroups && styles.attendanceFilterActive]} onPress={() => setShowAllGroups(true)}><Text style={[styles.attendanceFilterText, showAllGroups && styles.attendanceFilterTextActive]}>كل المجموعات</Text></TouchableOpacity></View>{(showAllGroups ? allGroups : todayGroups).flatMap((group) => GroupScheduleRepository.getSchedulesForGroup(group.id).filter((schedule) => showAllGroups || schedule.dayOfWeek === new Date().getDay()).map((schedule) => { const key = `${group.id}:${schedule.id}`; const selected = selectedGroupId === group.id && selectedScheduleId === schedule.id; return <TouchableOpacity key={key} onPress={() => { setSelectedGroupId(group.id); setSelectedScheduleId(schedule.id); }} style={[styles.rebuildGroupRow, selected && styles.rebuildGroupRowActive]}><View style={styles.rebuildGroupIcon}><Ionicons name="people-outline" size={20} color={Colors.primary} /></View><View style={styles.rebuildGroupCopy}><Text style={styles.rebuildGroupName}>{group.name}</Text><Text style={styles.rebuildGroupMeta}>{[group.subjectName, group.grade, group.teacherName].filter(Boolean).join(" · ")}</Text><Text style={styles.rebuildGroupMeta}>{DAYS_OF_WEEK[schedule.dayOfWeek]} · {formatTimeArabic(schedule.startTime)} - {formatTimeArabic(schedule.endTime)}</Text></View><Ionicons name="chevron-back" size={18} color={Colors.slate400} /></TouchableOpacity>; }))}<AppButton title="بدء جلسة الحضور" onPress={startAttendance} disabled={!selectedGroupId} size="lg" />{searchError ? <Text style={styles.errorAlertText}>{searchError}</Text> : null}</View>
+          <View style={styles.startAttendancePanel}>
+            <Text style={styles.rebuildSectionTitle}>مجموعات اليوم</Text>
+            <View style={styles.attendanceFilterRow}>
+              <TouchableOpacity style={[styles.attendanceFilter, !showAllGroups && styles.attendanceFilterActive]} onPress={() => setShowAllGroups(false)}>
+                <Text style={[styles.attendanceFilterText, !showAllGroups && styles.attendanceFilterTextActive]}>اليوم</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[styles.attendanceFilter, showAllGroups && styles.attendanceFilterActive]} onPress={() => setShowAllGroups(true)}>
+                <Text style={[styles.attendanceFilterText, showAllGroups && styles.attendanceFilterTextActive]}>كل المجموعات</Text>
+              </TouchableOpacity>
+            </View>
+            {visibleGroupSchedules.map(({ group, schedule, activeSession }) => {
+              const key = `${group.id}:${schedule.id}`;
+              const selected = selectedGroupId === group.id && selectedScheduleId === schedule.id;
+              const statusLabel = activeSession?.status === "open"
+                ? "جلسة نشطة، اضغط للمتابعة"
+                : activeSession?.status === "closed"
+                  ? "جلسة مغلقة"
+                  : "لم تبدأ الجلسة";
+              return (
+                <TouchableOpacity
+                  key={key}
+                  disabled={isStartingAttendance}
+                  onPress={() => handleGroupPress(group, schedule.id, activeSession)}
+                  style={[styles.rebuildGroupRow, selected && styles.rebuildGroupRowActive]}
+                >
+                  <View style={styles.rebuildGroupIcon}><Ionicons name="people-outline" size={20} color={Colors.primary} /></View>
+                  <View style={styles.rebuildGroupCopy}>
+                    <Text style={styles.rebuildGroupName}>{group.name}</Text>
+                    <Text style={styles.rebuildGroupMeta}>{[group.subjectName, group.grade, group.teacherName].filter(Boolean).join(" · ")}</Text>
+                    <Text style={styles.rebuildGroupMeta}>{DAYS_OF_WEEK[schedule.dayOfWeek]} · {formatTimeArabic(schedule.startTime)} - {formatTimeArabic(schedule.endTime)}</Text>
+                    <Text style={[styles.rebuildGroupMeta, activeSession?.status === "open" ? styles.groupAttendanceStateActive : null]}>{statusLabel}</Text>
+                  </View>
+                  <Ionicons name="chevron-back" size={18} color={Colors.slate400} />
+                </TouchableOpacity>
+              );
+            })}
+            <AppButton
+              title={isStartingAttendance ? "جارٍ فتح الجلسة..." : selectedSession?.status === "closed" ? "إعادة فتح الجلسة" : "بدء جلسة الحضور"}
+              onPress={() => startAttendance()}
+              disabled={!selectedGroupId || isStartingAttendance}
+              size="lg"
+            />
+            {searchError ? <Text style={styles.errorAlertText}>{searchError}</Text> : null}
+          </View>
         </ScrollView>
       ) : (
         <ScrollView contentContainerStyle={styles.rebuildContent} keyboardShouldPersistTaps="handled">
           {attendanceSummary ? <View style={styles.rebuildSummary}><View style={[styles.summaryTile, styles.summaryAll]}><Ionicons name="people" size={21} color={Colors.primary} /><Text style={styles.summaryValue}>{attendanceSummary.total}</Text><Text style={styles.summaryLabel}>الكل</Text></View><View style={[styles.summaryTile, styles.summaryPresent]}><Ionicons name="checkmark-circle" size={21} color={Colors.successText} /><Text style={styles.summaryValue}>{attendanceSummary.present}</Text><Text style={styles.summaryLabel}>حاضر</Text></View><View style={[styles.summaryTile, styles.summaryAbsent]}><Ionicons name="close-circle" size={21} color={Colors.dangerText} /><Text style={styles.summaryValue}>{attendanceSummary.absent}</Text><Text style={styles.summaryLabel}>غائب</Text></View><View style={[styles.summaryTile, styles.summaryMakeup]}><Ionicons name="people-outline" size={21} color={Colors.warningText} /><Text style={styles.summaryValue}>{attendanceSummary.makeup}</Text><Text style={styles.summaryLabel}>تعويض</Text></View></View> : null}
-          <View style={styles.rebuildScanPanel}><View style={styles.rebuildScanInput}><Ionicons name="search-outline" size={23} color={Colors.slate400} /><AppInput value={manualCode} onChangeText={setManualCode} placeholder="اكتب كود الطالب للبحث اليدوي" containerStyle={{ flex: 1, marginBottom: 0 }} /></View><TouchableOpacity style={styles.rebuildManualButton} onPress={() => lookupCard(manualCode, undefined, true)}><Text style={styles.rebuildManualText}>بحث بالكود</Text></TouchableOpacity>{isCameraActive ? <BarcodeScannerView onDetected={(data) => handleBarcodeScanned({ data })} onClose={() => { setIsTorchOn(false); setIsCameraActive(false); }} style={styles.rebuildCamera} /> : <TouchableOpacity style={styles.rebuildScanButton} onPress={() => { isScanningBlockedRef.current = false; lastScannedRef.current = null; setIsCameraActive(true); }}><Ionicons name="scan-outline" size={25} color={Colors.white} /><Text style={styles.rebuildScanButtonText}>مسح كود الطالب</Text></TouchableOpacity>}</View>
-          {student ? <View style={styles.rebuildStudentCard}><View style={styles.rebuildStudentAvatar}><Ionicons name="person" size={34} color={Colors.primary} /></View><View style={styles.rebuildStudentCopy}><Text style={styles.rebuildStudentName}>{student.fullName}</Text><Text style={styles.rebuildStudentMeta}>كود الطالب: {student.cardCode || student.studentCode}</Text><Text style={styles.rebuildStudentMeta}>{[student.grade, currentGroupLabel].filter(Boolean).join(" · ")}</Text></View><View style={styles.rebuildStatus}><Ionicons name={attendanceResult?.isLate ? "time-outline" : "checkmark-circle"} size={22} color={attendanceResult?.isLate ? Colors.warningText : Colors.successText} /><Text style={styles.rebuildStatusText}>{attendanceResult?.isLate ? "متأخر" : attendanceResult ? "حاضر" : isAlreadyAttended ? "مسجل" : makeupNotice ? "تعويض مستحق" : isExternalAttendance ? "خارج المجموعة" : "جاهز للتسجيل"}</Text>{attendanceResult?.checkInTime ? <Text style={styles.rebuildTime}>{attendanceResult.checkInTime}</Text> : null}</View>{!attendanceResult && !isAlreadyAttended ? <AppButton title={makeupNotice ? "تسجيل حضور تعويضي" : isExternalAttendance ? "تسجيل حضور خارجي" : "تسجيل الحضور"} onPress={requestAttendanceConfirmation} loading={isProcessing} disabled={isSessionClosed} size="lg" /> : null}<View style={styles.rebuildActions}><TouchableOpacity style={styles.rebuildSecondaryAction} onPress={handleReset}><Ionicons name="refresh" size={20} color={Colors.primary} /><Text style={styles.rebuildActionText}>مسح طالب آخر</Text></TouchableOpacity><TouchableOpacity style={styles.rebuildSecondaryAction} onPress={() => router.push({ pathname: "/(main)/students", params: { add: "1", attendanceSessionId: activeSessionId } } as any)}><Ionicons name="person-add-outline" size={20} color={Colors.primary} /><Text style={styles.rebuildActionText}>إضافة طالب</Text></TouchableOpacity></View></View> : null}
+          <View style={styles.rebuildScanPanel}><View style={styles.rebuildScanInput}><Ionicons name="search-outline" size={23} color={Colors.slate400} /><AppInput value={manualCode} onChangeText={setManualCode} placeholder="اكتب كود الطالب للبحث اليدوي" containerStyle={{ flex: 1, marginBottom: 0 }} /></View><TouchableOpacity style={styles.rebuildManualButton} onPress={() => lookupCard(manualCode, undefined, true)}><Text style={styles.rebuildManualText}>بحث بالكود</Text></TouchableOpacity>{isCameraActive ? <BarcodeScannerView onDetected={(data) => handleBarcodeScanned({ data })} onClose={() => setIsCameraActive(false)} title="مسح كارت الطالب" /> : <TouchableOpacity style={styles.rebuildScanButton} onPress={() => { isScanningBlockedRef.current = false; lastScannedRef.current = null; setIsCameraActive(true); }}><Ionicons name="scan-outline" size={25} color={Colors.white} /><Text style={styles.rebuildScanButtonText}>مسح كود الطالب</Text></TouchableOpacity>}</View>
+          {student ? <View style={[styles.rebuildStudentCard, getStudentColorPresentation(student.studentColor).backgroundColor ? { backgroundColor: getStudentColorPresentation(student.studentColor).backgroundColor, borderColor: getStudentColorPresentation(student.studentColor).accentColor } : null]}><View style={styles.rebuildStudentAvatar}><Ionicons name="person" size={34} color={getStudentColorPresentation(student.studentColor).accentColor || Colors.primary} /></View><View style={styles.rebuildStudentCopy}><Text style={styles.rebuildStudentName}>{student.fullName}</Text><Text style={styles.rebuildStudentMeta}>كود الطالب: {student.cardCode || student.studentCode}</Text><Text style={styles.rebuildStudentMeta}>{[student.grade, currentGroupLabel].filter(Boolean).join(" · ")}</Text></View><View style={styles.rebuildStatus}><Ionicons name={attendanceResult?.isLate ? "time-outline" : "checkmark-circle"} size={22} color={attendanceResult?.isLate ? Colors.warningText : Colors.successText} /><Text style={styles.rebuildStatusText}>{attendanceResult?.isLate ? "متأخر" : attendanceResult ? "حاضر" : isAlreadyAttended ? "مسجل" : makeupNotice ? "تعويض مستحق" : isExternalAttendance ? "خارج المجموعة" : "جاهز للتسجيل"}</Text>{attendanceResult?.checkInTime ? <Text style={styles.rebuildTime}>{attendanceResult.checkInTime}</Text> : null}</View>{!attendanceResult && !isAlreadyAttended ? <AppButton title={makeupNotice ? "تسجيل حضور تعويضي" : isExternalAttendance ? "تسجيل حضور خارجي" : "تسجيل الحضور"} onPress={handleAttendanceAction} loading={isProcessing} disabled={isSessionClosed} size="lg" /> : null}<View style={styles.rebuildActions}><TouchableOpacity style={styles.rebuildSecondaryAction} onPress={handleReset}><Ionicons name="refresh" size={20} color={Colors.primary} /><Text style={styles.rebuildActionText}>مسح طالب آخر</Text></TouchableOpacity><TouchableOpacity style={styles.rebuildSecondaryAction} onPress={() => router.push({ pathname: "/(main)/students", params: { add: "1", attendanceSessionId: activeSessionId } } as any)}><Ionicons name="person-add-outline" size={20} color={Colors.primary} /><Text style={styles.rebuildActionText}>إضافة طالب</Text></TouchableOpacity></View></View> : null}
           {student && (activeSessionId || selectedSessionId) ? <View style={styles.homeworkEvaluationBox}>
             <View style={styles.rebuildSectionHeader}><View><Text style={styles.rebuildSectionTitle}>حالة الواجب</Text><Text style={styles.rebuildFinanceHint}>{homeworkEvaluation?.statusName || "لم تُسجل حالة لهذه الحصة"}</Text></View><Ionicons name="document-text-outline" size={20} color={Colors.primary} /></View>
             {homeworkError ? <Text style={styles.errorAlertText}>{homeworkError}</Text> : homeworkStatuses.length ? <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.homeworkStatusChoices}>
@@ -779,9 +941,70 @@ function ScannerContent() {
         </ScrollView>
       )}
       <Modal visible={showPaymentModal} transparent animationType="fade" onRequestClose={() => setShowPaymentModal(false)}><View style={styles.modalBackdrop}><View style={styles.modalContent}><Text style={styles.modalTitle}>تسجيل دفعة نقدية</Text><Text style={styles.modalSub}>{student?.fullName}</Text><View style={styles.paymentPurposeRow}>{(["session", "cycle"] as const).map((purpose) => <TouchableOpacity key={purpose} style={[styles.paymentPurposeButton, paymentPurpose === purpose && styles.paymentPurposeButtonActive]} onPress={() => { setPaymentPurpose(purpose); setSelectedPaymentCycleId(null); if (purpose === "cycle") setPaymentAmount(String(financialStatus?.remainingBalance ?? 0)); else { const session = activeSessionId ? SessionRepository.findById(activeSessionId) : null; setPaymentAmount(String(Number(session?.sessionPrice || financialStatus?.currentPeriodDebt || 0))); } }}><Text style={[styles.paymentPurposeText, paymentPurpose === purpose && styles.paymentPurposeTextActive]}>{purpose === "session" ? "دفع الحصة" : "استكمال الشهر / الباقة"}</Text></TouchableOpacity>)}</View>{paymentPurpose === "cycle" && (financialStatus?.cycles?.filter((cycle) => (cycle.remainingDebt ?? 0) > 0).length || 0) > 1 ? <View style={styles.paymentCyclePicker}><Text style={styles.paymentCycleTitle}>اختر المجموعة أو الدورة</Text>{financialStatus?.cycles.filter((cycle) => (cycle.remainingDebt ?? 0) > 0).map((cycle) => <TouchableOpacity key={cycle.id} style={[styles.paymentCycleOption, selectedPaymentCycleId === cycle.id && styles.paymentCycleOptionActive]} onPress={() => { setSelectedPaymentCycleId(cycle.id); setPaymentAmount(String(cycle.remainingDebt ?? cycle.effectivePrice ?? cycle.cyclePrice ?? 0)); }}><Text style={styles.paymentCycleName}>{cycle.groupName || cycle.packageName || "دورة مديونية"}</Text><Text style={styles.paymentCycleAmount}>المتبقي: {formatCurrency(cycle.remainingDebt ?? 0)}</Text></TouchableOpacity>)}</View> : null}{paymentPurpose === "session" && (financialStatus?.cycles?.filter((cycle) => (cycle.remainingDebt ?? 0) > 0).length || 0) > 1 ? <View style={styles.paymentCyclePicker}><Text style={styles.paymentCycleTitle}>اختار الدورة التي ستخصم منها الدفعة</Text>{financialStatus?.cycles.filter((cycle) => (cycle.remainingDebt ?? 0) > 0).map((cycle) => <TouchableOpacity key={cycle.id} style={[styles.paymentCycleOption, selectedPaymentCycleId === cycle.id && styles.paymentCycleOptionActive]} onPress={() => setSelectedPaymentCycleId(cycle.id)}><Text style={styles.paymentCycleName}>{cycle.groupName || cycle.packageName || "دورة مديونية"}</Text><Text style={styles.paymentCycleAmount}>المتبقي: {formatCurrency(cycle.remainingDebt ?? 0)}</Text></TouchableOpacity>)}</View> : null}<AppInput label="المبلغ" keyboardType="numeric" value={paymentAmount} onChangeText={setPaymentAmount} /><AppInput label="ملاحظة الدفع (اختياري)" placeholder="مثال: استكمال باقي الشهر" value={paymentNotes} onChangeText={setPaymentNotes} multiline /><View style={styles.modalButtonRow}><AppButton title="حفظ" onPress={handleConfirmQuickPayment} loading={isRecordingPayment} variant="success" style={{ flex: 1 }} /><AppButton title="إلغاء" variant="outline" onPress={() => setShowPaymentModal(false)} style={{ flex: 1 }} /></View></View></View></Modal>
-      <Modal visible={showAllStudentPicker} transparent animationType="slide" onRequestClose={() => setShowAllStudentPicker(false)}><View style={styles.modalBackdrop}><View style={styles.confirmSheet}><Text style={styles.modalTitle}>اختيار طالب للحضور</Text><AppInput value={allStudentSearch} onChangeText={setAllStudentSearch} placeholder="ابحث بالاسم أو الهاتف أو الكود" /><ScrollView style={{ maxHeight: 360 }}>{attendancePickerStudents.map((item) => <TouchableOpacity key={item.id} style={styles.rebuildGroupRow} onPress={() => { setShowAllStudentPicker(false); setManualCode(item.cardCode || item.studentCode || item.phone || ""); void lookupCard(item.cardCode || item.studentCode || item.phone || "", item, true); }}><View style={styles.rebuildGroupCopy}><Text style={styles.rebuildGroupName}>{item.fullName}</Text><Text style={styles.rebuildGroupMeta}>{[item.phone, item.studentCode || item.cardCode, item.grade].filter(Boolean).join(" · ")}</Text></View><Ionicons name="chevron-back" size={18} color={Colors.slate400} /></TouchableOpacity>)}</ScrollView><AppButton title="إلغاء" variant="outline" onPress={() => setShowAllStudentPicker(false)} /></View></View></Modal>
+      <Modal
+        visible={showAllStudentPicker}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setShowAllStudentPicker(false)}
+      >
+        <View style={styles.modalBackdrop}>
+          <View style={styles.confirmSheet}>
+            <Text style={styles.modalTitle}>اختيار طالب للحضور</Text>
+            <AppInput
+              value={allStudentSearch}
+              onChangeText={setAllStudentSearch}
+              placeholder="ابحث بالاسم أو الهاتف أو الكود"
+            />
+            <ScrollView style={{ maxHeight: 360 }}>
+              {attendancePickerStudents.length > 0 ? (
+                attendancePickerStudents.map((item) => (
+                  <TouchableOpacity
+                    key={item.id}
+                    style={[
+                      styles.rebuildGroupRow,
+                      getStudentColorPresentation(item.studentColor).backgroundColor
+                        ? {
+                            backgroundColor: getStudentColorPresentation(item.studentColor).backgroundColor,
+                            borderColor: getStudentColorPresentation(item.studentColor).accentColor,
+                          }
+                        : null,
+                    ]}
+                    onPress={() => {
+                      setShowAllStudentPicker(false);
+                      const code = item.cardCode || item.studentCode || item.phone || "";
+                      setManualCode(code);
+                      void lookupCard(code, item, true);
+                    }}
+                  >
+                    <View style={styles.rebuildGroupCopy}>
+                      <Text style={styles.rebuildGroupName}>{item.fullName}</Text>
+                      <Text style={styles.rebuildGroupMeta}>
+                        {[item.phone, item.studentCode || item.cardCode, item.grade]
+                          .filter(Boolean)
+                          .join(" · ")}
+                      </Text>
+                    </View>
+                    <Ionicons name="chevron-back" size={18} color={Colors.slate400} />
+                  </TouchableOpacity>
+                ))
+              ) : (
+                <Text style={styles.rebuildEmpty}>
+                  {allStudentSearch.trim()
+                    ? "لا يوجد طلاب مطابقون في المجموعة أو المستوى المحدد."
+                    : "ابحث عن طالب من نطاق هذه المجموعة."}
+                </Text>
+              )}
+            </ScrollView>
+            <AppButton
+              title="إلغاء"
+              variant="outline"
+              onPress={() => setShowAllStudentPicker(false)}
+            />
+          </View>
+        </View>
+      </Modal>
       <Modal visible={showAttendanceNoteModal} transparent animationType="fade" onRequestClose={() => setShowAttendanceNoteModal(false)}><View style={styles.modalBackdrop}><View style={styles.modalContent}><Text style={styles.modalTitle}>إضافة ملاحظة</Text><Text style={styles.modalSub}>{student?.fullName}</Text><AppInput value={attendanceNoteText} onChangeText={setAttendanceNoteText} placeholder="اكتب ملاحظتك" multiline /><View style={styles.modalButtonRow}><AppButton title="حفظ" onPress={() => void saveAttendanceNote()} style={{ flex: 1 }} /><AppButton title="إلغاء" variant="outline" onPress={() => setShowAttendanceNoteModal(false)} style={{ flex: 1 }} /></View>{attendanceNotes.map((note) => <View key={note.id} style={styles.paymentHistoryRow}><Text style={styles.paymentHistoryType}>{note.text}</Text><Text style={styles.paymentHistoryMeta}>{note.createdByName || "حساب"}</Text></View>)}</View></View></Modal>
-      <Modal visible={Boolean(pendingAttendance)} transparent animationType="slide" onRequestClose={cancelPendingAttendance}>
+      <Modal visible={Boolean(pendingAttendance && requiresAttendanceConfirmation(Boolean(pendingAttendance.makeup), pendingAttendance.isExternal === true))} transparent animationType="slide" onRequestClose={cancelPendingAttendance}>
         <View style={styles.modalBackdrop}>
           <View style={styles.confirmSheet}>
             <View style={styles.confirmIcon}><Ionicons name="checkmark-circle-outline" size={30} color={Colors.primary} /></View>
@@ -879,57 +1102,12 @@ function ScannerContent() {
         {attendanceStarted && !student && !isSessionClosed ? (
           <AppCard style={styles.scannerCard}>
             {isCameraActive ? (
-              <View style={styles.cameraContainer}>
-                {permission?.granted ? (
-                  <View style={styles.cameraFrameWrap}>
-                  <CameraView
-                    key={`attendance-camera-${cameraInstanceKey}`}
-                    style={styles.camera}
-                    autofocus="on"
-                    zoom={0.2}
-                    enableTorch={isTorchOn}
-                    barcodeScannerSettings={{
-                      barcodeTypes: ["qr", "code128", "ean13", "upc_a"],
-                    }}
-                    onBarcodeScanned={handleBarcodeScanned}
-                  />
-                  <View pointerEvents="none" style={styles.scanGuide}><View style={styles.scanGuideCorner} /><Text style={styles.scanGuideText}>قرّب الكارت داخل الإطار</Text></View>
-                  </View>
-                ) : (
-                  <View style={styles.permissionBox}>
-                    <Text style={styles.permissionText}>
-                      {Strings.cameraPermissionRequired}
-                    </Text>
-                    <AppButton
-                      title={Strings.grantPermissionButton}
-                      onPress={requestPermission}
-                      size="sm"
-                    />
-                  </View>
-                )}
-                <View style={styles.cameraControls}>
-                  <AppButton
-                    title={isTorchOn ? "إغلاق الفلاش" : "تشغيل الفلاش"}
-                    variant="outline"
-                    size="sm"
-                    onPress={() => setIsTorchOn((current) => !current)}
-                    icon={<Ionicons name="flashlight-outline" size={18} color={Colors.primary} />}
-                    style={{ flex: 1 }}
-                  />
-                <AppButton
-                  title="إغلاق الكاميرا"
-                  variant="outline"
-                  size="sm"
-                  onPress={() => { setIsTorchOn(false); setIsCameraActive(false); }}
-                  style={{ flex: 1 }}
-                />
-                </View>
-              </View>
+              <BarcodeScannerView onDetected={(data) => handleBarcodeScanned({ data })} onClose={() => setIsCameraActive(false)} title="مسح كارت الطالب" />
             ) : (
               <View style={styles.cameraPlaceholder}>
                 <TouchableOpacity
                   activeOpacity={0.8}
-                  onPress={() => { isScanningBlockedRef.current = false; lastScannedRef.current = null; setCameraInstanceKey((value) => value + 1); setIsCameraActive(true); }}
+                  onPress={() => { isScanningBlockedRef.current = false; lastScannedRef.current = null; setIsCameraActive(true); }}
                   style={styles.cameraLaunchButton}
                 >
                   <Ionicons
@@ -1404,60 +1582,6 @@ const createStyles = () => StyleSheet.create({
   scannerCard: {
     padding: Spacing.lg,
     marginBottom: Spacing.lg,
-  },
-  cameraContainer: {
-    alignItems: "center",
-  },
-  cameraFrameWrap: {
-    width: "100%",
-    height: 240,
-    borderRadius: BorderRadius.md,
-    overflow: "hidden",
-    position: "relative",
-    backgroundColor: Colors.slate900,
-  },
-  camera: {
-    width: "100%",
-    height: 240,
-  },
-  cameraControls: {
-    flexDirection: "row",
-    gap: Spacing.sm,
-    marginTop: Spacing.sm,
-  },
-  scanGuide: {
-    position: "absolute",
-    left: "10%",
-    right: "10%",
-    top: "28%",
-    height: "44%",
-    borderWidth: 2,
-    borderColor: Colors.white,
-    borderRadius: 12,
-    alignItems: "center",
-    justifyContent: "flex-end",
-    paddingBottom: 8,
-  },
-  scanGuideCorner: {
-    ...StyleSheet.absoluteFill,
-    borderWidth: 3,
-    borderColor: Colors.primary,
-    borderRadius: 12,
-    opacity: 0.85,
-  },
-  scanGuideText: {
-    color: Colors.white,
-    fontSize: 12,
-    fontWeight: "700",
-    backgroundColor: "rgba(0,0,0,0.55)",
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 6,
-  },
-  permissionBox: {
-    height: 180,
-    alignItems: "center",
-    justifyContent: "center",
   },
   permissionText: {
     ...Typography.body,

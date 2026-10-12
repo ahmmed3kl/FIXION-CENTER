@@ -11,7 +11,7 @@ const SERVICE_CATALOG = Object.freeze({
   sms: { name: "SMS", description: "الرسائل النصية", availability: "not_configured" },
 });
 
-const ENTITY_SERVICE = { attendance: "attendance", attendance_marked: "attendance", session: "attendance", payment: "payments", payment_collected: "payments", payment_reversal: "payments", debt_adjustment: "payments", package: "packages", package_subject: "packages", package_subscription: "packages", package_teacher_override: "packages", debt_cycle: "packages", advance_coverage: "packages", subscription: "packages", makeup: "makeup", notification: "notifications", notification_template: "notifications", notification_event: "notifications", notification_delivery: "notifications", report: "reports" };
+const ENTITY_SERVICE = { attendance: "attendance", attendance_marked: "attendance", absence_note: "attendance", session: "attendance", payment: "payments", payment_collected: "payments", payment_reversal: "payments", debt_adjustment: "payments", package: "packages", package_subject: "packages", package_subscription: "packages", package_teacher_override: "packages", debt_cycle: "packages", advance_coverage: "packages", subscription: "packages", makeup: "makeup", notification: "notifications", notification_template: "notifications", notification_event: "notifications", notification_delivery: "notifications", report: "reports" };
 
 function getServiceKeyForEntity(entityType, operationType, payload) {
   const entity = String(entityType || "").toLowerCase();
