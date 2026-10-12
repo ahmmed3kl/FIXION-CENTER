@@ -86,6 +86,11 @@ async function ensureSchemaCompatibility() {
     );
     CREATE INDEX IF NOT EXISTS idx_card_ranges_codes
       ON card_ranges(center_id, status, start_code, end_code);
+    CREATE TABLE IF NOT EXISTS center_academic_stages (
+      center_id VARCHAR(64) PRIMARY KEY REFERENCES centers(id) ON DELETE CASCADE,
+      stages_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
   `);
   await pool.query(`
     CREATE TABLE IF NOT EXISTS center_data_state (

@@ -110,7 +110,10 @@ router.get(
           client.query("SELECT * FROM grade_scores WHERE center_id = $1", [centerId]),
           client.query("SELECT * FROM homework_evaluation_statuses WHERE center_id = $1", [centerId]),
           client.query("SELECT * FROM session_homework_evaluations WHERE center_id = $1", [centerId]),
-          client.query("SELECT * FROM center_academic_stages WHERE center_id = $1", [centerId]).catch(() => ({ rows: [] })),
+          withBootstrapQueryContext(
+            client.query("SELECT * FROM center_academic_stages WHERE center_id = $1", [centerId]),
+            "center_academic_stages",
+          ),
           withBootstrapQueryContext(
             client.query("SELECT id, center_id, start_code, end_code, status, created_at, updated_at FROM card_ranges WHERE center_id = $1", [centerId]),
             "card_ranges",

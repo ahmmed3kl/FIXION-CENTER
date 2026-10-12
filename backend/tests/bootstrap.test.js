@@ -17,7 +17,9 @@ const routePath = require.resolve("../src/routes/sync");
 let server;
 let baseUrl;
 let failCardRanges = false;
+let failAcademicStages = false;
 let scopedQueries = [];
+let transactionErrors = [];
 const rangesByCenter = {
   "center-a": [{
     id: "range-a",
@@ -43,28 +45,51 @@ before(async () => {
   };
   deviceGuard.deviceGuard = (req, res, next) => next();
   SyncProcessor.acquireCenterSyncLock = async () => {};
-  db.withTransaction = (callback) => callback({
-    query: async (sql, parameters) => {
-      const table = sql.match(/\bFROM\s+([a-z_]+)/i)?.[1];
-      if (table && parameters?.length) {
-        scopedQueries.push({ table, centerId: parameters[0] });
-      }
-      if (table === "card_ranges" && failCardRanges) {
-        const error = new Error('relation "card_ranges" does not exist');
-        error.code = "42P01";
-        error.table = "card_ranges";
-        throw error;
-      }
-      if (table === "card_ranges") {
-        return { rows: rangesByCenter[parameters[0]] || [] };
-      }
-      if (table === "server_sync_operations") {
-        return { rows: [{ max_seq: "7" }] };
-      }
-      return { rows: [] };
-    },
-  });
-
+  db.withTransaction = (callback) => {
+    let transactionAborted = false;
+    let queryQueue = Promise.resolve();
+    const query = (sql, parameters) => {
+      const execute = async () => {
+        const table = sql.match(/\bFROM\s+([a-z_]+)/i)?.[1];
+        if (transactionAborted) {
+          const error = new Error("current transaction is aborted");
+          error.code = "25P02";
+          transactionErrors.push({ table, code: error.code });
+          throw error;
+        }
+        if (table && parameters?.length) {
+          scopedQueries.push({ table, centerId: parameters[0] });
+        }
+        if (table === "center_academic_stages" && failAcademicStages) {
+          const error = new Error('relation "center_academic_stages" does not exist');
+          error.code = "42P01";
+          error.table = "center_academic_stages";
+          transactionAborted = true;
+          transactionErrors.push({ table, code: error.code });
+          throw error;
+        }
+        if (table === "card_ranges" && failCardRanges) {
+          const error = new Error('relation "card_ranges" does not exist');
+          error.code = "42P01";
+          error.table = "card_ranges";
+          transactionAborted = true;
+          transactionErrors.push({ table, code: error.code });
+          throw error;
+        }
+        if (table === "card_ranges") {
+          return { rows: rangesByCenter[parameters[0]] || [] };
+        }
+        if (table === "server_sync_operations") {
+          return { rows: [{ max_seq: "7" }] };
+        }
+        return { rows: [] };
+      };
+      const result = queryQueue.then(execute);
+      queryQueue = result.catch(() => {});
+      return result;
+    };
+    return callback({ query });
+  };
   delete require.cache[routePath];
   const syncRouter = require(routePath);
   const app = express();
@@ -138,6 +163,36 @@ test("a missing card_ranges table remains a generic 500 but logs the failing tab
   }
 });
 
+test("missing academic stages table logs its original SQL failure instead of a later transaction-aborted error", async () => {
+  failAcademicStages = true;
+  transactionErrors = [];
+  const logged = [];
+  const originalConsoleError = console.error;
+  console.error = (...args) => logged.push(args);
+  try {
+    const response = await fetch(`${baseUrl}/sync/bootstrap`, {
+      headers: { "X-Center-Id": "center-a", "X-Device-Id": "device-a" },
+    });
+    assert.equal(response.status, 500);
+    const body = await response.json();
+    assert.equal(body.error.code, "INTERNAL_ERROR");
+    assert.doesNotMatch(JSON.stringify(body), /42P01|25P02|center_academic_stages|card_ranges/);
+    assert.equal(logged.length, 1);
+    const diagnostic = JSON.parse(logged[0][1]);
+    assert.equal(diagnostic.code, "42P01");
+    assert.equal(diagnostic.table, "center_academic_stages");
+    assert.equal(diagnostic.centerId, "center-a");
+    assert.equal(diagnostic.path, "/sync/bootstrap");
+    assert.deepEqual(transactionErrors.slice(0, 2), [
+      { table: "center_academic_stages", code: "42P01" },
+      { table: "card_ranges", code: "25P02" },
+    ]);
+  } finally {
+    console.error = originalConsoleError;
+    failAcademicStages = false;
+  }
+});
+
 test("card-range bootstrap query is center-scoped", async () => {
   const centerA = await fetch(`${baseUrl}/sync/bootstrap`, {
     headers: { "X-Center-Id": "center-a", "X-Device-Id": "device-a" },
@@ -159,4 +214,6 @@ test("startup schema compatibility declares card_ranges with idempotent DDL", as
   assert.match(statements[0], /CREATE TABLE IF NOT EXISTS card_ranges/);
   assert.match(statements[0], /uq_card_range_identity/);
   assert.match(statements[0], /idx_card_ranges_codes/);
+  assert.match(statements[0], /CREATE TABLE IF NOT EXISTS center_academic_stages/);
+  assert.match(statements[0], /stages_json JSONB NOT NULL DEFAULT '\[\]'::jsonb/);
 });
