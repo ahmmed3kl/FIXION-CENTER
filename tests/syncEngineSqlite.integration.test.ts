@@ -165,6 +165,8 @@ class InvalidChangeAdapter extends SharedServerAdapter {
 
 class SpecificRetryAdapter implements ISyncApiAdapter {
   calls: SyncOperationPayload[][] = [];
+  bootstrapGroups: BootstrapResponse["groups"] | null = null;
+  bootstrapCalls = 0;
   response: PushSyncResponse = {
     success: true,
     syncedOperationIds: [],
@@ -194,7 +196,9 @@ class SpecificRetryAdapter implements ISyncApiAdapter {
   }
 
   async bootstrapCenter(_centerId: string): Promise<BootstrapResponse> {
-    throw new Error("Unexpected bootstrap request");
+    this.bootstrapCalls += 1;
+    if (!this.bootstrapGroups) throw new Error("Unexpected bootstrap request");
+    return { groups: this.bootstrapGroups } as BootstrapResponse;
   }
 }
 
@@ -649,6 +653,99 @@ describe("SyncEngine against independent persistent SQLite databases", () => {
       ).rejects.toThrow("العملية غير مؤهلة لإعادة المحاولة الآمنة");
       expect(adapter.calls).toHaveLength(0);
       expect(SyncRepository.getByOperationId(operationId)?.status).toBe("conflict");
+    } finally {
+      SyncEngine.setAdapter(originalAdapter);
+    }
+  });
+
+  it("reconciles a group-delete conflict from fresh server state before deciding whether to retry", async () => {
+    const centerId = `engine-group-delete-retry-${Date.now()}`;
+    const database = createClientDatabase("group-delete-retry", centerId);
+    const operationId = `op-grp-delete-${Date.now()}-group-1`;
+    SyncRepository.enqueueOperation({
+      operationId,
+      centerId,
+      userId: "retry-user",
+      deviceId: "retry-device",
+      operationType: "DELETE",
+      entityType: "group",
+      entityId: "group-1",
+      payload: { id: "group-1" },
+    });
+    database.runSync(
+      `UPDATE sync_operations
+       SET status = 'conflict', last_error = 'column "status" does not exist'
+       WHERE operation_id = ?`,
+      [operationId],
+    );
+
+    const adapter = new SpecificRetryAdapter();
+    SyncEngine.setAdapter(adapter);
+    try {
+      adapter.bootstrapGroups = [{ id: "group-1", deleted: false }];
+      adapter.response.syncedOperationIds = [operationId];
+      await expect(
+        SyncEngine.retryFailedGroupDelete(centerId, operationId),
+      ).resolves.toBe("synced");
+      expect(adapter.bootstrapCalls).toBe(1);
+      expect(adapter.calls).toHaveLength(1);
+      expect(adapter.calls[0]).toHaveLength(1);
+      expect(adapter.calls[0][0]).toMatchObject({
+        operationId,
+        operationType: "DELETE",
+        entityType: "group",
+        entityId: "group-1",
+      });
+      expect(SyncRepository.getByOperationId(operationId)?.status).toBe("synced");
+
+      const alreadyDeletedId = `op-grp-delete-${Date.now()}-group-2`;
+      SyncRepository.enqueueOperation({
+        operationId: alreadyDeletedId,
+        centerId,
+        userId: "retry-user",
+        deviceId: "retry-device",
+        operationType: "DELETE",
+        entityType: "group",
+        entityId: "group-2",
+        payload: { id: "group-2" },
+      });
+      database.runSync(
+        `UPDATE sync_operations
+         SET status = 'conflict', last_error = 'column "status" does not exist'
+         WHERE operation_id = ?`,
+        [alreadyDeletedId],
+      );
+      adapter.bootstrapGroups = [{ id: "group-2", deleted: true }];
+      const pushesBeforeAlreadyDeleted = adapter.calls.length;
+      await expect(
+        SyncEngine.retryFailedGroupDelete(centerId, alreadyDeletedId),
+      ).resolves.toBe("already_deleted");
+      expect(adapter.calls).toHaveLength(pushesBeforeAlreadyDeleted);
+      expect(SyncRepository.getByOperationId(alreadyDeletedId)?.status).toBe("synced");
+
+      const unknownStateId = `op-grp-delete-${Date.now()}-group-3`;
+      SyncRepository.enqueueOperation({
+        operationId: unknownStateId,
+        centerId,
+        userId: "retry-user",
+        deviceId: "retry-device",
+        operationType: "DELETE",
+        entityType: "group",
+        entityId: "group-3",
+        payload: { id: "group-3" },
+      });
+      database.runSync(
+        `UPDATE sync_operations
+         SET status = 'conflict', last_error = 'column "status" does not exist'
+         WHERE operation_id = ?`,
+        [unknownStateId],
+      );
+      adapter.bootstrapGroups = [];
+      await expect(
+        SyncEngine.retryFailedGroupDelete(centerId, unknownStateId),
+      ).rejects.toThrow("تعذر التحقق من وجود المجموعة على الخادم");
+      expect(adapter.calls).toHaveLength(pushesBeforeAlreadyDeleted);
+      expect(SyncRepository.getByOperationId(unknownStateId)?.status).toBe("conflict");
     } finally {
       SyncEngine.setAdapter(originalAdapter);
     }

@@ -99,12 +99,16 @@ export default function SyncDebugScreen() {
     setRetryingOperationId(operation.operationId);
     setLastResult("");
     try {
-      const result = await SyncEngine.retryLegacyGroupScheduleUpdate(
-        activeCenter.id,
-        operation.operationId,
-      );
+      const isGroupDelete =
+        operation.entityType === "group" &&
+        operation.operationType.toUpperCase() === "DELETE";
+      const result = isGroupDelete
+        ? await SyncEngine.retryFailedGroupDelete(activeCenter.id, operation.operationId)
+        : await SyncEngine.retryLegacyGroupScheduleUpdate(activeCenter.id, operation.operationId);
       setLastResult(
-        result === "synced"
+        result === "already_deleted"
+          ? `المجموعة ${operation.entityId} محذوفة بالفعل على الخادم؛ تمت تسوية العملية دون إعادة إرسالها.`
+          : result === "synced"
           ? `تم تأكيد العملية ${operation.operationId} من الخادم.`
           : `أعاد الخادم تعارضًا جديدًا للعملية ${operation.operationId}.`,
       );
@@ -230,6 +234,27 @@ export default function SyncDebugScreen() {
                     : <Ionicons name="reload-outline" size={18} color={Colors.white} />}
                   <Text style={styles.syncButtonText}>
                     {retryingOperationId === operation.operationId ? "جارٍ إعادة المحاولة" : "إعادة محاولة هذه العملية"}
+                  </Text>
+                </TouchableOpacity>
+              ) : operation.status === "conflict" &&
+                operation.entityType === "group" &&
+                operation.operationType.toUpperCase() === "DELETE" &&
+                operation.operationId.startsWith("op-grp-delete-") &&
+                /column\s+["']?status["']?\s+does not exist/i.test(operation.lastError || "") ? (
+                <TouchableOpacity
+                  style={styles.retryButton}
+                  onPress={() => retryOperation(operation)}
+                  disabled={retryingOperationId !== null || refreshing}
+                  accessibilityRole="button"
+                  accessibilityLabel={`التحقق من حالة المجموعة وإعادة محاولة الحذف ${operation.operationId}`}
+                >
+                  {retryingOperationId === operation.operationId
+                    ? <ActivityIndicator color={Colors.white} />
+                    : <Ionicons name="reload-outline" size={18} color={Colors.white} />}
+                  <Text style={styles.syncButtonText}>
+                    {retryingOperationId === operation.operationId
+                      ? "جارٍ التحقق من حالة المجموعة"
+                      : "التحقق من الخادم وتسوية الحذف"}
                   </Text>
                 </TouchableOpacity>
               ) : null}

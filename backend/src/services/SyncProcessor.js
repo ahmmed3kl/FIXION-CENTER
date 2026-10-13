@@ -1983,11 +1983,6 @@ class SyncProcessor {
             );
           }
           await client.query(
-            `UPDATE group_schedules SET status = 'inactive', updated_at = NOW()
-              WHERE center_id = $1 AND group_id = $2 AND status <> 'inactive'`,
-            [centerId, groupId],
-          );
-          await client.query(
             `UPDATE sessions SET status = 'cancelled', updated_at = NOW()
               WHERE center_id = $1 AND group_id = $2
                 AND status = 'scheduled' AND session_date >= CURRENT_DATE`,

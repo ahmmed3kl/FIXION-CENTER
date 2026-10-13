@@ -1591,6 +1591,89 @@ export class SyncEngine {
     });
   }
 
+  static async retryFailedGroupDelete(
+    centerId: string,
+    operationId: string,
+  ): Promise<"synced" | "already_deleted" | "conflict"> {
+    if (!centerId || !operationId) {
+      throw new Error("مركز أو معرّف العملية غير صالح.");
+    }
+
+    return this.withSyncLocks(centerId, async () => {
+      const operation = SyncRepository.getByOperationId(operationId);
+      const lastError = operation?.lastError || "";
+      if (
+        !operation ||
+        operation.centerId !== centerId ||
+        operation.entityType !== "group" ||
+        operation.operationType.toUpperCase() !== "DELETE" ||
+        operation.status !== "conflict" ||
+        !operationId.startsWith("op-grp-delete-") ||
+        !/column\s+["']?status["']?\s+does not exist/i.test(lastError)
+      ) {
+        throw new Error("العملية غير مؤهلة لإعادة المحاولة الآمنة.");
+      }
+
+      const serverSnapshot = await this.adapter.bootstrapCenter(centerId);
+      const serverGroup = serverSnapshot.groups?.find(
+        (group: any) => String(group.id) === operation.entityId,
+      );
+      if (!serverGroup) {
+        throw new Error("تعذر التحقق من وجود المجموعة على الخادم؛ تُركت العملية للمراجعة.");
+      }
+      if (serverGroup.deleted === true || serverGroup.deleted === "true") {
+        SyncRepository.markAsSynced(operationId, { resolveOnlyThisOperation: true });
+        return "already_deleted";
+      }
+
+      SyncRepository.markAsSyncing(operationId);
+      try {
+        const response = await this.adapter.pushOperations(centerId, [{
+          operationId: operation.operationId,
+          centerId: operation.centerId,
+          userId: operation.userId,
+          deviceId: operation.deviceId,
+          operationType: operation.operationType,
+          entityType: operation.entityType,
+          entityId: operation.entityId,
+          payload: typeof operation.payload === "string"
+            ? JSON.parse(operation.payload || "{}")
+            : operation.payload,
+          createdAt: operation.createdAt,
+          retryCount: operation.retryCount,
+        }]);
+
+        if (response.syncedOperationIds.includes(operationId)) {
+          SyncRepository.markAsSynced(operationId, { resolveOnlyThisOperation: true });
+          return "synced";
+        }
+
+        const conflict = response.conflicts.find((item) => item.operationId === operationId);
+        if (conflict) {
+          SyncRepository.markAsConflict(
+            operationId,
+            `تضارب مع الخادم: ${conflict.reason} (${conflict.resolution})`,
+            { serverState: conflict.serverState, resolution: conflict.resolution },
+          );
+          return "conflict";
+        }
+
+        const reason = "لم يؤكد الخادم قبول العملية ولم يُرجع تعارضًا لها.";
+        SyncRepository.markAsFailed(operationId, reason);
+        throw new Error(reason);
+      } catch (error: any) {
+        const current = SyncRepository.getByOperationId(operationId);
+        if (current?.status === "syncing") {
+          SyncRepository.markAsFailed(
+            operationId,
+            error?.message || "تعذر الحصول على نتيجة إعادة المحاولة من الخادم.",
+          );
+        }
+        throw error;
+      }
+    });
+  }
+
   /**
    * A server reset can erase the remote sync ledger while this device still
    * marks its original creates as synced. Rebuild fresh outbox records from
