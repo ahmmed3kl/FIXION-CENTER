@@ -24,7 +24,7 @@ export default function CenterSwitchScreen() {
     setSwitchingCenterId(centerId);
     try {
       await selectCenter(centerId);
-      Alert.alert("تم بنجاح", "تم تبديل السنتر الحالي.", [{ text: "حسنًا", onPress: () => router.replace("/(main)/index" as any) }]);
+      Alert.alert("تم بنجاح", "تم تبديل السنتر الحالي.", [{ text: "حسنًا", onPress: () => router.replace("/(main)/dashboard" as any) }]);
     } catch (error: any) {
       Alert.alert("تعذر التبديل", error?.message || "لا يمكن تبديل السنتر حاليًا.");
     } finally {

@@ -11,7 +11,7 @@ import { useAuthStore } from "../../features/auth/useAuthStore";
 import { canSwitchCenters } from "../../features/auth/centerAccess";
 
 export const unstable_settings = {
-  anchor: "index",
+  anchor: "dashboard",
 } as const;
 
 export default function MainLayout() {
@@ -36,7 +36,7 @@ export default function MainLayout() {
 
   return (
     <Tabs
-      initialRouteName="index"
+      initialRouteName="dashboard"
       backBehavior="history"
       screenOptions={{
         headerShown: false,
@@ -72,7 +72,7 @@ export default function MainLayout() {
         }}
       />
       <Tabs.Screen
-        name="index"
+        name="dashboard"
         options={{
           title: Strings.tabDashboard,
           tabBarIcon: ({ focused, color, size }) => (

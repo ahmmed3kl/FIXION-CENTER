@@ -41,9 +41,10 @@ describe("route permission access", () => {
     expect(canSwitchCenters({ role: "secretary" })).toBe(false);
   });
 
-  it("resolves the main route group to the dashboard while its index route initializes", () => {
-    expect(resolvePermissionRouteName(["(main)"])).toBe("index");
-    expect(canAccessRoute("index", ["dashboard.view"])).toBe(true);
-    expect(canAccessRoute("index", [])).toBe(false);
+  it("resolves the main route group and dashboard route to the dashboard permission", () => {
+    expect(resolvePermissionRouteName(["(main)"])).toBe("dashboard");
+    expect(resolvePermissionRouteName(["(main)", "dashboard"])).toBe("dashboard");
+    expect(canAccessRoute("dashboard", ["dashboard.view"])).toBe(true);
+    expect(canAccessRoute("dashboard", [])).toBe(false);
   });
 });

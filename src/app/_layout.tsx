@@ -108,7 +108,7 @@ function AuthGuard({ children }: { children: React.ReactNode }) {
     if (!isAuthenticated && !inAuthGroup) {
       router.replace("/(auth)/login");
     } else if (isAuthenticated && inAuthGroup) {
-      router.replace("/(main)/index");
+      router.replace("/(main)/dashboard");
     }
   }, [isAuthenticated, activeCenterId, isLoading, segments]);
 

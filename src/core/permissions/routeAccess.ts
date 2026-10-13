@@ -1,7 +1,7 @@
 import { Permission } from "../../shared/types";
 
 export const routePermissions: Partial<Record<string, Permission[]>> = {
-  index: ["dashboard.view"],
+  dashboard: ["dashboard.view"],
   students: ["students.view"],
   scanner: ["attendance.create"],
   academic: [
@@ -46,7 +46,7 @@ const routeAllPermissions: Partial<Record<string, Permission[]>> = {
 };
 
 export function resolvePermissionRouteName(segments: readonly string[]): string {
-  if (segments.length === 1 && segments[0] === "(main)") return "index";
+  if (segments.length === 1 && segments[0] === "(main)") return "dashboard";
   return segments.find((segment) => segment in routePermissions || unrestrictedRoutes.has(segment))
     || segments[segments.length - 1]
     || "unlisted-route";
