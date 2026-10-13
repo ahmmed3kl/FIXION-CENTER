@@ -1938,6 +1938,10 @@ class InMemorySqliteMock implements SqlDatabase {
               row.status = "inactive";
               if (trimmed.includes("updated_at = ?"))
                 row.updated_at = params[0];
+            } else if (trimmed.includes("status = 'deleted'")) {
+              row.status = "deleted";
+              if (trimmed.includes("updated_at = ?"))
+                row.updated_at = params[0];
             } else if (trimmed.includes("status = ?")) {
               row.status = params[0];
               if (params.length >= 2) row.updated_at = params[1];
@@ -1955,12 +1959,22 @@ class InMemorySqliteMock implements SqlDatabase {
             }
           }
         } else if (tableName === "group_schedules") {
-          const id = params[params.length - 1];
-          const row = list.find((r) => r.id === id);
-          if (row) {
-            if (trimmed.includes("status = 'inactive'"))
-              row.status = "inactive";
-            else if (trimmed.includes("status = ?")) row.status = params[0];
+          if (trimmed.includes("group_id = ?")) {
+            const centerId = params.length >= 3 ? params[1] : null;
+            const groupId = params[params.length - 1];
+            list.filter((row) => row.group_id === groupId && (!centerId || row.center_id === centerId))
+              .forEach((row) => {
+                if (trimmed.includes("status = 'inactive'")) row.status = "inactive";
+                if (trimmed.includes("updated_at = ?")) row.updated_at = params[0];
+              });
+          } else {
+            const id = params[params.length - 1];
+            const row = list.find((r) => r.id === id);
+            if (row) {
+              if (trimmed.includes("status = 'inactive'"))
+                row.status = "inactive";
+              else if (trimmed.includes("status = ?")) row.status = params[0];
+            }
           }
         } else if (tableName === "student_group_enrollments") {
           const id = params[params.length - 1];
@@ -1980,6 +1994,19 @@ class InMemorySqliteMock implements SqlDatabase {
             }
           }
         } else if (tableName === "sessions") {
+          if (trimmed.includes("group_id = ?")) {
+            const centerId = params[1];
+            const groupId = params[2];
+            const cutoffDate = params[3];
+            list.filter(
+              (row) => row.center_id === centerId && row.group_id === groupId &&
+                row.status === "scheduled" && row.session_date >= cutoffDate,
+            ).forEach((row) => {
+              row.status = "cancelled";
+              row.updated_at = params[0];
+            });
+            return { lastInsertRowId: 0, changes: 1 };
+          }
           const id = params[params.length - 1];
           const row = list.find((r) => r.id === id);
           if (row) {
@@ -2015,11 +2042,23 @@ class InMemorySqliteMock implements SqlDatabase {
           const id = params[params.length - 1];
           const row = list.find((r) => r.id === id);
           if (row) {
-            if (trimmed.includes("status = ?")) {
+            if (trimmed.includes("status = 'cancelled'")) {
+              row.cycle_price = params[0];
+              row.status = "cancelled";
+              row.updated_at = params[1];
+            } else if (trimmed.includes("status = ?")) {
               row.status = params[0];
               if (trimmed.includes("updated_at = ?"))
                 row.updated_at = params[1];
             }
+          }
+        } else if (tableName === "student_subscriptions") {
+          if (trimmed.includes("group_id = ?")) {
+            const centerId = params[0];
+            const groupId = params[1];
+            list.filter(
+              (row) => row.center_id === centerId && row.group_id === groupId && row.status === "active",
+            ).forEach((row) => { row.status = "cancelled"; });
           }
         } else if (tableName === "packages") {
           const id = params[params.length - 1];
@@ -2947,6 +2986,48 @@ class InMemorySqliteMock implements SqlDatabase {
 
     if (trimmed.includes("FROM group_schedules")) {
       const list = this.tables.get("group_schedules") || [];
+      if (
+        trimmed.includes("JOIN groups other") &&
+        trimmed.includes("JOIN group_schedules own")
+      ) {
+        const [ownGroupId, centerId, excludedGroupId, teacherId] = params;
+        const groups = this.tables.get("groups") || [];
+        const ownSchedules = list.filter(
+          (schedule) =>
+            schedule.center_id === centerId &&
+            schedule.group_id === ownGroupId &&
+            schedule.status === "active",
+        );
+        for (const otherSchedule of list) {
+          const otherGroup = groups.find(
+            (group) =>
+              group.center_id === centerId &&
+              group.id === otherSchedule.group_id,
+          );
+          if (
+            otherSchedule.center_id !== centerId ||
+            otherSchedule.group_id === excludedGroupId ||
+            otherSchedule.status !== "active" ||
+            otherGroup?.teacher_id !== teacherId
+          ) {
+            continue;
+          }
+          const conflict = ownSchedules.find(
+            (ownSchedule) =>
+              ownSchedule.day_of_week === otherSchedule.day_of_week &&
+              !(ownSchedule.end_time <= otherSchedule.start_time ||
+                ownSchedule.start_time >= otherSchedule.end_time),
+          );
+          if (conflict) {
+            return [{
+              groupName: otherGroup.name,
+              startTime: otherSchedule.start_time,
+              endTime: otherSchedule.end_time,
+            }] as T[];
+          }
+        }
+        return [] as T[];
+      }
       const mapped = list.map((r) => ({
         id: r.id,
         centerId: r.center_id,
@@ -2997,7 +3078,26 @@ class InMemorySqliteMock implements SqlDatabase {
       return mapped as T[];
     }
 
-    if (trimmed.includes("FROM student_group_enrollments")) {
+    if (trimmed.includes("FROM center_academic_stages")) {
+      const list = this.tables.get("center_academic_stages") || [];
+      const mapped = list.map((row) => ({
+        centerId: row.center_id,
+        stagesJson: row.stages_json,
+        updatedAt: row.updated_at,
+        center_id: row.center_id,
+        stages_json: row.stages_json,
+        updated_at: row.updated_at,
+      }));
+      if (params.length >= 1 && trimmed.includes("center_id = ?")) {
+        return mapped.filter((row) => row.centerId === params[0]) as T[];
+      }
+      return mapped as T[];
+    }
+
+    if (
+      trimmed.includes("FROM student_group_enrollments") &&
+      !trimmed.includes("FROM debt_cycles")
+    ) {
       const list = this.tables.get("student_group_enrollments") || [];
       const students = this.tables.get("students") || [];
       const groups = this.tables.get("groups") || [];
@@ -3474,6 +3574,7 @@ class InMemorySqliteMock implements SqlDatabase {
     if (trimmed.includes("FROM debt_cycles")) {
       const list = this.tables.get("debt_cycles") || [];
       const groups = this.tables.get("groups") || [];
+      const enrollments = this.tables.get("student_group_enrollments") || [];
       const packages = this.tables.get("packages") || [];
       const mapped = list.map((r) => {
         const g = groups.find((grp) => grp.id === r.group_id);
@@ -3497,6 +3598,7 @@ class InMemorySqliteMock implements SqlDatabase {
           packageId: r.package_id || null,
           cycleType: r.cycle_type || "group",
           billingMode: r.billing_mode || null,
+          serverRevision: r.server_revision || 0,
           // snake_case
           center_id: r.center_id,
           student_id: r.student_id,
@@ -3512,6 +3614,17 @@ class InMemorySqliteMock implements SqlDatabase {
           billing_mode: r.billing_mode,
         };
       });
+      if (trimmed.includes("dc.status IN ('open', 'partial', 'pending')")) {
+        const groupId = params[1];
+        return mapped.filter((cycle) => {
+          const enrollment = enrollments.find((row) => row.id === cycle.enrollmentId);
+          return cycle.centerId === params[0] &&
+            ["open", "partial", "pending"].includes(cycle.status) &&
+            cycle.cycleType !== "package" &&
+            !cycle.packageSubscriptionId &&
+            (cycle.groupId === groupId || enrollment?.group_id === groupId);
+        }) as T[];
+      }
       if (
         params.length >= 3 &&
         trimmed.includes("enrollment_id = ? AND cycle_number = ?")
@@ -3620,6 +3733,15 @@ class InMemorySqliteMock implements SqlDatabase {
 
     if (trimmed.includes("FROM payments")) {
       const list = this.tables.get("payments") || [];
+      if (trimmed.includes("COALESCE(SUM(amount), 0) as paid")) {
+        const paid = list
+          .filter(
+            (row) => row.center_id === params[0] && row.debt_cycle_id === params[1] &&
+              (!row.is_reversed || row.is_reversed === 0),
+          )
+          .reduce((total, row) => total + (Number(row.amount) || 0), 0);
+        return [{ paid }] as T[];
+      }
       if (trimmed.includes("created_at LIKE ?")) {
         const centerId = params[0];
         const pattern = String(params[1]).replace("%", "");

@@ -1700,7 +1700,12 @@ export class SyncEngine {
        FROM groups WHERE center_id = ?`,
       [centerId],
     );
-    for (const group of groups) queue("group", group.id, group);
+    for (const group of groups) {
+      queue("group", group.id, {
+        ...group,
+        status: group.status === "deleted" ? "inactive" : group.status,
+      });
+    }
 
     const schedules = db.getAllSync<any>(
       `SELECT id, group_id as groupId, day_of_week as dayOfWeek,
@@ -2013,6 +2018,13 @@ export class SyncEngine {
           const lateAfter = Number(
             g.late_after_minutes || g.lateAfterMinutes || 15,
           );
+          const localGroup = db.getFirstSync<{ status: string }>(
+            "SELECT status FROM groups WHERE center_id = ? AND id = ?",
+            [centerId, g.id],
+          );
+          const groupStatus = g.deleted || localGroup?.status === "deleted"
+            ? "deleted"
+            : (g.status === "archived" ? "inactive" : (g.status || "active"));
           db.runSync(
             `INSERT INTO groups (id, center_id, name, teacher_id, subject_id, grade, default_fee, session_price, monthly_price, session_duration_minutes, late_after_minutes, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(id) DO UPDATE SET name=excluded.name, teacher_id=excluded.teacher_id, subject_id=excluded.subject_id, grade=excluded.grade, default_fee=excluded.default_fee, session_price=excluded.session_price, monthly_price=excluded.monthly_price, session_duration_minutes=excluded.session_duration_minutes, late_after_minutes=excluded.late_after_minutes, status=excluded.status, updated_at=excluded.updated_at`,
@@ -2028,7 +2040,7 @@ export class SyncEngine {
               monthlyPrice,
               duration,
               lateAfter,
-              g.status === "archived" ? "inactive" : (g.status || "active"),
+              groupStatus,
               g.created_at || new Date().toISOString(),
               g.updated_at || new Date().toISOString(),
             ],
@@ -2897,7 +2909,7 @@ export class SyncEngine {
             ],
           );
           if (t.cascadeGroups === true && (t.status || "") === "inactive") {
-            db.runSync("UPDATE groups SET status = 'inactive', updated_at = ? WHERE center_id = ? AND teacher_id = ?", [t.updated_at || t.updatedAt || new Date().toISOString(), centerId, teacherId]);
+            db.runSync("UPDATE groups SET status = 'inactive', updated_at = ? WHERE center_id = ? AND teacher_id = ? AND status <> 'deleted'", [t.updated_at || t.updatedAt || new Date().toISOString(), centerId, teacherId]);
           }
         } else if (
           entityType === "subject" ||
@@ -2928,8 +2940,71 @@ export class SyncEngine {
           const groupId = g.id || change.entityId;
           const action = String(change.action || change.operationType || "").toUpperCase();
           if (action === "DELETE" || action === "REMOVE") {
-            db.runSync("DELETE FROM group_schedules WHERE center_id = ? AND group_id = ?", [centerId, groupId]);
-            db.runSync("DELETE FROM groups WHERE center_id = ? AND id = ?", [centerId, groupId]);
+            const now = new Date().toISOString();
+            const endDate = now.slice(0, 10);
+            const enrollments = db.getAllSync<{ id: string }>(
+              `SELECT id FROM student_group_enrollments
+                WHERE center_id = ? AND group_id = ? AND status = 'active'`,
+              [centerId, groupId],
+            );
+            for (const enrollment of enrollments) {
+              db.runSync(
+                `UPDATE student_group_enrollments
+                    SET status = 'ended', end_date = ?, updated_at = ?
+                  WHERE center_id = ? AND id = ? AND status = 'active'`,
+                [endDate, now, centerId, enrollment.id],
+              );
+            }
+            const cycles = db.getAllSync<{ id: string }>(
+              `SELECT dc.id FROM debt_cycles dc
+                WHERE dc.center_id = ?
+                  AND dc.status IN ('open', 'partial', 'pending')
+                  AND dc.cycle_type <> 'package'
+                  AND dc.package_subscription_id IS NULL
+                  AND (
+                    dc.group_id = ?
+                    OR dc.enrollment_id IN (
+                      SELECT e.id FROM student_group_enrollments e
+                       WHERE e.center_id = ? AND e.group_id = ?
+                    )
+                  )`,
+              [centerId, groupId, centerId, groupId],
+            );
+            for (const cycle of cycles) {
+              const paidRow = db.getFirstSync<{ paid: number }>(
+                `SELECT COALESCE(SUM(amount), 0) as paid FROM payments
+                  WHERE center_id = ? AND debt_cycle_id = ?
+                    AND (is_reversed = 0 OR is_reversed IS NULL)`,
+                [centerId, cycle.id],
+              );
+              db.runSync(
+                `UPDATE debt_cycles
+                    SET cycle_price = ?, status = 'cancelled', updated_at = ?
+                  WHERE center_id = ? AND id = ?`,
+                [Math.max(0, Number(paidRow?.paid || 0)), now, centerId, cycle.id],
+              );
+            }
+            db.runSync(
+              `UPDATE student_subscriptions SET status = 'cancelled'
+                WHERE center_id = ? AND group_id = ? AND status = 'active'`,
+              [centerId, groupId],
+            );
+            db.runSync(
+              `UPDATE group_schedules SET status = 'inactive', updated_at = ?
+                WHERE center_id = ? AND group_id = ? AND status != 'inactive'`,
+              [now, centerId, groupId],
+            );
+            db.runSync(
+              `UPDATE sessions SET status = 'cancelled', updated_at = ?
+                WHERE center_id = ? AND group_id = ? AND status = 'scheduled'
+                  AND session_date >= ?`,
+              [now, centerId, groupId, endDate],
+            );
+            db.runSync(
+              `UPDATE groups SET status = 'deleted', updated_at = ?
+                WHERE center_id = ? AND id = ?`,
+              [now, centerId, groupId],
+            );
           } else {
             const defaultFee = Number(g.default_fee || g.defaultFee || 0);
             const sessionPrice = Number(
@@ -2938,6 +3013,13 @@ export class SyncEngine {
             const monthlyPrice = Number(
               g.monthly_price || g.monthlyPrice || defaultFee * 4,
             );
+            const localGroup = db.getFirstSync<{ status: string }>(
+              "SELECT status FROM groups WHERE center_id = ? AND id = ?",
+              [centerId, groupId],
+            );
+            const localStatus = g.deleted || localGroup?.status === "deleted"
+              ? "deleted"
+              : (g.status === "archived" ? "inactive" : (g.status || "active"));
             db.runSync(
               `INSERT INTO groups (id, center_id, name, teacher_id, subject_id, grade, default_fee, session_price, monthly_price, session_duration_minutes, late_after_minutes, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(id) DO UPDATE SET name=excluded.name, teacher_id=excluded.teacher_id, subject_id=excluded.subject_id, grade=excluded.grade, default_fee=excluded.default_fee, session_price=excluded.session_price, monthly_price=excluded.monthly_price, session_duration_minutes=excluded.session_duration_minutes, late_after_minutes=excluded.late_after_minutes, status=excluded.status, updated_at=excluded.updated_at`,
@@ -2953,7 +3035,7 @@ export class SyncEngine {
                 monthlyPrice,
                 Number(g.session_duration_minutes || 120),
                 Number(g.late_after_minutes || 15),
-                g.status === "archived" ? "inactive" : (g.status || "active"),
+                localStatus,
                 g.created_at || new Date().toISOString(),
                 g.updated_at || new Date().toISOString(),
               ],

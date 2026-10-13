@@ -369,7 +369,7 @@ export class TeacherRepository {
       // Do not cascade-delete groups, enrollments, sessions, attendance, or finance.
       // Marking the groups inactive removes them from operational lists while
       // preserving their relationships for historical reports.
-      db.runSync("UPDATE groups SET status='inactive', updated_at=? WHERE center_id=? AND teacher_id=?", [now, centerId, teacherId]);
+      db.runSync("UPDATE groups SET status='inactive', updated_at=? WHERE center_id=? AND teacher_id=? AND status<>'deleted'", [now, centerId, teacherId]);
     }
     db.runSync("UPDATE teachers SET status='inactive', updated_at=? WHERE center_id=? AND id=?", [now, centerId, teacherId]);
     const operationId = `op-teach-delete-${Date.now()}-${teacherId}`;

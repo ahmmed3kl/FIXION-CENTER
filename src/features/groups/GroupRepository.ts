@@ -75,7 +75,10 @@ export class GroupRepository {
       [centerId],
     );
 
-    return includeInactive ? rows : rows.filter((r) => r.status === "active");
+    const availableRows = rows.filter((row) => row.status !== "deleted");
+    return includeInactive
+      ? availableRows
+      : availableRows.filter((row) => row.status === "active");
   }
 
   /** Returns active groups that have at least one schedule on the requested JS weekday. */
@@ -271,6 +274,9 @@ export class GroupRepository {
     if (!existing) {
       throw new NotFoundError("المجموعة غير موجودة.");
     }
+    if (existing.status === "deleted") {
+      throw new ValidationError("لا يمكن تعديل مجموعة محذوفة.");
+    }
 
     const teacherId = dto.teacherId ?? existing.teacherId;
     const subjectId = dto.subjectId ?? existing.subjectId;
@@ -413,6 +419,9 @@ export class GroupRepository {
     if (!existing) {
       throw new NotFoundError("المجموعة غير موجودة.");
     }
+    if (existing.status === "deleted") {
+      throw new ValidationError("لا يمكن تغيير حالة مجموعة محذوفة.");
+    }
 
     const db = DatabaseService.getDb();
     const now = new Date().toISOString();
@@ -461,6 +470,9 @@ export class GroupRepository {
       throw new ForbiddenError("ليس لديك صلاحية إعادة تفعيل المجموعة.");
     const existing = this.findById(groupId);
     if (!existing) throw new NotFoundError("المجموعة غير موجودة.");
+    if (existing.status === "deleted") {
+      throw new ValidationError("لا يمكن إعادة تفعيل مجموعة محذوفة.");
+    }
     const now = new Date().toISOString();
     DatabaseService.getDb().runSync(
       "UPDATE groups SET status='active', updated_at=? WHERE center_id=? AND id=?",
@@ -503,25 +515,164 @@ export class GroupRepository {
       throw new ForbiddenError("ليس لديك صلاحية حذف المجموعة.");
     const existing = this.findById(groupId);
     if (!existing) throw new NotFoundError("المجموعة غير موجودة.");
+    if (existing.status === "deleted") return;
     const db = DatabaseService.getDb();
-    const refs = db.getFirstSync<{ count: number }>(
-      "SELECT COUNT(*) as count FROM student_group_enrollments WHERE center_id=? AND group_id=?",
+    const now = new Date();
+    const updatedAt = now.toISOString();
+    const endDate = updatedAt.slice(0, 10);
+    const operationPrefix = `op-grp-delete-${now.getTime()}-${groupId}`;
+    const deviceId = DeviceService.getDeviceIdSync();
+    const activeEnrollments = db.getAllSync<{
+      id: string;
+      studentId: string;
+      groupId: string;
+      startDate: string;
+      specialMonthlyPrice: number | null;
+      createdAt: string;
+    }>(
+      `SELECT id, student_id as studentId, group_id as groupId,
+              start_date as startDate, special_monthly_price as specialMonthlyPrice,
+              created_at as createdAt
+         FROM student_group_enrollments
+        WHERE center_id = ? AND group_id = ? AND status = 'active'`,
       [centerId, groupId],
     );
-    if ((refs?.count || 0) > 0)
-      throw new ValidationError(
-        "لا يمكن حذف مجموعة لها تسجيلات؛ عطّلها للحفاظ على السجل.",
+    const affectedCycles = db.getAllSync<{
+      id: string;
+      studentId: string;
+      enrollmentId: string | null;
+      groupId: string | null;
+      cycleNumber: number | null;
+      startDate: string;
+      endDate: string;
+      cyclePrice: number;
+      status: string;
+      packageSubscriptionId: string | null;
+      packageId: string | null;
+      cycleType: string;
+      billingMode: string;
+      serverRevision: number;
+    }>(
+      `SELECT dc.id, dc.student_id as studentId,
+              dc.enrollment_id as enrollmentId, dc.group_id as groupId,
+              dc.cycle_number as cycleNumber, dc.start_date as startDate,
+              dc.end_date as endDate, dc.cycle_price as cyclePrice,
+              dc.status, dc.package_subscription_id as packageSubscriptionId,
+              dc.package_id as packageId, dc.cycle_type as cycleType,
+              dc.billing_mode as billingMode, dc.server_revision as serverRevision
+         FROM debt_cycles dc
+        WHERE dc.center_id = ?
+          AND dc.status IN ('open', 'partial', 'pending')
+          AND dc.cycle_type <> 'package'
+          AND dc.package_subscription_id IS NULL
+          AND (
+            dc.group_id = ?
+            OR dc.enrollment_id IN (
+              SELECT e.id
+                FROM student_group_enrollments e
+               WHERE e.center_id = ? AND e.group_id = ?
+            )
+          )`,
+      [centerId, groupId, centerId, groupId],
+    );
+
+    for (const enrollment of activeEnrollments) {
+      const operationId = `${operationPrefix}-enr-${enrollment.id}`;
+      db.runSync(
+        `UPDATE student_group_enrollments
+            SET status = 'ended', end_date = ?, updated_at = ?
+          WHERE center_id = ? AND id = ? AND status = 'active'`,
+        [endDate, updatedAt, centerId, enrollment.id],
       );
-    db.runSync("DELETE FROM group_schedules WHERE center_id=? AND group_id=?", [
-      centerId,
-      groupId,
-    ]);
-    db.runSync("DELETE FROM groups WHERE center_id=? AND id=?", [
-      centerId,
-      groupId,
-    ]);
-    const operationId = `op-grp-delete-${Date.now()}-${groupId}`;
-    const deviceId = DeviceService.getDeviceIdSync();
+      AuditService.recordEvent({
+        operationId,
+        centerId,
+        userId: user.id,
+        deviceId,
+        entityType: "enrollment",
+        entityId: enrollment.id,
+        action: "enrollment.end_on_group_delete",
+        payload: { studentId: enrollment.studentId, groupId, endDate },
+      });
+      SyncRepository.enqueueOperation({
+        operationId,
+        centerId,
+        userId: user.id,
+        deviceId,
+        operationType: "UPDATE",
+        entityType: "enrollment",
+        entityId: enrollment.id,
+        payload: { status: "ended", endDate, updatedAt },
+      });
+    }
+
+    for (const cycle of affectedCycles) {
+      const paidRow = db.getFirstSync<{ paid: number }>(
+        `SELECT COALESCE(SUM(amount), 0) as paid
+           FROM payments
+          WHERE center_id = ? AND debt_cycle_id = ?
+            AND (is_reversed = 0 OR is_reversed IS NULL)`,
+        [centerId, cycle.id],
+      );
+      const retainedPaidAmount = Math.max(0, Number(paidRow?.paid || 0));
+      const operationId = `${operationPrefix}-cycle-${cycle.id}`;
+      db.runSync(
+        `UPDATE debt_cycles
+            SET cycle_price = ?, status = 'cancelled', updated_at = ?
+          WHERE center_id = ? AND id = ?`,
+        [retainedPaidAmount, updatedAt, centerId, cycle.id],
+      );
+      AuditService.recordEvent({
+        operationId,
+        centerId,
+        userId: user.id,
+        deviceId,
+        entityType: "debt_cycle",
+        entityId: cycle.id,
+        action: "debt_cycle.cancel_on_group_delete",
+        payload: { groupId, retainedPaidAmount },
+      });
+      SyncRepository.enqueueOperation({
+        operationId,
+        centerId,
+        userId: user.id,
+        deviceId,
+        operationType: "UPDATE",
+        entityType: "debt_cycle",
+        entityId: cycle.id,
+        payload: {
+          ...cycle,
+          cyclePrice: retainedPaidAmount,
+          status: "cancelled",
+          expectedRevision: Number(cycle.serverRevision || 0),
+          updatedAt,
+        },
+      });
+    }
+
+    db.runSync(
+      `UPDATE student_subscriptions SET status = 'cancelled'
+        WHERE center_id = ? AND group_id = ? AND status = 'active'`,
+      [centerId, groupId],
+    );
+    db.runSync(
+      `UPDATE group_schedules SET status = 'inactive', updated_at = ?
+        WHERE center_id = ? AND group_id = ? AND status != 'inactive'`,
+      [updatedAt, centerId, groupId],
+    );
+    db.runSync(
+      `UPDATE sessions SET status = 'cancelled', updated_at = ?
+        WHERE center_id = ? AND group_id = ? AND status = 'scheduled'
+          AND session_date >= ?`,
+      [updatedAt, centerId, groupId, endDate],
+    );
+    db.runSync(
+      `UPDATE groups SET status = 'deleted', updated_at = ?
+        WHERE center_id = ? AND id = ?`,
+      [updatedAt, centerId, groupId],
+    );
+
+    const operationId = `${operationPrefix}-group`;
     AuditService.recordEvent({
       operationId,
       centerId,
@@ -530,7 +681,7 @@ export class GroupRepository {
       entityType: "group",
       entityId: groupId,
       action: "group.delete",
-      payload: { name: existing.name },
+      payload: { name: existing.name, archived: true },
     });
     SyncRepository.enqueueOperation({
       operationId,
@@ -540,7 +691,11 @@ export class GroupRepository {
       operationType: "DELETE",
       entityType: "group",
       entityId: groupId,
-      payload: { id: groupId, baseUpdatedAt: existing.updatedAt ?? null },
+      payload: {
+        id: groupId,
+        baseUpdatedAt: existing.updatedAt ?? null,
+        deletedAt: updatedAt,
+      },
     });
     SyncEngine.syncCenterNow(centerId).catch((err) => {
       console.warn("Auto-sync group delete notice:", err);

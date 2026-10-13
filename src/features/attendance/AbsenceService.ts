@@ -26,18 +26,7 @@ export class AbsenceService {
       throw new ForbiddenError("ليس لديك صلاحية عرض بيانات الحضور والغياب.");
     }
     const db = DatabaseService.getDb();
-
-    // 1. Expected students snapshot
-    const expectedStudents = db.getAllSync<any>(
-      `SELECT s.id, s.center_id as centerId, s.student_code as studentCode,
-              s.full_name as fullName, s.phone, s.parent_phone as parentPhone,
-              s.grade, s.status, s.student_type as studentType,
-              s.student_color as studentColor
-       FROM session_expected_students ses
-       JOIN students s ON ses.student_id = s.id
-       WHERE ses.center_id = ? AND ses.session_id = ?`,
-      [centerId, sessionId],
-    );
+    const expectedStudents = SessionRepository.getExpectedStudents(sessionId);
 
     // 2. Filter out students with recorded attendance or advance coverage
     const absentees: Student[] = [];
@@ -67,12 +56,7 @@ export class AbsenceService {
     const { centerId } = this.getActiveContext();
     const db = DatabaseService.getDb();
 
-    const isExpected = db.getFirstSync<any>(
-      `SELECT id FROM session_expected_students
-       WHERE center_id = ? AND session_id = ? AND student_id = ?`,
-      [centerId, sessionId, studentId],
-    );
-    if (!isExpected) return false;
+    if (!SessionRepository.getExpectedStudents(sessionId).some((student) => student.id === studentId)) return false;
 
     const attended = db.getFirstSync<any>(
       `SELECT id FROM attendance WHERE center_id = ? AND session_id = ? AND student_id = ?`,

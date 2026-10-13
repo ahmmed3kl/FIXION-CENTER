@@ -32,7 +32,7 @@ export class TeacherSettlementService {
        LEFT JOIN sessions s
          ON s.center_id = g.center_id AND s.group_id = g.id AND s.teacher_id = ?
        WHERE g.center_id = ?
-         AND COALESCE(NULLIF(g.status, ''), 'active') <> 'inactive'
+         AND COALESCE(NULLIF(g.status, ''), 'active') NOT IN ('inactive', 'deleted')
          AND (g.teacher_id = ? OR s.id IS NOT NULL)
        ORDER BY g.name`,
       [teacherId, centerId, teacherId],

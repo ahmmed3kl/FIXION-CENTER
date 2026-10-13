@@ -82,7 +82,19 @@ router.get(
         ] = await Promise.all([
           client.query("SELECT * FROM students WHERE center_id = $1", [centerId]),
           client.query("SELECT * FROM student_cards WHERE center_id = $1", [centerId]),
-          client.query("SELECT * FROM groups WHERE center_id = $1", [centerId]),
+          client.query(
+            `SELECT g.*,
+                    EXISTS (
+                      SELECT 1 FROM server_sync_operations tombstone
+                       WHERE tombstone.center_id = g.center_id
+                         AND tombstone.entity_type = 'group'
+                         AND tombstone.entity_id = g.id
+                         AND UPPER(tombstone.operation_type) IN ('DELETE', 'REMOVE')
+                         AND tombstone.status = 'applied'
+                    ) AS deleted
+               FROM groups g WHERE g.center_id = $1`,
+            [centerId],
+          ),
           client.query("SELECT * FROM teachers WHERE center_id = $1", [centerId]),
           client.query("SELECT * FROM subjects WHERE center_id = $1", [centerId]),
           client.query("SELECT * FROM teacher_subjects WHERE center_id = $1", [centerId]),

@@ -101,7 +101,7 @@ export interface StudentCard {
   centerId: string;
   studentId: string;
   cardCode: string;
-  status: "active" | "inactive";
+  status: "active" | "inactive" | "deleted";
   issuedAt: string;
   deactivatedAt?: string | null;
   createdAt: string;
@@ -184,7 +184,7 @@ export interface Group {
   monthlyPrice: number;
   sessionDurationMinutes: number;
   lateAfterMinutes: number;
-  status: "active" | "inactive";
+  status: "active" | "inactive" | "deleted";
   createdAt?: string;
   updatedAt?: string | null;
   teacherName?: string;

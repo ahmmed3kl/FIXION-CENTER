@@ -1,7 +1,11 @@
 import { DatabaseService } from "../src/core/database";
+import { SyncRepository } from "../src/core/sync";
 import { CardRangeRepository } from "../src/features/students/CardRangeRepository";
+import { ConnectivityService } from "../src/core/connectivity";
+import { EnrollmentRepository } from "../src/features/enrollments/EnrollmentRepository";
 import { AttendanceRepository } from "../src/features/attendance/AttendanceRepository";
 import { AttendanceSessionService } from "../src/features/attendance/AttendanceSessionService";
+import { AbsenceService } from "../src/features/attendance/AbsenceService";
 import { MakeupService } from "../src/features/attendance/MakeupService";
 import { useAuthStore } from "../src/features/auth/useAuthStore";
 import { GradeBookRepository } from "../src/features/grades/GradeBookRepository";
@@ -39,6 +43,7 @@ describe("makeup attendance integration", () => {
       parentPhone: "01111110001",
       grade: group.grade,
     });
+
     const examRosterBefore = GradeBookRepository.getStudentsForGroup(groupId);
     expect(examRosterBefore.length).toBeGreaterThan(0);
     const regularStudent = examRosterBefore[0];
@@ -129,6 +134,246 @@ describe("makeup attendance integration", () => {
     expect(
       AttendanceRepository.getSessionAttendance("makeup-target-int").map((attendance) => attendance.attendanceType),
     ).toEqual(["makeup", "present"]);
+  });
+
+  it("keeps successful cross-group compensation out of the destination group's expected roster", async () => {
+    const centerId = "center-1";
+    const db = DatabaseService.getDb();
+    const sourceGroup = db.getFirstSync<any>(
+      "SELECT id, teacher_id as teacherId, subject_id as subjectId, grade FROM groups WHERE center_id = ? AND id = ?",
+      [centerId, "grp-1"],
+    );
+    expect(sourceGroup).toBeTruthy();
+    const targetGroupId = "makeup-roster-target-group";
+    db.runSync(
+      `INSERT INTO groups
+       (id, center_id, name, teacher_id, subject_id, grade, default_fee, session_price, monthly_price, status, created_at, updated_at)
+       VALUES (?, ?, 'Makeup target group', ?, ?, ?, 0, 0, 0, 'active', ?, ?)`,
+      [targetGroupId, centerId, sourceGroup.teacherId, sourceGroup.subjectId, sourceGroup.grade, "2026-10-13", "2026-10-13"],
+    );
+    const visitor = StudentRepository.createStudent({
+      studentCode: "990021",
+      fullName: "Cross Group Makeup Visitor",
+      phone: "01011110021",
+      parentPhone: "01111110021",
+      grade: sourceGroup.grade,
+    });
+    const sourceSessionId = "makeup-roster-source-session";
+    const targetSessionId = "makeup-roster-target-session";
+    db.runSync(
+      `INSERT INTO sessions
+       (id, center_id, group_id, subject_id, teacher_id, session_date, start_time, end_time, status, created_at)
+       VALUES (?, ?, ?, ?, ?, '2099-10-01', '10:00', '12:00', 'closed', '2026-10-13')`,
+      [sourceSessionId, centerId, "grp-1", sourceGroup.subjectId, sourceGroup.teacherId],
+    );
+    db.runSync(
+      `INSERT INTO session_expected_students (id, center_id, session_id, student_id, created_at)
+       VALUES (?, ?, ?, ?, '2026-10-13')`,
+      [`exp-${sourceSessionId}-${visitor.id}`, centerId, sourceSessionId, visitor.id],
+    );
+    db.runSync(
+      `INSERT INTO sessions
+       (id, center_id, group_id, subject_id, teacher_id, session_date, start_time, end_time, status, created_at)
+       VALUES (?, ?, ?, ?, ?, '2099-10-02', '10:00', '12:00', 'open', '2026-10-13')`,
+      [targetSessionId, centerId, targetGroupId, sourceGroup.subjectId, sourceGroup.teacherId],
+    );
+    const targetRosterSummary = AttendanceSessionService.getSummary(targetSessionId);
+    db.runSync(
+      `INSERT INTO session_expected_students (id, center_id, session_id, student_id, created_at)
+       VALUES (?, ?, ?, ?, '2026-10-13')`,
+      [`exp-comp-${targetSessionId}-${visitor.id}`, centerId, targetSessionId, visitor.id],
+    );
+    db.runSync(
+      `INSERT INTO attendance
+       (id, center_id, student_id, session_id, check_in_time, status, is_late, attendance_type, original_absence_id, is_external, operation_id)
+       VALUES (?, ?, ?, ?, '2099-10-02T10:30:00.000Z', 'present', 0, 'makeup', ?, 0, ?)`,
+      ["makeup-roster-attendance", centerId, visitor.id, targetSessionId, sourceSessionId, "makeup-roster-operation"],
+    );
+
+    expect(AttendanceSessionService.isExpected(targetSessionId, visitor.id)).toBe(false);
+    expect(AttendanceSessionService.getSummary(targetSessionId)).toEqual({
+      ...targetRosterSummary,
+      makeup: 1,
+    });
+    expect(db.getFirstSync<any>(
+      "SELECT original_absence_id as originalAbsenceId FROM attendance WHERE center_id = ? AND session_id = ? AND student_id = ?",
+      [centerId, targetSessionId, visitor.id],
+    )?.originalAbsenceId).toBe(sourceSessionId);
+  });
+
+  it("filters legacy compensation snapshots from expected and absent lists without changing makeup links", () => {
+    const centerId = "center-1";
+    const db = DatabaseService.getDb();
+    const sourceGroup = db.getFirstSync<any>(
+      "SELECT id, teacher_id as teacherId, subject_id as subjectId, grade FROM groups WHERE center_id = ? AND id = ?",
+      [centerId, "grp-1"],
+    );
+    expect(sourceGroup).toBeTruthy();
+    const targetGroupId = "legacy-makeup-stale-roster-group";
+    db.runSync(
+      `INSERT INTO groups
+       (id, center_id, name, teacher_id, subject_id, grade, default_fee, session_price, monthly_price, status, created_at, updated_at)
+       VALUES (?, ?, 'Legacy makeup stale roster', ?, ?, ?, 0, 0, 0, 'active', ?, ?)`,
+      [targetGroupId, centerId, sourceGroup.teacherId, sourceGroup.subjectId, sourceGroup.grade, "2026-10-13", "2026-10-13"],
+    );
+    const visitors = ["990031", "990032", "990033"].map((studentCode) =>
+      StudentRepository.createStudent({
+        studentCode,
+        fullName: `Legacy makeup visitor ${studentCode}`,
+        phone: "01011110031",
+        parentPhone: "01111110031",
+        grade: sourceGroup.grade,
+      }),
+    );
+    const realMember = StudentRepository.createStudent({
+      studentCode: "990034",
+      fullName: "Eligible group member with makeup history",
+      phone: "01011110034",
+      parentPhone: "01111110034",
+      grade: sourceGroup.grade,
+    });
+    EnrollmentRepository.enrollStudent({
+      studentId: realMember.id,
+      groupId: targetGroupId,
+      startDate: "2099-10-04",
+    });
+
+    const sourceSessionId = "legacy-makeup-source-session";
+    const previousMakeupSessionId = "legacy-makeup-history-session";
+    const currentSessionId = "legacy-makeup-current-session";
+    db.runSync(
+      `INSERT INTO sessions
+       (id, center_id, group_id, subject_id, teacher_id, session_date, start_time, end_time, status, created_at)
+       VALUES (?, ?, ?, ?, ?, '2099-10-01', '10:00', '12:00', 'closed', '2026-10-13')`,
+      [sourceSessionId, centerId, "grp-1", sourceGroup.subjectId, sourceGroup.teacherId],
+    );
+    db.runSync(
+      `INSERT INTO sessions
+       (id, center_id, group_id, subject_id, teacher_id, session_date, start_time, end_time, status, created_at)
+       VALUES (?, ?, ?, ?, ?, '2099-10-03', '10:00', '12:00', 'closed', '2026-10-13')`,
+      [previousMakeupSessionId, centerId, targetGroupId, sourceGroup.subjectId, sourceGroup.teacherId],
+    );
+    db.runSync(
+      `INSERT INTO sessions
+       (id, center_id, group_id, subject_id, teacher_id, session_date, start_time, end_time, status, created_at)
+       VALUES (?, ?, ?, ?, ?, '2099-10-04', '10:00', '12:00', 'open', '2026-10-13')`,
+      [currentSessionId, centerId, targetGroupId, sourceGroup.subjectId, sourceGroup.teacherId],
+    );
+
+    for (const visitor of visitors) {
+      db.runSync(
+        `INSERT INTO session_expected_students (id, center_id, session_id, student_id, created_at)
+         VALUES (?, ?, ?, ?, '2026-10-13')`,
+        [`exp-${sourceSessionId}-${visitor.id}`, centerId, sourceSessionId, visitor.id],
+      );
+      db.runSync(
+        `INSERT INTO session_expected_students (id, center_id, session_id, student_id, created_at)
+         VALUES (?, ?, ?, ?, '2026-10-13')`,
+        [`exp-${currentSessionId}-${visitor.id}`, centerId, currentSessionId, visitor.id],
+      );
+      db.runSync(
+        `INSERT INTO attendance
+         (id, center_id, student_id, session_id, check_in_time, status, is_late, attendance_type, original_absence_id, is_external, operation_id)
+         VALUES (?, ?, ?, ?, '2099-10-03T10:30:00.000Z', 'present', 0, 'makeup', ?, 0, ?)`,
+        [`legacy-makeup-${visitor.id}`, centerId, visitor.id, previousMakeupSessionId, sourceSessionId, `legacy-makeup-op-${visitor.id}`],
+      );
+    }
+    db.runSync(
+      `INSERT INTO session_expected_students (id, center_id, session_id, student_id, created_at)
+       VALUES (?, ?, ?, ?, '2026-10-13')`,
+      [`exp-${currentSessionId}-${realMember.id}`, centerId, currentSessionId, realMember.id],
+    );
+
+    const expectedStudents = SessionRepository.getExpectedStudents(currentSessionId);
+    expect(expectedStudents.map((student) => student.id)).toEqual([realMember.id]);
+    expect(AbsenceService.getAbsenteesForSession(currentSessionId).map((student) => student.id)).toEqual([realMember.id]);
+    expect(AttendanceSessionService.getSummary(currentSessionId)).toEqual({
+      total: 1,
+      present: 0,
+      absent: 1,
+      makeup: 0,
+    });
+    for (const visitor of visitors) {
+      expect(AttendanceSessionService.isExpected(currentSessionId, visitor.id)).toBe(false);
+    }
+    expect(AttendanceSessionService.isExpected(currentSessionId, realMember.id)).toBe(true);
+
+    // Simulate a sync refresh replaying the old rows: reads must still apply
+    // the same relationship check and never surface those rows as absences.
+    for (const visitor of visitors) {
+      db.runSync(
+        `INSERT OR IGNORE INTO session_expected_students (id, center_id, session_id, student_id, created_at)
+         VALUES (?, ?, ?, ?, '2026-10-13')`,
+        [`exp-${currentSessionId}-${visitor.id}`, centerId, currentSessionId, visitor.id],
+      );
+    }
+    expect(SessionRepository.getExpectedStudents(currentSessionId).map((student) => student.id)).toEqual([realMember.id]);
+    expect(AttendanceSessionService.getSummary(currentSessionId).absent).toBe(1);
+    expect(db.getAllSync<any>(
+      `SELECT student_id as studentId, original_absence_id as originalAbsenceId
+       FROM attendance WHERE center_id = ? AND session_id = ?`,
+      [centerId, previousMakeupSessionId],
+    ).map((row: any) => row.originalAbsenceId)).toEqual([sourceSessionId, sourceSessionId, sourceSessionId]);
+  });
+
+  it("records a newly enrolled attendance-screen student once and retains session outbox work", async () => {
+    const centerId = "center-1";
+    const groupId = "grp-1";
+    const sessionId = "attendance-add-flow-session";
+    const db = DatabaseService.getDb();
+    const group = db.getFirstSync<any>(
+      "SELECT teacher_id as teacherId, subject_id as subjectId, grade FROM groups WHERE center_id = ? AND id = ?",
+      [centerId, groupId],
+    );
+    expect(group).toBeTruthy();
+    const student = StudentRepository.createStudent({
+      studentCode: "990022",
+      fullName: "Attendance Add Flow Student",
+      phone: "01011110022",
+      parentPhone: "01111110022",
+      grade: group.grade,
+    });
+    EnrollmentRepository.enrollStudent({
+      studentId: student.id,
+      groupId,
+      startDate: "2099-10-03",
+    });
+    db.runSync(
+      `INSERT INTO sessions
+       (id, center_id, group_id, subject_id, teacher_id, session_date, start_time, end_time, status, created_at)
+       VALUES (?, ?, ?, ?, ?, '2099-10-03', '10:00', '12:00', 'open', '2026-10-13')`,
+      [sessionId, centerId, groupId, group.subjectId, group.teacherId],
+    );
+
+    ConnectivityService.setState("offline");
+    try {
+      AttendanceSessionService.addEnrolledStudentToOpenSession(sessionId, student.id);
+      expect(AttendanceSessionService.isExpected(sessionId, student.id)).toBe(true);
+      await AttendanceRepository.recordAttendance({
+        studentId: student.id,
+        sessionId,
+        status: "present",
+        isLate: false,
+      });
+      expect(AttendanceRepository.isAlreadyAttended(sessionId, student.id)).toBe(true);
+
+      AttendanceSessionService.addEnrolledStudentToOpenSession(sessionId, student.id);
+      expect(db.getAllSync<any>(
+        "SELECT id FROM attendance WHERE center_id = ? AND session_id = ? AND student_id = ?",
+        [centerId, sessionId, student.id],
+      )).toHaveLength(1);
+      expect(SyncRepository.getByOperationId(
+        `op-session-roster-add-${sessionId}-${student.id}`,
+      )?.status).toBe("pending");
+      const attendanceOperationId = db.getFirstSync<any>(
+        "SELECT operation_id as operationId FROM attendance WHERE center_id = ? AND session_id = ? AND student_id = ?",
+        [centerId, sessionId, student.id],
+      )?.operationId;
+      expect(attendanceOperationId).toBeTruthy();
+      expect(SyncRepository.getByOperationId(attendanceOperationId)?.status).toBe("pending");
+    } finally {
+      ConnectivityService.setState("online");
+    }
   });
 
   it("selects an eligible scheduled next class, skips ineligible intermediates, and expires at cycle end", () => {

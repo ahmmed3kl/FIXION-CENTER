@@ -85,18 +85,8 @@ export class FinancialCalculationService {
       [centerId, studentId],
     );
 
-    const rawPerSessionCycleIds = new Set(
-      rawCycles
-        .filter((cycle) => cycle.billingMode === "per_session" || cycle.cycleType === "per_session")
-        .map((cycle) => cycle.id),
-    );
     const payments: PaymentEvent[] = rawPayments.map((p) => {
       const storedType = p.paymentType === "cash" ? "session" : p.paymentType;
-      // Older attendance builds could store a cash/session label while also
-      // linking the payment to a debt cycle. The cycle link is authoritative:
-      // such a payment reduces the monthly/package obligation, so expose it
-      // as a partial ledger payment in profile/report views.
-      const pType = p.debtCycleId && storedType === "session" && !rawPerSessionCycleIds.has(p.debtCycleId) ? "partial" : storedType;
       const pMethod = p.paymentMethod || "cash";
       return {
         id: p.id,
@@ -107,7 +97,7 @@ export class FinancialCalculationService {
         debtCycleId: p.debtCycleId || undefined,
         sessionId: p.sessionId || undefined,
         amount: Number(p.amount) || 0,
-        paymentType: pType,
+        paymentType: storedType,
         paymentMethod: pMethod,
         paymentDate: p.paymentDate || p.createdAt?.slice(0, 10),
         notes: p.notes || undefined,
@@ -155,13 +145,14 @@ export class FinancialCalculationService {
     const activeMonthlyPayments = payments.filter(
       (p) =>
         !p.isReversed &&
+        p.paymentType !== "session" &&
         (!p.debtCycleId || !perSessionCycleIds.has(p.debtCycleId)) &&
-        (!!p.debtCycleId || (p.paymentType !== "session" && !p.sessionId)),
+        (!!p.debtCycleId || !p.sessionId),
     );
     const activeSessionPayments = payments.filter(
       (p) =>
         !p.isReversed &&
-        ((!p.debtCycleId || perSessionCycleIds.has(p.debtCycleId)) && (p.paymentType === "session" || !!p.sessionId)),
+        p.paymentType === "session",
     );
 
     // Track unassigned payments (payments without debtCycleId), and direct
@@ -435,14 +426,14 @@ export class FinancialCalculationService {
     const monthlyPayments = payments.filter(
       (payment) =>
         !payment.isReversed &&
+        payment.paymentType !== "session" &&
         (!payment.debtCycleId || !cycles.some((cycle) => cycle.id === payment.debtCycleId && (cycle.billingMode === "per_session" || cycle.cycleType === "per_session"))) &&
-        (!!payment.debtCycleId || (payment.paymentType !== "session" && !payment.sessionId)),
+        (!!payment.debtCycleId || !payment.sessionId),
     );
     const sessionPayments = payments.filter(
       (payment) =>
         !payment.isReversed &&
-        (!payment.debtCycleId || cycles.some((cycle) => cycle.id === payment.debtCycleId && (cycle.billingMode === "per_session" || cycle.cycleType === "per_session"))) &&
-        (payment.paymentType === "session" || !!payment.sessionId),
+        payment.paymentType === "session",
     );
     const packageCycles = cycles.filter((cycle) => cycle.cycleType === "package");
     const monthlyGroupDue = groupCycles.reduce(

@@ -87,6 +87,18 @@ export class EnrollmentRepository {
        JOIN students s ON e.student_id = s.id AND s.deleted_at IS NULL
        LEFT JOIN groups g ON e.group_id = g.id
        WHERE e.center_id = ? AND e.group_id = ? AND e.status = 'active'
+         AND NOT EXISTS (
+           SELECT 1
+           FROM session_expected_students compensation_expected
+           JOIN sessions compensation_session
+             ON compensation_session.center_id = compensation_expected.center_id
+            AND compensation_session.id = compensation_expected.session_id
+           WHERE compensation_expected.center_id = e.center_id
+             AND compensation_expected.student_id = e.student_id
+             AND compensation_session.group_id = e.group_id
+             AND compensation_expected.id LIKE ('exp-comp-' || compensation_expected.session_id || '-%')
+             AND e.id = ('enr-' || compensation_expected.id)
+         )
        ORDER BY s.full_name ASC`,
       [centerId, groupId],
     );

@@ -147,18 +147,17 @@ export class PaymentRepository {
     paymentDate?: string;
     notes?: string;
     operationId?: string;
+    allowCreditBalance?: boolean;
   }): Promise<PaymentEvent> {
     const { centerId, user } = this.getActiveContext();
     if (!PermissionService.hasPermission(user.permissions, "payments.create")) {
       throw new ForbiddenError("ليس لديك صلاحية تسجيل المدفوعات.");
     }
 
-    if (!params.amount || params.amount <= 0) {
+    if (!Number.isFinite(params.amount) || params.amount <= 0) {
       throw new ValidationError("مبلغ الدفعة يجب أن يكون أكبر من صفر.");
     }
-
     const db = DatabaseService.getDb();
-    const paymentId = `pay-${generateUUID()}`;
     const operationId = params.operationId || `op-pay-${generateUUID()}`;
     const deviceId = DeviceService.getDeviceIdSync();
     const createdAt = new Date().toISOString();
@@ -183,6 +182,55 @@ export class PaymentRepository {
     } else if (params.paymentType === "partial") {
       normType = "partial";
     }
+    if (params.allowCreditBalance && normType === "session") {
+      throw new ValidationError("الرصيد المقدم يُسجل كدفعة شهرية أو جزئية، وليس كدفعة حصة.");
+    }
+
+    const existingPayment = db.getFirstSync<any>(
+      `SELECT id, operation_id as operationId, center_id as centerId,
+              student_id as studentId, subscription_id as subscriptionId,
+              debt_cycle_id as debtCycleId, session_id as sessionId,
+              amount, payment_type as paymentType, payment_method as paymentMethod,
+              payment_date as paymentDate, notes, is_reversed as isReversed,
+              created_at as createdAt, user_id as userId, updated_at as updatedAt
+       FROM payments WHERE operation_id = ?`,
+      [operationId],
+    );
+    if (existingPayment) {
+      const existingType = existingPayment.paymentType === "cash"
+        ? "session"
+        : existingPayment.paymentType;
+      if (
+        existingPayment.centerId !== centerId ||
+        existingPayment.studentId !== params.studentId ||
+        Number(existingPayment.amount) !== params.amount ||
+        existingType !== normType ||
+        (params.sessionId && existingPayment.sessionId !== params.sessionId) ||
+        (params.debtCycleId && existingPayment.debtCycleId !== params.debtCycleId)
+      ) {
+        throw new ConflictError("معرّف العملية مستخدم لدفعة ببيانات مختلفة.");
+      }
+      return {
+        id: existingPayment.id,
+        operationId: existingPayment.operationId,
+        centerId: existingPayment.centerId,
+        studentId: existingPayment.studentId,
+        subscriptionId: existingPayment.subscriptionId || undefined,
+        debtCycleId: existingPayment.debtCycleId || undefined,
+        sessionId: existingPayment.sessionId || undefined,
+        amount: Number(existingPayment.amount) || 0,
+        paymentType: existingType,
+        paymentMethod: existingPayment.paymentMethod || "cash",
+        paymentDate: existingPayment.paymentDate,
+        notes: existingPayment.notes || undefined,
+        isReversed: existingPayment.isReversed === 1 || existingPayment.isReversed === true,
+        createdAt: existingPayment.createdAt,
+        userId: existingPayment.userId,
+        updatedAt: existingPayment.updatedAt || undefined,
+      };
+    }
+
+    const paymentId = `pay-${generateUUID()}`;
 
     // Auto-link debtCycleId for monthly/partial payments if not explicitly provided
     let assignedCycleId = params.debtCycleId || null;
@@ -282,6 +330,76 @@ export class PaymentRepository {
       }
     }
 
+    const currentFinancialStatus = FinancialCalculationService.getStudentFinancialStatus(
+      params.studentId,
+    );
+    const targetCycle = assignedCycleId
+      ? currentFinancialStatus.cycles.find((cycle) => cycle.id === assignedCycleId)
+      : undefined;
+    if (assignedCycleId && !targetCycle) {
+      throw new ValidationError("تعذر تحديث دورة المديونية قبل تسجيل الدفعة.");
+    }
+    const targetCycleIsPerSession = Boolean(
+      targetCycle &&
+      (targetCycle.billingMode === "per_session" || targetCycle.cycleType === "per_session"),
+    );
+    const targetCycleIsSessionLane = Boolean(
+      targetCycle &&
+      (targetCycle.billingMode === "pending" || targetCycleIsPerSession),
+    );
+    if (normType === "session" && targetCycle && !targetCycleIsSessionLane) {
+      throw new ValidationError("دفعة الحصة لا تخص دورة الاشتراك الشهري أو الباقة.");
+    }
+    const isUnlinkedSessionPayment = normType === "session" &&
+      !assignedCycleId &&
+      !params.sessionId;
+    if (isUnlinkedSessionPayment && Number(currentFinancialStatus.currentPeriodDebt || 0) <= 0) {
+      throw new ValidationError("لا توجد رسوم حصص مستحقة للتحصيل حاليًا.");
+    }
+
+    if (normType === "session" && !params.sessionId) {
+      const outstanding = targetCycleIsPerSession && targetCycle?.groupId
+        ? Number(FinancialCalculationService.getStudentFinancialStatusForGroup(
+            params.studentId,
+            targetCycle.groupId,
+          ).currentPeriodDebt || 0)
+        : Number(currentFinancialStatus.currentPeriodDebt || 0);
+      if (outstanding <= 0) {
+        throw new ValidationError("لا توجد رسوم حصص مستحقة للتحصيل في هذه الدورة.");
+      }
+      if (params.amount > outstanding + 0.000001) {
+        throw new ValidationError(`المبلغ يتجاوز رسوم الحصص المستحقة (${outstanding}).`);
+      }
+    }
+
+    // Recalculate immediately before writing. Monthly/package collections are
+    // capped to a selected cycle, or to the aggregate when the oldest cycle
+    // was assigned automatically. Advance payments use a separate explicit path.
+    if (!params.allowCreditBalance && normType !== "session") {
+      const cyclePriceOnMonthlySwitch = targetCycle && targetCycleIsPerSession
+        ? Math.max(
+            0,
+            Number(targetCycle.cyclePrice || 0) +
+              currentFinancialStatus.adjustments
+                .filter((adjustment) => adjustment.debtCycleId === targetCycle.id)
+                .reduce((sum, adjustment) => sum + Number(adjustment.adjustmentAmount || 0), 0),
+          )
+        : Number(targetCycle?.remainingDebt ?? 0);
+      const outstanding = targetCycle
+        ? params.debtCycleId
+          ? cyclePriceOnMonthlySwitch
+          : Number(currentFinancialStatus.monthlyRemainingDebt || 0)
+        : Number(currentFinancialStatus.monthlyRemainingDebt || 0);
+      if (outstanding <= 0) {
+        throw new ValidationError("لا يوجد مبلغ مستحق للتحصيل حاليًا.");
+      }
+      if (params.amount > outstanding + 0.000001) {
+        throw new ValidationError(
+          `المبلغ يتجاوز المتبقي المستحق (${outstanding}). استخدم «إضافة رصيد مقدم» إذا كانت الدفعة مقصودة للمستقبل.`,
+        );
+      }
+    }
+
     if (assignedCycleId) {
       const cycle = db.getFirstSync<{ billingMode?: string; cycleType?: string }>(
         `SELECT billing_mode as billingMode, cycle_type as cycleType
@@ -310,6 +428,14 @@ export class PaymentRepository {
       }
     }
 
+    const isAdvanceBeyondDue = Boolean(
+      params.allowCreditBalance &&
+      params.amount > Number(currentFinancialStatus.monthlyRemainingDebt ?? 0) + 0.000001,
+    );
+    const paymentNotes = [
+      isAdvanceBeyondDue ? "رصيد مقدم" : "",
+      params.notes?.trim() || "",
+    ].filter(Boolean).join(" • ") || undefined;
     const paymentEvent: PaymentEvent = {
       id: paymentId,
       operationId,
@@ -322,7 +448,7 @@ export class PaymentRepository {
       paymentType: normType,
       paymentMethod,
       paymentDate,
-      notes: params.notes,
+      notes: paymentNotes,
       isReversed: false,
       createdAt,
       userId: user.id,
@@ -331,18 +457,11 @@ export class PaymentRepository {
       db.runSync(
         `INSERT INTO payments (id, operation_id, center_id, student_id, subscription_id, debt_cycle_id, session_id, amount, payment_type, payment_method, payment_date, notes, is_reversed, created_at, user_id)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
-        [paymentId, operationId, centerId, params.studentId, params.subscriptionId || null, assignedCycleId, params.sessionId || null, params.amount, normType, paymentMethod, paymentDate, params.notes || null, createdAt, user.id],
+        [paymentId, operationId, centerId, params.studentId, params.subscriptionId || null, assignedCycleId, params.sessionId || null, params.amount, normType, paymentMethod, paymentDate, paymentNotes || null, createdAt, user.id],
       );
       SyncRepository.enqueueOperation({ centerId, userId: user.id, deviceId, operationType: "payment.create", entityType: "payment", entityId: paymentId, payload: paymentEvent, operationId });
-      AuditService.recordEvent({ operationId, centerId, userId: user.id, deviceId, entityType: "payment", entityId: paymentId, action: "payment.record", payload: { studentId: params.studentId, amount: params.amount, paymentType: normType, debtCycleId: assignedCycleId, sessionId: params.sessionId, subscriptionId: params.subscriptionId, notes: params.notes || null, actorName: user.fullName } });
+      AuditService.recordEvent({ operationId, centerId, userId: user.id, deviceId, entityType: "payment", entityId: paymentId, action: "payment.record", payload: { studentId: params.studentId, amount: params.amount, paymentType: normType, debtCycleId: assignedCycleId, sessionId: params.sessionId, subscriptionId: params.subscriptionId, notes: paymentNotes || null, actorName: user.fullName } });
     });
-
-    // 4. Recalculate financial status to update cycle statuses dynamically
-    try {
-      FinancialCalculationService.getStudentFinancialStatus(params.studentId);
-    } catch {
-      // safe fallback
-    }
 
     return paymentEvent;
   }

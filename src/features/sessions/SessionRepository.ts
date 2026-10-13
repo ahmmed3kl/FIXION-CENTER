@@ -133,6 +133,90 @@ export class SessionRepository {
     return activationTimes;
   }
 
+  /**
+   * Returns students who were actually eligible for this group's session
+   * date. This validates legacy expected-roster snapshots without mutating
+   * them, so compensation visitors from older clients cannot become absentees.
+   */
+  static getEligibleStudentIdsForSession(sessionId: string): string[] {
+    const { centerId } = this.getActiveContext();
+    const db = DatabaseService.getDb();
+    const regularRows = db.getAllSync<{ studentId?: string; student_id?: string; id?: string }>(
+      `SELECT DISTINCT enrollment.student_id as studentId
+       FROM sessions session
+       JOIN student_group_enrollments enrollment
+         ON enrollment.center_id = session.center_id
+        AND enrollment.group_id = session.group_id
+        AND enrollment.status IN ('active', 'ended')
+        AND enrollment.start_date <= session.session_date
+        AND (enrollment.end_date IS NULL OR enrollment.end_date >= session.session_date)
+        AND NOT EXISTS (
+          SELECT 1
+          FROM session_expected_students compensation_expected
+          JOIN sessions compensation_session
+            ON compensation_session.center_id = compensation_expected.center_id
+           AND compensation_session.id = compensation_expected.session_id
+          WHERE compensation_expected.center_id = enrollment.center_id
+            AND compensation_expected.student_id = enrollment.student_id
+            AND compensation_session.group_id = enrollment.group_id
+            AND compensation_expected.id LIKE ('exp-comp-' || compensation_expected.session_id || '-%')
+            AND enrollment.id = ('enr-' || compensation_expected.id)
+        )
+       JOIN students student
+         ON student.center_id = enrollment.center_id
+        AND student.id = enrollment.student_id
+        AND student.deleted_at IS NULL
+       WHERE session.center_id = ? AND session.id = ?`,
+      [centerId, sessionId],
+    );
+    const packageRows = db.getAllSync<{ studentId?: string; student_id?: string }>(
+      `SELECT DISTINCT subscription.student_id as studentId
+       FROM sessions session
+       JOIN groups scoped_group
+         ON scoped_group.center_id = session.center_id
+        AND scoped_group.id = session.group_id
+       JOIN student_package_subscriptions subscription
+         ON subscription.center_id = session.center_id
+        AND subscription.status IN ('active', 'ended', 'cancelled')
+        AND subscription.start_date <= session.session_date
+        AND (subscription.end_date IS NULL OR subscription.end_date >= session.session_date)
+       JOIN students student
+         ON student.center_id = subscription.center_id
+        AND student.id = subscription.student_id
+        AND student.deleted_at IS NULL
+       JOIN package_subjects package_subject
+         ON package_subject.center_id = subscription.center_id
+        AND package_subject.package_id = subscription.package_id
+        AND package_subject.subject_id = COALESCE(session.subject_id, scoped_group.subject_id)
+       LEFT JOIN package_subject_teacher_overrides selected
+         ON selected.center_id = subscription.center_id
+        AND selected.subscription_id = subscription.id
+        AND selected.subject_id = package_subject.subject_id
+       WHERE session.center_id = ? AND session.id = ?
+         AND (package_subject.group_id = scoped_group.id OR selected.group_id = scoped_group.id)
+         AND COALESCE(selected.teacher_id, package_subject.default_teacher_id) =
+             COALESCE(session.teacher_id, scoped_group.teacher_id)
+         AND (selected.id IS NULL OR selected.group_id = scoped_group.id)
+         AND (
+           selected.id IS NOT NULL
+           OR NOT EXISTS (
+             SELECT 1 FROM package_subject_teacher_overrides any_selection
+             WHERE any_selection.center_id = subscription.center_id
+               AND any_selection.subscription_id = subscription.id
+           )
+         )`,
+      [centerId, sessionId],
+    );
+    return Array.from(new Set(
+      [
+        ...regularRows.map((row) => row.studentId ?? row.student_id ?? row.id),
+        ...packageRows.map((row) => row.studentId ?? row.student_id),
+      ]
+        .map((studentId) => String(studentId ?? ""))
+        .filter(Boolean),
+    ));
+  }
+
   /** Read-only expected-student snapshot for a historical session. */
   static getExpectedStudents(sessionId: string): Student[] {
     const { centerId, user } = this.getActiveContext();
@@ -153,7 +237,10 @@ export class SessionRepository {
       [centerId, sessionId],
     );
 
-    if (rows.length > 0) return rows;
+    if (rows.length > 0) {
+      const eligible = new Set(this.getEligibleStudentIdsForSession(sessionId));
+      return rows.filter((student) => eligible.has(student.id));
+    }
 
     // Older sessions may have been created before roster snapshots were
     // introduced. Reconstruct their expected roster from the enrollment that
@@ -171,6 +258,18 @@ export class SessionRepository {
         AND enrollment.status = 'active'
         AND enrollment.start_date <= session.session_date
         AND (enrollment.end_date IS NULL OR enrollment.end_date >= session.session_date)
+        AND NOT EXISTS (
+          SELECT 1
+          FROM session_expected_students compensation_expected
+          JOIN sessions compensation_session
+            ON compensation_session.center_id = compensation_expected.center_id
+           AND compensation_session.id = compensation_expected.session_id
+          WHERE compensation_expected.center_id = enrollment.center_id
+            AND compensation_expected.student_id = enrollment.student_id
+            AND compensation_session.group_id = enrollment.group_id
+            AND compensation_expected.id LIKE ('exp-comp-' || compensation_expected.session_id || '-%')
+            AND enrollment.id = ('enr-' || compensation_expected.id)
+        )
        JOIN students st
          ON st.center_id = enrollment.center_id AND st.id = enrollment.student_id
        WHERE session.center_id = ? AND session.id = ?

@@ -309,6 +309,19 @@ class SyncProcessor {
           AND e.status IN ('active', 'transferred', 'withdrawn', 'completed')
           AND e.joined_at::date <= $4::date
           AND (e.ended_at IS NULL OR e.ended_at::date >= $4::date)
+          AND NOT EXISTS (
+            SELECT 1
+              FROM session_expected_students compensation_expected
+              JOIN sessions compensation_session
+                ON compensation_session.center_id = compensation_expected.center_id
+               AND compensation_session.id = compensation_expected.session_id
+             WHERE compensation_expected.center_id = e.center_id
+               AND compensation_expected.student_id = e.student_id
+               AND compensation_session.group_id = e.group_id
+               AND compensation_expected.id LIKE
+                   ('exp-comp-' || compensation_expected.session_id || '-%')
+               AND e.id = ('enr-' || compensation_expected.id)
+          )
         LIMIT 1`,
       [centerId, groupId, studentId, sessionDate],
     );
@@ -1599,11 +1612,10 @@ class SyncProcessor {
                 teacherId: rosterTeacherId,
                 groupGrade: sessionGroup.grade,
                 studentId,
-                allowSameTeacherCompensation: true,
               }))
             ) {
               throw new Error(
-                "SESSION_ROSTER_STUDENT_NOT_ELIGIBLE: student is outside this group, level, or allowed compensation scope.",
+                "SESSION_ROSTER_STUDENT_NOT_ELIGIBLE: student has no enrollment or package eligibility for this group.",
               );
             }
             await client.query(
@@ -1929,23 +1941,75 @@ class SyncProcessor {
         const operation = String(context.operationType || "").toUpperCase();
         if (operation === "DELETE" || operation === "REMOVE") {
           const enrollments = await client.query(
-            `SELECT COUNT(*)::int AS count FROM student_group_enrollments WHERE center_id = $1 AND group_id = $2`,
+            `SELECT id FROM student_group_enrollments
+              WHERE center_id = $1 AND group_id = $2 AND status = 'active'`,
             [centerId, groupId],
           );
-          if (enrollments.rows[0]?.count > 0) {
-            throw new Error("لا يمكن حذف مجموعة لها تسجيلات؛ عطّلها للحفاظ على السجل.");
+          for (const enrollment of enrollments.rows) {
+            await client.query(
+              `UPDATE student_group_enrollments
+                  SET status = 'withdrawn', ended_at = COALESCE(ended_at, NOW()), updated_at = NOW()
+                WHERE center_id = $1 AND id = $2 AND status = 'active'`,
+              [centerId, enrollment.id],
+            );
+          }
+          const cycles = await client.query(
+            `SELECT id FROM debt_cycles
+              WHERE center_id = $1
+                AND status IN ('pending', 'partially_paid')
+                AND cycle_type <> 'package'
+                AND package_subscription_id IS NULL
+                AND (
+                  group_id = $2
+                  OR enrollment_id IN (
+                    SELECT id FROM student_group_enrollments
+                     WHERE center_id = $1 AND group_id = $2
+                  )
+                )`,
+            [centerId, groupId],
+          );
+          for (const cycle of cycles.rows) {
+            const paid = await client.query(
+              `SELECT COALESCE(SUM(amount), 0)::numeric AS amount
+                 FROM payments
+                WHERE center_id = $1 AND debt_cycle_id = $2 AND is_reversed = FALSE`,
+              [centerId, cycle.id],
+            );
+            await client.query(
+              `UPDATE debt_cycles
+                  SET amount_due = $3, status = 'cancelled', updated_at = NOW()
+                WHERE center_id = $1 AND id = $2`,
+              [centerId, cycle.id, Math.max(0, Number(paid.rows[0]?.amount || 0))],
+            );
           }
           await client.query(
-            `DELETE FROM group_schedules WHERE center_id = $1 AND group_id = $2`,
+            `UPDATE group_schedules SET status = 'inactive', updated_at = NOW()
+              WHERE center_id = $1 AND group_id = $2 AND status <> 'inactive'`,
             [centerId, groupId],
           );
           await client.query(
-            `DELETE FROM groups WHERE center_id = $1 AND id = $2`,
+            `UPDATE sessions SET status = 'cancelled', updated_at = NOW()
+              WHERE center_id = $1 AND group_id = $2
+                AND status = 'scheduled' AND session_date >= CURRENT_DATE`,
+            [centerId, groupId],
+          );
+          await client.query(
+            `UPDATE groups SET status = 'archived', updated_at = NOW()
+              WHERE center_id = $1 AND id = $2`,
             [centerId, groupId],
           );
           break;
         }
         const groupStatus = (grp.status || "active") === "inactive" ? "archived" : (grp.status || "active");
+        const deletionTombstone = await client.query(
+          `SELECT 1 AS deleted FROM server_sync_operations
+            WHERE center_id = $1 AND entity_type = 'group' AND entity_id = $2
+              AND UPPER(operation_type) IN ('DELETE', 'REMOVE')
+              AND status = 'applied'
+            LIMIT 1`,
+          [centerId, groupId],
+        );
+        if (deletionTombstone.rows.length > 0) break;
         const existingGroup = await client.query(
           `SELECT name, teacher_id, subject_id, grade, default_fee, session_price,
                   monthly_price, session_duration_minutes, late_after_minutes, status

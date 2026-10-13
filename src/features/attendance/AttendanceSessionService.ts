@@ -10,7 +10,11 @@ import { GroupRepository } from "../groups/GroupRepository";
 import { SessionRepository } from "../sessions/SessionRepository";
 import { GroupScheduleRepository } from "../groups/GroupScheduleRepository";
 import { AuditService } from "../../core/audit";
-import { calculateSessionAttendanceCounts } from "./AttendanceCalculations";
+import {
+  calculateSessionAttendanceCounts,
+  excludeCompensationVisitorsFromExpectedRoster,
+  filterExpectedStudentIdsByEligibility,
+} from "./AttendanceCalculations";
 import { stableSessionId } from "../../shared/utils/stableIds";
 import { DEFAULT_TEACHER_WEEK_START_DAY, isTeacherMakeupCycleOpen } from "../../shared/utils/teacherWeeks";
 import { getLocalDateOnly } from "../../shared/utils/date";
@@ -351,10 +355,14 @@ export class AttendanceSessionService {
     const reconciliationUpdatedAt = sessionWasActivated
       ? new Date().toISOString()
       : undefined;
-    const expectedStudentIds = db.getAllSync<{ studentId: string }>(
+    const expectedRows = db.getAllSync<{ studentId: string }>(
       "SELECT student_id as studentId FROM session_expected_students WHERE center_id = ? AND session_id = ?",
       [session.centerId, session.id],
     ).map((row) => row.studentId);
+    const eligibleStudentIds = SessionRepository.getEligibleStudentIdsForSession(session.id);
+    const expectedStudentIds = expectedRows.length > 0
+      ? filterExpectedStudentIdsByEligibility(expectedRows, eligibleStudentIds)
+      : eligibleStudentIds;
     SyncRepository.enqueueOperation({
       operationId: activationOperationId,
       centerId: session.centerId,
@@ -420,30 +428,19 @@ export class AttendanceSessionService {
         teacherId: rawSession.teacherId || group?.teacherId || null,
       };
     }
-    if (db.getFirstSync(
-      `SELECT 1 FROM session_expected_students
+    const snapshotEntry = db.getFirstSync<{ id: string }>(
+      `SELECT id FROM session_expected_students
        WHERE center_id = ? AND session_id = ? AND student_id = ?`,
       [session.centerId, sessionId, studentId],
-    )) return true;
+    );
+    if (snapshotEntry) {
+      return SessionRepository.getEligibleStudentIdsForSession(sessionId).includes(studentId);
+    }
 
     // A student may be added to an old/legacy session only when their
     // enrollment was valid on the session date.  Never use today's active
     // enrollment to rewrite a historical roster.
-    const hasExpectedSnapshot = Boolean(
-      db.getFirstSync<any>(
-        "SELECT 1 FROM session_expected_students WHERE center_id = ? AND session_id = ? LIMIT 1",
-        [session.centerId, sessionId],
-      ),
-    );
-    const enrolled = !hasExpectedSnapshot && Boolean(db.getFirstSync<any>(
-      `SELECT 1 FROM student_group_enrollments
-       WHERE center_id = ? AND group_id = ? AND student_id = ?
-         AND status = 'active'
-         AND start_date <= ?
-         AND (end_date IS NULL OR end_date >= ?)
-       LIMIT 1`,
-      [session.centerId, session.groupId, studentId, session.sessionDate, session.sessionDate],
-    ));
+    const enrolled = SessionRepository.getEligibleStudentIdsForSession(sessionId).includes(studentId);
     if (enrolled) {
       if (rawSession.status === "closed") return true;
       const now = new Date().toISOString();
@@ -509,89 +506,112 @@ export class AttendanceSessionService {
 
   static getSummary(sessionId: string): AttendanceSummary {
     const db = DatabaseService.getDb();
-    const session = db.getFirstSync<{ centerId: string; groupId: string; subjectId?: string | null; teacherId?: string | null; sessionDate: string }>(
-      "SELECT center_id as centerId, group_id as groupId, subject_id as subjectId, teacher_id as teacherId, session_date as sessionDate FROM sessions WHERE id = ?",
+    const session = db.getFirstSync<{ id: string; centerId: string; groupId: string; subjectId?: string | null; teacherId?: string | null; sessionDate: string }>(
+      `SELECT s.id, s.center_id as centerId, s.group_id as groupId,
+              COALESCE(s.subject_id, g.subject_id) as subjectId,
+              COALESCE(s.teacher_id, g.teacher_id) as teacherId,
+              s.session_date as sessionDate
+       FROM sessions s JOIN groups g ON g.center_id = s.center_id AND g.id = s.group_id
+       WHERE s.id = ?`,
       [sessionId],
     );
     if (!session) return { total: 0, present: 0, absent: 0, makeup: 0 };
-    const expected = db.getAllSync<any>(
-      "SELECT student_id as studentId FROM session_expected_students WHERE center_id = ? AND session_id = ?",
-      [session.centerId, sessionId],
-    );
-    let normalizedExpected = expected
-      .map((row: any) => row.studentId ?? row.student_id)
-      .filter(Boolean)
-      .map(String);
-    // The session snapshot is the historical roster. Ending an enrollment or
-    // package later must not remove students from a session already recorded.
-    if (normalizedExpected.length === 0) {
-      const historicalEnrollments = db.getAllSync<any>(
-        `SELECT student_id as studentId
-         FROM student_group_enrollments
-         WHERE center_id = ? AND group_id = ?
-           AND status IN ('active', 'ended')
-           AND start_date <= ? AND (end_date IS NULL OR end_date >= ?)`,
-        [session.centerId, session.groupId, session.sessionDate, session.sessionDate],
-      );
-      normalizedExpected = historicalEnrollments
-        .map((row: any) => String(row.studentId ?? row.student_id ?? ""))
-        .filter(Boolean);
-      const packageRows = db.getAllSync<any>(
-        `SELECT DISTINCT sps.student_id as studentId
-         FROM student_package_subscriptions sps
-         JOIN package_subjects ps
-           ON ps.center_id = sps.center_id AND ps.package_id = sps.package_id
-         JOIN groups scoped_group
-           ON scoped_group.center_id = sps.center_id AND scoped_group.id = ?
-         LEFT JOIN package_subject_teacher_overrides selected
-           ON selected.center_id = sps.center_id
-          AND selected.subscription_id = sps.id
-          AND selected.subject_id = ps.subject_id
-         WHERE sps.center_id = ? AND sps.status IN ('active', 'ended', 'cancelled')
-           AND sps.start_date <= ? AND (sps.end_date IS NULL OR sps.end_date >= ?)
-           AND ps.subject_id = COALESCE(?, scoped_group.subject_id)
-           AND (ps.group_id = scoped_group.id OR selected.group_id = scoped_group.id)
-           AND COALESCE(selected.teacher_id, ps.default_teacher_id) = COALESCE(?, scoped_group.teacher_id)
-           AND (selected.id IS NULL OR selected.group_id = scoped_group.id)
-           AND (selected.id IS NOT NULL OR NOT EXISTS (
-             SELECT 1 FROM package_subject_teacher_overrides any_selection
-             WHERE any_selection.center_id = sps.center_id
-               AND any_selection.subscription_id = sps.id
-           ))`,
-        [session.groupId, session.centerId, session.sessionDate, session.sessionDate, session.subjectId ?? null, session.teacherId ?? null],
-      );
-      normalizedExpected = Array.from(new Set([
-        ...normalizedExpected,
-        ...packageRows.map((row: any) => String(row.studentId ?? row.student_id ?? "")).filter(Boolean),
-      ]));
-    }
+    const eligibleIds = SessionRepository.getEligibleStudentIdsForSession(sessionId);
+    // A legacy expected snapshot can contain compensation visitors. Current
+    // date-valid enrollment/package relationships are the roster authority;
+    // keeping the snapshot rows themselves would turn old visitors into
+    // absentees after app restart or sync replay.
+    let normalizedExpected = eligibleIds;
     const attendance = db.getAllSync<any>(
-      "SELECT student_id as studentId, status, attendance_type as attendanceType FROM attendance WHERE center_id = ? AND session_id = ?",
+      `SELECT student_id as studentId, status,
+              attendance_type as attendanceType,
+              original_absence_id as originalAbsenceId
+       FROM attendance WHERE center_id = ? AND session_id = ?`,
       [session.centerId, sessionId],
     );
-    const normalizedAttendance = attendance.map((row: any) => ({
-      ...row,
-      studentId: row.studentId ?? row.student_id,
-      attendanceType: row.attendanceType ?? row.attendance_type,
-    }));
-    // Legacy sessions may have no immutable roster snapshot. Reconstruct the
-    // same historical roster used by the dashboard, then include a regular
-    // attendance row as a last-resort signal so the session counter cannot
-    // show zero while the student's attendance is visibly recorded.
-    if (normalizedExpected.length === 0) {
-      const sessionInfo = db.getFirstSync<any>(
-        "SELECT group_id as groupId, session_date as sessionDate FROM sessions WHERE center_id = ? AND id = ?",
-        [session.centerId, sessionId],
-      );
-      const enrollments = sessionInfo
-        ? EnrollmentRepository.getActiveEnrollmentsForGroup(sessionInfo.groupId, sessionInfo.sessionDate)
-        : [];
-      const ids = new Set<string>(enrollments.map((row: any) => String(row.studentId ?? row.student_id)));
-      for (const row of normalizedAttendance) {
-        if (row.studentId && row.attendanceType !== "makeup") ids.add(String(row.studentId));
+    const normalizedAttendance = attendance.map((row: any) => {
+      const item = {
+        ...row,
+        studentId: row.studentId ?? row.student_id,
+        attendanceType: row.attendanceType ?? row.attendance_type,
+        originalAbsenceId: row.originalAbsenceId ?? row.original_absence_id,
+      };
+      if (
+        item.attendanceType !== "makeup" ||
+        (item.status !== "present" && item.status !== "late") ||
+        !item.originalAbsenceId
+      ) {
+        return { ...item, originalAbsenceValid: false };
       }
-      normalizedExpected = Array.from(ids);
-    }
+
+      const originalSession = db.getFirstSync<any>(
+        `SELECT s.id, s.group_id as groupId, s.session_date as sessionDate, s.status,
+                COALESCE(s.subject_id, g.subject_id) as subjectId,
+                COALESCE(s.teacher_id, g.teacher_id) as teacherId
+         FROM sessions s
+         JOIN groups g ON g.center_id = s.center_id AND g.id = s.group_id
+         WHERE s.center_id = ? AND s.id = ? AND s.status <> 'cancelled'`,
+        [session.centerId, item.originalAbsenceId],
+      );
+      if (
+        !originalSession ||
+        originalSession.subjectId !== session.subjectId ||
+        originalSession.teacherId !== session.teacherId
+      ) {
+        return { ...item, originalAbsenceValid: false };
+      }
+
+      const sourceHasSnapshot = Boolean(db.getFirstSync<any>(
+        `SELECT 1 FROM session_expected_students
+         WHERE center_id = ? AND session_id = ? LIMIT 1`,
+        [session.centerId, originalSession.id],
+      ));
+      const sourceExpected = sourceHasSnapshot
+        ? Boolean(db.getFirstSync<any>(
+          `SELECT 1 FROM session_expected_students
+           WHERE center_id = ? AND session_id = ? AND student_id = ?
+             AND id NOT LIKE ?`,
+          [
+            session.centerId,
+            originalSession.id,
+            item.studentId,
+            `exp-comp-${originalSession.id}-%`,
+          ],
+        ))
+        : Boolean(db.getFirstSync<any>(
+          `SELECT 1 FROM student_group_enrollments
+           WHERE center_id = ? AND group_id = ? AND student_id = ?
+             AND status IN ('active', 'ended')
+             AND start_date <= ? AND (end_date IS NULL OR end_date >= ?)
+           LIMIT 1`,
+          [
+            session.centerId,
+            originalSession.groupId,
+            item.studentId,
+            originalSession.sessionDate,
+            originalSession.sessionDate,
+          ],
+        )) || this.getPackageExpectedStudentIds(
+          originalSession.groupId,
+          originalSession.subjectId,
+          originalSession.teacherId,
+          originalSession.sessionDate,
+        ).includes(item.studentId);
+      const attendedOriginal = Boolean(db.getFirstSync<any>(
+        `SELECT 1 FROM attendance
+         WHERE center_id = ? AND session_id = ? AND student_id = ?`,
+        [session.centerId, originalSession.id, item.studentId],
+      ));
+      return {
+        ...item,
+        originalAbsenceValid: sourceExpected && !attendedOriginal,
+      };
+    });
+    normalizedExpected = excludeCompensationVisitorsFromExpectedRoster(
+      normalizedExpected,
+      normalizedAttendance,
+      eligibleIds,
+    );
     const coveredInAdvance = db.getAllSync<{ studentId: string }>(
       "SELECT student_id as studentId FROM advance_coverages WHERE center_id = ? AND target_future_session_id = ?",
       [session.centerId, sessionId],
@@ -724,14 +744,89 @@ export class AttendanceSessionService {
    * attendance validation passes. Called only after the operator explicitly
    * confirms compensation attendance.
    */
-  static addCompensationStudent(sessionId: string, studentId: string): void {
-    const { activeCenterId } = useAuthStore.getState();
-    if (!activeCenterId) return;
+  /**
+   * Adds a newly enrolled student to an already-open session's roster and
+   * persists the roster change to the outbox before attendance is recorded.
+   */
+  static addEnrolledStudentToOpenSession(sessionId: string, studentId: string): void {
+    const { activeCenterId, currentUser } = useAuthStore.getState();
+    if (!activeCenterId || !currentUser) throw new ForbiddenError("يجب تسجيل الدخول أولاً.");
     const db = DatabaseService.getDb();
-    const now = new Date().toISOString();
-    db.runSync(
-      "INSERT OR IGNORE INTO session_expected_students (id, center_id, session_id, student_id, created_at) VALUES (?, ?, ?, ?, ?)",
-      [`exp-comp-${sessionId}-${studentId}`, activeCenterId, sessionId, studentId, now],
+    const session = db.getFirstSync<any>(
+      `SELECT s.id, s.center_id as centerId, s.group_id as groupId,
+              s.session_date as sessionDate, s.status, s.schedule_id as scheduleId,
+              COALESCE(s.subject_id, g.subject_id) as subjectId,
+              COALESCE(s.teacher_id, g.teacher_id) as teacherId,
+              s.session_price as sessionPrice,
+              s.late_after_minutes as lateAfterMinutes,
+              s.start_time as startTime, s.end_time as endTime,
+              s.created_at as createdAt, s.updated_at as updatedAt
+       FROM sessions s
+       JOIN groups g ON g.center_id = s.center_id AND g.id = s.group_id
+       WHERE s.center_id = ? AND s.id = ?`,
+      [activeCenterId, sessionId],
     );
+    if (!session) throw new ConflictError("جلسة الحضور غير موجودة.");
+    if (session.status !== "open") throw new ConflictError("لا يمكن إضافة طالب إلى جلسة حضور غير مفتوحة.");
+
+    const enrolled = Boolean(db.getFirstSync<any>(
+      `SELECT 1 FROM student_group_enrollments
+       WHERE center_id = ? AND group_id = ? AND student_id = ?
+         AND status IN ('active', 'ended')
+         AND start_date <= ? AND (end_date IS NULL OR end_date >= ?)
+       LIMIT 1`,
+      [activeCenterId, session.groupId, studentId, session.sessionDate, session.sessionDate],
+    ));
+    const packageEligible = this.getPackageExpectedStudentIds(
+      session.groupId,
+      session.subjectId,
+      session.teacherId,
+      session.sessionDate,
+    ).includes(studentId);
+    if (!enrolled && !packageEligible) {
+      throw new ConflictError("يجب تسجيل الطالب في المجموعة الحالية أو باقتها قبل تسجيل الحضور.");
+    }
+
+    const alreadyExpected = Boolean(db.getFirstSync<any>(
+      `SELECT 1 FROM session_expected_students
+       WHERE center_id = ? AND session_id = ? AND student_id = ?`,
+      [activeCenterId, sessionId, studentId],
+    ));
+    if (alreadyExpected) return;
+
+    const now = new Date().toISOString();
+    const operationId = `op-session-roster-add-${sessionId}-${studentId}`;
+    DatabaseService.runInTransaction(() => {
+      db.runSync(
+        `INSERT OR IGNORE INTO session_expected_students
+         (id, center_id, session_id, student_id, created_at)
+         VALUES (?, ?, ?, ?, ?)`,
+        [`exp-${sessionId}-${studentId}`, activeCenterId, sessionId, studentId, now],
+      );
+      AuditService.recordEvent({
+        operationId,
+        centerId: activeCenterId,
+        userId: currentUser.id,
+        deviceId: DeviceService.getDeviceIdSync(),
+        entityType: "session",
+        entityId: sessionId,
+        action: "session.roster.add",
+        payload: { sessionId, studentId, groupId: session.groupId },
+      });
+      SyncRepository.enqueueOperation({
+        operationId,
+        centerId: activeCenterId,
+        userId: currentUser.id,
+        deviceId: DeviceService.getDeviceIdSync(),
+        operationType: "UPDATE",
+        entityType: "session",
+        entityId: sessionId,
+        payload: {
+          ...session,
+          expectedStudentIds: [studentId],
+          updatedAt: now,
+        },
+      });
+    });
   }
 }

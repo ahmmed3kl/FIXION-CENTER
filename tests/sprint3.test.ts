@@ -377,15 +377,18 @@ describe("Sprint 3 - FIXION Financial Core & Cash Payments", () => {
       expect(queued?.operationType).toBe("payment.create");
     });
 
-    it("prevents duplicate payments with the same operation_id (idempotency enforcement)", async () => {
-      await expect(
-        PaymentRepository.recordPayment({
-          studentId: studentPay.id,
-          amount: 500,
-          paymentType: "monthly",
-          operationId: "op-pay-unique-12345", // duplicate
-        }),
-      ).rejects.toThrow();
+    it("returns the original payment when retrying the same operation_id", async () => {
+      const duplicate = await PaymentRepository.recordPayment({
+        studentId: studentPay.id,
+        amount: 500,
+        paymentType: "monthly",
+        operationId: "op-pay-unique-12345",
+      });
+      expect(duplicate.operationId).toBe("op-pay-unique-12345");
+      expect(duplicate.id).toBeDefined();
+      expect(SyncRepository.getPendingOperations("center-1").filter(
+        (operation) => operation.operationId === "op-pay-unique-12345",
+      )).toHaveLength(1);
     });
 
     it("rejects non-positive payment amount", async () => {

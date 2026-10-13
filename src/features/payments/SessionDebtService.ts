@@ -102,7 +102,7 @@ export class SessionDebtService {
         const directPayment = session ? Number(db.getFirstSync<any>(
           `SELECT COALESCE(SUM(amount), 0) as amount FROM payments
            WHERE center_id = ? AND student_id = ? AND session_id = ?
-             AND (debt_cycle_id IS NULL OR EXISTS (
+             AND (payment_type = 'session' OR debt_cycle_id IS NULL OR EXISTS (
                SELECT 1 FROM debt_cycles dc
                 WHERE dc.center_id = payments.center_id
                   AND dc.id = payments.debt_cycle_id
@@ -172,6 +172,7 @@ export class SessionDebtService {
     const monthlyPool = Number(db.getFirstSync<any>(
       `SELECT COALESCE(SUM(amount), 0) as amount FROM payments
        WHERE center_id = ? AND student_id = ? AND payment_date >= ? AND payment_date <= ?
+         AND payment_type <> 'session'
          AND (debt_cycle_id IS NULL OR NOT EXISTS (
                 SELECT 1 FROM debt_cycles dc
                  WHERE dc.center_id = payments.center_id

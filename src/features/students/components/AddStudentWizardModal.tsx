@@ -12,6 +12,7 @@ import {
 } from "react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { formatCurrency, formatTimeArabic } from "../../../core/localization";
+import { DatabaseService } from "../../../core/database";
 import { Colors, useTheme } from "../../../core/theme";
 import { ConnectivityService } from "../../../core/connectivity";
 import { SyncEngine } from "../../../core/sync";
@@ -50,6 +51,8 @@ interface AddStudentWizardModalProps {
   onStudentCreated: (student?: Student) => void;
   keepOpenAfterCreate?: boolean;
   initialGroupId?: string;
+  requiredGroupId?: string;
+  attendanceSessionDate?: string;
 }
 
 type FieldErrors = {
@@ -94,7 +97,15 @@ const Section = ({
   </View>
 );
 
-export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({ visible, onClose, onStudentCreated, keepOpenAfterCreate = false, initialGroupId }) => {
+export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({
+  visible,
+  onClose,
+  onStudentCreated,
+  keepOpenAfterCreate = false,
+  initialGroupId,
+  requiredGroupId,
+  attendanceSessionDate,
+}) => {
   const { colors } = useTheme();
   const { width, height } = useWindowDimensions();
   const isTablet = width >= 600;
@@ -317,6 +328,7 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({ vi
     return groupSchedules.slice(0, 2).map((item) => `${DAYS[item.dayOfWeek] || "اليوم"} ${formatTimeArabic(item.startTime)}`).join("  •  ") || "لم يتم تحديد الموعد";
   };
   const firstScheduledDate = (groupId: string) => {
+    if (groupId === requiredGroupId && attendanceSessionDate) return attendanceSessionDate;
     const start = new Date(`${getLocalDateOnly()}T12:00:00`);
     const groupSchedules = schedules[groupId] || GroupScheduleRepository.getSchedulesForGroup(groupId);
     const now = new Date();
@@ -379,6 +391,18 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({ vi
     if (submitting) return;
     setSubmitting(true);
     try {
+      const requiredGroupSelected = !requiredGroupId || (
+        packageId
+          ? Object.values(packageGroupIds).includes(requiredGroupId)
+          : selectedGroupIds.includes(requiredGroupId)
+      );
+      if (!requiredGroupSelected) {
+        Alert.alert(
+          "المجموعة الحالية مطلوبة",
+          "لإكمال تسجيل الحضور، أضف الطالب إلى المجموعة الحالية أو اخترها ضمن تسجيل الباقة.",
+        );
+        return;
+      }
       if (!validateForm()) {
         Alert.alert("راجع البيانات", "أكمل الحقول المطلوبة قبل إضافة الطالب.");
         return;
@@ -413,23 +437,27 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({ vi
 
   const createStudent = async (reuseArchivedCard: boolean) => {
     setSubmitting(true);
+    let studentPersisted = false;
     try {
       const packageGroups = packageOptionIds.map((id) => packageGroupIds[id]).filter(Boolean);
-      // Package groups are enrolled with their first real scheduled class as
-      // the start date; StudentRepository's generic groupIds path uses today.
-      const student = StudentRepository.createStudent(
+      const createStudentRecord = () => StudentRepository.createStudent(
         { studentCode: studentCode.trim(), cardCode: cardCode.trim(), fullName: fullName.trim(), phone: phone.trim(), parentPhone: parentPhone.trim(), grade, notes: notes.trim(), groupIds: [] },
         { reuseArchivedCard },
       );
+      let student: Student;
       if (packageId) {
+        student = createStudentRecord();
+        studentPersisted = true;
         // Create the package ledger before its attendance enrollments. This
         // prevents each selected package group from opening an extra monthly
         // debt cycle in addition to the single package cycle.
         const packageStartDate = packageGroups.map((groupId) => firstScheduledDate(groupId)).sort()[0] || getLocalDateOnly();
         const subscription = await PackageSubscriptionRepository.subscribeStudent({ studentId: student.id, packageId, startDate: packageStartDate, selectedOptionIds: packageOptionIds, selectedTeacherIds: packageTeacherIds, selectedGroupIds: packageGroupIds });
-        for (const groupId of Array.from(new Set(packageGroups))) {
-          EnrollmentRepository.enrollStudent({ studentId: student.id, groupId, startDate: firstScheduledDate(groupId) });
-        }
+        DatabaseService.runInTransaction(() => {
+          for (const groupId of Array.from(new Set(packageGroups))) {
+            EnrollmentRepository.enrollStudent({ studentId: student.id, groupId, startDate: firstScheduledDate(groupId) });
+          }
+        });
         if (currentUser?.permissions?.includes("packages.manage")) {
           for (const option of selectedPackageOptions) {
             const teacherId = packageTeacherIds[option.id];
@@ -437,16 +465,27 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({ vi
           }
         }
       } else {
-        for (const groupId of selectedGroupIds) {
-          EnrollmentRepository.enrollStudent({ studentId: student.id, groupId, startDate: firstScheduledDate(groupId) });
-        }
+        student = DatabaseService.runInTransaction(() => {
+          const created = createStudentRecord();
+          for (const groupId of selectedGroupIds) {
+            EnrollmentRepository.enrollStudent({ studentId: created.id, groupId, startDate: firstScheduledDate(groupId) });
+          }
+          return created;
+        });
+        studentPersisted = true;
       }
-      Alert.alert("تمت الإضافة", "تمت إضافة الطالب بنجاح.");
+      if (!requiredGroupId) Alert.alert("تمت الإضافة", "تمت إضافة الطالب بنجاح.");
       onStudentCreated(student);
       if (keepOpenAfterCreate) resetStudentFields();
       else { resetForm(); onClose(); }
     } catch (error: any) {
-      Alert.alert("تعذر إضافة الطالب", error?.message || "حدث خطأ غير متوقع.");
+      const failure = error?.message || "حدث خطأ غير متوقع.";
+      Alert.alert(
+        studentPersisted ? "تم إنشاء الطالب دون إكمال التسجيل" : "تعذر إضافة الطالب",
+        studentPersisted
+          ? `${failure}\nلم يُسجل الحضور. راجع تسجيل المجموعة أو الباقة قبل المتابعة.`
+          : failure,
+      );
     } finally { setSubmitting(false); }
   };
 

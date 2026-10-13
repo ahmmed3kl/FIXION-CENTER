@@ -8,6 +8,64 @@ export interface SessionAttendanceCounts {
   makeup: number;
 }
 
+export interface SessionRosterAttendanceRow {
+  studentId: string;
+  status: string;
+  attendanceType?: string | null;
+  originalAbsenceId?: string | null;
+  originalAbsenceValid?: boolean;
+}
+
+export function getSessionExpectedStudentIds(
+  sessionId: string,
+  rows: { id?: string | null; studentId: string }[],
+): string[] {
+  const compensationPrefix = `exp-comp-${sessionId}-`;
+  return Array.from(new Set(
+    rows
+      .filter((row) => !row.id?.startsWith(compensationPrefix))
+      .map((row) => row.studentId)
+      .filter(Boolean),
+  ));
+}
+
+export function filterExpectedStudentIdsByEligibility(
+  expectedStudentIds: string[],
+  eligibleStudentIds: string[],
+): string[] {
+  const eligible = new Set(eligibleStudentIds);
+  return Array.from(new Set(expectedStudentIds.filter((studentId) => eligible.has(studentId))));
+}
+
+/**
+ * Compensation visitors belong to the destination session's attendance
+ * history, not its regular expected roster. A historic snapshot may contain
+ * such a visitor from older scanner flows; exclude only a successfully
+ * recorded, origin-linked makeup when the student has no independent
+ * enrollment/package eligibility in this destination group.
+ */
+export function excludeCompensationVisitorsFromExpectedRoster(
+  expectedStudentIds: string[],
+  attendance: SessionRosterAttendanceRow[],
+  eligibleStudentIds: string[],
+): string[] {
+  const eligible = new Set(eligibleStudentIds);
+  const compensationVisitors = new Set(
+    attendance
+      .filter((item) =>
+        item.attendanceType === "makeup" &&
+        (item.status === "present" || item.status === "late") &&
+        item.originalAbsenceValid === true &&
+        Boolean(item.originalAbsenceId),
+      )
+      .map((item) => item.studentId)
+      .filter((studentId) => !eligible.has(studentId)),
+  );
+  return Array.from(new Set(expectedStudentIds)).filter(
+    (studentId) => !compensationVisitors.has(studentId),
+  );
+}
+
 /**
  * Aggregates one session from its immutable expected roster and attendance
  * rows. Kept in a dependency-free module so repositories and reports can

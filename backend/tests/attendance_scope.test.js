@@ -12,6 +12,7 @@ function makeClient({
   expected = false,
   hasSnapshot = false,
   hasEnrollment = false,
+  hasLegacyCompensationEnrollment = false,
   hasSameLevelCompensationEnrollment = false,
   packageEligible = false,
 } = {}) {
@@ -38,16 +39,27 @@ function makeClient({
       }
       if (
         sql.includes("FROM session_expected_students") &&
-        sql.includes("student_id = $3")
+        sql.includes("student_id = $3") &&
+        !sql.includes("FROM student_group_enrollments e")
       ) {
         return { rows: expected ? [{ "?column?": 1 }] : [] };
       }
-      if (sql.includes("FROM session_expected_students")) {
+      if (
+        sql.includes("FROM session_expected_students") &&
+        !sql.includes("FROM student_group_enrollments e")
+      ) {
         return { rows: hasSnapshot ? [{ "?column?": 1 }] : [] };
       }
       if (sql.includes("JOIN groups enrolled_group")) {
         return {
           rows: hasSameLevelCompensationEnrollment
+            ? [{ "?column?": 1 }]
+            : [],
+        };
+      }
+      if (sql.includes("FROM student_group_enrollments e")) {
+        return {
+          rows: hasEnrollment && !hasLegacyCompensationEnrollment
             ? [{ "?column?": 1 }]
             : [],
         };
@@ -124,6 +136,24 @@ test("legacy sessions without a roster snapshot retain date-valid enrollment eli
   );
 });
 
+test("migration-created membership copied from a compensation roster is not normal eligibility", async () => {
+  const client = makeClient({
+    hasEnrollment: true,
+    hasLegacyCompensationEnrollment: true,
+  });
+  const eligible = await SyncProcessor.isStudentEligibleForSessionGroup(client, {
+    centerId,
+    groupId: "attendance-scope-group",
+    sessionDate: "2026-10-11",
+    subjectId: "attendance-scope-subject",
+    teacherId: "attendance-scope-teacher",
+    groupGrade: "الصف الثالث الثانوي",
+    studentId,
+  });
+
+  assert.equal(eligible, false);
+});
+
 test("legacy package students remain eligible when no roster snapshot exists", async () => {
   const client = makeClient({ packageEligible: true });
 
@@ -198,4 +228,23 @@ test("same-teacher compensation is eligible only within the active group's level
     },
   );
   assert.equal(ineligible, false);
+});
+
+test("same-teacher compensation cannot be added to a session's expected roster", async () => {
+  const client = makeClient({
+    hasSameLevelCompensationEnrollment: true,
+  });
+  const expectedForGroup = await SyncProcessor.isStudentEligibleForSessionGroup(
+    client,
+    {
+      centerId,
+      groupId: "attendance-scope-group",
+      sessionDate: "2026-10-11",
+      subjectId: "attendance-scope-subject",
+      teacherId: "attendance-scope-teacher",
+      groupGrade: "الصف الثالث الثانوي",
+      studentId,
+    },
+  );
+  assert.equal(expectedForGroup, false);
 });
