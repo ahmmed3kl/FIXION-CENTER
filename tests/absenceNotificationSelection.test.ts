@@ -1,7 +1,9 @@
 import {
   absenceNotificationOperationPrefix,
   beginAbsenceRecipientSelection,
+  getSelectedAbsenceRecipientIds,
   hasValidNotificationContact,
+  toggleAllAbsenceRecipientSelection,
   toggleAbsenceRecipientSelection,
 } from "../src/features/notifications/absenceNotificationSelection";
 
@@ -29,5 +31,23 @@ describe("absence notification recipient selection", () => {
     expect(prefix).toBe(absenceNotificationOperationPrefix("session-a", "student-a"));
     expect(prefix).not.toBe(absenceNotificationOperationPrefix("session-a", "student-b"));
     expect(prefix.length).toBeLessThan(64);
+  });
+
+  it("selects and clears exactly the absence roster for the current session", () => {
+    const sessionAbsentees = ["student-1", "student-2", "student-3"];
+    const partialSelection = new Set(["student-2"]);
+    expect(Array.from(toggleAllAbsenceRecipientSelection(partialSelection, sessionAbsentees)).sort())
+      .toEqual(sessionAbsentees);
+    expect(toggleAllAbsenceRecipientSelection(new Set(sessionAbsentees), sessionAbsentees).size)
+      .toBe(0);
+    expect(toggleAllAbsenceRecipientSelection(new Set(["outside-student"]), sessionAbsentees))
+      .toEqual(new Set(sessionAbsentees));
+  });
+
+  it("sends only selected recipients contained in the active subsection", () => {
+    expect(getSelectedAbsenceRecipientIds(
+      new Set(["never-1", "cross-group-1", "outside"]),
+      ["never-1", "never-2"],
+    )).toEqual(["never-1"]);
   });
 });

@@ -23,8 +23,21 @@ describe("teacher teaching-week cycles", () => {
     expect(isWithinTeacherWeekCycle("2026-10-06", "2026-10-07", 3)).toBe(false);
   });
 
+  it("normalizes persisted numeric settings and SQL timestamps without shifting the session day", () => {
+    expect(getTeacherWeekBounds("2026-10-06T00:00:00.000Z", "3")).toEqual({
+      startDate: "2026-09-30",
+      endDate: "2026-10-06",
+    });
+    expect(getTeacherWeekBounds("2026-10-06 00:00:00", 3)).toEqual({
+      startDate: "2026-09-30",
+      endDate: "2026-10-06",
+    });
+  });
+
   it("rejects malformed dates and invalid start-day values", () => {
     expect(() => getTeacherWeekBounds("2026-02-30", 6)).toThrow(RangeError);
     expect(() => getTeacherWeekBounds("2026-10-06", 7)).toThrow(RangeError);
+    expect(() => getTeacherWeekBounds("2026-10-06", "monday")).toThrow(RangeError);
+    expect(() => getTeacherWeekBounds("not-a-date", 6)).toThrow(RangeError);
   });
 });

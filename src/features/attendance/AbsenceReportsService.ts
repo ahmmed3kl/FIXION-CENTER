@@ -11,6 +11,7 @@ import {
   DEFAULT_TEACHER_WEEK_START_DAY,
   getTeacherWeekBounds,
   isWithinTeacherWeekCycle,
+  normalizeTeacherWeekStartDay,
 } from "../../shared/utils/teacherWeeks";
 export interface AbsenceSessionSummary {
   session: Session;
@@ -26,10 +27,13 @@ export interface CompensationReportRow {
   kind: "completed" | "eligible" | "advanced";
   attendance?: Attendance;
   opportunity?: MakeupOpportunity;
+  originalSession?: Session;
 }
 
 export interface MonthlyNeverAttendedRow {
   student: Student;
+  teacherId: string;
+  subjectId: string;
   teacherNames: string[];
   subjectName: string;
   groupNames: string[];
@@ -132,11 +136,13 @@ export class AbsenceReportsService {
       if (!session.teacherId || !session.subjectId) continue;
       let weekStartDay = teacherWeekStarts.get(session.teacherId);
       if (weekStartDay === undefined) {
-        const teacher = db.getFirstSync<{ weekStartDay?: number | null }>(
+        const teacher = db.getFirstSync<{ weekStartDay?: unknown }>(
           "SELECT week_start_day as weekStartDay FROM teachers WHERE center_id = ? AND id = ?",
           [centerId, session.teacherId],
         );
-        weekStartDay = teacher?.weekStartDay ?? DEFAULT_TEACHER_WEEK_START_DAY;
+        weekStartDay = normalizeTeacherWeekStartDay(
+          teacher?.weekStartDay ?? DEFAULT_TEACHER_WEEK_START_DAY,
+        );
         teacherWeekStarts.set(session.teacherId, weekStartDay);
       }
       const bounds = getTeacherWeekBounds(session.sessionDate, weekStartDay);
@@ -207,6 +213,8 @@ export class AbsenceReportsService {
         if (attended.has(studentId)) continue;
         rows.push({
           student: expected.student,
+          teacherId: cycle.teacherId,
+          subjectId: cycle.subjectId,
           teacherNames: cycle.teacherName ? [cycle.teacherName] : [],
           subjectName: cycle.subjectName,
           groupNames: Array.from(expected.groups).sort(),
@@ -221,6 +229,35 @@ export class AbsenceReportsService {
     );
   }
 
+  static getNeverAttendedForSession(
+    session: Session,
+    monthlyRows: MonthlyNeverAttendedRow[],
+    successfullyCompensatedStudentIds: ReadonlySet<string> = new Set(),
+    currentAbsentStudentIds?: ReadonlySet<string>,
+  ): MonthlyNeverAttendedRow[] {
+    if (!session.teacherId || !session.subjectId || !session.centerId) return [];
+    const expectedStudentIds = new Set(
+      SessionRepository.getExpectedStudents(session.id).map((student) => student.id),
+    );
+    if (!expectedStudentIds.size) return [];
+    const teacher = DatabaseService.getDb().getFirstSync<{ weekStartDay?: unknown }>(
+      "SELECT week_start_day as weekStartDay FROM teachers WHERE center_id = ? AND id = ?",
+      [session.centerId, session.teacherId],
+    );
+    const weekStartDay = normalizeTeacherWeekStartDay(
+      teacher?.weekStartDay ?? DEFAULT_TEACHER_WEEK_START_DAY,
+    );
+    const cycleStartDate = getTeacherWeekBounds(session.sessionDate, weekStartDay).startDate;
+    return monthlyRows.filter((row) =>
+      row.teacherId === session.teacherId &&
+      row.subjectId === session.subjectId &&
+      row.cycleStartDate === cycleStartDate &&
+      expectedStudentIds.has(row.student.id) &&
+      !successfullyCompensatedStudentIds.has(row.student.id) &&
+      (!currentAbsentStudentIds || currentAbsentStudentIds.has(row.student.id)),
+    );
+  }
+
   static getMonthlyCrossGroupMakeups(
     month: string,
     sessions = this.getSessionsForMonth(month),
@@ -228,9 +265,23 @@ export class AbsenceReportsService {
     const rows: MonthlyCrossGroupMakeupRow[] = [];
     for (const { session: targetSession } of sessions) {
       for (const attendance of AttendanceRepository.getSessionAttendance(targetSession.id)) {
-        if (attendance.attendanceType !== "makeup" || !attendance.originalAbsenceId) continue;
+        if (
+          attendance.attendanceType !== "makeup" ||
+          (attendance.status !== "present" && attendance.status !== "late") ||
+          attendance.isExternal ||
+          !attendance.originalAbsenceId ||
+          attendance.sessionId !== targetSession.id
+        ) continue;
         const originalSession = SessionRepository.findById(attendance.originalAbsenceId);
-        if (!originalSession || originalSession.groupId === targetSession.groupId) continue;
+        if (
+          !originalSession ||
+          originalSession.groupId === targetSession.groupId ||
+          originalSession.teacherId !== targetSession.teacherId ||
+          originalSession.subjectId !== targetSession.subjectId ||
+          !SessionRepository.getExpectedStudents(originalSession.id)
+            .some((student) => student.id === attendance.studentId) ||
+          AttendanceRepository.getStudentAttendanceInSession(originalSession.id, attendance.studentId)
+        ) continue;
         const student = StudentRepository.findByIdForAttendanceReport(attendance.studentId);
         if (student) rows.push({ student, attendance, originalSession, targetSession });
       }
@@ -261,10 +312,24 @@ export class AbsenceReportsService {
     const present = counts.present.map((student) => ({ student, attendance: presentAttendance.get(student.id)! }));
 
     const compensation: CompensationReportRow[] = attendance
-      .filter((item) => item.attendanceType === "makeup")
+      .filter((item) =>
+        item.attendanceType === "makeup" &&
+        (item.status === "present" || item.status === "late") &&
+        !item.isExternal &&
+        Boolean(item.originalAbsenceId),
+      )
       .flatMap((item) => {
+        const originalSession = SessionRepository.findById(item.originalAbsenceId!);
+        if (
+          !originalSession ||
+          !SessionRepository.getExpectedStudents(originalSession.id)
+            .some((student) => student.id === item.studentId) ||
+          AttendanceRepository.getStudentAttendanceInSession(originalSession.id, item.studentId)
+        ) return [];
         const student = byStudent.get(item.studentId) || StudentRepository.findByIdForAttendanceReport(item.studentId);
-        return student ? [{ student, kind: "completed" as const, attendance: item }] : [];
+        return student
+          ? [{ student, kind: "completed" as const, attendance: item, originalSession }]
+          : [];
       });
     const absenceNotes = Object.fromEntries(
       AbsenceNoteRepository.getForSession(sessionId).map((note) => [note.studentId, note.text]),

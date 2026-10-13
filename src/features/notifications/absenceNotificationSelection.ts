@@ -12,6 +12,23 @@ export function toggleAbsenceRecipientSelection(
   return next;
 }
 
+export function toggleAllAbsenceRecipientSelection(
+  selectedStudentIds: ReadonlySet<string>,
+  allAbsentStudentIds: readonly string[],
+): Set<string> {
+  const allSelected = allAbsentStudentIds.length > 0 &&
+    allAbsentStudentIds.every((studentId) => selectedStudentIds.has(studentId));
+  return allSelected ? new Set<string>() : new Set(allAbsentStudentIds);
+}
+
+export function getSelectedAbsenceRecipientIds(
+  selectedStudentIds: Iterable<string>,
+  scopedStudentIds: readonly string[],
+): string[] {
+  const selected = new Set(selectedStudentIds);
+  return Array.from(new Set(scopedStudentIds.filter((studentId) => selected.has(studentId))));
+}
+
 export function hasValidNotificationContact(...contacts: Array<string | null | undefined>): boolean {
   return contacts.some((contact) => {
     const digits = String(contact || "").replace(/\D/g, "");

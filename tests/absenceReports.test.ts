@@ -1,7 +1,10 @@
 import { AbsenceReportsService, calculateAbsenceReportCounts, calculateSessionAttendanceCounts } from "../src/features/attendance/AbsenceReportsService";
 import { Attendance, Session, Student } from "../src/shared/types";
-import { DatabaseService } from "../src/core/database";
+import { DatabaseService, SqlDatabase } from "../src/core/database";
 import { AttendanceRepository } from "../src/features/attendance/AttendanceRepository";
+import { AbsenceNoteRepository } from "../src/features/attendance/AbsenceNoteRepository";
+import { AbsenceService } from "../src/features/attendance/AbsenceService";
+import { MakeupService } from "../src/features/attendance/MakeupService";
 import { SessionRepository } from "../src/features/sessions/SessionRepository";
 import { StudentRepository } from "../src/features/students/StudentRepository";
 
@@ -198,10 +201,16 @@ describe("absence report count aggregation", () => {
     const sourceSession = session("source-session", "source-group");
     const makeups = [
       { ...makeupAttendance("a"), id: "cross-group", sessionId: targetSession.id, originalAbsenceId: sourceSession.id },
+      { ...makeupAttendance("b"), id: "not-originally-absent", studentId: "b", sessionId: targetSession.id, originalAbsenceId: sourceSession.id },
       { ...makeupAttendance("b"), id: "same-group", sessionId: targetSession.id, originalAbsenceId: "same-group-source" },
       { ...attendance("c", "present"), id: "regular-attendance", sessionId: targetSession.id, originalAbsenceId: sourceSession.id },
+      { ...makeupAttendance("d"), id: "failed-makeup", studentId: "d", sessionId: targetSession.id, originalAbsenceId: sourceSession.id, status: "absent" as Attendance["status"] },
+      { ...makeupAttendance("e"), id: "wrong-target", studentId: "e", sessionId: "another-session", originalAbsenceId: sourceSession.id },
     ];
     const getAttendance = jest.spyOn(AttendanceRepository, "getSessionAttendance").mockReturnValue(makeups);
+    const getExpected = jest.spyOn(SessionRepository, "getExpectedStudents").mockReturnValue([student("a"), student("b")]);
+    const getSourceAttendance = jest.spyOn(AttendanceRepository, "getStudentAttendanceInSession")
+      .mockImplementation((_sessionId, studentId) => studentId === "b" ? attendance("b", "present") : null);
     const findSession = jest.spyOn(SessionRepository, "findById").mockImplementation((id) =>
       id === "same-group-source" ? session("same-group-source", "target-group") : sourceSession,
     );
@@ -222,8 +231,135 @@ describe("absence report count aggregation", () => {
       });
     } finally {
       getAttendance.mockRestore();
+      getExpected.mockRestore();
+      getSourceAttendance.mockRestore();
       findSession.mockRestore();
       findStudent.mockRestore();
+    }
+  });
+
+  it("shows completed compensation only when linked to a real original absence", () => {
+    const targetSession = session("target-session", "target-group");
+    const sourceSession = session("source-session", "source-group");
+    const records: Attendance[] = [
+      { ...makeupAttendance("a"), id: "valid-makeup", sessionId: targetSession.id, originalAbsenceId: sourceSession.id },
+      { ...makeupAttendance("b"), id: "unlinked-makeup", studentId: "b", sessionId: targetSession.id },
+      { ...makeupAttendance("d"), id: "external-makeup", studentId: "d", sessionId: targetSession.id, originalAbsenceId: sourceSession.id, isExternal: true },
+    ];
+    const getSessionAttendance = jest.spyOn(AttendanceRepository, "getSessionAttendance").mockReturnValue(records);
+    const getExpected = jest.spyOn(SessionRepository, "getExpectedStudents")
+      .mockImplementation((id) => id === sourceSession.id || id === targetSession.id ? [student("a")] : []);
+    const getOriginalAttendance = jest.spyOn(AttendanceRepository, "getStudentAttendanceInSession").mockReturnValue(null);
+    const findSession = jest.spyOn(SessionRepository, "findById").mockImplementation((id) =>
+      id === targetSession.id ? targetSession : id === sourceSession.id ? sourceSession : null,
+    );
+    const getAbsentees = jest.spyOn(AbsenceService, "getAbsenteesForSession").mockReturnValue([student("a")]);
+    const isCoveredInAdvance = jest.spyOn(MakeupService, "isSessionCoveredInAdvance").mockReturnValue(false);
+    const getOpportunities = jest.spyOn(MakeupService, "getMakeupOpportunities").mockReturnValue([]);
+    const getAbsenceNotes = jest.spyOn(AbsenceNoteRepository, "getForSession").mockReturnValue([]);
+    try {
+      const report = AbsenceReportsService.getSessionReport(targetSession.id);
+      expect(report.compensation).toHaveLength(1);
+      expect(report.compensation[0]).toMatchObject({
+        kind: "completed",
+        student: { id: "a" },
+        originalSession: { id: "source-session", groupId: "source-group" },
+      });
+    } finally {
+      getSessionAttendance.mockRestore();
+      getExpected.mockRestore();
+      getOriginalAttendance.mockRestore();
+      findSession.mockRestore();
+      getAbsentees.mockRestore();
+      isCoveredInAdvance.mockRestore();
+      getOpportunities.mockRestore();
+      getAbsenceNotes.mockRestore();
+    }
+  });
+
+  it("limits never-attended rows to the opened session roster and excludes successful cross-group makeups", () => {
+    const target = session("selected-session", "group-1");
+    const otherTeacherRow = {
+      student: student("other"),
+      teacherId: "teacher-2",
+      subjectId: "subject-1",
+      teacherNames: ["Other"],
+      subjectName: "Math",
+      groupNames: ["Other group"],
+      cycleStartDate: "2026-09-26",
+      cycleEndDate: "2026-10-02",
+    };
+    const matchingRow = {
+      ...otherTeacherRow,
+      student: student("matching"),
+      teacherId: "teacher-1",
+    };
+    const peerGroupRow = { ...matchingRow, student: student("peer-group") };
+    const compensatedRow = { ...matchingRow, student: student("compensated") };
+    const reportDb: SqlDatabase = {
+      execSync: jest.fn(),
+      runSync: jest.fn(),
+      getAllSync: jest.fn(),
+      getFirstSync: jest.fn().mockReturnValue({ weekStartDay: "6" }),
+    };
+    const getDb = jest.spyOn(DatabaseService, "getDb").mockReturnValue(reportDb);
+    const getExpected = jest.spyOn(SessionRepository, "getExpectedStudents")
+      .mockReturnValue([matchingRow.student]);
+    try {
+      expect(AbsenceReportsService.getNeverAttendedForSession(
+        target,
+        [otherTeacherRow, matchingRow, peerGroupRow, compensatedRow],
+        new Set(["compensated"]),
+      ))
+        .toEqual([matchingRow]);
+    } finally {
+      getDb.mockRestore();
+      getExpected.mockRestore();
+    }
+  });
+
+  it("shows only the two absent students from a six-student roster, not eight cycle-wide students", () => {
+    const target = session("six-student-session", "current-group");
+    const expected = Array.from({ length: 6 }, (_, index) => student(`current-${index + 1}`));
+    const rows = [
+      ...expected,
+      student("peer-group-1"),
+      student("peer-group-2"),
+    ].map((item) => ({
+      student: item,
+      teacherId: "teacher-1",
+      subjectId: "subject-1",
+      teacherNames: ["Teacher"],
+      subjectName: "Math",
+      groupNames: ["Current or peer group"],
+      cycleStartDate: "2026-09-26",
+      cycleEndDate: "2026-10-02",
+    }));
+    const getDb = jest.spyOn(DatabaseService, "getDb").mockReturnValue({
+      getFirstSync: jest.fn().mockReturnValue({ weekStartDay: 6 }),
+    } as any);
+    const getExpected = jest.spyOn(SessionRepository, "getExpectedStudents").mockReturnValue(expected);
+    try {
+      const counts = calculateAbsenceReportCounts(
+        expected,
+        expected.slice(4),
+        expected.slice(0, 4).map((item) => attendance(item.id, "present")),
+        [],
+      );
+      expect(counts.present).toHaveLength(4);
+      expect(counts.absent).toHaveLength(2);
+      const actualAbsentees = new Set(counts.absent.map((item) => item.id));
+      const neverAttended = AbsenceReportsService.getNeverAttendedForSession(
+        target,
+        rows,
+        new Set(),
+        actualAbsentees,
+      );
+      expect(neverAttended.map((row) => row.student.id)).toEqual(["current-5", "current-6"]);
+      expect(neverAttended).toHaveLength(2);
+    } finally {
+      getDb.mockRestore();
+      getExpected.mockRestore();
     }
   });
 });

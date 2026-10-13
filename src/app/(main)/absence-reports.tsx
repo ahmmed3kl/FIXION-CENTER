@@ -27,7 +27,9 @@ import { getStudentColorPresentation } from "../../features/students/studentColo
 import {
   absenceNotificationOperationPrefix,
   beginAbsenceRecipientSelection,
+  getSelectedAbsenceRecipientIds,
   hasValidNotificationContact,
+  toggleAllAbsenceRecipientSelection,
   toggleAbsenceRecipientSelection,
 } from "../../features/notifications/absenceNotificationSelection";
 import { smartSearch } from "../../shared/utils/smartSearch";
@@ -36,7 +38,8 @@ import { formatLocalDate } from "../../shared/utils/date";
 
 type SessionGroup = { id?: string; name: string; items: AbsenceSessionSummary[] };
 type AbsenceSendStatus = "sent" | "failed" | "partial" | "queued" | "no_contact" | "not_absent";
-type MonthlyReportSection = "sessions" | "never-attended" | "cross-group-makeups";
+type AbsenceRecipientScope = "session-absent" | "never-attended" | "cross-group-makeups";
+type AbsenceSubsection = AbsenceRecipientScope;
 
 function SessionGroupList({
   groups,
@@ -213,17 +216,25 @@ export default function AbsenceReportsScreen() {
   const [sessions, setSessions] = useState<AbsenceSessionSummary[]>([]);
   const [monthlyNeverAttended, setMonthlyNeverAttended] = useState<MonthlyNeverAttendedRow[]>([]);
   const [monthlyCrossGroupMakeups, setMonthlyCrossGroupMakeups] = useState<MonthlyCrossGroupMakeupRow[]>([]);
-  const [monthlySection, setMonthlySection] = useState<MonthlyReportSection>("sessions");
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [absenceSentBefore, setAbsenceSentBefore] = useState(false);
-  const [selectionMode, setSelectionMode] = useState(false);
-  const [selectedAbsentStudentIds, setSelectedAbsentStudentIds] = useState<Set<string>>(new Set());
+  const [selectionModes, setSelectionModes] = useState<Record<AbsenceRecipientScope, boolean>>({
+    "session-absent": false,
+    "never-attended": false,
+    "cross-group-makeups": false,
+  });
+  const [selectedRecipientIds, setSelectedRecipientIds] = useState<Record<AbsenceRecipientScope, Set<string>>>({
+    "session-absent": new Set(),
+    "never-attended": new Set(),
+    "cross-group-makeups": new Set(),
+  });
   const [absenceSendStatuses, setAbsenceSendStatuses] = useState<Record<string, AbsenceSendStatus>>({});
   const [sendingSelectedAbsences, setSendingSelectedAbsences] = useState(false);
   const sendingSelectedAbsencesRef = useRef(false);
   const [report, setReport] = useState<AbsenceSessionReport | null>(null);
   const [search, setSearch] = useState("");
   const [tab, setTab] = useState<"absent" | "present" | "compensation">("absent");
+  const [absenceSubsection, setAbsenceSubsection] = useState<AbsenceSubsection>("session-absent");
   const [loading, setLoading] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
   const [error, setError] = useState("");
@@ -290,19 +301,36 @@ export default function AbsenceReportsScreen() {
   }, [canView, loadSessions, localDataRevision, month, selectedSessionId, services.loaded]));
 
   useFocusEffect(useCallback(() => () => {
-    setSelectionMode(false);
-    setSelectedAbsentStudentIds(new Set());
+    setSelectionModes({
+      "session-absent": false,
+      "never-attended": false,
+      "cross-group-makeups": false,
+    });
+    setSelectedRecipientIds({
+      "session-absent": new Set(),
+      "never-attended": new Set(),
+      "cross-group-makeups": new Set(),
+    });
   }, []));
 
   const openSession = (sessionId: string) => {
     setSelectedSessionId(sessionId);
-    setSelectionMode(false);
-    setSelectedAbsentStudentIds(new Set());
+    setSelectionModes({
+      "session-absent": false,
+      "never-attended": false,
+      "cross-group-makeups": false,
+    });
+    setSelectedRecipientIds({
+      "session-absent": new Set(),
+      "never-attended": new Set(),
+      "cross-group-makeups": new Set(),
+    });
     setAbsenceSendStatuses({});
     try { setAbsenceSentBefore(NotificationService.hasAbsenceNotification(sessionId)); } catch { setAbsenceSentBefore(false); }
     setReport(null);
     setSearch("");
     setTab("absent");
+    setAbsenceSubsection("session-absent");
     setDetailLoading(true);
     try {
       setReport(AbsenceReportsService.getSessionReport(sessionId));
@@ -317,6 +345,49 @@ export default function AbsenceReportsScreen() {
   const filteredAbsent = useMemo(() => report ? smartSearch(report.absent, search, [{ get: (student) => student.fullName }, { get: (student) => student.studentCode }]) : [], [report, search]);
   const filteredPresent = useMemo(() => report ? report.present.filter(({ student }) => smartSearch([student], search, [{ get: (item) => item.fullName }, { get: (item) => item.studentCode }]).length) : [], [report, search]);
   const filteredCompensation = useMemo(() => report ? report.compensation.filter(({ student }) => smartSearch([student], search, [{ get: (item) => item.fullName }, { get: (item) => item.studentCode }]).length) : [], [report, search]);
+  const crossGroupMakeupsForSession = useMemo(() => monthlyCrossGroupMakeups
+    .filter((row) => row.originalSession.id === report?.session.id)
+    .filter((row) => report?.absent.some((student) => student.id === row.student.id)),
+  [monthlyCrossGroupMakeups, report]);
+  const neverAttendedForSession = useMemo(() => {
+    if (!report) return [];
+    const absentIds = new Set(report.absent.map((student) => student.id));
+    const successfullyCompensatedIds = new Set(crossGroupMakeupsForSession.map((row) => row.student.id));
+    return AbsenceReportsService.getNeverAttendedForSession(
+      report.session,
+      monthlyNeverAttended,
+      successfullyCompensatedIds,
+      absentIds,
+    );
+  }, [crossGroupMakeupsForSession, monthlyNeverAttended, report]);
+  const filteredNeverAttended = useMemo(() => neverAttendedForSession
+    .filter(({ student }) => smartSearch([student], search, [{ get: (item) => item.fullName }, { get: (item) => item.studentCode }]).length),
+  [neverAttendedForSession, search]);
+  const filteredCrossGroupMakeups = useMemo(() => crossGroupMakeupsForSession
+    .filter(({ student }) => smartSearch([student], search, [{ get: (item) => item.fullName }, { get: (item) => item.studentCode }]).length),
+  [crossGroupMakeupsForSession, search]);
+
+  const getAbsenceScopeStudentIds = (scope: AbsenceRecipientScope, sourceReport = report): string[] => {
+    if (!sourceReport) return [];
+    if (scope === "session-absent") return sourceReport.absent.map((student) => student.id);
+    const absentIds = new Set(sourceReport.absent.map((student) => student.id));
+    if (scope === "cross-group-makeups") {
+      return monthlyCrossGroupMakeups
+        .filter((row) => row.originalSession.id === sourceReport.session.id && absentIds.has(row.student.id))
+        .map((row) => row.student.id);
+    }
+    const crossMakeupIds = new Set(
+      monthlyCrossGroupMakeups
+        .filter((row) => row.originalSession.id === sourceReport.session.id && absentIds.has(row.student.id))
+        .map((row) => row.student.id),
+    );
+    return AbsenceReportsService.getNeverAttendedForSession(
+      sourceReport.session,
+      monthlyNeverAttended,
+      crossMakeupIds,
+      absentIds,
+    ).map((row) => row.student.id);
+  };
 
   const openAbsenceNote = (student: Student) => {
     setAbsenceNoteText(report?.absenceNotes[student.id] || "");
@@ -337,22 +408,39 @@ export default function AbsenceReportsScreen() {
     }
   };
 
-  const toggleAbsentStudentSelection = (studentId: string) => {
-    setSelectedAbsentStudentIds((selected) => toggleAbsenceRecipientSelection(selected, studentId));
+  const updateScopeSelection = (scope: AbsenceRecipientScope, updater: (selected: Set<string>) => Set<string>) => {
+    setSelectedRecipientIds((previous) => ({ ...previous, [scope]: updater(previous[scope]) }));
   };
 
-  const enterAbsenceSelection = (studentId: string) => {
-    setSelectionMode(true);
-    setSelectedAbsentStudentIds(beginAbsenceRecipientSelection(studentId));
+  const toggleRecipientSelection = (scope: AbsenceRecipientScope, studentId: string) => {
+    updateScopeSelection(scope, (selected) => toggleAbsenceRecipientSelection(selected, studentId));
   };
 
-  const cancelAbsenceSelection = () => {
-    setSelectionMode(false);
-    setSelectedAbsentStudentIds(new Set());
+  const enterRecipientSelection = (scope: AbsenceRecipientScope, studentId?: string) => {
+    setSelectionModes((previous) => ({ ...previous, [scope]: true }));
+    if (studentId) updateScopeSelection(scope, () => beginAbsenceRecipientSelection(studentId));
   };
 
-  const sendSelectedAbsences = () => {
-    if (!report || !selectedSessionId || !selectedAbsentStudentIds.size || sendingSelectedAbsencesRef.current) return;
+  const toggleAllRecipients = (scope: AbsenceRecipientScope) => {
+    if (!report || sendingSelectedAbsences) return;
+    setSelectionModes((previous) => ({ ...previous, [scope]: true }));
+    const scopedIds = getAbsenceScopeStudentIds(scope);
+    updateScopeSelection(scope, (selected) =>
+      toggleAllAbsenceRecipientSelection(selected, scopedIds),
+    );
+  };
+
+  const cancelAbsenceSelection = (scope: AbsenceRecipientScope) => {
+    setSelectionModes((previous) => ({ ...previous, [scope]: false }));
+    updateScopeSelection(scope, () => new Set());
+  };
+
+  const sendSelectedAbsences = (scope: AbsenceRecipientScope) => {
+    const selectedIds = getSelectedAbsenceRecipientIds(
+      selectedRecipientIds[scope],
+      getAbsenceScopeStudentIds(scope),
+    );
+    if (!report || !selectedSessionId || !selectedIds.length || sendingSelectedAbsencesRef.current) return;
     if (!services.isEnabled("notifications")) {
       Alert.alert("الإشعارات غير مفعلة", "فعّل خدمة الإشعارات لهذا المركز من إدارة المنصة.");
       return;
@@ -361,37 +449,46 @@ export default function AbsenceReportsScreen() {
       Alert.alert("غير مسموح", "ليس لديك صلاحية إرسال الإشعارات.");
       return;
     }
-    const count = selectedAbsentStudentIds.size;
+    const count = selectedIds.length;
     Alert.alert(
       "تأكيد إرسال إشعار الغياب",
       `سيتم تجهيز إشعارات الغياب لـ ${count} طالب${count === 1 ? "" : "اً"} محدد${count === 1 ? "" : "ين"} فقط. هل تريد المتابعة؟`,
       [
         { text: "إلغاء", style: "cancel" },
-        { text: "تأكيد الإرسال", onPress: () => { void executeSelectedAbsenceSend(); } },
+        { text: "تأكيد الإرسال", onPress: () => { void executeSelectedAbsenceSend(scope, selectedIds); } },
       ],
     );
   };
 
-  const executeSelectedAbsenceSend = async () => {
+  const executeSelectedAbsenceSend = async (scope: AbsenceRecipientScope, requestedStudentIds: string[]) => {
     if (!report || !selectedSessionId || sendingSelectedAbsencesRef.current) return;
     sendingSelectedAbsencesRef.current = true;
     setSendingSelectedAbsences(true);
-    const studentIds = Array.from(selectedAbsentStudentIds);
+    let studentIds: string[] = [];
     const statusUpdates: Record<string, AbsenceSendStatus> = {};
     const details: string[] = [];
 
     try {
       const refreshedReport = AbsenceReportsService.getSessionReport(selectedSessionId);
+      studentIds = getSelectedAbsenceRecipientIds(
+        requestedStudentIds,
+        getAbsenceScopeStudentIds(scope, refreshedReport),
+      );
+      if (!studentIds.length) {
+        Alert.alert("تغيّرت قائمة الغياب", "لم يعد أي من الطلاب المحددين ضمن هذه القائمة.");
+        cancelAbsenceSelection(scope);
+        return;
+      }
       const currentStudents = new Map(refreshedReport.absent.map((student) => [student.id, student]));
       for (const studentId of studentIds) {
         const student = currentStudents.get(studentId);
         if (!student) {
-          statusUpdates[studentId] = "not_absent";
+          statusUpdates[`${scope}:${studentId}`] = "not_absent";
           details.push("طالب محدد: لم يعد غائبًا عن هذه الحصة.");
           continue;
         }
         if (!hasValidNotificationContact(student.parentPhone, student.phone)) {
-          statusUpdates[studentId] = "no_contact";
+          statusUpdates[`${scope}:${studentId}`] = "no_contact";
           details.push(`${student.fullName}: لا توجد وسيلة تواصل صالحة.`);
           continue;
         }
@@ -413,7 +510,7 @@ export default function AbsenceReportsScreen() {
               : dispatch.sent > 0 || deliveryStatus.sent > 0
                 ? "sent"
                 : "failed";
-          statusUpdates[studentId] = status;
+          statusUpdates[`${scope}:${studentId}`] = status;
           const statusLabel = status === "sent"
             ? "تم الإرسال"
             : status === "partial"
@@ -423,13 +520,12 @@ export default function AbsenceReportsScreen() {
               : "فشل الإرسال";
           details.push(`${student.fullName}: ${statusLabel}${deliveryStatus.failed ? ` (${deliveryStatus.failed} وسيلة فاشلة)` : ""}.`);
         } catch (sendError: any) {
-          statusUpdates[studentId] = "failed";
+          statusUpdates[`${scope}:${studentId}`] = "failed";
           details.push(`${student.fullName}: تعذر الإرسال${sendError?.message ? ` (${sendError.message})` : ""}.`);
         }
       }
       setAbsenceSendStatuses((previous) => ({ ...previous, ...statusUpdates }));
-      setSelectionMode(false);
-      setSelectedAbsentStudentIds(new Set());
+      cancelAbsenceSelection(scope);
       Alert.alert(
         "نتيجة إرسال إشعارات الغياب",
         `المحددون: ${studentIds.length}\n${details.join("\n")}`,
@@ -470,6 +566,110 @@ export default function AbsenceReportsScreen() {
     }
   };
 
+  const renderAbsenceList = (
+    scope: AbsenceRecipientScope,
+    title: string,
+    students: Student[],
+    emptyText: string,
+    getDetailNote?: (studentId: string) => string | undefined,
+  ) => {
+    const selectedIds = selectedRecipientIds[scope];
+    const selectionMode = selectionModes[scope];
+    const scopedIds = getAbsenceScopeStudentIds(scope);
+    const scopedSelectedIds = getSelectedAbsenceRecipientIds(selectedIds, scopedIds);
+    const allSelected = scopedIds.length > 0 && scopedSelectedIds.length === scopedIds.length;
+    return <>
+      {selectionMode ? (
+        <View style={styles.selectionToolbar}>
+          <View style={styles.selectionToolbarCopy}>
+            <Text style={styles.selectionCount}>تم تحديد {scopedSelectedIds.length} من {scopedIds.length} طالب</Text>
+            <Text style={styles.selectionHint}>الإرسال لهذه القائمة فقط</Text>
+          </View>
+          <TouchableOpacity
+            accessibilityRole="button"
+            disabled={!scopedIds.length || sendingSelectedAbsences}
+            style={styles.selectAllButton}
+            onPress={() => toggleAllRecipients(scope)}
+          >
+            <Text style={styles.selectAllText}>{allSelected ? "إلغاء تحديد الكل" : "تحديد الكل"}</Text>
+          </TouchableOpacity>
+          {canSendAbsenceNotifications ? (
+            <TouchableOpacity
+              accessibilityRole="button"
+              disabled={!scopedSelectedIds.length || sendingSelectedAbsences}
+              style={[styles.sendSelectedButton, (!scopedSelectedIds.length || sendingSelectedAbsences) && styles.disabledButton]}
+              onPress={() => sendSelectedAbsences(scope)}
+            >
+              {sendingSelectedAbsences ? <ActivityIndicator size="small" color={Colors.white} /> : <Ionicons name="send-outline" size={15} color={Colors.white} />}
+              <Text style={styles.sendButtonText}>إرسال المحددين</Text>
+            </TouchableOpacity>
+          ) : null}
+          <TouchableOpacity
+            accessibilityRole="button"
+            disabled={sendingSelectedAbsences}
+            style={styles.cancelSelectionButton}
+            onPress={() => cancelAbsenceSelection(scope)}
+          >
+            <Text style={styles.cancelSelectionText}>إلغاء</Text>
+          </TouchableOpacity>
+        </View>
+      ) : (
+        <View style={styles.actionRow}>
+          <View style={styles.headerCopy}>
+            <Text style={styles.sectionTitle}>{title} ({students.length})</Text>
+            <Text style={styles.selectionHint}>اختر القائمة وحدد المستلمين قبل الإرسال</Text>
+          </View>
+          {canSendAbsenceNotifications ? (
+            <View style={styles.absentActions}>
+              <TouchableOpacity style={styles.selectAllButton} onPress={() => enterRecipientSelection(scope)}>
+                <Text style={styles.selectAllText}>تحديد أفراد</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.selectAllButton} onPress={() => toggleAllRecipients(scope)}>
+                <Text style={styles.selectAllText}>تحديد الكل</Text>
+              </TouchableOpacity>
+              {scope !== "session-absent" ? (
+                <TouchableOpacity
+                  style={[styles.selectAllButton, !scopedSelectedIds.length && styles.disabledButton]}
+                  disabled={!scopedSelectedIds.length}
+                  onPress={() => sendSelectedAbsences(scope)}
+                >
+                  <Text style={styles.selectAllText}>إرسال المحددين</Text>
+                </TouchableOpacity>
+              ) : null}
+              {scope === "session-absent" ? (
+                <TouchableOpacity style={styles.sendButton} onPress={sendAll}>
+                  <Ionicons name="send-outline" size={15} color={Colors.white} />
+                  <Text style={styles.sendButtonText}>إرسال للكل</Text>
+                </TouchableOpacity>
+              ) : null}
+            </View>
+          ) : null}
+        </View>
+      )}
+      {students.map((student) => (
+        <StudentRow
+          key={`${scope}:${student.id}`}
+          student={student}
+          status={scope === "never-attended" ? "لم يحضر" : scope === "cross-group-makeups" ? "تم التعويض" : undefined}
+          statusTone={scope === "cross-group-makeups" ? "green" : "orange"}
+          detailNote={getDetailNote?.(student.id)}
+          note={report?.absenceNotes[student.id]}
+          selected={selectedIds.has(student.id)}
+          selectionMode={selectionMode}
+          sendStatus={absenceSendStatuses[`${scope}:${student.id}`]}
+          onToggleSelection={() => toggleRecipientSelection(scope, student.id)}
+          onLongPress={canSendAbsenceNotifications ? () => enterRecipientSelection(scope, student.id) : undefined}
+          onNotePress={!selectionMode && canEditAbsenceNotes ? () => openAbsenceNote(student) : undefined}
+          onPress={() => {
+            if (selectionMode) toggleRecipientSelection(scope, student.id);
+            else router.push({ pathname: "/(main)/students", params: { studentId: student.id } } as any);
+          }}
+        />
+      ))}
+      {!students.length ? <EmptyMessage text={search ? "لا توجد نتائج مطابقة." : emptyText} /> : null}
+    </>;
+  };
+
   if (!services.loaded) return <View style={styles.centered}><ActivityIndicator color={Colors.primary} /><Text style={styles.muted}>جارٍ تحميل حالة الخدمات...</Text></View>;
   if (!services.isEnabled("reports")) return <View style={styles.centered}><Ionicons name="lock-closed-outline" size={34} color={Colors.slate400} /><Text style={styles.emptyTitle}>تقارير الغياب غير مفعلة</Text><Text style={styles.muted}>فعّل خدمة التقارير لهذا المركز من إدارة المنصة.</Text></View>;
   if (!canView) return <View style={styles.centered}><Ionicons name="shield-outline" size={34} color={Colors.slate400} /><Text style={styles.emptyTitle}>ليس لديك صلاحية عرض الحضور والغياب</Text></View>;
@@ -478,63 +678,60 @@ export default function AbsenceReportsScreen() {
     return <SafeAreaView style={styles.safe}><ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
       <View style={styles.detailHeader}><TouchableOpacity onPress={() => { setSelectedSessionId(null); setReport(null); }} style={styles.backButton}><Ionicons name="chevron-forward" size={23} color={Colors.slate800} /></TouchableOpacity><View style={styles.headerCopy}><Text style={styles.eyebrow}>تفاصيل الحصة</Text><Text style={styles.title}>{report.session.groupName || "مجموعة"}</Text><Text style={styles.subtitle}>{report.session.subjectName || ""}  •  {report.session.teacherName || "مدرس غير محدد"}</Text></View><View style={styles.headerIcon}><Ionicons name="calendar-outline" size={22} color={Colors.primary} /></View></View>
       <View style={styles.sessionInfo}><Text style={styles.sessionInfoLine}>{formatDate(report.session.sessionDate)}  •  {formatTimeArabic(report.session.startTime)} - {formatTimeArabic(report.session.endTime)}</Text><View style={styles.counterRow}><Counter label="الكل" value={report.expected.length} tone="blue" /><Counter label="حاضر" value={report.present.length} tone="green" /><Counter label="غائب" value={report.absent.length} tone="red" /><Counter label="تعويض" value={report.compensated} tone="purple" /></View></View>
-      <View style={styles.tabRow}>{[["absent", "الغائبين", report.absent.length], ["present", "الحاضرين", report.present.length], ["compensation", "تعويض", report.compensation.length]].map(([key, label, count]) => <TouchableOpacity key={String(key)} onPress={() => setTab(key as typeof tab)} style={[styles.tab, tab === key && styles.tabActive]}><Text style={[styles.tabText, tab === key && styles.tabTextActive]}>{label} ({count})</Text></TouchableOpacity>)}</View>
+      <View style={styles.tabRow}>{[["present", "الحاضرين", report.present.length], ["absent", "الغائبين", report.absent.length], ["compensation", "التعويض", report.compensation.length]].map(([key, label, count]) => <TouchableOpacity key={String(key)} onPress={() => setTab(key as typeof tab)} style={[styles.tab, tab === key && styles.tabActive]}><Text style={[styles.tabText, tab === key && styles.tabTextActive]}>{label} ({count})</Text></TouchableOpacity>)}</View>
       <View style={styles.searchWrap}><Ionicons name="search-outline" size={18} color={Colors.slate400} /><TextInputLike value={search} onChangeText={setSearch} placeholder="ابحث باسم الطالب أو الكود" /></View>
       {tab === "absent" ? <>
-        {selectionMode ? (
-          <View style={styles.selectionToolbar}>
-            <View style={styles.selectionToolbarCopy}>
-              <Text style={styles.selectionCount}>تم تحديد {selectedAbsentStudentIds.size} طالب</Text>
-              <Text style={styles.selectionHint}>سيصل الإشعار للمحددين فقط</Text>
-            </View>
+        <View style={styles.reportExtraTabs}>
+          {([
+            ["session-absent", `غياب الجلسة (${filteredAbsent.length})`],
+            ["never-attended", `لم يحضروا مطلقًا (${filteredNeverAttended.length})`],
+            ["cross-group-makeups", `عوّضوا في مجموعة أخرى (${filteredCrossGroupMakeups.length})`],
+          ] as const).map(([key, label]) => (
             <TouchableOpacity
+              key={key}
               accessibilityRole="button"
-              disabled={!selectedAbsentStudentIds.size || sendingSelectedAbsences}
-              style={[styles.sendSelectedButton, (!selectedAbsentStudentIds.size || sendingSelectedAbsences) && styles.disabledButton]}
-              onPress={sendSelectedAbsences}
+              accessibilityState={{ selected: absenceSubsection === key }}
+              onPress={() => setAbsenceSubsection(key)}
+              style={[styles.reportExtraTab, absenceSubsection === key && styles.tabActive]}
             >
-              {sendingSelectedAbsences ? <ActivityIndicator size="small" color={Colors.white} /> : <Ionicons name="send-outline" size={15} color={Colors.white} />}
-              <Text style={styles.sendButtonText}>إرسال المحددين</Text>
+              <Text style={[styles.tabText, absenceSubsection === key && styles.tabTextActive]}>{label}</Text>
             </TouchableOpacity>
-            <TouchableOpacity
-              accessibilityRole="button"
-              disabled={sendingSelectedAbsences}
-              style={styles.cancelSelectionButton}
-              onPress={cancelAbsenceSelection}
-            >
-              <Text style={styles.cancelSelectionText}>إلغاء</Text>
-            </TouchableOpacity>
-          </View>
-        ) : (
-          <View style={styles.actionRow}>
-            <View>
-              <Text style={styles.sectionTitle}>الطلاب الغائبون</Text>
-              <Text style={styles.selectionHint}>اضغط مطولًا على طالب لتحديد مستلمي الإشعار</Text>
-            </View>
-            {canSendAbsenceNotifications ? <TouchableOpacity style={styles.sendButton} onPress={sendAll}><Ionicons name="send-outline" size={15} color="#FFF" /><Text style={styles.sendButtonText}>إرسال للكل</Text></TouchableOpacity> : null}
-          </View>
-        )}
-        {filteredAbsent.map((student) => (
-          <StudentRow
-            key={student.id}
-            student={student}
-            note={report.absenceNotes[student.id]}
-            selected={selectedAbsentStudentIds.has(student.id)}
-            selectionMode={selectionMode}
-            sendStatus={absenceSendStatuses[student.id]}
-            onToggleSelection={() => toggleAbsentStudentSelection(student.id)}
-            onLongPress={canSendAbsenceNotifications ? () => enterAbsenceSelection(student.id) : undefined}
-            onNotePress={!selectionMode && canEditAbsenceNotes ? () => openAbsenceNote(student) : undefined}
-            onPress={() => {
-              if (selectionMode) toggleAbsentStudentSelection(student.id);
-              else router.push({ pathname: "/(main)/students", params: { studentId: student.id } } as any);
-            }}
-          />
-        ))}
-        {!filteredAbsent.length ? <EmptyMessage text={search ? "لا توجد نتائج مطابقة." : "لا يوجد غياب مسجل لهذه الحصة."} /> : null}
+          ))}
+        </View>
+        {absenceSubsection === "session-absent"
+          ? renderAbsenceList("session-absent", "الطلاب الغائبون", filteredAbsent, "لا يوجد غياب مسجل لهذه الحصة.")
+          : null}
+        {absenceSubsection === "never-attended"
+          ? renderAbsenceList(
+            "never-attended",
+            "لم يحضروا مطلقًا ضمن دورة الشرح",
+            filteredNeverAttended.map((row) => row.student),
+            "لا يوجد طالب غائب متوقع لم يحضر خلال دورة الشرح.",
+            (studentId) => {
+              const row = neverAttendedForSession.find((item) => item.student.id === studentId);
+              return row
+                ? `دورة الشرح: ${formatDate(row.cycleStartDate)} – ${formatDate(row.cycleEndDate)} · المجموعات: ${row.groupNames.join("، ") || "—"}`
+                : undefined;
+            },
+          )
+          : null}
+        {absenceSubsection === "cross-group-makeups"
+          ? renderAbsenceList(
+            "cross-group-makeups",
+            "عوّضوا في مجموعة أخرى",
+            filteredCrossGroupMakeups.map((row) => row.student),
+            "لا توجد تعويضات ناجحة مرتبطة بهذه الجلسة في مجموعة أخرى.",
+            (studentId) => {
+              const row = crossGroupMakeupsForSession.find((item) => item.student.id === studentId);
+              return row
+                ? `الأصل: ${row.originalSession.groupName || "مجموعة"} (${formatDate(row.originalSession.sessionDate)}) · التعويض: ${row.targetSession.groupName || "مجموعة"} (${formatDate(row.targetSession.sessionDate)})`
+                : undefined;
+            },
+          )
+          : null}
       </> : null}
       {tab === "present" ? <>{filteredPresent.map(({ student, attendance }) => <StudentRow key={student.id} student={student} status={attendanceLabel(attendance)} statusTone={attendance.status === "late" ? "orange" : "green"} onPress={() => router.push({ pathname: "/(main)/students", params: { studentId: student.id } } as any)} />)}{!filteredPresent.length ? <EmptyMessage text={search ? "لا توجد نتائج مطابقة." : "لا يوجد حضور مسجل لهذه الحصة."} /> : null}</> : null}
-      {tab === "compensation" ? <>{filteredCompensation.map((row) => <CompensationRow key={`${row.student.id}-${row.kind}-${row.attendance?.id || row.opportunity?.nextEligibleSessionId || "advance"}`} row={row} onPress={() => router.push({ pathname: "/(main)/students", params: { studentId: row.student.id } } as any)} />)}{!filteredCompensation.length ? <EmptyMessage text={search ? "لا توجد نتائج مطابقة." : "لا توجد بيانات تعويض لهذه الحصة."} /> : null}</> : null}
+      {tab === "compensation" ? <>{filteredCompensation.map((row) => <CompensationRow key={`${row.student.id}-${row.kind}-${row.attendance?.id || row.opportunity?.nextEligibleSessionId || "advance"}`} row={row} targetSession={report.session} onPress={() => router.push({ pathname: "/(main)/students", params: { studentId: row.student.id } } as any)} />)}{!filteredCompensation.length ? <EmptyMessage text={search ? "لا توجد نتائج مطابقة." : "لا توجد بيانات تعويض لهذه الحصة."} /> : null}</> : null}
     </ScrollView>
     <Modal visible={Boolean(noteTarget)} transparent animationType="fade" onRequestClose={() => { if (!savingAbsenceNote) setNoteTarget(null); }}>
       <View style={styles.modalOverlay}>
@@ -587,59 +784,14 @@ export default function AbsenceReportsScreen() {
           </View>
           <TouchableOpacity onPress={() => setMonth((value) => shiftMonth(value, 1))}><Ionicons name="chevron-back" size={20} color={Colors.slate600} /></TouchableOpacity>
         </View>
-        <View style={styles.monthSections}>
-          {([
-            ["sessions", `الجلسات (${sessions.length})`],
-            ["never-attended", `لم يحضروا مطلقًا (${monthlyNeverAttended.length})`],
-            ["cross-group-makeups", `تعويض بمجموعة أخرى (${monthlyCrossGroupMakeups.length})`],
-          ] as const).map(([section, label]) => (
-            <TouchableOpacity
-              key={section}
-              accessibilityRole="button"
-              accessibilityState={{ selected: monthlySection === section }}
-              style={[styles.monthSectionButton, monthlySection === section && styles.monthSectionButtonActive]}
-              onPress={() => setMonthlySection(section)}
-            >
-              <Text style={[styles.monthSectionText, monthlySection === section && styles.monthSectionTextActive]}>{label}</Text>
-            </TouchableOpacity>
-          ))}
-        </View>
         {loading ? (
           <View style={styles.loadingBox}><ActivityIndicator color={Colors.primary} /><Text style={styles.muted}>جارٍ تحميل التقارير...</Text></View>
         ) : error ? (
           <View style={styles.errorBox}><Text style={styles.errorText}>{error}</Text><TouchableOpacity onPress={loadSessions}><Text style={styles.retryText}>إعادة المحاولة</Text></TouchableOpacity></View>
-        ) : monthlySection === "sessions" ? (
+        ) : (
           <>
             <SessionGroupList groups={groupedSessions} onPress={openSession} />
             {!sessions.length ? <EmptyMessage text="لا توجد جلسات في هذا الشهر." /> : null}
-          </>
-        ) : monthlySection === "never-attended" ? (
-          <>
-            {monthlyNeverAttended.map((row) => (
-              <StudentRow
-                key={`${row.student.id}:${row.teacherNames.join(",")}:${row.subjectName}:${row.cycleStartDate}`}
-                student={row.student}
-                status="لم يحضر"
-                statusTone="orange"
-                note={`المدرس: ${row.teacherNames.join("، ") || "—"} · المادة: ${row.subjectName || "—"} · دورة الشرح: ${formatDate(row.cycleStartDate)} – ${formatDate(row.cycleEndDate)} · المجموعات: ${row.groupNames.join("، ") || "—"}`}
-                onPress={() => router.push({ pathname: "/(main)/students", params: { studentId: row.student.id } } as any)}
-              />
-            ))}
-            {!monthlyNeverAttended.length ? <EmptyMessage text="لا يوجد طالب متوقع لم يحضر حصة عادية أو تعويضًا مرتبطًا بحصص المدرس والمادة خلال دورة الشرح في الشهر المحدد." /> : null}
-          </>
-        ) : (
-          <>
-            {monthlyCrossGroupMakeups.map((row) => (
-              <StudentRow
-                key={row.attendance.id}
-                student={row.student}
-                status="تعويض"
-                statusTone="green"
-                note={`غاب في ${row.originalSession.groupName || "مجموعة"} (${formatDate(row.originalSession.sessionDate)}) · عوّض في ${row.targetSession.groupName || "مجموعة"} (${formatDate(row.targetSession.sessionDate)})`}
-                onPress={() => router.push({ pathname: "/(main)/students", params: { studentId: row.student.id } } as any)}
-              />
-            ))}
-            {!monthlyCrossGroupMakeups.length ? <EmptyMessage text="لا توجد حالات تعويض مسجلة في مجموعة أخرى خلال هذا الشهر." /> : null}
           </>
         )}
       </ScrollView>
@@ -651,7 +803,7 @@ function Counter({ label, value, tone }: { label: string; value: number; tone: "
 
 function SessionCard({ item, onPress }: { item: AbsenceSessionSummary; onPress: () => void }) { return <TouchableOpacity activeOpacity={0.8} onPress={onPress} style={styles.sessionCard}><View style={styles.sessionCardTop}><View style={styles.chevron}><Ionicons name="chevron-back" size={19} color={Colors.slate400} /></View><View style={styles.sessionCopy}><Text numberOfLines={1} style={styles.sessionName}>{item.session.groupName || "مجموعة"}</Text><Text numberOfLines={1} style={styles.sessionMeta}>{item.session.subjectName || ""}  •  {item.session.teacherName || "مدرس غير محدد"}</Text><Text style={styles.sessionDate}>{formatDate(item.session.sessionDate)}  •  {formatTimeArabic(item.session.startTime)}</Text></View></View><View style={styles.cardCounters}><Counter label="الكل" value={item.total} tone="blue" /><Counter label="حاضر" value={item.present} tone="green" /><Counter label="غائب" value={item.absent} tone="red" /><Counter label="تعويض" value={item.compensated} tone="purple" /></View></TouchableOpacity>; }
 
-function StudentRow({ student, status, statusTone, note, selected = false, selectionMode = false, sendStatus, onToggleSelection, onLongPress, onNotePress, onPress }: { student: Student; status?: string; statusTone?: "green" | "orange"; note?: string; selected?: boolean; selectionMode?: boolean; sendStatus?: AbsenceSendStatus; onToggleSelection?: () => void; onLongPress?: () => void; onNotePress?: () => void; onPress: () => void }) {
+function StudentRow({ student, status, statusTone, note, detailNote, selected = false, selectionMode = false, sendStatus, onToggleSelection, onLongPress, onNotePress, onPress }: { student: Student; status?: string; statusTone?: "green" | "orange"; note?: string; detailNote?: string; selected?: boolean; selectionMode?: boolean; sendStatus?: AbsenceSendStatus; onToggleSelection?: () => void; onLongPress?: () => void; onNotePress?: () => void; onPress: () => void }) {
   const studentColor = getStudentColorPresentation(student.studentColor);
   const sendStatusLabel = sendStatus === "sent"
     ? "تم الإرسال"
@@ -669,8 +821,8 @@ function StudentRow({ student, status, statusTone, note, selected = false, selec
   return (
     <View style={[
       styles.studentRow,
-      studentColor.backgroundColor ? { backgroundColor: studentColor.backgroundColor } : null,
       selected && styles.studentRowSelected,
+      studentColor.backgroundColor ? { backgroundColor: studentColor.backgroundColor } : null,
     ]}>
       <TouchableOpacity
         activeOpacity={0.8}
@@ -684,6 +836,7 @@ function StudentRow({ student, status, statusTone, note, selected = false, selec
         <View style={styles.studentCopy}>
           <Text style={styles.studentName}>{student.fullName}</Text>
           <Text style={styles.studentCode}>كود الطالب: {student.studentCode || "—"}</Text>
+          {detailNote ? <Text style={styles.absenceNotePreview}>{detailNote}</Text> : null}
           {note ? <Text style={styles.absenceNotePreview}>ملاحظة: {note}</Text> : null}
           {sendStatusLabel ? <Text style={[styles.absenceSendStatus, sendStatus === "failed" || sendStatus === "partial" || sendStatus === "no_contact" ? styles.absenceSendStatusError : null]}>{sendStatusLabel}</Text> : null}
         </View>
@@ -709,7 +862,14 @@ function StudentRow({ student, status, statusTone, note, selected = false, selec
   );
 }
 
-function CompensationRow({ row, onPress }: { row: CompensationReportRow; onPress: () => void }) { const label = row.kind === "completed" ? "تم التعويض" : row.kind === "advanced" ? "تغطية مسبقة" : "مؤهل للتعويض"; return <StudentRow student={row.student} status={label} statusTone={row.kind === "eligible" ? "orange" : "green"} onPress={onPress} />; }
+function CompensationRow({ row, targetSession, onPress }: { row: CompensationReportRow; targetSession: AbsenceSessionReport["session"]; onPress: () => void }) {
+  const label = row.kind === "completed" ? "تم التعويض" : row.kind === "advanced" ? "تغطية مسبقة" : "مؤهل للتعويض";
+  const source = row.originalSession;
+  const note = source
+    ? `الأصل: ${source.groupName || "مجموعة"} (${formatDate(source.sessionDate)}) · التعويض: ${targetSession.groupName || "مجموعة"} (${formatDate(targetSession.sessionDate)})`
+    : undefined;
+  return <StudentRow student={row.student} status={label} statusTone={row.kind === "eligible" ? "orange" : "green"} note={note} onPress={onPress} />;
+}
 
 function EmptyMessage({ text }: { text: string }) { return <View style={styles.emptyBox}><Ionicons name="file-tray-outline" size={28} color={Colors.slate400} /><Text style={styles.emptyText}>{text}</Text></View>; }
 
@@ -720,11 +880,11 @@ const createStyles = () => StyleSheet.create({
   groupReportHeaderCopy: { flex: 1, alignItems: "flex-end" },
   groupReportHint: { color: Colors.slate500, fontSize: 10, marginTop: 3 },
   safe: { flex: 1, backgroundColor: Colors.background }, content: { padding: 16, paddingBottom: 34, gap: 10 }, centered: { flex: 1, alignItems: "center", justifyContent: "center", gap: 9, padding: 24, backgroundColor: Colors.background }, pageHeader: { flexDirection: "row-reverse", alignItems: "center", gap: 12, paddingVertical: 5 }, detailHeader: { flexDirection: "row-reverse", alignItems: "center", gap: 10, paddingVertical: 5 }, headerCopy: { flex: 1, alignItems: "flex-end" }, headerIcon: { width: 45, height: 45, borderRadius: 14, alignItems: "center", justifyContent: "center", backgroundColor: Colors.primaryLight }, backButton: { width: 40, height: 40, borderRadius: 12, alignItems: "center", justifyContent: "center", backgroundColor: Colors.white, borderWidth: 1, borderColor: Colors.border }, eyebrow: { color: Colors.primary, fontSize: 11, fontWeight: "800", textAlign: "right" }, title: { color: Colors.slate900, fontSize: 25, fontWeight: "900", marginTop: 2, textAlign: "right" }, subtitle: { color: Colors.slate500, fontSize: 12, marginTop: 3, textAlign: "right" }, monthPicker: { minHeight: 58, borderRadius: 15, backgroundColor: Colors.white, borderWidth: 1, borderColor: Colors.border, flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 14 }, monthCenter: { alignItems: "center" }, monthLabel: { color: Colors.slate900, fontSize: 16, fontWeight: "800" }, monthHint: { color: Colors.slate500, fontSize: 10, marginTop: 2 }, sessionCard: { backgroundColor: Colors.white, borderRadius: 15, borderWidth: 1, borderColor: Colors.border, padding: 12 }, sessionCardTop: { flexDirection: "row-reverse", gap: 7, alignItems: "flex-start" }, chevron: { width: 25, height: 25, alignItems: "center", justifyContent: "center" }, sessionCopy: { flex: 1, alignItems: "flex-end" }, sessionName: { color: Colors.slate900, fontSize: 15, fontWeight: "800" }, sessionMeta: { color: Colors.slate600, fontSize: 11, marginTop: 2 }, sessionDate: { color: Colors.slate500, fontSize: 10, marginTop: 4 }, cardCounters: { flexDirection: "row-reverse", borderTopWidth: 1, borderTopColor: Colors.slate100, marginTop: 10, paddingTop: 9, justifyContent: "space-between" }, counter: { alignItems: "center", minWidth: 45 }, counterValue: { color: Colors.primary, fontSize: 17, fontWeight: "900" }, counterLabel: { color: Colors.slate500, fontSize: 10, marginTop: 1 }, green: { color: Colors.successText }, red: { color: Colors.dangerText }, purple: { color: "#7C3AED" }, sessionInfo: { backgroundColor: Colors.white, borderRadius: 15, borderWidth: 1, borderColor: Colors.border, padding: 12 }, sessionInfoLine: { color: Colors.slate600, fontSize: 12, textAlign: "right" }, counterRow: { flexDirection: "row-reverse", justifyContent: "space-between", marginTop: 10 }, tabRow: { flexDirection: "row-reverse", backgroundColor: Colors.white, borderRadius: 13, padding: 4, borderWidth: 1, borderColor: Colors.border }, tab: { flex: 1, alignItems: "center", paddingVertical: 10, borderRadius: 10 }, tabActive: { backgroundColor: Colors.primary }, tabText: { color: Colors.slate600, fontSize: 11, fontWeight: "800" }, tabTextActive: { color: Colors.white }, searchWrap: { minHeight: 44, borderRadius: 11, backgroundColor: Colors.white, borderWidth: 1, borderColor: Colors.border, flexDirection: "row-reverse", alignItems: "center", gap: 8, paddingHorizontal: 11 }, inputHost: { flex: 1 }, searchInput: { color: Colors.slate800, fontSize: 13, textAlign: "right", minHeight: 40 }, actionRow: { flexDirection: "row-reverse", alignItems: "center", justifyContent: "space-between", marginTop: 2 }, sectionTitle: { color: Colors.slate900, fontSize: 16, fontWeight: "800", textAlign: "right" }, sendButton: { flexDirection: "row-reverse", alignItems: "center", gap: 5, paddingHorizontal: 11, minHeight: 34, borderRadius: 9, backgroundColor: Colors.primary }, sendButtonText: { color: Colors.white, fontSize: 11, fontWeight: "800" },
-  monthSections: { flexDirection: "row-reverse", flexWrap: "wrap", gap: 6 },
-  monthSectionButton: { flexGrow: 1, minHeight: 38, alignItems: "center", justifyContent: "center", paddingHorizontal: 8, paddingVertical: 6, borderRadius: 10, borderWidth: 1, borderColor: Colors.border, backgroundColor: Colors.white },
-  monthSectionButtonActive: { backgroundColor: Colors.primary, borderColor: Colors.primary },
-  monthSectionText: { color: Colors.slate600, fontSize: 9, fontWeight: "800", textAlign: "center" },
-  monthSectionTextActive: { color: Colors.white },
+  reportExtraTabs: { flexDirection: "row-reverse", gap: 6 },
+  reportExtraTab: { flex: 1, minHeight: 38, alignItems: "center", justifyContent: "center", paddingHorizontal: 7, paddingVertical: 6, borderRadius: 10, borderWidth: 1, borderColor: Colors.border, backgroundColor: Colors.white },
+  absentActions: { flexDirection: "row-reverse", alignItems: "center", justifyContent: "flex-end", flexWrap: "wrap", gap: 6 },
+  selectAllButton: { minHeight: 34, justifyContent: "center", paddingHorizontal: 9, borderRadius: 9, borderWidth: 1, borderColor: Colors.primaryLight, backgroundColor: Colors.white },
+  selectAllText: { color: Colors.primary, fontSize: 10, fontWeight: "800" },
   studentRow: { backgroundColor: Colors.white, borderRadius: 13, borderWidth: 1, borderColor: Colors.border, padding: 8, flexDirection: "row-reverse", alignItems: "center", gap: 7 },
   studentRowSelected: { borderColor: Colors.primary, backgroundColor: Colors.primaryMuted },
   studentMain: { flex: 1, minWidth: 0, flexDirection: "row-reverse", alignItems: "center", gap: 9 },

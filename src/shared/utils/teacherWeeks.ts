@@ -16,11 +16,32 @@ function formatLocalDate(date: Date): string {
   ].join("-");
 }
 
-function getWeekBounds(dateValue: string, startDay: number): WeekBounds {
-  const date = parseLocalDateOnly(dateValue);
-  if (!date || !Number.isInteger(startDay) || startDay < 0 || startDay > 6) {
-    throw new RangeError("تاريخ أو يوم بداية الأسبوع غير صالح.");
+export function normalizeTeacherWeekStartDay(value: unknown): number {
+  if (value === null || value === undefined) return DEFAULT_TEACHER_WEEK_START_DAY;
+  const startDay = typeof value === "number"
+    ? value
+    : typeof value === "string" && /^\d+$/.test(value.trim())
+      ? Number(value)
+      : Number.NaN;
+  if (!Number.isInteger(startDay) || startDay < 0 || startDay > 6) {
+    throw new RangeError("يوم بداية أسبوع المدرس غير صالح.");
   }
+  return startDay;
+}
+
+function parseSessionDate(value: string): Date | null {
+  const dateOnly = parseLocalDateOnly(value);
+  if (dateOnly) return dateOnly;
+
+  const match = /^(\d{4}-\d{2}-\d{2})(?:T|\s)(.+)$/.exec(value.trim());
+  if (!match || !Number.isFinite(new Date(value).getTime())) return null;
+  return parseLocalDateOnly(match[1]);
+}
+
+function getWeekBounds(dateValue: string, startDayValue: unknown): WeekBounds {
+  const date = parseSessionDate(dateValue);
+  if (!date) throw new RangeError("تاريخ الحصة غير صالح لدورة شرح المدرس.");
+  const startDay = normalizeTeacherWeekStartDay(startDayValue);
   const daysSinceStart = (date.getDay() - startDay + 7) % 7;
   const start = new Date(date.getFullYear(), date.getMonth(), date.getDate() - daysSinceStart, 12);
   const end = new Date(start.getFullYear(), start.getMonth(), start.getDate() + 6, 12);
@@ -33,7 +54,7 @@ export function getSystemWeekBounds(dateValue: string): WeekBounds {
 
 export function getTeacherWeekBounds(
   dateValue: string,
-  weekStartDay = DEFAULT_TEACHER_WEEK_START_DAY,
+  weekStartDay: unknown = DEFAULT_TEACHER_WEEK_START_DAY,
 ): WeekBounds {
   return getWeekBounds(dateValue, weekStartDay);
 }
@@ -41,7 +62,7 @@ export function getTeacherWeekBounds(
 export function isWithinTeacherWeekCycle(
   originalSessionDate: string,
   candidateSessionDate: string,
-  weekStartDay = DEFAULT_TEACHER_WEEK_START_DAY,
+  weekStartDay: unknown = DEFAULT_TEACHER_WEEK_START_DAY,
 ): boolean {
   return getTeacherWeekBounds(originalSessionDate, weekStartDay).startDate ===
     getTeacherWeekBounds(candidateSessionDate, weekStartDay).startDate;
