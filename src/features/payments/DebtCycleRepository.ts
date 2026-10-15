@@ -5,11 +5,13 @@ import {
     ForbiddenError,
     NotFoundError,
     UnauthorizedError,
+    ValidationError,
 } from "../../core/errors";
 import { PermissionService } from "../../core/permissions";
 import { SyncRepository } from "../../core/sync";
 import { DebtCycle } from "../../shared/types";
 import { getLocalDateOnly } from "../../shared/utils/date";
+import { isPerSessionBillingMode } from "../../shared/utils/billingMode";
 import { useAuthStore } from "../auth/useAuthStore";
 
 function generateUUID(): string {
@@ -993,28 +995,103 @@ export class DebtCycleRepository {
       [centerId, cycleId],
     );
     if (!cycle) throw new NotFoundError("دورة المديونية غير موجودة.");
-    if (cycle.cycleType === "package" && billingMode !== "package") {
-      throw new Error("مديونية الباقة لا تُحاسب بنظام الحصة.");
+    if (
+      (cycle.cycleType === "package" || cycle.packageSubscriptionId) &&
+      billingMode !== "package"
+    ) {
+      throw new ValidationError("مديونية الباقة لا تُحاسب بنظام الحصة.");
+    }
+    if (billingMode === "per_session") {
+      if (!PermissionService.hasPermission(user.permissions, "payments.adjust")) {
+        throw new ForbiddenError("ليس لديك صلاحية تحديد نظام الفوترة.");
+      }
+      if (isPerSessionBillingMode(cycle.billingMode, cycle.cycleType)) {
+        return cycle as DebtCycle;
+      }
+      if (cycle.billingMode !== "pending") {
+        throw new ValidationError(
+          "لا يمكن تحويل دورة فوترة محددة إلى الدفع بالحصة. اختر نظامها قبل تسجيل أي دفعة.",
+        );
+      }
+      if (cycle.status === "cancelled" || cycle.status === "paid") {
+        throw new ValidationError("لا يمكن تغيير نظام فوترة دورة ملغاة أو مسددة.");
+      }
+      const payment = db.getFirstSync<{ id: string }>(
+        `SELECT id FROM payments
+         WHERE center_id = ? AND student_id = ?
+           AND (
+             debt_cycle_id = ?
+             OR (debt_cycle_id IS NULL AND payment_date >= ? AND payment_date <= ?)
+             OR session_id IN (
+               SELECT id FROM sessions
+               WHERE center_id = ? AND group_id = ?
+                 AND session_date >= ? AND session_date <= ?
+             )
+           )
+         LIMIT 1`,
+        [
+          centerId,
+          cycle.studentId,
+          cycleId,
+          cycle.startDate,
+          cycle.endDate,
+          centerId,
+          cycle.groupId,
+          cycle.startDate,
+          cycle.endDate,
+        ],
+      );
+      if (payment) {
+        throw new ValidationError(
+          "لا يمكن تغيير نظام الفوترة بعد تسجيل دفعات لهذه الدورة أو فترتها.",
+        );
+      }
+      const adjustment = db.getFirstSync<{ id: string }>(
+        `SELECT id FROM debt_adjustments
+         WHERE center_id = ? AND debt_cycle_id = ?
+         LIMIT 1`,
+        [centerId, cycleId],
+      );
+      if (adjustment) {
+        throw new ValidationError(
+          "لا يمكن تغيير نظام الفوترة بعد تطبيق خصم أو تعديل على الدورة.",
+        );
+      }
+      if (cycle.enrollmentId) {
+        const enrollment = db.getFirstSync<{ specialMonthlyPrice: number | null }>(
+          `SELECT special_monthly_price as specialMonthlyPrice
+           FROM student_group_enrollments
+           WHERE center_id = ? AND id = ?`,
+          [centerId, cycle.enrollmentId],
+        );
+        if (enrollment?.specialMonthlyPrice != null) {
+          throw new ValidationError(
+            "هذا التسجيل له سعر شهري خاص، ولا يمكن تحويله إلى الدفع بالحصة لأن النظام لا يحدد خصمًا لكل حصة.",
+          );
+        }
+      }
     }
     const nextCycleType = billingMode === "per_session"
       ? "per_session"
       : cycle.cycleType === "per_session" ? "monthly" : cycle.cycleType;
     const now = new Date().toISOString();
-    db.runSync(
-      `UPDATE debt_cycles SET billing_mode = ?, cycle_type = CASE WHEN ? = 'per_session' THEN 'per_session' WHEN cycle_type = 'per_session' THEN 'monthly' ELSE cycle_type END, updated_at = ? WHERE center_id = ? AND id = ?`,
-      [billingMode, billingMode, now, centerId, cycleId],
-    );
     const operationId = `op-dc-mode-${generateUUID()}`;
     const deviceId = DeviceService.getDeviceIdSync();
-    SyncRepository.enqueueOperation({
-      operationId, centerId, userId: user.id, deviceId,
-      operationType: "UPDATE", entityType: "debt_cycle", entityId: cycleId,
-      payload: { ...cycle, billingMode, cycleType: nextCycleType, expectedRevision: Number(cycle.serverRevision || 0), updatedAt: now },
-    });
-    AuditService.recordEvent({
-      operationId, centerId, userId: user.id, deviceId,
-      entityType: "debt_cycle", entityId: cycleId,
-      action: "debt_cycle.billing_mode_set", payload: { billingMode },
+    DatabaseService.runInTransaction(() => {
+      db.runSync(
+        `UPDATE debt_cycles SET billing_mode = ?, cycle_type = CASE WHEN ? = 'per_session' THEN 'per_session' WHEN cycle_type = 'per_session' THEN 'monthly' ELSE cycle_type END, updated_at = ? WHERE center_id = ? AND id = ?`,
+        [billingMode, billingMode, now, centerId, cycleId],
+      );
+      SyncRepository.enqueueOperation({
+        operationId, centerId, userId: user.id, deviceId,
+        operationType: "UPDATE", entityType: "debt_cycle", entityId: cycleId,
+        payload: { ...cycle, billingMode, cycleType: nextCycleType, expectedRevision: Number(cycle.serverRevision || 0), updatedAt: now },
+      });
+      AuditService.recordEvent({
+        operationId, centerId, userId: user.id, deviceId,
+        entityType: "debt_cycle", entityId: cycleId,
+        action: "debt_cycle.billing_mode_set", payload: { billingMode },
+      });
     });
     return { ...cycle, billingMode, cycleType: nextCycleType, updatedAt: now };
   }

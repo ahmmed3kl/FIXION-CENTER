@@ -76,7 +76,8 @@ export class DailyClosingService {
     const paymentsAlt = db.getAllSync<any>(
       `SELECT id, amount, payment_type, payment_method, session_id, debt_cycle_id, is_reversed, created_at
        FROM payments
-       WHERE center_id = ? AND created_at LIKE ?`,
+       WHERE center_id = ? AND (payment_date IS NULL OR payment_date = '')
+         AND created_at LIKE ?`,
       [centerId, `${businessDate}%`],
     );
 

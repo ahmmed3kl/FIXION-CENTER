@@ -2,12 +2,14 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { DatabaseService, SqlDatabase } from "../src/core/database";
+import { Logger } from "../src/core/logger";
 import { ConflictError, ForbiddenError } from "../src/core/errors";
 import { DeviceService } from "../src/core/device";
 import { ConnectivityService } from "../src/core/connectivity";
 import { useAuthStore } from "../src/features/auth/useAuthStore";
 import { AbsenceNoteRepository } from "../src/features/attendance/AbsenceNoteRepository";
 import { AttendanceRepository } from "../src/features/attendance/AttendanceRepository";
+import { getAttendanceHistoryPresentation } from "../src/features/attendance/attendanceHistoryPresentation";
 import { Permission, User } from "../src/shared/types";
 
 interface NativeStatement {
@@ -174,24 +176,107 @@ describe("session-scoped absence notes", () => {
       "SELECT COUNT(*) as count FROM absence_notes WHERE center_id = ?",
       [CENTER_ID],
     )?.count).toBe(2);
-    expect(AttendanceRepository.getStudentAttendance(STUDENT_ID)).toEqual(
+    const attendanceHistory = AttendanceRepository.getStudentAttendance(STUDENT_ID);
+    expect(attendanceHistory).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           sessionId: "absence-note-session-1",
           status: "absent",
+          sessionDate: "2026-01-01",
+          startTime: "16:00",
           absenceNote: "اعتذر ولي الأمر",
         }),
         expect.objectContaining({
           sessionId: "absence-note-session-2",
           status: "excused",
+          sessionDate: "2026-01-08",
+          startTime: "16:00",
+          checkInTime: "2026-01-08T16:30:00Z",
           absenceNote: "ظرف عائلي",
         }),
       ]),
     );
+    expect(attendanceHistory.filter(
+      (record) => record.sessionId === "absence-note-session-1",
+    )).toHaveLength(1);
+    expect(attendanceHistory.filter(
+      (record) => record.sessionId === "absence-note-session-2",
+    )).toHaveLength(1);
+    const noteOnlyAbsence = attendanceHistory.find(
+      (record) => record.sessionId === "absence-note-session-1",
+    );
+    if (!noteOnlyAbsence) {
+      throw new Error("Expected absence-note history to include a derived absence.");
+    }
+    expect(noteOnlyAbsence).toMatchObject({
+      status: "absent",
+      sessionDate: "2026-01-01",
+      checkInTime: null,
+      isDerivedAbsence: true,
+    });
+    expect(getAttendanceHistoryPresentation(noteOnlyAbsence)).toEqual({
+      sessionDateLabel: "الخميس ٢٠٢٦/١/١",
+      checkInTimeLabel: null,
+      sessionStartTimeLabel: null,
+    });
     expect(database.getFirstSync<{ count: number }>(
       "SELECT COUNT(*) as count FROM sync_operations WHERE center_id = ? AND entity_type = 'absence_note'",
       [CENTER_ID],
     )?.count).toBe(3);
+  });
+
+  it("retains historical attendance when session or check-in fields are missing and logs their source", () => {
+    database.runSync(
+      `INSERT INTO attendance
+       (id, center_id, student_id, session_id, check_in_time, status, is_late, attendance_type, operation_id)
+       VALUES (?, ?, ?, ?, ?, 'present', 0, 'present', ?)`,
+      [
+        "legacy-orphan-attendance",
+        CENTER_ID,
+        STUDENT_ID,
+        "legacy-missing-session",
+        "",
+        "legacy-orphan-attendance-operation",
+      ],
+    );
+    const warning = jest.spyOn(Logger, "warn").mockImplementation(() => {});
+
+    try {
+      const row = AttendanceRepository.getStudentAttendance(STUDENT_ID)
+        .find((item) => item.id === "legacy-orphan-attendance");
+
+      expect(row).toMatchObject({
+        sessionId: "legacy-missing-session",
+        status: "present",
+        checkInTime: null,
+        sessionDate: null,
+        startTime: null,
+      });
+      expect(warning).toHaveBeenCalledWith(
+        "attendance",
+        "student_history_session_date_unavailable",
+        expect.objectContaining({
+          metadata: expect.objectContaining({
+            sessionId: "legacy-missing-session",
+            source: "sessions.session_date",
+            reason: "missing",
+          }),
+        }),
+      );
+      expect(warning).toHaveBeenCalledWith(
+        "attendance",
+        "student_history_check_in_time_unavailable",
+        expect.objectContaining({
+          metadata: expect.objectContaining({
+            sessionId: "legacy-missing-session",
+            source: "attendance.check_in_time",
+            reason: "missing",
+          }),
+        }),
+      );
+    } finally {
+      warning.mockRestore();
+    }
   });
 
   it("rejects unauthorized, out-of-center, or present-student note writes before queueing", () => {

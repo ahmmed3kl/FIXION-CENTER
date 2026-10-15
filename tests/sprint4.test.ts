@@ -862,7 +862,7 @@ describe("Sprint 4 - FIXION Packages, Makeups & Unified Attendance/Financial Int
       expect(financial.monthlyRemainingDebt).toBe(800);
     });
 
-    it("requires an explicit per-session cycle and preserves package/group balances", async () => {
+    it("rejects a package-covered session payment and preserves package/group balances", async () => {
       const before = FinancialCalculationService.getStudentFinancialStatus(
         studentDual.id,
       );
@@ -873,7 +873,7 @@ describe("Sprint 4 - FIXION Packages, Makeups & Unified Attendance/Financial Int
         amount: 200,
         paymentDate: "2026-10-03",
         operationId,
-      })).rejects.toThrow("per_session");
+      })).rejects.toThrow("هذه الرسوم مرتبطة بباقة");
 
       const financial = FinancialCalculationService.getStudentFinancialStatus(
         studentDual.id,
@@ -975,7 +975,7 @@ describe("Sprint 4 - FIXION Packages, Makeups & Unified Attendance/Financial Int
       });
     });
 
-    it("a) monthly billing rejects per-session payment without an explicit per-session cycle", async () => {
+    it("a) monthly billing does not allow charging an unrelated, unattended session", async () => {
       const before = FinancialCalculationService.getStudentFinancialStatus(
         regStudent.id,
         "2026-11-01",
@@ -984,14 +984,15 @@ describe("Sprint 4 - FIXION Packages, Makeups & Unified Attendance/Financial Int
       expect(before.groupMonthlyPaid).toBe(0);
       expect(before.groupRemainingDebt).toBe(400);
 
-      // Record a session payment of 150 EGP with paymentType: 'session', paymentMethod: 'cash'
+      // The payment method is independent of billing mode, but a charge still
+      // requires attendance in a session covered by the student's cycle.
       await expect(PaymentRepository.recordPayment({
         studentId: regStudent.id,
         sessionId: "sess-1",
         amount: 150,
         paymentType: "session",
         paymentDate: "2026-11-02",
-      })).rejects.toThrow("per_session");
+      })).rejects.toThrow("يجب تسجيل حضور الطالب في الجلسة");
 
       const after = FinancialCalculationService.getStudentFinancialStatus(
         regStudent.id,
@@ -1013,7 +1014,7 @@ describe("Sprint 4 - FIXION Packages, Makeups & Unified Attendance/Financial Int
       expect(after.remainingBalance).toBe(1000);
     });
 
-    it("b) package billing rejects per-session payment without an explicit per-session cycle", async () => {
+    it("b) package debt remains protected from an unrelated session charge", async () => {
       const status = FinancialCalculationService.getStudentFinancialStatus(
         regStudent.id,
         "2026-11-01",
@@ -1029,7 +1030,7 @@ describe("Sprint 4 - FIXION Packages, Makeups & Unified Attendance/Financial Int
         sessionId: "sess-2",
         amount: 100,
         paymentDate: "2026-11-03",
-      })).rejects.toThrow("per_session");
+      })).rejects.toThrow("يجب تسجيل حضور الطالب في الجلسة");
 
       const updated = FinancialCalculationService.getStudentFinancialStatus(
         regStudent.id,
@@ -1082,7 +1083,7 @@ describe("Sprint 4 - FIXION Packages, Makeups & Unified Attendance/Financial Int
       expect(extFin.sessionPaymentsTotal).toBe(400);
     });
 
-    it("d) session payment exceeding monthly price: NEVER reduces monthly subscription debt", async () => {
+    it("d) a session payment without eligible attendance does not alter monthly debt", async () => {
       const bigSessionStudent = StudentRepository.createStudent({
         studentCode: "400011",
         fullName: "رامي خليل (مدفوعات حصص كبيرة)",
@@ -1119,14 +1120,14 @@ describe("Sprint 4 - FIXION Packages, Makeups & Unified Attendance/Financial Int
         sessionId: "sess-1",
         amount: 1500,
         paymentDate: "2026-11-02",
-      })).rejects.toThrow("per_session");
+      })).rejects.toThrow("يجب تسجيل حضور الطالب في الجلسة");
 
       const afterBigSess =
         FinancialCalculationService.getStudentFinancialStatus(
           bigSessionStudent.id,
           "2026-11-01",
         );
-      // Monthly debt remains 300 EGP — it is NOT wiped, NOT reduced, NOT negative!
+      // No payment is recorded for a session the student did not attend.
       expect(afterBigSess.groupMonthlyDue).toBe(300);
       expect(afterBigSess.groupMonthlyPaid).toBe(0);
       expect(afterBigSess.groupRemainingDebt).toBe(300);
@@ -1137,7 +1138,7 @@ describe("Sprint 4 - FIXION Packages, Makeups & Unified Attendance/Financial Int
       expect(afterBigSess.sessionPaymentsTotal).toBe(0);
     });
 
-    it("e) payment reversal restores subscription debt and rejects an unconfigured session payment", async () => {
+    it("e) payment reversal restores subscription debt and rejects an unattended session payment", async () => {
       // 1. Pay 400 EGP for group monthly cycle
       const cycles = DebtCycleRepository.getCyclesForStudent(regStudent.id);
       const groupCycle = cycles.find((c) => c.cycleType !== "package");
@@ -1180,7 +1181,7 @@ describe("Sprint 4 - FIXION Packages, Makeups & Unified Attendance/Financial Int
         amount: 50,
         paymentDate: "2026-11-05",
         operationId,
-      })).rejects.toThrow("per_session");
+      })).rejects.toThrow("يجب تسجيل حضور الطالب في الجلسة");
 
       fin = FinancialCalculationService.getStudentFinancialStatus(
         regStudent.id,

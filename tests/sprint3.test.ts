@@ -282,14 +282,15 @@ describe("Sprint 3 - FIXION Financial Core & Cash Payments", () => {
       expect(status.sessionTotalPaid).toBe(0);
     });
 
-    it("CRITICAL: recording a session payment of 200 does NOT reduce monthly debt (remains 1000)", async () => {
-      // Record session payment
-      await PaymentRepository.recordPayment({
+    it("rejects a session payment without an attended session and preserves the pending cycle", async () => {
+      const cycle = DebtCycleRepository.getCyclesForEnrollment(enrollmentIso.id)[0];
+      expect(cycle.billingMode).toBe("pending");
+      await expect(PaymentRepository.recordPayment({
         studentId: studentIso.id,
         amount: 200,
         paymentType: "session",
-        sessionId: "sess-1",
-      });
+        debtCycleId: cycle.id,
+      })).rejects.toThrow("لتسجيل دفعة حصة يجب تحديد جلسة حضرها الطالب");
 
       const status = FinancialCalculationService.getStudentFinancialStatus(
         studentIso.id,
@@ -300,14 +301,14 @@ describe("Sprint 3 - FIXION Financial Core & Cash Payments", () => {
       expect(status.monthlyTotalDue).toBe(1000);
       expect(status.monthlyTotalPaid).toBe(0);
       expect(status.monthlyRemainingDebt).toBe(1000);
-
-      // Session total paid is exposed separately
-      expect(status.sessionTotalPaid).toBe(200);
-      expect(status.sessionPayments.length).toBe(1);
+      expect(status.sessionTotalPaid).toBe(0);
+      expect(status.sessionPayments.length).toBe(0);
       expect(status.monthlyPayments.length).toBe(0);
+      expect(status.cycles.find((item) => item.id === cycle.id)?.billingMode)
+        .toBe("pending");
     });
 
-    it("recording a partial monthly payment of 400 reduces monthly debt (to 600), while session paid remains separate (200)", async () => {
+    it("recording a partial monthly payment of 400 reduces monthly debt (to 600)", async () => {
       await PaymentRepository.recordPayment({
         studentId: studentIso.id,
         amount: 400,
@@ -322,7 +323,7 @@ describe("Sprint 3 - FIXION Financial Core & Cash Payments", () => {
       expect(status.monthlyTotalDue).toBe(1000);
       expect(status.monthlyTotalPaid).toBe(400);
       expect(status.monthlyRemainingDebt).toBe(600);
-      expect(status.sessionTotalPaid).toBe(200);
+      expect(status.sessionTotalPaid).toBe(0);
     });
   });
 

@@ -1,6 +1,7 @@
 jest.mock("expo-device", () => ({ modelName: "Test Device" }));
 
 import { DatabaseService } from "../src/core/database";
+import { ConnectivityService } from "../src/core/connectivity";
 import { SyncRepository } from "../src/core/sync";
 import { AttendanceRepository } from "../src/features/attendance/AttendanceRepository";
 import { AttendanceSessionService } from "../src/features/attendance/AttendanceSessionService";
@@ -12,6 +13,8 @@ import { DebtAdjustmentRepository } from "../src/features/payments/DebtAdjustmen
 import { DebtCycleRepository } from "../src/features/payments/DebtCycleRepository";
 import { FinancialCalculationService } from "../src/features/payments/FinancialCalculationService";
 import { PaymentRepository } from "../src/features/payments/PaymentRepository";
+import { submitPaymentAction } from "../src/features/payments/paymentActionService";
+import { PaymentOperationIdentity } from "../src/features/payments/paymentSubmissionIdentity";
 import { getConfiguredSessionPrice } from "../src/features/payments/paymentEligibility";
 import { SessionDateService } from "../src/features/sessions/SessionDateService";
 import { SessionRepository } from "../src/features/sessions/SessionRepository";
@@ -202,7 +205,7 @@ describe("payment collection rules", () => {
     };
   }
 
-  async function createPerSessionScenario() {
+  async function createPerSessionScenario(groupId?: string, requiredSessions = 2) {
     const student = createStudent();
     const targetDate = SessionDateService.getCurrentSessionDate(centerId);
     const periodStart = `${targetDate.slice(0, 7)}-01`;
@@ -216,10 +219,12 @@ describe("payment collection rules", () => {
       price: number;
     }> = [];
 
-    for (const group of GroupRepository.getAll()) {
+    for (const group of GroupRepository.getAll().filter(
+      (item) => !groupId || item.id === groupId,
+    )) {
       const price = getConfiguredSessionPrice(group);
       const schedules = GroupScheduleRepository.getSchedulesForGroup(group.id);
-      if (price <= 0 || !schedules.length) continue;
+      if (price === undefined || price <= 0 || !schedules.length) continue;
 
       const enrollment = EnrollmentRepository.enrollStudent({
         studentId: student.id,
@@ -241,14 +246,16 @@ describe("payment collection rules", () => {
           if (cursor.getDay() !== schedule.dayOfWeek) continue;
           const sessionDate = `${cursor.getFullYear()}-${String(cursor.getMonth() + 1).padStart(2, "0")}-${String(cursor.getDate()).padStart(2, "0")}`;
           if (sessionDate < cycle.startDate || sessionDate > cycle.endDate) continue;
-          const existing = db.getFirstSync<{ id: string }>(
-            `SELECT id FROM sessions
+          const existing = db.getFirstSync<{ id: string; status: string }>(
+            `SELECT id, status FROM sessions
              WHERE center_id = ? AND group_id = ? AND schedule_id = ? AND session_date = ?`,
             [centerId, group.id, schedule.id, sessionDate],
           );
-          if (!existing) dates.set(sessionDate, schedule.id);
+          if (!existing || ["scheduled", "open"].includes(existing.status)) {
+            dates.set(sessionDate, schedule.id);
+          }
         }
-        if (scenarioSessions.length + dates.size >= 2) break;
+        if (scenarioSessions.length + dates.size >= requiredSessions) break;
       }
 
       for (const [sessionDate, scheduleId] of dates) {
@@ -264,15 +271,47 @@ describe("payment collection rules", () => {
           throw new Error(`Test session ${session.id} did not become open.`);
         }
         scenarioSessions.push({ cycle, session, price });
-        if (scenarioSessions.length >= 2) break;
+        if (scenarioSessions.length >= requiredSessions) break;
       }
-      if (scenarioSessions.length >= 2) break;
+      if (scenarioSessions.length >= requiredSessions) break;
     }
 
-    if (scenarioSessions.length < 2) {
-      throw new Error("The payment test fixture needs two unused, scheduled sessions in the current billing period.");
+    if (scenarioSessions.length < requiredSessions) {
+      throw new Error(
+        `The payment test fixture needs ${requiredSessions} scheduled sessions in the current billing period.`,
+      );
     }
     return { student, scenarioSessions };
+  }
+
+  function setTestGroupPrices(
+    groupId: string,
+    sessionPrice: number,
+    monthlyPrice: number,
+  ) {
+    const group = GroupRepository.findById(groupId);
+    if (!group) throw new Error("The payment test group was not found.");
+    DatabaseService.getDb().runSync(
+      `UPDATE groups
+       SET name = ?, teacher_id = ?, subject_id = ?, grade = ?,
+           session_price = ?, monthly_price = ?, session_duration_minutes = ?,
+           late_after_minutes = ?, status = ?, updated_at = ?
+       WHERE center_id = ? AND id = ?`,
+      [
+        group.name,
+        group.teacherId,
+        group.subjectId,
+        group.grade,
+        sessionPrice,
+        monthlyPrice,
+        group.sessionDurationMinutes ?? 120,
+        group.lateAfterMinutes ?? 15,
+        group.status,
+        new Date().toISOString(),
+        centerId,
+        groupId,
+      ],
+    );
   }
 
   it("rejects an ordinary payment after a cycle is fully paid and allows its exact remaining balance", async () => {
@@ -509,128 +548,515 @@ describe("payment collection rules", () => {
     })).rejects.toThrow("لا يوجد مبلغ مستحق");
   });
 
-  it("requires explicit per-session billing and records attendance/profile payments idempotently in the local outbox", async () => {
-    const { student, scenarioSessions } = await createPerSessionScenario();
-    const [attendanceSession, profileSession] = scenarioSessions;
+  it("collects a session against a monthly cycle with exact group pricing, offline retry safety, and race protection", async () => {
     const db = DatabaseService.getDb();
-    const rejectedOperationId = `op-session-pending-rejected-${student.id}`;
+    const group = GroupRepository.getAll().find(
+      (item) => GroupScheduleRepository.getSchedulesForGroup(item.id).length > 0,
+    );
+    if (!group) throw new Error("The payment test fixture needs a scheduled group.");
+    const originalPrices = db.getFirstSync<{
+      sessionPrice: number;
+      monthlyPrice: number;
+    }>(
+      "SELECT session_price as sessionPrice, monthly_price as monthlyPrice FROM groups WHERE center_id = ? AND id = ?",
+      [centerId, group.id],
+    );
+    if (!originalPrices) throw new Error("The payment test group was not found.");
 
-    expect(attendanceSession.cycle.billingMode).toBe("pending");
-    await expect(PaymentRepository.recordSessionPayment({
-      studentId: student.id,
-      sessionId: attendanceSession.session.id,
-      amount: attendanceSession.price,
-      operationId: rejectedOperationId,
-    })).rejects.toThrow("per_session");
-    expect(db.getFirstSync<{ billingMode: string }>(
-      "SELECT billing_mode as billingMode FROM debt_cycles WHERE center_id = ? AND id = ?",
-      [centerId, attendanceSession.cycle.id],
-    )?.billingMode).toBe("pending");
-    expect(db.getFirstSync(
-      "SELECT id FROM payments WHERE center_id = ? AND operation_id = ?",
-      [centerId, rejectedOperationId],
-    )).toBeNull();
+    const previousConnectivity = ConnectivityService.getState();
+    setTestGroupPrices(group.id, 137, 1000);
+    try {
+      ConnectivityService.setState("offline");
+      const { student, scenarioSessions } = await createPerSessionScenario(group.id, 3);
+      const [attendanceSession, profileSession, racingSession] = scenarioSessions;
+      const untouchedStudent = await createPerSessionScenario(group.id);
+      const untouchedCycle = untouchedStudent.scenarioSessions[0].cycle;
+      const cycleId = attendanceSession.cycle.id;
+      DebtCycleRepository.setBillingMode(cycleId, "monthly");
+      expect(untouchedCycle.billingMode).toBe("pending");
+      await DebtAdjustmentRepository.createAdjustment({
+        debtCycleId: cycleId,
+        adjustmentAmount: -50,
+        reason: "خصم اختبار الدفع بالحصة",
+        operationId: `op-session-discount-${student.id}`,
+      });
 
-    DebtCycleRepository.setBillingMode(attendanceSession.cycle.id, "per_session");
-    if (profileSession.cycle.id !== attendanceSession.cycle.id) {
-      DebtCycleRepository.setBillingMode(profileSession.cycle.id, "per_session");
-    }
-    for (const cycleId of new Set(scenarioSessions.map(({ cycle }) => cycle.id))) {
+      for (const scenario of scenarioSessions) {
+        await AttendanceRepository.recordAttendance({
+          studentId: student.id,
+          sessionId: scenario.session.id,
+          status: "present",
+          isLate: false,
+        });
+      }
+
+      const before = FinancialCalculationService.getStudentFinancialStatus(student.id);
+      const cycleBefore = before.cycles.find((item) => item.id === cycleId);
+      const firstCandidate = before.sessionDebt?.paymentCandidates?.find(
+        (candidate) => candidate.sessionId === attendanceSession.session.id,
+      );
+      expect(firstCandidate).toMatchObject({
+        debtCycleId: cycleId,
+        sessionPrice: 137,
+        amountDue: 137,
+      });
+      expect(before.sessionDebt!.expectedSessions).toBeGreaterThan(0);
+      expect(1000 / before.sessionDebt!.expectedSessions).not.toBe(137);
+      expect(cycleBefore?.billingMode).toBe("monthly");
+
+      const attendanceRequest = {
+        centerId,
+        studentId: student.id,
+        amount: 137,
+        paymentType: "session" as const,
+        debtCycleId: cycleId,
+        sessionId: attendanceSession.session.id,
+      };
+      await expect(PaymentRepository.recordPayment({
+        ...attendanceRequest,
+        amount: 138,
+        operationId: `op-session-overcharge-${student.id}`,
+      })).rejects.toThrow("المبلغ يتجاوز رسوم الحصة المتبقية");
+      const attendanceIdentityRef: { current: PaymentOperationIdentity | null } = {
+        current: null,
+      };
+      const attendanceSubmission = await submitPaymentAction(
+        attendanceRequest,
+        attendanceIdentityRef.current,
+        (identity) => { attendanceIdentityRef.current = identity; },
+      );
+      const attendanceRetry = await submitPaymentAction(
+        attendanceRequest,
+        attendanceIdentityRef.current,
+        (identity) => { attendanceIdentityRef.current = identity; },
+      );
+      expect(attendanceRetry.payment.id).toBe(attendanceSubmission.payment.id);
+      expect(attendanceSubmission.payment).toMatchObject({
+        paymentType: "session",
+        sessionId: attendanceSession.session.id,
+        debtCycleId: cycleId,
+        amount: 137,
+      });
+
+      const profileRequest = {
+        centerId,
+        studentId: student.id,
+        amount: 137,
+        paymentType: "session" as const,
+        debtCycleId: cycleId,
+        sessionId: profileSession.session.id,
+      };
+      const profileIdentityRef: { current: PaymentOperationIdentity | null } = {
+        current: null,
+      };
+      const profileSubmission = await submitPaymentAction(
+        profileRequest,
+        profileIdentityRef.current,
+        (identity) => { profileIdentityRef.current = identity; },
+      );
+      const profileRetry = await submitPaymentAction(
+        profileRequest,
+        profileIdentityRef.current,
+        (identity) => { profileIdentityRef.current = identity; },
+      );
+      expect(profileRetry.payment.id).toBe(profileSubmission.payment.id);
+      expect(profileSubmission.payment.sessionId).toBe(profileSession.session.id);
+
+      const raceResults = await Promise.allSettled([
+        PaymentRepository.recordPayment({
+          studentId: student.id,
+          amount: 137,
+          paymentType: "session",
+          debtCycleId: cycleId,
+          sessionId: racingSession.session.id,
+          operationId: `op-session-race-a-${student.id}`,
+        }),
+        PaymentRepository.recordPayment({
+          studentId: student.id,
+          amount: 137,
+          paymentType: "session",
+          debtCycleId: cycleId,
+          sessionId: racingSession.session.id,
+          operationId: `op-session-race-b-${student.id}`,
+        }),
+      ]);
+      expect(raceResults.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+      expect(raceResults.filter((result) => result.status === "rejected")).toHaveLength(1);
+      await expect(PaymentRepository.recordPayment({
+        studentId: student.id,
+        amount: 137,
+        paymentType: "session",
+        debtCycleId: cycleId,
+        sessionId: attendanceSession.session.id,
+        operationId: `op-session-duplicate-${student.id}`,
+      })).rejects.toThrow("لا يوجد مبلغ مستحق للتحصيل عن هذه الحصة");
+
+      const finalStatus = FinancialCalculationService.getStudentFinancialStatus(student.id);
+      const cycleAfter = finalStatus.cycles.find((item) => item.id === cycleId);
+      expect(cycleAfter?.billingMode).toBe("monthly");
+      expect(finalStatus.monthlyTotalPaid).toBe(0);
+      expect(cycleAfter?.remainingDebt).toBe(
+        Number(cycleBefore?.remainingDebt || 0) - 137 * 3,
+      );
+      expect(finalStatus.groupMonthlyPaid).toBe(137 * 3);
+      expect(finalStatus.monthlyRemainingDebt).toBe(
+        Number(cycleBefore?.remainingDebt || 0) - 137 * 3,
+      );
       expect(db.getFirstSync<{ billingMode: string }>(
         "SELECT billing_mode as billingMode FROM debt_cycles WHERE center_id = ? AND id = ?",
-        [centerId, cycleId],
-      )?.billingMode).toBe("per_session");
-    }
-    await AttendanceRepository.recordAttendance({
-      studentId: student.id,
-      sessionId: attendanceSession.session.id,
-      status: "present",
-      isLate: false,
-    });
-    await AttendanceRepository.recordAttendance({
-      studentId: student.id,
-      sessionId: profileSession.session.id,
-      status: "present",
-      isLate: false,
-    });
+        [centerId, untouchedCycle.id],
+      )?.billingMode).toBe("pending");
+      expect(finalStatus.sessionPayments).toHaveLength(3);
+      expect(finalStatus.monthlyPayments).toHaveLength(0);
+      const attendanceGroupStatus = FinancialCalculationService
+        .getStudentFinancialStatusForGroup(student.id, group.id);
+      expect(attendanceGroupStatus.groupMonthlyPaid).toBe(137 * 3);
+      expect(attendanceGroupStatus.groupRemainingDebt).toBe(
+        Number(cycleBefore?.remainingDebt || 0) - 137 * 3,
+      );
+      expect(attendanceGroupStatus.monthlyTotalPaid).toBe(0);
 
-    const beforePayment = FinancialCalculationService.getStudentFinancialStatus(student.id);
-    expect(beforePayment.currentPeriodDebt).toBe(
-      attendanceSession.price + profileSession.price,
-    );
-    expect(beforePayment.monthlyRemainingDebt).toBe(0);
+      const successfulOperationIds = [
+        attendanceSubmission.identity.operationId,
+        profileSubmission.identity.operationId,
+        ...raceResults
+          .filter((result): result is PromiseFulfilledResult<Awaited<ReturnType<typeof PaymentRepository.recordPayment>>> => result.status === "fulfilled")
+          .map((result) => result.value.operationId),
+      ];
+      for (const operationId of successfulOperationIds) {
+        expect(SyncRepository.getPendingOperations(centerId)
+          .filter((operation) => operation.operationId === operationId)).toHaveLength(1);
+      }
+      const queuedSessionOperation = SyncRepository.getPendingOperations(centerId)
+        .find((operation) =>
+          operation.operationId === attendanceSubmission.identity.operationId,
+        );
+      if (!queuedSessionOperation) {
+        throw new Error("The offline session payment was not queued for sync.");
+      }
+      expect(queuedSessionOperation.operationType).toBe("payment.create");
+      expect(JSON.parse(String(queuedSessionOperation.payload))).toMatchObject({
+        paymentType: "session",
+        sessionId: attendanceSession.session.id,
+        debtCycleId: cycleId,
+        amount: 137,
+      });
 
-    const attendanceOperationId = `op-session-attendance-${student.id}`;
-    const attendancePayment = await PaymentRepository.recordSessionPayment({
-      studentId: student.id,
-      sessionId: attendanceSession.session.id,
-      amount: attendanceSession.price,
-      operationId: attendanceOperationId,
-    });
-    const attendanceRetry = await PaymentRepository.recordSessionPayment({
-      studentId: student.id,
-      sessionId: attendanceSession.session.id,
-      amount: attendanceSession.price,
-      operationId: attendanceOperationId,
-    });
-    expect(attendanceRetry.id).toBe(attendancePayment.id);
-    expect(attendancePayment.sessionId).toBe(attendanceSession.session.id);
-
-    const profileOperationId = `op-session-profile-${student.id}`;
-    const profilePayment = await PaymentRepository.recordPayment({
-      studentId: student.id,
-      amount: profileSession.price,
-      paymentType: "session",
-      debtCycleId: profileSession.cycle.id,
-      operationId: profileOperationId,
-    });
-    const profileRetry = await PaymentRepository.recordPayment({
-      studentId: student.id,
-      amount: profileSession.price,
-      paymentType: "session",
-      debtCycleId: profileSession.cycle.id,
-      operationId: profileOperationId,
-    });
-    expect(profileRetry.id).toBe(profilePayment.id);
-    expect(profilePayment.sessionId).toBeUndefined();
-    expect(profilePayment.debtCycleId).toBe(profileSession.cycle.id);
-
-    const payments = db.getAllSync<{ id: string; operationId: string; paymentType: string; sessionId: string | null }>(
-      `SELECT id, operation_id as operationId, payment_type as paymentType, session_id as sessionId
-       FROM payments WHERE center_id = ? AND student_id = ?`,
-      [centerId, student.id],
-    );
-    expect(payments.filter((payment) =>
-      payment.operationId === attendanceOperationId || payment.operationId === profileOperationId,
-    )).toHaveLength(2);
-    expect(payments.filter((payment) =>
-      payment.operationId === attendanceOperationId || payment.operationId === profileOperationId,
-    ).every((payment) => payment.paymentType === "session")).toBe(true);
-
-    for (const operationId of [attendanceOperationId, profileOperationId]) {
+      const reversalOperationId = `op-session-payment-reversal-${student.id}`;
+      const reversal = await PaymentRepository.reversePayment({
+        paymentId: attendanceSubmission.payment.id,
+        reason: "اختبار عكس دفعة حصة مرتبطة بدورة شهرية",
+        operationId: reversalOperationId,
+      });
+      expect(reversal.reversedAmount).toBe(137);
+      const afterReversal = FinancialCalculationService.getStudentFinancialStatus(student.id);
+      expect(afterReversal.monthlyRemainingDebt).toBe(
+        Number(cycleBefore?.remainingDebt || 0) - 137 * 2,
+      );
+      expect(afterReversal.monthlyTotalPaid).toBe(0);
+      expect(afterReversal.sessionPaymentsTotal).toBe(137 * 2);
+      const groupStatusAfterReversal = FinancialCalculationService
+        .getStudentFinancialStatusForGroup(student.id, group.id);
+      expect(groupStatusAfterReversal.groupMonthlyPaid).toBe(137 * 2);
+      expect(groupStatusAfterReversal.groupRemainingDebt).toBe(
+        Number(cycleBefore?.remainingDebt || 0) - 137 * 2,
+      );
+      expect(db.getFirstSync<{ isReversed: boolean | number }>(
+        "SELECT is_reversed as isReversed FROM payments WHERE center_id = ? AND id = ?",
+        [centerId, attendanceSubmission.payment.id],
+      )?.isReversed).toBe(true);
       expect(SyncRepository.getPendingOperations(centerId)
-        .filter((operation) => operation.operationId === operationId)).toHaveLength(1);
-    }
-    const afterPayment = FinancialCalculationService.getStudentFinancialStatus(student.id);
-    expect(afterPayment.currentPeriodDebt).toBe(0);
-    expect(afterPayment.monthlyRemainingDebt).toBe(0);
+        .filter((operation) => operation.operationId === reversalOperationId))
+        .toHaveLength(1);
 
-    const reversalOperationId = `op-session-reversal-${student.id}`;
-    const reversal = await PaymentRepository.reversePayment({
-      paymentId: attendancePayment.id,
-      reason: "اختبار عكس دفعة حصة",
-      operationId: reversalOperationId,
+      const monthlyStudent = await createPerSessionScenario(group.id);
+      const monthlyCycle = monthlyStudent.scenarioSessions[0].cycle;
+      DebtCycleRepository.setBillingMode(monthlyCycle.id, "monthly");
+      const monthlyBalance = FinancialCalculationService
+        .getStudentFinancialStatus(monthlyStudent.student.id)
+        .cycles.find((item) => item.id === monthlyCycle.id)?.remainingDebt;
+      const monthlyPayment = await PaymentRepository.recordPayment({
+        studentId: monthlyStudent.student.id,
+        amount: Number(monthlyBalance),
+        paymentType: "monthly",
+        debtCycleId: monthlyCycle.id,
+        operationId: `op-monthly-on-monthly-cycle-${monthlyStudent.student.id}`,
+      });
+      const monthlyStatus = FinancialCalculationService
+        .getStudentFinancialStatus(monthlyStudent.student.id);
+      expect(monthlyPayment.paymentType).toBe("monthly");
+      expect(monthlyStatus.sessionPayments).toHaveLength(0);
+      expect(monthlyStatus.monthlyPayments).toHaveLength(1);
+      expect(monthlyStatus.monthlyRemainingDebt).toBe(0);
+      expect(monthlyStatus.cycles.find((item) => item.id === monthlyCycle.id)?.billingMode)
+        .toBe("monthly");
+      expect(SyncRepository.getPendingOperations(centerId)
+        .filter((operation) => operation.operationId === monthlyPayment.operationId))
+        .toHaveLength(1);
+    } finally {
+      ConnectivityService.setState(previousConnectivity);
+      setTestGroupPrices(
+        group.id,
+        originalPrices.sessionPrice,
+        originalPrices.monthlyPrice,
+      );
+    }
+  });
+
+  it("allows the selected collection method on pending cycles and honors discounts and full waivers", async () => {
+    const db = DatabaseService.getDb();
+    const group = GroupRepository.getAll().find(
+      (item) => GroupScheduleRepository.getSchedulesForGroup(item.id).length > 0,
+    );
+    if (!group) throw new Error("The payment test fixture needs a scheduled group.");
+    const originalPrices = db.getFirstSync<{
+      sessionPrice: number;
+      monthlyPrice: number;
+    }>(
+      "SELECT session_price as sessionPrice, monthly_price as monthlyPrice FROM groups WHERE center_id = ? AND id = ?",
+      [centerId, group.id],
+    );
+    if (!originalPrices) throw new Error("The payment test group was not found.");
+    setTestGroupPrices(group.id, 141, 930);
+
+    try {
+      const discountedScenario = await createPerSessionScenario(group.id);
+      const discountedSession = discountedScenario.scenarioSessions[0];
+      expect(discountedSession.cycle.billingMode).toBe("pending");
+      await AttendanceRepository.recordAttendance({
+        studentId: discountedScenario.student.id,
+        sessionId: discountedSession.session.id,
+        status: "present",
+        isLate: false,
+      });
+      const initialCycle = FinancialCalculationService
+        .getStudentFinancialStatus(discountedScenario.student.id)
+        .cycles.find((cycle) => cycle.id === discountedSession.cycle.id);
+      const adjustedBalance = 50;
+      await DebtAdjustmentRepository.createAdjustment({
+        debtCycleId: discountedSession.cycle.id,
+        adjustmentAmount: adjustedBalance - Number(initialCycle?.effectivePrice || 0),
+        reason: "خصم اختبار الدورة المعلقة",
+        operationId: `op-pending-session-discount-${discountedScenario.student.id}`,
+      });
+      const discountedCandidate = FinancialCalculationService
+        .getStudentFinancialStatus(discountedScenario.student.id)
+        .sessionDebt?.paymentCandidates?.find(
+          (candidate) => candidate.sessionId === discountedSession.session.id,
+        );
+      expect(discountedCandidate).toMatchObject({
+        sessionPrice: 141,
+        amountDue: 50,
+      });
+      const discountedPayment = await PaymentRepository.recordPayment({
+        studentId: discountedScenario.student.id,
+        amount: 50,
+        paymentType: "session",
+        debtCycleId: discountedSession.cycle.id,
+        sessionId: discountedSession.session.id,
+        operationId: `op-pending-session-discount-payment-${discountedScenario.student.id}`,
+      });
+      const discountedStatus = FinancialCalculationService
+        .getStudentFinancialStatus(discountedScenario.student.id);
+      expect(discountedPayment.paymentType).toBe("session");
+      expect(discountedStatus.monthlyRemainingDebt).toBe(0);
+      expect(discountedStatus.monthlyTotalPaid).toBe(0);
+      expect(discountedStatus.cycles.find((cycle) => cycle.id === discountedSession.cycle.id)?.billingMode)
+        .toBe("pending");
+
+      const monthlyScenario = await createPerSessionScenario(group.id);
+      const monthlyCycle = monthlyScenario.scenarioSessions[0].cycle;
+      const monthlyBalance = FinancialCalculationService
+        .getStudentFinancialStatus(monthlyScenario.student.id)
+        .cycles.find((cycle) => cycle.id === monthlyCycle.id)?.remainingDebt;
+      const monthlyPayment = await PaymentRepository.recordPayment({
+        studentId: monthlyScenario.student.id,
+        amount: Number(monthlyBalance),
+        paymentType: "monthly",
+        debtCycleId: monthlyCycle.id,
+        operationId: `op-pending-monthly-payment-${monthlyScenario.student.id}`,
+      });
+      expect(monthlyPayment.paymentType).toBe("monthly");
+      expect(FinancialCalculationService
+        .getStudentFinancialStatus(monthlyScenario.student.id)
+        .cycles.find((cycle) => cycle.id === monthlyCycle.id)?.billingMode).toBe("pending");
+
+      const exemptScenario = await createPerSessionScenario(group.id);
+      const exemptSession = exemptScenario.scenarioSessions[0];
+      await AttendanceRepository.recordAttendance({
+        studentId: exemptScenario.student.id,
+        sessionId: exemptSession.session.id,
+        status: "present",
+        isLate: false,
+      });
+      const exemptCycle = FinancialCalculationService
+        .getStudentFinancialStatus(exemptScenario.student.id)
+        .cycles.find((cycle) => cycle.id === exemptSession.cycle.id);
+      await DebtAdjustmentRepository.createAdjustment({
+        debtCycleId: exemptSession.cycle.id,
+        adjustmentAmount: -Number(exemptCycle?.effectivePrice || 0),
+        reason: "إعفاء كامل من الاشتراك",
+        operationId: `op-pending-session-exemption-${exemptScenario.student.id}`,
+      });
+      await expect(PaymentRepository.recordPayment({
+        studentId: exemptScenario.student.id,
+        amount: 1,
+        paymentType: "session",
+        debtCycleId: exemptSession.cycle.id,
+        sessionId: exemptSession.session.id,
+        operationId: `op-pending-session-exempted-${exemptScenario.student.id}`,
+      })).rejects.toThrow("لا يوجد مبلغ مستحق للتحصيل عن هذه الحصة");
+      expect(db.getFirstSync<{ billingMode: string }>(
+        "SELECT billing_mode as billingMode FROM debt_cycles WHERE center_id = ? AND id = ?",
+        [centerId, exemptSession.cycle.id],
+      )?.billingMode).toBe("pending");
+    } finally {
+      setTestGroupPrices(
+        group.id,
+        originalPrices.sessionPrice,
+        originalPrices.monthlyPrice,
+      );
+    }
+  });
+
+  it("does not switch a pending cycle after a payment has been recorded against it", async () => {
+    const { student, scenarioSessions } = await createPerSessionScenario();
+    const cycle = scenarioSessions[0].cycle;
+    const db = DatabaseService.getDb();
+    const operationId = `op-pending-cycle-payment-${student.id}`;
+
+    const payment = await PaymentRepository.recordPayment({
+      studentId: student.id,
+      amount: 1,
+      paymentType: "partial",
+      debtCycleId: cycle.id,
+      operationId,
     });
-    expect(reversal.reversedAmount).toBe(attendanceSession.price);
-    const afterReversal = FinancialCalculationService.getStudentFinancialStatus(student.id);
-    expect(afterReversal.currentPeriodDebt).toBe(attendanceSession.price);
-    expect(afterReversal.monthlyRemainingDebt).toBe(0);
-    expect(afterReversal.sessionPaymentsTotal).toBe(profileSession.price);
-    expect(db.getFirstSync<{ isReversed: boolean | number }>(
-      "SELECT is_reversed as isReversed FROM payments WHERE center_id = ? AND id = ?",
-      [centerId, attendancePayment.id],
-    )?.isReversed).toBe(true);
-    expect(SyncRepository.getPendingOperations(centerId)
-      .filter((operation) => operation.operationId === reversalOperationId)).toHaveLength(1);
+
+    expect(payment.debtCycleId).toBe(cycle.id);
+    expect(db.getFirstSync<{ billingMode: string }>(
+      "SELECT billing_mode as billingMode FROM debt_cycles WHERE center_id = ? AND id = ?",
+      [centerId, cycle.id],
+    )?.billingMode).toBe("pending");
+    expect(() => DebtCycleRepository.setBillingMode(cycle.id, "per_session"))
+      .toThrow("بعد تسجيل دفعات لهذه الدورة أو فترتها");
+    expect(db.getFirstSync<{ billingMode: string }>(
+      "SELECT billing_mode as billingMode FROM debt_cycles WHERE center_id = ? AND id = ?",
+      [centerId, cycle.id],
+    )?.billingMode).toBe("pending");
+  });
+
+  it("blocks per-session conversion when a legacy payment already references the pending cycle", async () => {
+    const { student, scenarioSessions } = await createPerSessionScenario();
+    const cycle = scenarioSessions[0].cycle;
+    const db = DatabaseService.getDb();
+    const now = new Date().toISOString();
+    const operationId = `op-legacy-cycle-payment-${student.id}`;
+    db.runSync(
+      `INSERT INTO payments
+       (id, operation_id, center_id, student_id, debt_cycle_id,
+        amount, payment_type, payment_method, payment_date, is_reversed,
+        created_at, user_id)
+       VALUES (?, ?, ?, ?, ?, 10, 'monthly', 'cash', ?, 0, ?, ?)`,
+      [
+        `legacy-payment-${student.id}`,
+        operationId,
+        centerId,
+        student.id,
+        cycle.id,
+        cycle.startDate,
+        now,
+        useAuthStore.getState().currentUser!.id,
+      ],
+    );
+
+    expect(() => DebtCycleRepository.setBillingMode(cycle.id, "per_session"))
+      .toThrow("دفعات لهذه الدورة أو فترتها");
+    expect(db.getFirstSync<{ billingMode: string }>(
+      "SELECT billing_mode as billingMode FROM debt_cycles WHERE center_id = ? AND id = ?",
+      [centerId, cycle.id],
+    )?.billingMode).toBe("pending");
+  });
+
+  it("preserves a cycle discount by refusing an unsafe conversion to per-session billing", async () => {
+    const { student, scenarioSessions } = await createPerSessionScenario();
+    const cycle = scenarioSessions[0].cycle;
+    const db = DatabaseService.getDb();
+
+    await DebtAdjustmentRepository.createAdjustment({
+      debtCycleId: cycle.id,
+      adjustmentAmount: -1,
+      reason: "خصم محفوظ قبل تحديد نظام الفوترة",
+    });
+
+    expect(() => DebtCycleRepository.setBillingMode(cycle.id, "per_session"))
+      .toThrow("خصم أو تعديل");
+    expect(db.getFirstSync<{ billingMode: string }>(
+      "SELECT billing_mode as billingMode FROM debt_cycles WHERE center_id = ? AND id = ?",
+      [centerId, cycle.id],
+    )?.billingMode).toBe("pending");
+    expect(FinancialCalculationService.getStudentFinancialStatus(student.id)
+      .adjustments.some((adjustment) => adjustment.debtCycleId === cycle.id)).toBe(true);
+  });
+
+  it("does not discard a student's negotiated monthly rate when selecting per-session billing", async () => {
+    const { scenarioSessions } = await createPerSessionScenario();
+    const cycle = scenarioSessions[0].cycle;
+    const db = DatabaseService.getDb();
+
+    db.runSync(
+      "UPDATE student_group_enrollments SET special_monthly_price = 250 WHERE center_id = ? AND id = ?",
+      [centerId, cycle.enrollmentId],
+    );
+    expect(db.getFirstSync<{ specialMonthlyPrice: number }>(
+      `SELECT special_monthly_price as specialMonthlyPrice
+       FROM student_group_enrollments WHERE center_id = ? AND id = ?`,
+      [centerId, cycle.enrollmentId],
+    )?.specialMonthlyPrice).toBe(250);
+
+    expect(() => DebtCycleRepository.setBillingMode(cycle.id, "per_session"))
+      .toThrow("سعر شهري خاص");
+    expect(db.getFirstSync<{ billingMode: string }>(
+      "SELECT billing_mode as billingMode FROM debt_cycles WHERE center_id = ? AND id = ?",
+      [centerId, cycle.id],
+    )?.billingMode).toBe("pending");
+  });
+
+  it("refuses cycle-total adjustments after per-session billing is selected", async () => {
+    const { scenarioSessions } = await createPerSessionScenario();
+    const cycle = scenarioSessions[0].cycle;
+    const db = DatabaseService.getDb();
+
+    DebtCycleRepository.setBillingMode(cycle.id, "per_session");
+    await expect(DebtAdjustmentRepository.createAdjustment({
+      debtCycleId: cycle.id,
+      adjustmentAmount: -50,
+      reason: "خصم بعد تحديد الدفع بالحصة",
+    })).rejects.toThrow("توزيع التعديل على كل حصة");
+
+    expect(DebtAdjustmentRepository.getAdjustmentsForCycle(cycle.id)).toEqual([]);
+    expect(db.getFirstSync<{ billingMode: string }>(
+      "SELECT billing_mode as billingMode FROM debt_cycles WHERE center_id = ? AND id = ?",
+      [centerId, cycle.id],
+    )?.billingMode).toBe("per_session");
+  });
+
+  it("refuses cycle-total adjustments after per-session billing is selected", async () => {
+    const { scenarioSessions } = await createPerSessionScenario();
+    const cycle = scenarioSessions[0].cycle;
+    const db = DatabaseService.getDb();
+
+    DebtCycleRepository.setBillingMode(cycle.id, "per_session");
+    await expect(DebtAdjustmentRepository.createAdjustment({
+      debtCycleId: cycle.id,
+      adjustmentAmount: -50,
+      reason: "خصم بعد تحديد الدفع بالحصة",
+    })).rejects.toThrow("توزيع التعديل على كل حصة");
+
+    expect(DebtAdjustmentRepository.getAdjustmentsForCycle(cycle.id)).toEqual([]);
+    expect(db.getFirstSync<{ billingMode: string }>(
+      "SELECT billing_mode as billingMode FROM debt_cycles WHERE center_id = ? AND id = ?",
+      [centerId, cycle.id],
+    )?.billingMode).toBe("per_session");
   });
 });

@@ -21,6 +21,7 @@ import { DailyClosingService } from "../src/features/reports/DailyClosingService
 import { OperationalReportsService } from "../src/features/reports/OperationalReportsService";
 import { SessionClosingService } from "../src/features/sessions/SessionClosingService";
 import { SessionRepository } from "../src/features/sessions/SessionRepository";
+import { isPerSessionBillingMode } from "../src/shared/utils/billingMode";
 import { configureTestCenterTimeZones } from "./helpers/centerTimeZone";
 
 describe("Sprint 5 - FIXION Operational Layer Test Suite", () => {
@@ -611,30 +612,61 @@ describe("Sprint 5 - FIXION Operational Layer Test Suite", () => {
       expect(op1.id).toBe(op2.id);
     });
 
-    it("30. Sprint 1-4 Regression: rejects session payment without explicit per-session billing", async () => {
-      const statusBefore =
-        FinancialCalculationService.getStudentFinancialStatus("std-1");
-      const groupDebtBefore = statusBefore.groupRemainingDebt;
-      const packageDebtBefore = statusBefore.packageRemainingDebt;
-      const operationId = "op-session-payment-without-cycle-s5";
+    it("30. allows session collection without changing the monthly billing default", async () => {
+      const db = DatabaseService.getDb();
+      const session = SessionRepository.findById("sess-1");
+      if (!session) throw new Error("The seeded payment session was not found.");
 
-      await expect(PaymentRepository.recordSessionPayment({
+      const [year, month] = session.sessionDate.split("-").map(Number);
+      const periodStart = `${year}-${String(month).padStart(2, "0")}-01`;
+      const periodEnd = `${year}-${String(month).padStart(2, "0")}-${String(new Date(year, month, 0).getDate()).padStart(2, "0")}`;
+      const existingCycles = DebtCycleRepository.getCyclesForStudent("std-1");
+      const cycle = await DebtCycleRepository.createOpeningCycle({
         studentId: "std-1",
-        sessionId: "sess-1",
-        amount: 200,
-        notes: "حصة فردية مستقلة",
-        operationId,
-      })).rejects.toThrow("per_session");
+        enrollmentId: "enr-1",
+        groupId: session.groupId,
+        cycleType: "monthly",
+        cycleNumber: Math.max(0, ...existingCycles.map((item) => item.cycleNumber)) + 1,
+        periodStart,
+        periodEnd,
+        amountDue: session.sessionPrice ?? 400,
+      });
 
-      const statusAfter =
-        FinancialCalculationService.getStudentFinancialStatus("std-1");
-      expect(statusAfter.groupRemainingDebt).toBe(groupDebtBefore);
-      expect(statusAfter.packageRemainingDebt).toBe(packageDebtBefore);
-      expect(statusAfter.sessionPaymentsTotal).toBe(statusBefore.sessionPaymentsTotal);
-      expect(DatabaseService.getDb().getFirstSync(
-        "SELECT id FROM payments WHERE center_id = ? AND operation_id = ?",
-        ["center-1", operationId],
-      )).toBeNull();
+      if (!AttendanceRepository.isAlreadyAttended(session.id, "std-1")) {
+        await AttendanceRepository.recordAttendance({
+          sessionId: session.id,
+          studentId: "std-1",
+          status: "present",
+          isLate: false,
+        });
+      }
+
+      const statusBefore = FinancialCalculationService.getStudentFinancialStatus("std-1");
+      const operationId = "op-session-payment-with-monthly-cycle-s5";
+      const payment = await PaymentRepository.recordSessionPayment({
+        studentId: "std-1",
+        sessionId: session.id,
+        amount: 150,
+        paymentDate: periodStart,
+        notes: "تحصيل حصة ضمن دورة شهرية",
+        operationId,
+      });
+
+      const statusAfter = FinancialCalculationService.getStudentFinancialStatus("std-1");
+      expect(payment).toMatchObject({
+        paymentType: "session",
+        sessionId: session.id,
+        debtCycleId: cycle.id,
+        amount: 150,
+      });
+      expect(db.getFirstSync<{ billingMode: string }>(
+        "SELECT billing_mode as billingMode FROM debt_cycles WHERE center_id = ? AND id = ?",
+        ["center-1", cycle.id],
+      )?.billingMode).toBe("monthly");
+      expect(statusAfter.groupRemainingDebt).toBe(statusBefore.groupRemainingDebt - 150);
+      expect(statusAfter.packageRemainingDebt).toBe(statusBefore.packageRemainingDebt);
+      expect(statusAfter.monthlyTotalPaid).toBe(statusBefore.monthlyTotalPaid);
+      expect(statusAfter.sessionPaymentsTotal).toBe(statusBefore.sessionPaymentsTotal + 150);
     });
   });
 
@@ -739,8 +771,10 @@ describe("Sprint 5 - FIXION Operational Layer Test Suite", () => {
           amountDue: Number(session.sessionPrice ?? 0),
         });
       } else if (
-        sessionCycle.billingMode !== "per_session" &&
-        sessionCycle.cycleType !== "per_session"
+        !isPerSessionBillingMode(
+          sessionCycle.billingMode,
+          sessionCycle.cycleType,
+        )
       ) {
         sessionCycle = DebtCycleRepository.setBillingMode(
           sessionCycle.id,

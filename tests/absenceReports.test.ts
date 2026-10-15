@@ -7,6 +7,8 @@ import { AbsenceService } from "../src/features/attendance/AbsenceService";
 import { MakeupService } from "../src/features/attendance/MakeupService";
 import { SessionRepository } from "../src/features/sessions/SessionRepository";
 import { StudentRepository } from "../src/features/students/StudentRepository";
+import { Logger } from "../src/core/logger";
+import { formatLocalDate } from "../src/shared/utils/date";
 
 jest.mock("expo-device", () => ({ modelName: "Test Device" }));
 
@@ -61,6 +63,51 @@ const session = (
 
 describe("absence report count aggregation", () => {
   const students = [student("a"), student("b")];
+
+  it("formats the stored session date for the absence report and logs truly missing source data", () => {
+    let reportSession = session("report-date-session", "group-1", {
+      sessionDate: "2026-10-12T00:00:00.000Z",
+    });
+    const findSession = jest.spyOn(SessionRepository, "findById")
+      .mockImplementation(() => reportSession);
+    const getExpected = jest.spyOn(SessionRepository, "getExpectedStudents")
+      .mockReturnValue([]);
+    const getAttendance = jest.spyOn(AttendanceRepository, "getSessionAttendance")
+      .mockReturnValue([]);
+    const getAbsentees = jest.spyOn(AbsenceService, "getAbsenteesForSession")
+      .mockReturnValue([]);
+    const getAbsenceNotes = jest.spyOn(AbsenceNoteRepository, "getForSession")
+      .mockReturnValue([]);
+    const warning = jest.spyOn(Logger, "warn").mockImplementation(() => {});
+
+    try {
+      const report = AbsenceReportsService.getSessionReport(reportSession.id);
+      expect(formatLocalDate(report.session.sessionDate))
+        .toBe("الاثنين ٢٠٢٦/١٠/١٢");
+      expect(warning).not.toHaveBeenCalled();
+
+      reportSession = { ...reportSession, sessionDate: "" };
+      AbsenceReportsService.getSessionReport(reportSession.id);
+      expect(warning).toHaveBeenCalledWith(
+        "attendance",
+        "absence_report_session_date_unavailable",
+        expect.objectContaining({
+          metadata: expect.objectContaining({
+            sessionId: reportSession.id,
+            source: "sessions.session_date",
+            reason: "missing",
+          }),
+        }),
+      );
+    } finally {
+      findSession.mockRestore();
+      getExpected.mockRestore();
+      getAttendance.mockRestore();
+      getAbsentees.mockRestore();
+      getAbsenceNotes.mockRestore();
+      warning.mockRestore();
+    }
+  });
 
   it("keeps session list and details at 1 present / 1 explicitly absent", () => {
     const result = calculateAbsenceReportCounts(students, [students[1]], [attendance("a", "present")], []);

@@ -397,15 +397,26 @@ describe("attendance duplicate protection", () => {
     await useAuthStore.getState().selectCenter("center-1");
   });
 
-  it("keeps valid makeup attendance separate from ordinary duplicate detection", async () => {
-    const makeupAttendance = await AttendanceRepository.recordAttendance({
+  it("rejects makeup attendance when its source session cannot be resolved", async () => {
+    const sessionId = "sess-duplicate-makeup";
+    const attendanceBefore = AttendanceRepository.getSessionAttendance(sessionId)
+      .filter((record) => record.studentId === "std-1");
+    const operationsBefore = SyncRepository.getRecentOperations("center-1", 1000)
+      .filter((operation) => operation.operationType === "attendance.create").length;
+
+    await expect(AttendanceRepository.recordAttendance({
       studentId: "std-1",
-      sessionId: "sess-duplicate-makeup",
+      sessionId,
       status: "present",
       isLate: false,
       attendanceType: "makeup",
-      originalAbsenceId: "legacy-absence-reference",
-    });
-    expect(makeupAttendance.attendanceType).toBe("makeup");
+      originalAbsenceId: "missing-source-session",
+    })).rejects.toBeInstanceOf(ConflictError);
+
+    expect(AttendanceRepository.getSessionAttendance(sessionId)
+      .filter((record) => record.studentId === "std-1")).toEqual(attendanceBefore);
+    expect(SyncRepository.getRecentOperations("center-1", 1000)
+      .filter((operation) => operation.operationType === "attendance.create"))
+      .toHaveLength(operationsBefore);
   });
 });

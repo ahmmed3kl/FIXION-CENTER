@@ -108,6 +108,12 @@ describe("makeup attendance integration", () => {
     expect(
       AttendanceSessionService.isExpected("makeup-target-int", makeupStudent.id),
     ).toBe(false);
+    const makeupOperation = SyncRepository.getRecentOperations(centerId, 1000)
+      .find((operation) => operation.operationId === makeupAttendance.operationId);
+    expect(JSON.parse(makeupOperation?.payload ?? "null")).toMatchObject({
+      attendanceType: "makeup",
+      originalAbsenceId: "makeup-source-int",
+    });
     expect(AttendanceSessionService.getSummary("makeup-target-int")).toEqual({
       total: examRosterBefore.length,
       present: 0,

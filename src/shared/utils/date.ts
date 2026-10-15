@@ -1,3 +1,5 @@
+import { toArabicDigits } from "./arabicNumerals";
+
 /** Returns the device's local calendar date as YYYY-MM-DD.
  *
  * Date-only business values (session days, enrollment starts, daily closing)
@@ -56,11 +58,10 @@ export function addDateOnlyDays(value: string, days: number): string {
   ].join("-");
 }
 
-/** Parse a date-only value without allowing the JavaScript Date parser to
- * silently turn malformed/UTC values into an "Invalid Date" label. */
+/** Preserve the calendar day when a server serializes a date-only value as ISO. */
 export function parseLocalDateOnly(value: unknown): Date | null {
   if (typeof value !== "string") return null;
-  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value.trim());
+  const match = /^(\d{4})-(\d{2})-(\d{2})(?:$|[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)$/i.exec(value.trim());
   if (!match) return null;
   const year = Number(match[1]);
   const month = Number(match[2]);
@@ -74,10 +75,33 @@ export function formatLocalDate(value: unknown, fallback = "تاريخ غير م
   const date = parseLocalDateOnly(value);
   if (!date) return fallback;
   const weekday = date.toLocaleDateString("ar-EG", { weekday: "long" });
-  const day = String(date.getDate());
-  const month = String(date.getMonth() + 1);
-  const year = String(date.getFullYear()).slice(-2);
-  return `${weekday} ${day}/${month}/${year}`;
+  const day = date.getDate();
+  const month = date.getMonth() + 1;
+  const year = date.getFullYear();
+  return `${weekday} ${toArabicDigits(`${year}/${month}/${day}`)}`;
+}
+
+export interface LocalTimeParts {
+  hours: number;
+  minutes: number;
+}
+
+export function parseLocalTimeParts(value: unknown): LocalTimeParts | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim();
+  if (!normalized) return null;
+
+  const timeOnly = /^(\d{1,2}):(\d{2})(?::\d{2}(?:\.\d+)?)?$/.exec(normalized);
+  if (timeOnly) {
+    const hours = Number(timeOnly[1]);
+    const minutes = Number(timeOnly[2]);
+    return hours <= 23 && minutes <= 59 ? { hours, minutes } : null;
+  }
+
+  if (!/^\d{4}-\d{2}-\d{2}[T ]/.test(normalized)) return null;
+  const instant = new Date(normalized);
+  if (!Number.isFinite(instant.getTime())) return null;
+  return { hours: instant.getHours(), minutes: instant.getMinutes() };
 }
 
 export function formatLocalDateTime(value: unknown, fallback = "تاريخ غير متاح"): string {
@@ -86,6 +110,6 @@ export function formatLocalDateTime(value: unknown, fallback = "تاريخ غي�
   const hour24 = date.getHours();
   const hour12 = hour24 % 12 || 12;
   const period = hour24 >= 12 ? "م" : "ص";
-  const time = `${String(hour12).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")} ${period}`;
+  const time = `${toArabicDigits(String(hour12).padStart(2, "0"))}:${toArabicDigits(String(date.getMinutes()).padStart(2, "0"))} ${period}`;
   return `${formatLocalDate(getLocalDateOnly(date), fallback)} — ${time}`;
 }

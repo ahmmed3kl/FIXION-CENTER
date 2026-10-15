@@ -1,4 +1,6 @@
 import { I18nManager, Platform } from "react-native";
+import { parseLocalTimeParts } from "../../shared/utils/date";
+import { toArabicDigits } from "../../shared/utils/arabicNumerals";
 
 // Force RTL layout for Arabic
 export function initializeRTL() {
@@ -187,16 +189,12 @@ export function formatNumber(num: number): string {
   return num.toLocaleString("ar-EG");
 }
 
-export function formatTimeArabic(timeStr: string): string {
-  if (!timeStr) return "";
-  const parts = timeStr.split(":");
-  if (parts.length >= 2) {
-    let hours = parseInt(parts[0], 10);
-    const minutes = parts[1];
-    const period = hours >= 12 ? "م" : "ص";
-    if (hours > 12) hours -= 12;
-    if (hours === 0) hours = 12;
-    return `${hours}:${minutes} ${period}`;
-  }
-  return timeStr;
+export function formatTimeArabic(timeStr: string | null | undefined): string {
+  const time = parseLocalTimeParts(timeStr);
+  if (!time) return "";
+  const hour12 = time.hours % 12 || 12;
+  const period = time.hours >= 12 ? "م" : "ص";
+  const hours = toArabicDigits(String(hour12).padStart(2, "0"));
+  const minutes = toArabicDigits(String(time.minutes).padStart(2, "0"));
+  return `${hours}:${minutes} ${period}`;
 }

@@ -15,6 +15,7 @@ import { Logger } from "../logger";
 import { getLocalDateOnly } from "../../shared/utils/date";
 import { CardRangeRepository } from "../../features/students/CardRangeRepository";
 import { isStudentColor } from "../../features/students/studentColor";
+import { normalizeBillingMode } from "../../shared/utils/billingMode";
 
 export type SyncEngineState = "online" | "offline" | "syncing" | "error";
 
@@ -196,7 +197,11 @@ function upsertLocalDebtCycle(db: any, cycle: any, centerId: string): void {
       ? "per_session"
       : "monthly";
   const rawBillingMode = String(cycle.billing_mode || cycle.billingMode || "").trim().toLowerCase().replace(/[\s-]/g, "_");
-  const billingMode = cycleType === "package" ? "package" : ["per_session", "session", "perclass", "per_class"].includes(rawBillingMode) || cycleType === "per_session" ? "per_session" : ["pending"].includes(rawBillingMode) ? "pending" : "monthly";
+  const billingMode = normalizeBillingMode(
+    rawBillingMode,
+    cycleType,
+    Boolean(cycle.package_subscription_id || cycle.packageSubscriptionId),
+  );
 
   const natural = enrollmentId
     ? db.getFirstSync(

@@ -10,6 +10,7 @@ import {
 import { PermissionService } from "../../core/permissions";
 import { SyncRepository } from "../../core/sync";
 import { DebtAdjustment } from "../../shared/types";
+import { isPerSessionBillingMode } from "../../shared/utils/billingMode";
 import { useAuthStore } from "../auth/useAuthStore";
 
 function generateUUID(): string {
@@ -104,7 +105,8 @@ export class DebtAdjustmentRepository {
     // 1. Fetch debt cycle
     const cycle = db.getFirstSync<any>(
       `SELECT id, center_id as centerId, student_id as studentId,
-              enrollment_id as enrollmentId, cycle_price as cyclePrice
+              enrollment_id as enrollmentId, cycle_price as cyclePrice,
+              billing_mode as billingMode, cycle_type as cycleType
        FROM debt_cycles
        WHERE center_id = ? AND id = ?`,
       [centerId, params.debtCycleId],
@@ -112,6 +114,11 @@ export class DebtAdjustmentRepository {
 
     if (!cycle) {
       throw new NotFoundError("الدورة المالية غير موجودة.");
+    }
+    if (isPerSessionBillingMode(cycle.billingMode, cycle.cycleType)) {
+      throw new ValidationError(
+        "لا يمكن تعديل دورة الدفع بالحصة كإجمالي؛ لا يحدد النظام توزيع التعديل على كل حصة.",
+      );
     }
 
     // 2. Calculate current effective price before this adjustment

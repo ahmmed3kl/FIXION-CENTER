@@ -7,6 +7,8 @@ import { MakeupService } from "./MakeupService";
 import { SessionRepository } from "../sessions/SessionRepository";
 import { StudentRepository } from "../students/StudentRepository";
 import { sortSessionsByActivation } from "../sessions/sessionOrdering";
+import { Logger } from "../../core/logger";
+import { parseLocalDateOnly } from "../../shared/utils/date";
 import {
   DEFAULT_TEACHER_WEEK_START_DAY,
   getTeacherWeekBounds,
@@ -316,6 +318,17 @@ export class AbsenceReportsService {
   static getSessionReport(sessionId: string): AbsenceSessionReport {
     const session = SessionRepository.findById(sessionId);
     if (!session) throw new Error("الحصة غير موجودة في المركز الحالي.");
+    if (!parseLocalDateOnly(session.sessionDate)) {
+      Logger.warn("attendance", "absence_report_session_date_unavailable", {
+        centerId: session.centerId,
+        entityType: "session",
+        metadata: {
+          sessionId: session.id,
+          source: "sessions.session_date",
+          reason: session.sessionDate ? "invalid" : "missing",
+        },
+      });
+    }
 
     const expected = SessionRepository.getExpectedStudents(sessionId);
     const attendance = AttendanceRepository.getSessionAttendance(sessionId);

@@ -1,8 +1,9 @@
 import { DatabaseService } from "../../core/database";
-import { SessionDebtBreakdown } from "../../shared/types";
+import { SessionDebtBreakdown, SessionPaymentCandidate } from "../../shared/types";
 import { getLocalDateOnly } from "../../shared/utils/date";
 import { useAuthStore } from "../auth/useAuthStore";
 import { GroupScheduleRepository } from "../groups/GroupScheduleRepository";
+import { isPerSessionBillingMode } from "../../shared/utils/billingMode";
 
 type PlannedSession = {
   date: string;
@@ -10,9 +11,14 @@ type PlannedSession = {
   scheduleId?: string;
   price: number;
   sessionId?: string;
+  sessionStatus?: string;
   attended: boolean;
   directlyPaid: number;
   perSession: boolean;
+  groupName: string;
+  sessionPrice: number | null;
+  debtCycleId?: string;
+  packageCovered?: boolean;
 };
 
 const isoDate = (date: Date) => getLocalDateOnly(date);
@@ -23,10 +29,8 @@ const addDays = (date: Date, days: number) => {
 };
 
 /**
- * Calculates the current month's per-session debt view without mutating the
- * existing monthly debt-cycle ledger. This keeps old financial history intact
- * while allowing monthly prepayments and pay-as-you-go payments to be shown
- * against concrete scheduled sessions.
+ * Calculates scheduled-session balances and payable session candidates
+ * without changing the existing billing-cycle defaults or ledger.
  */
 export class SessionDebtService {
   static getCurrentMonthBreakdown(
@@ -57,20 +61,30 @@ export class SessionDebtService {
     );
     for (const enrollment of enrollments) {
       const billingCycle = db.getFirstSync<any>(
-        `SELECT billing_mode as billingMode, cycle_type as cycleType
+        `SELECT id, billing_mode as billingMode, cycle_type as cycleType,
+                status
            FROM debt_cycles
           WHERE center_id = ? AND enrollment_id = ?
             AND start_date <= ? AND end_date >= ?
           ORDER BY cycle_number DESC LIMIT 1`,
         [activeCenterId, enrollment.id, periodEnd, periodStart],
       );
-      const isPerSession = billingCycle?.billingMode === "per_session" || billingCycle?.cycleType === "per_session";
+      const isPerSession = isPerSessionBillingMode(
+        billingCycle?.billingMode,
+        billingCycle?.cycleType,
+      );
       const group = db.getFirstSync<any>(
-        `SELECT id, session_price as sessionPrice, monthly_price as monthlyPrice, default_fee as defaultFee
+        `SELECT id, name, session_price as sessionPrice,
+                monthly_price as monthlyPrice, default_fee as defaultFee
          FROM groups WHERE center_id = ? AND id = ?`,
         [activeCenterId, enrollment.groupId],
       );
       if (!group) continue;
+      const configuredSessionPrice = Number(group.sessionPrice);
+      const sessionPrice =
+        Number.isFinite(configuredSessionPrice) && configuredSessionPrice > 0
+          ? configuredSessionPrice
+          : null;
       const schedules = GroupScheduleRepository.getSchedulesForGroup(enrollment.groupId);
       const dates: { date: string; scheduleId: string }[] = [];
       for (let cursor = new Date(monthStart); cursor <= monthEnd; cursor = addDays(cursor, 1)) {
@@ -90,7 +104,7 @@ export class SessionDebtService {
       for (const slot of dates) {
         const date = slot.date;
         const session = db.getFirstSync<any>(
-          `SELECT id FROM sessions
+          `SELECT id, status FROM sessions
            WHERE center_id = ? AND group_id = ? AND schedule_id = ? AND session_date = ?
            ORDER BY id LIMIT 1`,
           [activeCenterId, enrollment.groupId, slot.scheduleId, date],
@@ -106,12 +120,32 @@ export class SessionDebtService {
                SELECT 1 FROM debt_cycles dc
                 WHERE dc.center_id = payments.center_id
                   AND dc.id = payments.debt_cycle_id
-                  AND (dc.billing_mode = 'per_session' OR dc.cycle_type = 'per_session')
+                  AND (dc.billing_mode = 'per_session'
+                       OR (COALESCE(dc.billing_mode, '') = '' AND dc.cycle_type = 'per_session'))
              ))
              AND is_reversed = 0`,
           [activeCenterId, studentId, session.id],
         )?.amount || 0) : 0;
-        planned.push({ date, groupId: enrollment.groupId, scheduleId: slot.scheduleId, price: Math.max(0, perSessionPrice), sessionId: session?.id, attended: Boolean(attendance), directlyPaid: directPayment, perSession: isPerSession });
+        planned.push({
+          date,
+          groupId: enrollment.groupId,
+          scheduleId: slot.scheduleId,
+          price: Math.max(0, perSessionPrice),
+          sessionId: session?.id,
+          sessionStatus: session?.status,
+          attended: Boolean(attendance),
+          directlyPaid: directPayment,
+          perSession: isPerSession,
+          groupName: String(group.name || ""),
+          sessionPrice,
+          debtCycleId:
+            billingCycle &&
+            billingCycle.status !== "cancelled" &&
+            billingCycle.cycleType !== "package" &&
+            billingCycle.billingMode !== "package"
+              ? billingCycle.id
+              : undefined,
+        });
       }
     }
 
@@ -164,7 +198,10 @@ export class SessionDebtService {
         });
         if (!optionItems.length) continue;
         const sessionShare = subjectShare / optionItems.length;
-        optionItems.forEach((item) => { item.price = sessionShare; });
+        optionItems.forEach((item) => {
+          item.price = sessionShare;
+          item.packageCovered = true;
+        });
       }
     }
 
@@ -177,7 +214,8 @@ export class SessionDebtService {
                 SELECT 1 FROM debt_cycles dc
                  WHERE dc.center_id = payments.center_id
                    AND dc.id = payments.debt_cycle_id
-                   AND (dc.billing_mode = 'per_session' OR dc.cycle_type = 'per_session')
+                   AND (dc.billing_mode = 'per_session'
+                        OR (COALESCE(dc.billing_mode, '') = '' AND dc.cycle_type = 'per_session'))
               ))
          AND (debt_cycle_id IS NOT NULL
               OR (payment_type IN ('monthly','partial') AND session_id IS NULL))
@@ -195,7 +233,8 @@ export class SessionDebtService {
            SELECT 1 FROM debt_cycles dc
             WHERE dc.center_id = payments.center_id
               AND dc.id = payments.debt_cycle_id
-              AND (dc.billing_mode = 'per_session' OR dc.cycle_type = 'per_session')
+              AND (dc.billing_mode = 'per_session'
+                   OR (COALESCE(dc.billing_mode, '') = '' AND dc.cycle_type = 'per_session'))
          )`,
       [activeCenterId, studentId, periodStart, periodEnd],
     )?.amount || 0);
@@ -204,7 +243,9 @@ export class SessionDebtService {
     let attendedPaidSessions = 0;
     let attendedUnpaidSessions = 0;
     let currentDebt = 0;
+    const currentDebtByGroup: Record<string, number> = {};
     let sessionPriceTotal = 0;
+    const paymentCandidates: SessionPaymentCandidate[] = [];
     for (const item of planned) {
       sessionPriceTotal += item.price;
       const remainingAfterDirect = Math.max(0, item.price - item.directlyPaid);
@@ -219,10 +260,39 @@ export class SessionDebtService {
       if (monthlyAllocated > 0) pool = Math.max(0, pool - monthlyAllocated);
       const fullyPaid = item.price <= 0 || allocated >= item.price;
       if (item.attended) {
+        const sessionAmountDue = item.sessionPrice === null
+          ? 0
+          : Math.max(
+              0,
+              item.sessionPrice -
+                item.directlyPaid -
+                (item.perSession ? perSessionAllocated : 0),
+            );
+          if (
+            item.sessionId &&
+            item.debtCycleId &&
+            item.sessionStatus !== "cancelled"
+          ) {
+            paymentCandidates.push({
+              sessionId: item.sessionId,
+              groupId: item.groupId,
+            groupName: item.groupName,
+            sessionDate: item.date,
+            debtCycleId: item.debtCycleId,
+            sessionPrice: item.sessionPrice,
+            amountDue: sessionAmountDue,
+            packageCovered: item.packageCovered,
+          });
+        }
         if (fullyPaid) attendedPaidSessions += 1;
         else {
           attendedUnpaidSessions += 1;
-          if (item.perSession) currentDebt += Math.max(0, item.price - allocated);
+          if (item.perSession) {
+            const unpaidAmount = Math.max(0, item.price - allocated);
+            currentDebt += unpaidAmount;
+            currentDebtByGroup[item.groupId] =
+              (currentDebtByGroup[item.groupId] || 0) + unpaidAmount;
+          }
         }
       } else if (fullyPaid) {
         futurePaidSessions += 1;
@@ -231,6 +301,80 @@ export class SessionDebtService {
       }
     }
 
-    return { periodStart, periodEnd, expectedSessions: planned.length, futureUnpaidSessions, futurePaidSessions, attendedPaidSessions, attendedUnpaidSessions, currentDebt, sessionPriceTotal };
+    const plannedSessionIds = new Set(
+      planned.map((item) => item.sessionId).filter((id): id is string => Boolean(id)),
+    );
+    const externalAttendance = db.getAllSync<any>(
+      `SELECT session_id as sessionId, status, is_external as isExternal
+       FROM attendance
+       WHERE center_id = ? AND student_id = ?`,
+      [activeCenterId, studentId],
+    );
+    for (const attendance of externalAttendance) {
+      if (
+        !attendance.isExternal ||
+        !["present", "late"].includes(attendance.status) ||
+        plannedSessionIds.has(attendance.sessionId)
+      ) {
+        continue;
+      }
+      const session = db.getFirstSync<any>(
+        `SELECT id, group_id as groupId, session_date as sessionDate, status
+         FROM sessions WHERE center_id = ? AND id = ?`,
+        [activeCenterId, attendance.sessionId],
+      );
+      if (
+        !session ||
+        session.status === "cancelled" ||
+        session.sessionDate < periodStart ||
+        session.sessionDate > periodEnd ||
+        (groupId && session.groupId !== groupId)
+      ) {
+        continue;
+      }
+      const group = db.getFirstSync<any>(
+        `SELECT id, name, session_price as sessionPrice
+         FROM groups WHERE center_id = ? AND id = ?`,
+        [activeCenterId, session.groupId],
+      );
+      if (!group) continue;
+
+      const configuredSessionPrice = Number(group.sessionPrice);
+      const sessionPrice =
+        Number.isFinite(configuredSessionPrice) && configuredSessionPrice > 0
+          ? configuredSessionPrice
+          : null;
+      const directlyPaid = Number(db.getFirstSync<any>(
+        `SELECT COALESCE(SUM(amount), 0) as amount FROM payments
+         WHERE center_id = ? AND student_id = ? AND session_id = ?
+           AND (payment_type = 'session' OR debt_cycle_id IS NULL)
+           AND is_reversed = 0`,
+        [activeCenterId, studentId, session.id],
+      )?.amount || 0);
+      paymentCandidates.push({
+        sessionId: session.id,
+        groupId: session.groupId,
+        groupName: String(group.name || ""),
+        sessionDate: session.sessionDate,
+        sessionPrice,
+        amountDue: sessionPrice === null
+          ? 0
+          : Math.max(0, sessionPrice - directlyPaid),
+      });
+    }
+
+    return {
+      periodStart,
+      periodEnd,
+      expectedSessions: planned.length,
+      futureUnpaidSessions,
+      futurePaidSessions,
+      attendedPaidSessions,
+      attendedUnpaidSessions,
+      currentDebt,
+      sessionPriceTotal,
+      currentDebtByGroup,
+      paymentCandidates,
+    };
   }
 }

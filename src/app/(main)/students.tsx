@@ -17,6 +17,7 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalDataRevision } from "../../core/database/useLocalDataRevision";
+import { getUserErrorMessage } from "../../core/errors";
 import { formatCurrency, formatTimeArabic, Strings } from "../../core/localization";
 import { formatLocalDate, formatLocalDateTime, getLocalDateOnly } from "../../shared/utils/date";
 import { PermissionService } from "../../core/permissions";
@@ -29,6 +30,7 @@ import {
   AttendanceRepository,
   StudentAttendanceHistoryRecord,
 } from "../../features/attendance/AttendanceRepository";
+import { getAttendanceHistoryPresentation } from "../../features/attendance/attendanceHistoryPresentation";
 import { PackageRepository } from "../../features/packages/PackageRepository";
 import { PackageSubscriptionRepository } from "../../features/packages/PackageSubscriptionRepository";
 import { GroupRepository } from "../../features/groups/GroupRepository";
@@ -37,15 +39,20 @@ import { returnToGroupDetailsIfRequested } from "../../features/groups/groupNavi
 import { TeacherSubjectRepository } from "../../features/teachers/TeacherSubjectRepository";
 import { TeacherRepository } from "../../features/teachers/TeacherRepository";
 import { DebtAdjustmentRepository } from "../../features/payments/DebtAdjustmentRepository";
+import { DebtCycleRepository } from "../../features/payments/DebtCycleRepository";
 import { FinancialCalculationService } from "../../features/payments/FinancialCalculationService";
 import { PaymentRepository } from "../../features/payments/PaymentRepository";
+import { submitPaymentAction } from "../../features/payments/paymentActionService";
 import {
   getConfiguredSessionPrice,
+  getPayableSessionPaymentCandidates,
+  getSessionPaymentActionState,
   getSessionPaymentCycles,
+  getSessionPaymentUnavailableReason,
   hasPayableSessionDebt,
 } from "../../features/payments/paymentEligibility";
 import { getPaymentDescription, getDebtCyclePeriodLabel } from "../../features/payments/paymentPresentation";
-import { PaymentOperationIdentity, resolvePaymentOperationIdentity } from "../../features/payments/paymentSubmissionIdentity";
+import { PaymentOperationIdentity } from "../../features/payments/paymentSubmissionIdentity";
 import { GradeBookRepository, GradeExam, GradeScore } from "../../features/grades/GradeBookRepository";
 import { HomeworkEvaluationRepository } from "../../features/homework/HomeworkEvaluationRepository";
 import { saveGradeEdit } from "../../features/grades/gradeScoreEdit";
@@ -82,6 +89,7 @@ import {
     PackageSubject,
 } from "../../shared/types";
 import { formatDisplayIdentifier } from "../../shared/utils/formatters";
+import { isPerSessionBillingMode } from "../../shared/utils/billingMode";
 
 const WEEK_DAYS = ["الأحد", "الإثنين", "الثلاثاء", "الأربعاء", "الخميس", "الجمعة", "السبت"];
 
@@ -225,6 +233,10 @@ export default function StudentsScreen() {
   const [isCardModalOpen, setIsCardModalOpen] = useState(false);
   const [isEnrollModalOpen, setIsEnrollModalOpen] = useState(false);
   const [isPaymentModalOpen, setIsPaymentModalOpen] = useState(false);
+  const [sessionBillingCycle, setSessionBillingCycle] = useState<DebtCycle | null>(null);
+  const [sessionBillingError, setSessionBillingError] = useState<string | null>(null);
+  const [isChangingSessionBillingMode, setIsChangingSessionBillingMode] = useState(false);
+  const sessionBillingChangeRef = useRef(false);
   const [isAdjModalOpen, setIsAdjModalOpen] = useState(false);
   const [isRevModalOpen, setIsRevModalOpen] = useState(false);
   const [isPackageModalOpen, setIsPackageModalOpen] = useState(false);
@@ -251,6 +263,7 @@ export default function StudentsScreen() {
     "monthly" | "session" | "partial"
   >("monthly");
   const [paymentCycleId, setPaymentCycleId] = useState("");
+  const [paymentSessionId, setPaymentSessionId] = useState("");
   const [paymentNotes, setPaymentNotes] = useState("");
   const [paymentAdvanceMode, setPaymentAdvanceMode] = useState(false);
   const [paymentFormError, setPaymentFormError] = useState("");
@@ -267,17 +280,11 @@ export default function StudentsScreen() {
   const getSessionOutstandingForCycle = useCallback((
     status: DetailedStudentFinancialStatus,
     cycle?: DebtCycle,
-  ) => {
-    if (cycle?.groupId && selectedStudent) {
-      return Number(
-        FinancialCalculationService.getStudentFinancialStatusForGroup(
-          selectedStudent.id,
-          cycle.groupId,
-        ).currentPeriodDebt || 0,
-      );
-    }
-    return Number(status.currentPeriodDebt || 0);
-  }, [selectedStudent?.id]);
+    sessionId = paymentSessionId,
+  ) => getPayableSessionPaymentCandidates(status, sessionId || undefined)
+    .filter((candidate) => !cycle || candidate.debtCycleId === cycle.id)
+    .reduce((sum, candidate) => sum + candidate.amountDue, 0),
+  [paymentSessionId]);
   const getSessionPriceForCycle = (cycle?: DebtCycle) => {
     if (!cycle?.groupId) return undefined;
     const group = availableGroups.find((item) => item.id === cycle.groupId)
@@ -443,14 +450,40 @@ export default function StudentsScreen() {
     }
   }, [localDataRevision]);
 
-  // Keep the profile payment form aligned with the attendance payment flow:
-  // cycle payments start with the open month/package balance, while a session
-  // payment starts with a per-session amount and remains separate.
+  // Keep the profile payment form aligned with the attendance payment flow.
   useEffect(() => {
     if (!isPaymentModalOpen || !financialStatus || paymentAdvanceMode) return;
-    const candidates = (paymentType === "session"
-      ? getSessionPaymentCycles(financialStatus.cycles, financialStatus.sessionDebt)
-      : financialStatus.cycles.filter((cycle) => (cycle.remainingDebt ?? 0) > 0))
+    if (paymentType === "session") {
+      const sessionCandidates = getPayableSessionPaymentCandidates(financialStatus);
+      const selectedSession = sessionCandidates.find(
+        (candidate) => candidate.sessionId === paymentSessionId,
+      ) || (sessionCandidates.length === 1 ? sessionCandidates[0] : undefined);
+      if (
+        !paymentSessionId &&
+        sessionCandidates.length === 1 &&
+        selectedSession
+      ) {
+        setPaymentSessionId(selectedSession.sessionId);
+      } else if (
+        paymentSessionId &&
+        !sessionCandidates.some((candidate) => candidate.sessionId === paymentSessionId)
+      ) {
+        setPaymentSessionId("");
+      }
+      const cycleId = selectedSession?.debtCycleId || "";
+      if (paymentCycleId !== cycleId) setPaymentCycleId(cycleId);
+      const due = selectedSession?.amountDue || 0;
+      setPaymentDueAmount(due);
+      if (selectedSession && (!paymentAmount || Number(paymentAmount) === 0)) {
+        setPaymentAmount(String(due));
+      } else if (!selectedSession && paymentAmount) {
+        setPaymentAmount("");
+      }
+      return;
+    }
+
+    const candidates = financialStatus.cycles
+      .filter((cycle) => (cycle.remainingDebt ?? 0) > 0)
       .sort((a, b) => {
         const byStart = String(a.startDate).localeCompare(String(b.startDate));
         if (byStart !== 0) return byStart;
@@ -464,14 +497,20 @@ export default function StudentsScreen() {
     if (candidates.length !== 1 && paymentCycleId && !candidates.some((cycle) => cycle.id === paymentCycleId)) {
       setPaymentCycleId("");
     }
-    const due = paymentType === "session"
-      ? getSessionOutstandingForCycle(financialStatus, selectedCycle)
-      : Number(selectedCycle?.remainingDebt ?? financialStatus.monthlyRemainingDebt ?? 0);
+    const due = Number(selectedCycle?.remainingDebt ?? financialStatus.monthlyRemainingDebt ?? 0);
     setPaymentDueAmount(due);
     if ((!paymentAmount || Number(paymentAmount) === 0) && !(candidates.length > 1 && !selectedCycle)) {
       setPaymentAmount(due > 0 ? String(due) : "");
     }
-  }, [isPaymentModalOpen, paymentType, financialStatus, paymentCycleId, paymentAdvanceMode, getSessionOutstandingForCycle]);
+  }, [
+    isPaymentModalOpen,
+    paymentType,
+    financialStatus,
+    paymentCycleId,
+    paymentSessionId,
+    paymentAdvanceMode,
+    paymentAmount,
+  ]);
 
   const openPaymentModal = (advance = false, requestedType?: "monthly" | "session") => {
     let latest = financialStatus;
@@ -487,11 +526,13 @@ export default function StudentsScreen() {
       return;
     }
     if (!latest) return;
-    const sessionPaymentAvailable = hasPayableSessionDebt(latest);
+    const sessionCandidates = getPayableSessionPaymentCandidates(latest);
+    const sessionPaymentAvailable = sessionCandidates.length > 0;
     if (!advance && requestedType === "session" && !sessionPaymentAvailable) {
       setPaymentNotice({
         title: "لا توجد رسوم حصص مستحقة",
-        message: "لا يمكن تسجيل دفع حصة إلا عند وجود مستحقات على دورة مضبوطة صراحةً بنظام الحصة.",
+        message: getSessionPaymentUnavailableReason(latest)
+          || "لا توجد حصة غير مسددة يمكن تحصيلها حاليًا.",
       });
       return;
     }
@@ -512,13 +553,26 @@ export default function StudentsScreen() {
       ? "monthly"
       : requestedType || (Number(latest.monthlyRemainingDebt || 0) > 0 ? "monthly" : "session");
     setPaymentType(initialType);
+    const initialSessionCandidate =
+      initialType === "session" && sessionCandidates.length === 1
+        ? sessionCandidates[0]
+        : undefined;
+    setPaymentSessionId(initialSessionCandidate?.sessionId || "");
     const initialCycles = initialType === "session"
-      ? getSessionPaymentCycles(latest.cycles, latest.sessionDebt)
+      ? getSessionPaymentCycles(latest.cycles, {
+          paymentCandidates: sessionCandidates,
+        })
       : latest.cycles.filter((cycle) => (cycle.remainingDebt ?? 0) > 0);
-    const selectedCycle = initialCycles.length === 1 ? initialCycles[0] : undefined;
+    const selectedCycle = initialSessionCandidate?.debtCycleId
+      ? latest.cycles.find((cycle) => cycle.id === initialSessionCandidate.debtCycleId)
+      : initialType === "session"
+        ? undefined
+        : initialCycles.length === 1
+          ? initialCycles[0]
+          : undefined;
     setPaymentCycleId(selectedCycle?.id || "");
     const initialDue = initialType === "session"
-      ? getSessionOutstandingForCycle(latest, selectedCycle)
+      ? initialSessionCandidate?.amountDue || 0
       : Number(selectedCycle?.remainingDebt ?? latest.monthlyRemainingDebt ?? 0);
     setPaymentDueAmount(initialDue);
     setPaymentAmount(initialDue > 0 && initialCycles.length <= 1 ? String(initialDue) : "");
@@ -529,6 +583,8 @@ export default function StudentsScreen() {
   };
 
   const openStudentDetails = (student: Student) => {
+    setSessionBillingCycle(null);
+    setSessionBillingError(null);
     if (selectedStudent?.id !== student.id) setProfileTab("groups");
     setSelectedStudent(student);
     setFinancialStatus(null);
@@ -837,8 +893,25 @@ export default function StudentsScreen() {
       );
       setFinancialStatus(latestFinancialStatus);
       const sessionPayment = paymentType === "session";
+      const payableSessions = sessionPayment
+        ? getPayableSessionPaymentCandidates(latestFinancialStatus)
+        : [];
+      const selectedSession = sessionPayment
+        ? payableSessions.find((candidate) => candidate.sessionId === paymentSessionId)
+          || (payableSessions.length === 1 ? payableSessions[0] : undefined)
+        : undefined;
+      if (sessionPayment && !selectedSession) {
+        throw new Error(
+          payableSessions.length > 1
+            ? "اختر الحصة التي ستُنسب إليها الدفعة."
+            : getSessionPaymentUnavailableReason(latestFinancialStatus)
+              || "لا توجد حصة مستحقة للتحصيل حاليًا.",
+        );
+      }
       const openCycles = sessionPayment
-        ? getSessionPaymentCycles(latestFinancialStatus.cycles, latestFinancialStatus.sessionDebt)
+        ? getSessionPaymentCycles(latestFinancialStatus.cycles, {
+            paymentCandidates: payableSessions,
+          })
         : latestFinancialStatus.cycles.filter((cycle) => (cycle.remainingDebt ?? 0) > 0);
       const orderedOpenCycles = [...openCycles].sort((a, b) => {
         const byStart = String(a.startDate).localeCompare(String(b.startDate));
@@ -846,42 +919,53 @@ export default function StudentsScreen() {
         if (a.cycleType === b.cycleType) return 0;
         return a.cycleType === "package" ? -1 : 1;
       });
-      const selectedCycle = orderedOpenCycles.find((cycle) => cycle.id === paymentCycleId)
-        || (orderedOpenCycles.length === 1 ? orderedOpenCycles[0] : undefined);
-      if (!paymentAdvanceMode && orderedOpenCycles.length > 1 && !selectedCycle) {
+      const selectedCycle = sessionPayment
+        ? selectedSession?.debtCycleId
+          ? latestFinancialStatus.cycles.find((cycle) => cycle.id === selectedSession.debtCycleId)
+          : undefined
+        : orderedOpenCycles.find((cycle) => cycle.id === paymentCycleId)
+          || (orderedOpenCycles.length === 1 ? orderedOpenCycles[0] : undefined);
+      if (!paymentAdvanceMode && !sessionPayment && orderedOpenCycles.length > 1 && !selectedCycle) {
         throw new Error(sessionPayment
           ? "اختر مجموعة رسوم الحصص التي ستُنسب إليها الدفعة."
           : "اختر دورة المديونية التي ستخصم منها الدفعة.");
       }
-      if (sessionPayment && !hasPayableSessionDebt(latestFinancialStatus)) {
-        throw new Error("لا توجد رسوم حصص مستحقة للتحصيل حاليًا.");
+      if (sessionPayment && !selectedSession) {
+        throw new Error(
+          getSessionPaymentUnavailableReason(latestFinancialStatus) ||
+          "لا توجد رسوم حصص مستحقة للتحصيل حاليًا.",
+        );
       }
       const normalizedPaymentType = paymentType === "monthly" && selectedCycle && amountNum >= Number(selectedCycle.remainingDebt ?? 0)
         ? "monthly"
         : paymentType;
+      const outstanding = sessionPayment
+        ? Number(selectedSession?.amountDue || 0)
+        : Number(selectedCycle?.remainingDebt ?? latestFinancialStatus.monthlyRemainingDebt ?? 0);
+      if (!paymentAdvanceMode && amountNum > outstanding + 0.000001) {
+        throw new Error(`المبلغ يتجاوز المتبقي المستحق (${formatCurrency(outstanding)}).`);
+      }
       const paymentRequest = {
         centerId: activeCenterId || selectedStudent.centerId,
         studentId: selectedStudent.id,
         amount: amountNum,
         paymentType: normalizedPaymentType,
-        debtCycleId: selectedCycle?.id,
-        subscriptionId: selectedCycle?.packageSubscriptionId,
+        debtCycleId: sessionPayment ? selectedSession?.debtCycleId : selectedCycle?.id,
+        sessionId: sessionPayment ? selectedSession?.sessionId : undefined,
+        subscriptionId: sessionPayment ? undefined : selectedCycle?.packageSubscriptionId,
         notes: paymentNotes.trim() || undefined,
         allowCreditBalance: paymentAdvanceMode,
       };
-      const paymentIdentity = resolvePaymentOperationIdentity(
+      await submitPaymentAction(
         paymentRequest,
         paymentOperationIdentityRef.current,
+        (identity) => { paymentOperationIdentityRef.current = identity; },
       );
-      paymentOperationIdentityRef.current = paymentIdentity;
-      await PaymentRepository.recordPayment({
-        ...paymentRequest,
-        operationId: paymentIdentity.operationId,
-      });
       setIsPaymentModalOpen(false);
       setPaymentAmount("");
       setPaymentNotes("");
       setPaymentCycleId("");
+      setPaymentSessionId("");
       setPaymentAdvanceMode(false);
       paymentOperationIdentityRef.current = null;
       setPaymentNotice({
@@ -1136,6 +1220,52 @@ export default function StudentsScreen() {
     "payments.adjust",
   );
 
+  const openSessionBillingModeConfirmation = (cycle: DebtCycle) => {
+    if (!canAdjustDebt) {
+      setPaymentNotice({
+        title: "الصلاحية غير متاحة",
+        message: "ليس لديك صلاحية تحديد نظام الفوترة.",
+      });
+      return;
+    }
+    setSessionBillingError(null);
+    setSessionBillingCycle(cycle);
+  };
+
+  const confirmSessionBillingMode = () => {
+    if (sessionBillingChangeRef.current || !sessionBillingCycle || !selectedStudent) return;
+    if (!canAdjustDebt) {
+      setSessionBillingError("ليس لديك صلاحية تحديد نظام الفوترة.");
+      return;
+    }
+    if (!activeCenterId || sessionBillingCycle.centerId !== activeCenterId ||
+        sessionBillingCycle.studentId !== selectedStudent.id) {
+      setSessionBillingError("تغير المركز أو الطالب؛ أغلق النافذة وأعد تحميل البيانات.");
+      return;
+    }
+
+    sessionBillingChangeRef.current = true;
+    setIsChangingSessionBillingMode(true);
+    setSessionBillingError(null);
+    try {
+      DebtCycleRepository.setBillingMode(sessionBillingCycle.id, "per_session");
+      setFinancialStatus(
+        FinancialCalculationService.getStudentFinancialStatus(selectedStudent.id),
+      );
+      setSessionBillingCycle(null);
+      setPaymentNotice({
+        title: "تم تحديد الدفع بالحصة",
+        message: "تم تغيير نظام الفوترة لهذه الدورة فقط. لم يتم تسجيل دفعة؛ سيظهر التحصيل بعد تسجيل حضور غير مدفوع.",
+        success: true,
+      });
+    } catch (error) {
+      setSessionBillingError(getUserErrorMessage(error));
+    } finally {
+      sessionBillingChangeRef.current = false;
+      setIsChangingSessionBillingMode(false);
+    }
+  };
+
   const confirmAttendanceCancellation = async () => {
     if (!attendanceToCancel || cancellingAttendance) return;
     setCancellingAttendance(true);
@@ -1268,11 +1398,24 @@ export default function StudentsScreen() {
     setIsEnrollModalOpen(true);
   };
 
+  const paymentSessionCandidates = financialStatus
+    ? getPayableSessionPaymentCandidates(financialStatus)
+    : [];
+  const selectedPaymentSession = paymentSessionCandidates.find(
+    (candidate) => candidate.sessionId === paymentSessionId,
+  ) || (paymentSessionCandidates.length === 1 ? paymentSessionCandidates[0] : undefined);
   const paymentCyclesForModal = !financialStatus
     ? []
     : paymentType === "session"
-      ? getSessionPaymentCycles(financialStatus.cycles, financialStatus.sessionDebt)
+      ? getSessionPaymentCycles(financialStatus.cycles, {
+          paymentCandidates: paymentSessionCandidates,
+        })
       : financialStatus.cycles.filter((cycle) => (cycle.remainingDebt ?? 0) > 0);
+  const sessionPaymentActionState = getSessionPaymentActionState(
+    financialStatus,
+    canCreatePayment,
+    isRecordingPayment,
+  );
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -1632,6 +1775,7 @@ export default function StudentsScreen() {
                         if (!(error instanceof SyntaxError)) throw error;
                       }
                     }
+                    const attendancePresentation = getAttendanceHistoryPresentation(row);
                     return (
                       <View key={row.id} style={[
                         styles.profileAttendanceRecord,
@@ -1661,14 +1805,22 @@ export default function StudentsScreen() {
                             <View style={styles.profileAttendanceRecordDatePart}>
                               <Ionicons name="calendar-outline" size={15} color={Colors.slate500} />
                               <Text style={styles.profileAttendanceRecordMeta}>
-                                {row.sessionDate ? formatLocalDate(row.sessionDate) : "تاريخ غير متاح"}
+                                {attendancePresentation.sessionDateLabel}
                               </Text>
                             </View>
-                            {row.startTime ? (
+                            {attendancePresentation.checkInTimeLabel ? (
                               <View style={styles.profileAttendanceRecordDatePart}>
                                 <Ionicons name="time-outline" size={15} color={Colors.slate500} />
                                 <Text style={styles.profileAttendanceRecordMeta}>
-                                  {formatTimeArabic(row.startTime.slice(0, 5))}
+                                  {attendancePresentation.checkInTimeLabel}
+                                </Text>
+                              </View>
+                            ) : null}
+                            {attendancePresentation.sessionStartTimeLabel ? (
+                              <View style={styles.profileAttendanceRecordDatePart}>
+                                <Ionicons name="time-outline" size={15} color={Colors.slate500} />
+                                <Text style={styles.profileAttendanceRecordMeta}>
+                                  {attendancePresentation.sessionStartTimeLabel}
                                 </Text>
                               </View>
                             ) : null}
@@ -1724,11 +1876,11 @@ export default function StudentsScreen() {
                       </TouchableOpacity>
                       <TouchableOpacity
                         accessibilityRole="button"
-                        accessibilityState={{ disabled: !financialStatus || !hasPayableSessionDebt(financialStatus) }}
-                        disabled={!financialStatus || !hasPayableSessionDebt(financialStatus)}
+                        accessibilityState={{ disabled: sessionPaymentActionState.disabled }}
+                        disabled={sessionPaymentActionState.disabled}
                         style={[
                           styles.profileInlineAction,
-                          (!financialStatus || !hasPayableSessionDebt(financialStatus)) && { opacity: 0.45 },
+                          sessionPaymentActionState.disabled && { opacity: 0.45 },
                         ]}
                         onPress={() => openPaymentModal(false, "session")}
                       >
@@ -1745,6 +1897,12 @@ export default function StudentsScreen() {
                       </TouchableOpacity>
                     </View>
                   )}
+                  {sessionPaymentActionState.reason ? (
+                    <Text style={styles.profileRowMeta}>{sessionPaymentActionState.reason}</Text>
+                  ) : null}
+                  {!canCreatePayment ? (
+                    <Text style={styles.profileRowMeta}>ليس لديك صلاحية تسجيل المدفوعات.</Text>
+                  ) : null}
                   {!financialStatus ? (
                     <View style={styles.profileEmpty}><Text style={styles.profileEmptyText}>تعذر تحميل بيانات المدفوعات.</Text></View>
                   ) : (
@@ -1797,9 +1955,9 @@ export default function StudentsScreen() {
                         );
                       }) : null}
                       <Text style={styles.profileSubsectionTitle}>الاشتراكات الشهرية والباقات</Text>
-                      {financialStatus.cycles.filter((cycle) => cycle.billingMode !== "per_session" && cycle.cycleType !== "per_session").length
+                      {financialStatus.cycles.filter((cycle) => !isPerSessionBillingMode(cycle.billingMode, cycle.cycleType)).length
                         ? financialStatus.cycles
-                          .filter((cycle) => cycle.billingMode !== "per_session" && cycle.cycleType !== "per_session")
+                          .filter((cycle) => !isPerSessionBillingMode(cycle.billingMode, cycle.cycleType))
                           .map((cycle) => {
                             const due = Math.max(0, Number(cycle.effectivePrice ?? cycle.effectiveDue ?? cycle.cyclePrice ?? 0));
                             const paid = Math.max(0, Number(cycle.paidAmount ?? cycle.totalPaid ?? 0));
@@ -1818,12 +1976,24 @@ export default function StudentsScreen() {
                             const statusType = cycle.status === "cancelled" ? "neutral" as const
                               : due === 0 || remaining === 0 ? "success" as const
                                 : paid > 0 ? "info" as const : "warning" as const;
+                            const hasSpecialMonthlyPrice = studentEnrollments.some(
+                              (enrollment) =>
+                                enrollment.id === cycle.enrollmentId &&
+                                enrollment.specialMonthlyPrice != null,
+                            );
+                            const hasCycleAdjustment = financialStatus.adjustments.some(
+                              (adjustment) => adjustment.debtCycleId === cycle.id,
+                            );
                             return (
                               <View key={cycle.id} style={styles.profileDebtCycleCard}>
                                 <View style={styles.profileFinanceCardHeading}>
                                   <View style={styles.profileRowCopy}>
                                     <Text style={styles.profileRowTitle}>
-                                      {cycle.cycleType === "package" ? "باقة" : "اشتراك شهري"} · {period || `${Strings.cycleNumberPrefix} ${cycle.cycleNumber}`}
+                                      {cycle.cycleType === "package"
+                                        ? "باقة"
+                                        : cycle.billingMode === "pending"
+                                          ? "نظام فوترة غير محدد"
+                                          : "اشتراك شهري"} · {period || `${Strings.cycleNumberPrefix} ${cycle.cycleNumber}`}
                                     </Text>
                                     <Text style={styles.profileRowMeta}>{cycle.packageName || cycle.groupName || "التزام مالي"}</Text>
                                   </View>
@@ -1845,6 +2015,40 @@ export default function StudentsScreen() {
                                   <View style={[styles.profileCycleProgress, { width: `${progress}%`, backgroundColor: remaining > 0 ? Colors.primary : Colors.success }]} />
                                 </View>
                                 {period ? <Text style={styles.profileCycleDates}>{formatLocalDate(cycle.startDate)} — {formatLocalDate(cycle.endDate)}</Text> : null}
+                                {cycle.billingMode === "pending" ? (
+                                  <>
+                                    <Text style={styles.profileRowMeta}>
+                                      لم يُحدد نظام الفوترة لهذه الدورة؛ لن يُسجل دفع بالحصة قبل تحديده صراحةً.
+                                    </Text>
+                                    {hasSpecialMonthlyPrice ? (
+                                      <Text style={styles.profileRowMeta}>
+                                        لهذا التسجيل سعر شهري خاص؛ لا يمكن تحويله إلى الدفع بالحصة لأن النظام لا يحدد خصمًا لكل حصة.
+                                      </Text>
+                                    ) : null}
+                                    {hasCycleAdjustment ? (
+                                      <Text style={styles.profileRowMeta}>
+                                        تحتوي هذه الدورة على خصم أو تعديل محفوظ؛ لا يمكن تحويلها إلى الدفع بالحصة دون تغيير ذلك الاستحقاق.
+                                      </Text>
+                                    ) : null}
+                                    {canAdjustDebt &&
+                                    cycle.cycleType !== "package" &&
+                                    !cycle.packageSubscriptionId &&
+                                    !hasSpecialMonthlyPrice &&
+                                    !hasCycleAdjustment &&
+                                    cycle.status !== "cancelled" &&
+                                    cycle.status !== "paid" ? (
+                                      <TouchableOpacity
+                                        accessibilityRole="button"
+                                        accessibilityLabel="تحديد نظام الفوترة للدفع بالحصة"
+                                        style={styles.profileInlineAction}
+                                        onPress={() => openSessionBillingModeConfirmation(cycle)}
+                                      >
+                                        <Ionicons name="cash-outline" size={17} color={Colors.primary} />
+                                        <Text style={styles.profileInlineActionText}>تحديد الدفع بالحصة</Text>
+                                      </TouchableOpacity>
+                                    ) : null}
+                                  </>
+                                ) : null}
                               </View>
                             );
                           })
@@ -2558,11 +2762,15 @@ export default function StudentsScreen() {
                       <Text style={styles.groupDetailsSubtitle}>السجل المسجل</Text>
                       {groupAttendanceRows.length === 0 ? <Text style={styles.emptyText}>لا توجد سجلات لهذه المجموعة.</Text> : groupAttendanceRows.map((row) => {
                         const absent = row.status === "absent";
-                        const label = absent
+                        const absenceState = absent || row.status === "excused";
+                        const label = row.status === "excused"
+                          ? "غائب بعذر"
+                          : absent
                           ? row.attendanceType === "makeup" ? "غياب عن التعويض" : "غياب"
                           : row.attendanceType === "makeup" ? "تعويض"
                             : row.status === "late" || row.isLate ? "متأخر" : "حاضر";
-                        const statusType = absent ? "danger" : row.attendanceType === "makeup" || row.isLate ? "warning" : "success";
+                        const statusType = absenceState ? "danger" : row.attendanceType === "makeup" || row.isLate ? "warning" : "success";
+                        const attendancePresentation = getAttendanceHistoryPresentation(row);
                         return (
                           <View key={row.id} style={[
                             styles.detailHistoryRow,
@@ -2572,9 +2780,14 @@ export default function StudentsScreen() {
                           ]}>
                             <View style={{ flex: 1 }}>
                               <Text style={styles.detailHistoryTitle}>
-                                {row.sessionDate ? formatLocalDate(row.sessionDate) : "تاريخ غير متاح"}
-                                {row.startTime ? ` · ${formatTimeArabic(row.startTime.slice(0, 5))}` : ""}
+                                {attendancePresentation.sessionDateLabel}
                               </Text>
+                              {attendancePresentation.checkInTimeLabel ? (
+                                <Text style={styles.detailHistoryMeta}>{attendancePresentation.checkInTimeLabel}</Text>
+                              ) : null}
+                              {attendancePresentation.sessionStartTimeLabel ? (
+                                <Text style={styles.detailHistoryMeta}>{attendancePresentation.sessionStartTimeLabel}</Text>
+                              ) : null}
                               <Text style={styles.detailHistoryMeta}>{row.attendanceType === "makeup" ? "حصة تعويضية" : "الحصة الأساسية"}</Text>
                               {canEditAttendance && !row.isDerivedAbsence && !absent && (
                                 <TouchableOpacity style={styles.cancelAttendanceAction} onPress={() => setAttendanceToCancel(row)}>
@@ -2761,7 +2974,7 @@ export default function StudentsScreen() {
               {(paymentAdvanceMode ? (["monthly", "partial"] as const) : (["monthly", "partial", "session"] as const)).map((type) => {
                 const disabled = !paymentAdvanceMode && (
                   type === "session"
-                    ? !financialStatus || !hasPayableSessionDebt(financialStatus)
+                    ? !financialStatus || paymentSessionCandidates.length === 0
                     : Number(financialStatus?.monthlyRemainingDebt || 0) <= 0
                 );
                 return (
@@ -2775,17 +2988,36 @@ export default function StudentsScreen() {
                   disabled={disabled}
                   onPress={() => {
                     if (!financialStatus) return;
-                    const candidates = type === "session"
-                      ? getSessionPaymentCycles(financialStatus.cycles, financialStatus.sessionDebt)
+                    const sessionCandidate = type === "session" && paymentSessionCandidates.length === 1
+                      ? paymentSessionCandidates[0]
+                      : undefined;
+                    const cycles = type === "session"
+                      ? getSessionPaymentCycles(financialStatus.cycles, {
+                          paymentCandidates: paymentSessionCandidates,
+                        })
                       : financialStatus.cycles.filter((cycle) => (cycle.remainingDebt ?? 0) > 0);
-                    const selectedCycle = candidates.length === 1 ? candidates[0] : undefined;
+                    const selectedCycle = sessionCandidate?.debtCycleId
+                      ? financialStatus.cycles.find((cycle) => cycle.id === sessionCandidate.debtCycleId)
+                      : type === "session"
+                        ? undefined
+                        : cycles.length === 1
+                          ? cycles[0]
+                          : undefined;
                     const due = type === "session"
-                      ? getSessionOutstandingForCycle(financialStatus, selectedCycle)
+                      ? sessionCandidate?.amountDue || 0
                       : Number(selectedCycle?.remainingDebt ?? financialStatus.monthlyRemainingDebt ?? 0);
                     setPaymentType(type);
+                    setPaymentSessionId(sessionCandidate?.sessionId || "");
                     setPaymentCycleId(selectedCycle?.id || "");
                     setPaymentDueAmount(due);
-                    setPaymentAmount(due > 0 && candidates.length <= 1 ? String(due) : "");
+                    setPaymentAmount(
+                      due > 0 &&
+                      (type === "session"
+                        ? paymentSessionCandidates.length === 1
+                        : cycles.length <= 1)
+                        ? String(due)
+                        : "",
+                    );
                     setPaymentFormError("");
                   }}
                 >
@@ -2806,6 +3038,44 @@ export default function StudentsScreen() {
               })}
             </View>
 
+            {!paymentAdvanceMode && paymentType === "session" ? (
+              <View style={styles.paymentCyclePicker}>
+                <Text style={styles.paymentCycleTitle}>اختر الحصة المسجل حضورها</Text>
+                {paymentSessionCandidates.length ? paymentSessionCandidates.map((candidate) => (
+                  <TouchableOpacity
+                    key={candidate.sessionId}
+                    style={[
+                      styles.paymentCycleOption,
+                      selectedPaymentSession?.sessionId === candidate.sessionId &&
+                        styles.paymentCycleOptionActive,
+                    ]}
+                    onPress={() => {
+                      setPaymentSessionId(candidate.sessionId);
+                      setPaymentCycleId(candidate.debtCycleId || "");
+                      setPaymentDueAmount(candidate.amountDue);
+                      setPaymentAmount(String(candidate.amountDue));
+                      setPaymentFormError("");
+                    }}
+                  >
+                    <Text style={styles.paymentCycleName}>
+                      {candidate.groupName || "المجموعة"} · {formatLocalDate(candidate.sessionDate)}
+                    </Text>
+                    <Text style={styles.paymentCycleAmount}>
+                      سعر الحصة: {candidate.sessionPrice === null
+                        ? "غير محدد"
+                        : formatCurrency(candidate.sessionPrice)}
+                      {" · "}
+                      المتبقي: {formatCurrency(candidate.amountDue)}
+                    </Text>
+                  </TouchableOpacity>
+                )) : (
+                  <Text style={styles.profileRowMeta}>
+                    {sessionPaymentActionState.reason || "لا توجد حصة مستحقة للتحصيل حاليًا."}
+                  </Text>
+                )}
+              </View>
+            ) : null}
+
             {!paymentAdvanceMode && paymentDueAmount > 0 ? (
               <View style={styles.paymentDuePreview}>
                 <Text style={styles.paymentDuePreviewLabel}>
@@ -2816,15 +3086,20 @@ export default function StudentsScreen() {
             ) : null}
 
             {!paymentAdvanceMode && paymentType === "session" ? (() => {
-              const selectedCycle = paymentCyclesForModal.find((cycle) => cycle.id === paymentCycleId)
-                || (paymentCyclesForModal.length === 1 ? paymentCyclesForModal[0] : undefined);
-              const price = getSessionPriceForCycle(selectedCycle);
               return (
                 <View style={[styles.paymentDuePreview, { flexDirection: "column", alignItems: "stretch", gap: Spacing.sm }]}>
                   <View style={{ flexDirection: "row-reverse", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-                    <Text style={styles.paymentDuePreviewLabel}>سعر الحصة للوحدة</Text>
+                    <Text style={styles.paymentDuePreviewLabel}>
+                      {selectedPaymentSession
+                        ? `${selectedPaymentSession.groupName} · ${formatLocalDate(selectedPaymentSession.sessionDate)}`
+                        : "الجلسة المحددة"}
+                    </Text>
                     <Text style={styles.paymentDuePreviewValue}>
-                      {selectedCycle ? price === undefined ? "غير متاح" : formatCurrency(price) : "اختر المجموعة"}
+                      {selectedPaymentSession
+                        ? selectedPaymentSession.sessionPrice === null
+                          ? "غير محدد"
+                          : formatCurrency(selectedPaymentSession.sessionPrice)
+                        : "اختر الحصة"}
                     </Text>
                   </View>
                   <View style={{ flexDirection: "row-reverse", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
@@ -2838,16 +3113,13 @@ export default function StudentsScreen() {
               );
             })() : null}
 
-            {paymentCyclesForModal.length > 1 ? (
+            {paymentType !== "session" && paymentCyclesForModal.length > 1 ? (
               <View style={styles.paymentCyclePicker}>
                 <Text style={styles.paymentCycleTitle}>
-                  {paymentType === "session" ? "اختر مجموعة رسوم الحصص" : "اختر الاشتراك أو الباقة"}
+                  اختر الاشتراك أو الباقة
                 </Text>
                 {paymentCyclesForModal.map((cycle) => {
-                  const due = paymentType === "session"
-                    ? getSessionOutstandingForCycle(financialStatus!, cycle)
-                    : Number(cycle.remainingDebt || 0);
-                  const price = paymentType === "session" ? getSessionPriceForCycle(cycle) : undefined;
+                  const due = Number(cycle.remainingDebt || 0);
                   return (
                     <TouchableOpacity
                         key={cycle.id}
@@ -2860,11 +3132,7 @@ export default function StudentsScreen() {
                         }}
                     >
                         <Text style={styles.paymentCycleName}>{cycle.packageName || cycle.groupName || "دورة مديونية"}</Text>
-                        <Text style={styles.paymentCycleAmount}>
-                          {paymentType === "session"
-                            ? `سعر الحصة: ${price === undefined ? "غير متاح" : formatCurrency(price)} · رسوم مستحقة: ${formatCurrency(due)}`
-                            : `المتبقي: ${formatCurrency(due)}`}
-                        </Text>
+                        <Text style={styles.paymentCycleAmount}>المتبقي: {formatCurrency(due)}</Text>
                     </TouchableOpacity>
                   );
                 })}
@@ -2887,7 +3155,7 @@ export default function StudentsScreen() {
                 disabled={
                   isRecordingPayment ||
                   (!paymentAdvanceMode && paymentDueAmount <= 0) ||
-                  (!paymentAdvanceMode && paymentType === "session" && !hasPayableSessionDebt(financialStatus))
+                  (!paymentAdvanceMode && paymentType === "session" && !selectedPaymentSession)
                 }
                 style={{ flex: 1 }}
               />
@@ -2900,6 +3168,64 @@ export default function StudentsScreen() {
                   setPaymentFormError("");
                   paymentOperationIdentityRef.current = null;
                 }}
+                style={{ flex: 1 }}
+              />
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal
+        visible={Boolean(sessionBillingCycle)}
+        transparent
+        animationType="fade"
+        onRequestClose={() => {
+          if (!isChangingSessionBillingMode) {
+            setSessionBillingCycle(null);
+            setSessionBillingError(null);
+          }
+        }}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.smallModalCard}>
+            <Text style={styles.modalTitle}>تحديد الدفع بالحصة</Text>
+            {sessionBillingCycle ? (
+              <>
+                <Text style={styles.fieldNote}>
+                  {sessionBillingCycle.groupName || "المجموعة"} · {getDebtCyclePeriodLabel(sessionBillingCycle)}
+                </Text>
+                <Text style={styles.fieldNote}>
+                  سعر الحصة: {getSessionPriceForCycle(sessionBillingCycle) === undefined
+                    ? "غير متاح"
+                    : formatCurrency(getSessionPriceForCycle(sessionBillingCycle) || 0)}
+                </Text>
+                <Text style={styles.fieldNote}>
+                  سيُطبق الاختيار على هذه الدورة فقط. لن تُسجل دفعة الآن، ولن يُسمح بالتغيير إذا كانت عليها دفعات أو خصومات/تعديلات محفوظة.
+                </Text>
+              </>
+            ) : null}
+            {sessionBillingError ? (
+              <View style={styles.paymentFormError}>
+                <Ionicons name="alert-circle-outline" size={18} color={Colors.danger} />
+                <Text style={styles.paymentFormErrorText}>{sessionBillingError}</Text>
+              </View>
+            ) : null}
+            <View style={{ flexDirection: "row", gap: 8 }}>
+              <AppButton
+                title="تأكيد"
+                onPress={confirmSessionBillingMode}
+                loading={isChangingSessionBillingMode}
+                disabled={isChangingSessionBillingMode}
+                style={{ flex: 1 }}
+              />
+              <AppButton
+                title="إلغاء"
+                variant="outline"
+                onPress={() => {
+                  setSessionBillingCycle(null);
+                  setSessionBillingError(null);
+                }}
+                disabled={isChangingSessionBillingMode}
                 style={{ flex: 1 }}
               />
             </View>

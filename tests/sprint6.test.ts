@@ -41,7 +41,7 @@ describe("Sprint 6 — Finalization, Backend/Sync & Production Readiness", () =>
     ApiClient.resetInstance();
   });
 
-  async function createPerSessionCycleForSeedStudent(
+  async function createActiveCycleForSeedStudent(
     studentId: string,
     enrollmentId: string,
   ) {
@@ -55,18 +55,7 @@ describe("Sprint 6 — Finalization, Backend/Sync & Production Readiness", () =>
       cycle.startDate <= session.sessionDate &&
       cycle.endDate >= session.sessionDate,
     );
-    if (currentCycle) {
-      if (
-        currentCycle.billingMode === "per_session" ||
-        currentCycle.cycleType === "per_session"
-      ) {
-        return currentCycle;
-      }
-      return DebtCycleRepository.setBillingMode(
-        currentCycle.id,
-        "per_session",
-      );
-    }
+    if (currentCycle) return currentCycle;
 
     const [year, month] = session.sessionDate.split("-").map(Number);
     const periodStart = `${year}-${String(month).padStart(2, "0")}-01`;
@@ -79,7 +68,7 @@ describe("Sprint 6 — Finalization, Backend/Sync & Production Readiness", () =>
       studentId,
       enrollmentId,
       groupId: session.groupId,
-      cycleType: "per_session",
+      cycleType: "monthly",
       cycleNumber,
       periodStart,
       periodEnd,
@@ -426,7 +415,13 @@ describe("Sprint 6 — Finalization, Backend/Sync & Production Readiness", () =>
     });
 
     it("Test 15: Payment sync preserves immutability and queues payment operation", async () => {
-      await createPerSessionCycleForSeedStudent("std-1", "enr-1");
+      await createActiveCycleForSeedStudent("std-1", "enr-1");
+      await AttendanceRepository.recordAttendance({
+        sessionId: "sess-1",
+        studentId: "std-1",
+        status: "present",
+        isLate: false,
+      });
       const payment = await PaymentRepository.recordSessionPayment({
         studentId: "std-1",
         sessionId: "sess-1",
@@ -442,7 +437,13 @@ describe("Sprint 6 — Finalization, Backend/Sync & Production Readiness", () =>
     });
 
     it("Test 16: Payment reversal sync queues reversal operation and marks payment is_reversed", async () => {
-      await createPerSessionCycleForSeedStudent("std-2", "enr-2");
+      await createActiveCycleForSeedStudent("std-2", "enr-2");
+      await AttendanceRepository.recordAttendance({
+        sessionId: "sess-1",
+        studentId: "std-2",
+        status: "present",
+        isLate: false,
+      });
       const payment = await PaymentRepository.recordSessionPayment({
         studentId: "std-2",
         sessionId: "sess-1",
@@ -746,7 +747,7 @@ describe("Sprint 6 — Finalization, Backend/Sync & Production Readiness", () =>
       expect(op?.status).toBe("synced");
     });
 
-    it("Test 30: Financial calculation regression: rejects session payment without explicit per-session billing", async () => {
+    it("Test 30: Financial calculation regression: rejects session payment without attendance", async () => {
       const studentId = "std-fin-regression-1";
       const statusBefore =
         FinancialCalculationService.getStudentFinancialStatus(studentId);
@@ -757,7 +758,7 @@ describe("Sprint 6 — Finalization, Backend/Sync & Production Readiness", () =>
         sessionId: "sess-1",
         amount: 250,
         operationId,
-      })).rejects.toThrow("per_session");
+      })).rejects.toThrow("يجب تسجيل حضور الطالب");
 
       const statusAfter =
         FinancialCalculationService.getStudentFinancialStatus(studentId);

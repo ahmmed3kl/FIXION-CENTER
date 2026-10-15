@@ -530,6 +530,17 @@ export interface DetailedStudentFinancialStatus extends StudentFinancialStatus {
   creditBalance?: number;
 }
 
+export interface SessionPaymentCandidate {
+  sessionId: string;
+  groupId: string;
+  groupName: string;
+  sessionDate: string;
+  debtCycleId?: string;
+  sessionPrice: number | null;
+  amountDue: number;
+  packageCovered?: boolean;
+}
+
 export interface SessionDebtBreakdown {
   periodStart: string;
   periodEnd: string;
@@ -540,6 +551,8 @@ export interface SessionDebtBreakdown {
   attendedUnpaidSessions: number;
   currentDebt: number;
   sessionPriceTotal: number;
+  currentDebtByGroup?: Record<string, number>;
+  paymentCandidates?: SessionPaymentCandidate[];
 }
 
 export type SyncOperationStatus =

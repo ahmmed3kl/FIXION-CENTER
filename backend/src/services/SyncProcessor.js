@@ -4770,11 +4770,15 @@ class SyncProcessor {
             ? "package"
             : ["per_session", "session", "perclass", "per_class"].includes(
                   rawBillingMode,
-                ) || cycleType === "per_session"
+                )
               ? "per_session"
               : rawBillingMode === "pending"
                 ? "pending"
-                : "monthly";
+                : rawBillingMode === "monthly"
+                  ? "monthly"
+                  : !rawBillingMode && cycleType === "per_session"
+                    ? "per_session"
+                    : "monthly";
         const normalizedCycleStatus = normalizeDebtCycleStatus(cycle.status);
         const requestedCycleAmount = Number(
           cycle.cycle_price ??

@@ -4,6 +4,7 @@ import { ConflictError, DuplicateAttendanceError } from "../src/core/errors";
 import { PermissionService, RolePermissions } from "../src/core/permissions";
 import { SyncRepository } from "../src/core/sync";
 import { AttendanceRepository } from "../src/features/attendance/AttendanceRepository";
+import { MakeupService } from "../src/features/attendance/MakeupService";
 import { useAuthStore } from "../src/features/auth/useAuthStore";
 import { DashboardService } from "../src/features/dashboard/DashboardService";
 import { PaymentRepository } from "../src/features/payments/PaymentRepository";
@@ -178,19 +179,94 @@ describe("Sprint 1 - FIXION Mobile App Foundation & Complete Working Flow", () =
       expect(auditLog?.action).toBe("attendance.record");
     });
 
-    it("supports makeup attendance type and optional originalAbsenceId", async () => {
-      const attendance = await AttendanceRepository.recordAttendance({
+    it("rejects makeup attendance without an explicit source absence and leaves no local or sync record", async () => {
+      const attendanceBefore = AttendanceRepository.getSessionAttendance("sess-1")
+        .filter((record) => record.studentId === "std-3");
+      const operationsBefore = SyncRepository.getRecentOperations("center-1", 1000)
+        .filter((operation) => operation.operationType === "attendance.create").length;
+
+      await expect(AttendanceRepository.recordAttendance({
         studentId: "std-3",
         sessionId: "sess-1",
         status: "present",
         isLate: false,
         attendanceType: "makeup",
-        originalAbsenceId: "abs-prev-009",
         checkInTime: "14:06:00",
+      })).rejects.toBeInstanceOf(ConflictError);
+
+      expect(AttendanceRepository.getSessionAttendance("sess-1")
+        .filter((record) => record.studentId === "std-3")).toEqual(attendanceBefore);
+      expect(SyncRepository.getRecentOperations("center-1", 1000)
+        .filter((operation) => operation.operationType === "attendance.create"))
+        .toHaveLength(operationsBefore);
+    });
+
+    it("records eligible makeup attendance with its explicit source absence", async () => {
+      const db = DatabaseService.getDb();
+      db.runSync(
+        `INSERT INTO groups
+         (id, center_id, name, teacher_id, subject_id, grade, default_fee,
+          session_price, monthly_price, session_duration_minutes, late_after_minutes,
+          status, created_at)
+         SELECT ?, center_id, ?, teacher_id, subject_id, grade, default_fee,
+                session_price, monthly_price, session_duration_minutes, late_after_minutes,
+                status, created_at
+         FROM groups WHERE center_id = ? AND id = ?`,
+        ["grp-sprint1-makeup-source", "مجموعة مصدر التعويض", "center-1", "grp-1"],
+      );
+      db.runSync(
+        `INSERT INTO sessions
+         (id, center_id, group_id, subject_id, teacher_id, session_date,
+          start_time, end_time, status, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'closed', ?)`,
+        [
+          "sprint1-makeup-source",
+          "center-1",
+          "grp-sprint1-makeup-source",
+          "subj-1",
+          "teach-1",
+          "2026-09-08",
+          "14:00",
+          "16:00",
+          "2026-09-08T16:00:00.000Z",
+        ],
+      );
+      db.runSync(
+        `INSERT INTO session_expected_students
+         (id, center_id, session_id, student_id, created_at)
+         VALUES (?, ?, ?, ?, ?)`,
+        ["exp-sprint1-makeup-source-std-3", "center-1", "sprint1-makeup-source", "std-3", "2026-09-08"],
+      );
+      db.runSync(
+        `INSERT INTO attendance
+         (id, center_id, student_id, session_id, check_in_time, status, is_late,
+          attendance_type, operation_id)
+         VALUES (?, ?, ?, ?, ?, 'absent', 0, 'present', ?)`,
+        [
+          "att-sprint1-makeup-source-std-3",
+          "center-1",
+          "std-3",
+          "sprint1-makeup-source",
+          "2026-09-08T14:00:00.000Z",
+          "op-sprint1-makeup-source-std-3",
+        ],
+      );
+
+      const attendance = await MakeupService.recordMakeupAttendance({
+        studentId: "std-3",
+        sessionId: "sess-1",
+        originalAbsenceId: "sprint1-makeup-source",
+        checkInTime: "2026-09-10T14:06:00.000Z",
       });
 
       expect(attendance.attendanceType).toBe("makeup");
-      expect(attendance.originalAbsenceId).toBe("abs-prev-009");
+      expect(attendance.originalAbsenceId).toBe("sprint1-makeup-source");
+      const queuedOperation = SyncRepository.getRecentOperations("center-1", 1000)
+        .find((operation) => operation.operationId === attendance.operationId);
+      expect(JSON.parse(queuedOperation?.payload ?? "null")).toMatchObject({
+        attendanceType: "makeup",
+        originalAbsenceId: "sprint1-makeup-source",
+      });
     });
 
     it("prevents duplicate attendance scans for the same student in the same session", async () => {

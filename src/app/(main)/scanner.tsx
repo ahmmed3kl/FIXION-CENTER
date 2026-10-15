@@ -40,15 +40,17 @@ import { findPreviousSessionAbsence } from "../../features/attendance/previousSe
 import { GroupScheduleRepository } from "../../features/groups/GroupScheduleRepository";
 import { GroupRepository } from "../../features/groups/GroupRepository";
 import { HomeworkEvaluationRepository } from "../../features/homework/HomeworkEvaluationRepository";
-import { PaymentRepository } from "../../features/payments/PaymentRepository";
+import { submitPaymentAction } from "../../features/payments/paymentActionService";
 import { FinancialCalculationService } from "../../features/payments/FinancialCalculationService";
 import {
   getConfiguredSessionPrice,
+  getPayableSessionPaymentCandidates,
+  getSessionPaymentActionState,
   getSessionPaymentCycles,
-  hasPayableSessionDebt,
+  getSessionPaymentUnavailableReason,
 } from "../../features/payments/paymentEligibility";
 import { getDebtCyclePeriodLabel, getPaymentDescription } from "../../features/payments/paymentPresentation";
-import { PaymentOperationIdentity, resolvePaymentOperationIdentity } from "../../features/payments/paymentSubmissionIdentity";
+import { PaymentOperationIdentity } from "../../features/payments/paymentSubmissionIdentity";
 import { SessionRepository } from "../../features/sessions/SessionRepository";
 import { SessionClosingService } from "../../features/sessions/SessionClosingService";
 import { sortSessionsByActivation } from "../../features/sessions/sessionOrdering";
@@ -58,6 +60,7 @@ import { StudentNoteRepository } from "../../features/students/StudentNoteReposi
 import { getStudentColorPresentation } from "../../features/students/studentColor";
 import { useAuthStore } from "../../features/auth/useAuthStore";
 import { formatLocalDate, formatLocalDateTime } from "../../shared/utils/date";
+import { isPerSessionBillingMode } from "../../shared/utils/billingMode";
 import { TEACHER_MAKEUP_CYCLE_EXPIRED_ERROR } from "../../shared/utils/teacherWeeks";
 import { searchAttendanceStudents } from "../../features/attendance/attendanceStudentSearch";
 import {
@@ -128,6 +131,8 @@ function ScannerContent() {
     null,
   );
   const [financialStatus, setFinancialStatus] =
+    useState<DetailedStudentFinancialStatus | null>(null);
+  const [attendanceGroupFinancialStatus, setAttendanceGroupFinancialStatus] =
     useState<DetailedStudentFinancialStatus | null>(null);
   const [groupAttendanceSummary, setGroupAttendanceSummary] =
     useState<StudentGroupAttendanceSummary | null>(null);
@@ -464,6 +469,7 @@ function ScannerContent() {
     setIsExternalAttendance(false);
     setAttendanceResult(null);
     setFinancialStatus(null);
+    setAttendanceGroupFinancialStatus(null);
     setGroupAttendanceSummary(null);
     setCurrentGroupLabel("");
     setMakeupNotice(null);
@@ -582,7 +588,7 @@ function ScannerContent() {
           );
           if (previousSessionRecord) {
             setPreviousAbsenceNotice({
-              sessionDate: previousSessionRecord.sessionDate,
+              sessionDate: formatLocalDate(previousSessionRecord.sessionDate),
               groupName: previousSessionRecord.groupName,
             });
           }
@@ -624,34 +630,26 @@ function ScannerContent() {
               ? strict
               : AttendanceSessionService.getMakeupEligibility(activeSessionId, foundStudent.id);
           })();
-      
-      console.log("[Scanner] Makeup eligibility:", makeupEligibility.eligible);
-      
-      // A student outside the current group is only allowed when the same
-      // subject/teacher makeup rule returns a real source absence. The old
-      // allowExternal flag made a normal visitor recordable as "external".
-      let compensationNotice: typeof makeupNotice = null;
-      if (!expected && !makeupEligibility.eligible) {
-        console.log("[Scanner] Checking compensation eligibility...");
-        const sameTeacher = AttendanceSessionService.isEnrolledWithSameTeacher(activeSessionId, foundStudent.id);
-        console.log("[Scanner] Compensation check result:", sameTeacher);
-        
-        if (sameTeacher.enrolled) {
-          compensationNotice = { sourceGroupName: sameTeacher.sourceGroupName, teacherName: sameTeacher.teacherName };
-        } else {
-          setStudent(null);
-          setSearchError("الطالب لا ينتمي إلى المجموعة أو المستوى المحدد، ولا توجد له حصة تعويضية مؤهلة.");
-          setIsProcessing(false);
-          return;
-        }
+
+      const makeupAbsenceId = makeupEligibility.eligible
+        ? makeupEligibility.originalAbsenceId?.trim()
+        : undefined;
+      if (!expected && !makeupAbsenceId) {
+        setStudent(null);
+        setMakeupNotice(null);
+        setSearchError("لا توجد جلسة غياب صريحة مؤهلة للتعويض لهذا الطالب.");
+        setIsProcessing(false);
+        return;
       }
 
       setIsExternalAttendance(false);
 
-      if (makeupEligibility.eligible) {
-        setMakeupNotice({ sourceGroupName: makeupEligibility.sourceGroupName, teacherName: makeupEligibility.teacherName, originalAbsenceId: makeupEligibility.originalAbsenceId });
-      } else if (compensationNotice) {
-        setMakeupNotice(compensationNotice);
+      if (makeupAbsenceId) {
+        setMakeupNotice({
+          sourceGroupName: makeupEligibility.sourceGroupName,
+          teacherName: makeupEligibility.teacherName,
+          originalAbsenceId: makeupAbsenceId,
+        });
       } else {
         setMakeupNotice(null);
       }
@@ -683,8 +681,18 @@ function ScannerContent() {
       if (paymentsEnabled && canViewPayments) {
         const fin = FinancialCalculationService.getStudentFinancialStatus(foundStudent.id);
         setFinancialStatus(fin);
+        const attendanceGroupId = sessions[0]?.groupId || selectedGroupId;
+        setAttendanceGroupFinancialStatus(
+          attendanceGroupId
+            ? FinancialCalculationService.getStudentFinancialStatusForGroup(
+                foundStudent.id,
+                attendanceGroupId,
+              )
+            : fin,
+        );
       } else {
         setFinancialStatus(null);
+        setAttendanceGroupFinancialStatus(null);
       }
     } catch (err) {
       setSearchError(getUserErrorMessage(err));
@@ -838,8 +846,15 @@ function ScannerContent() {
       setAttendanceSummary(AttendanceSessionService.getSummary(session.id));
       try {
         setFinancialStatus(FinancialCalculationService.getStudentFinancialStatus(targetStudent.id));
+        setAttendanceGroupFinancialStatus(
+          FinancialCalculationService.getStudentFinancialStatusForGroup(
+            targetStudent.id,
+            session.groupId,
+          ),
+        );
       } catch (financialError) {
         setFinancialStatus(null);
+        setAttendanceGroupFinancialStatus(null);
         setPaymentNotice({
           title: "تعذر تحديث الموقف المالي",
           message: getUserErrorMessage(financialError),
@@ -930,6 +945,7 @@ function ScannerContent() {
     setAttendanceResult(null);
     setIsAlreadyAttended(false);
     setFinancialStatus(null);
+    setAttendanceGroupFinancialStatus(null);
   };
 
   const handleRecordAttendance = async () => {
@@ -941,17 +957,45 @@ function ScannerContent() {
   const paymentCyclesForPurpose = (
     status: DetailedStudentFinancialStatus,
     purpose: "session" | "cycle",
-  ) => purpose === "session"
-    ? getSessionPaymentCycles(status.cycles, status.sessionDebt)
-    : status.cycles.filter((cycle) => (cycle.remainingDebt ?? 0) > 0);
+  ) => {
+    if (purpose !== "session") {
+      return status.cycles.filter((cycle) => (cycle.remainingDebt ?? 0) > 0);
+    }
+    if (!activeSessionId) return [];
+    const candidates = getPayableSessionPaymentCandidates(status, activeSessionId);
+    const cycles = getSessionPaymentCycles(status.cycles, {
+      paymentCandidates: candidates,
+    });
+    const sessionGroupId = activeSessionId
+      ? SessionRepository.findById(activeSessionId)?.groupId
+      : selectedGroupId;
+    return sessionGroupId
+      ? cycles.filter((cycle) => cycle.groupId === sessionGroupId)
+      : cycles;
+  };
+
+  const getCurrentAttendanceGroupId = () => {
+    const activeSessionGroupId = activeSessionId
+      ? SessionRepository.findById(activeSessionId)?.groupId
+      : undefined;
+    return activeSessionGroupId || selectedGroupId || undefined;
+  };
+
+  const isCurrentAttendanceSessionOpen = () => Boolean(
+    activeSessionId &&
+    !isSessionClosed &&
+    SessionRepository.findById(activeSessionId)?.status === "open",
+  );
 
   const getSessionOutstandingForCycle = (
-    studentId: string,
     status: DetailedStudentFinancialStatus,
     cycle?: DebtCycle,
-  ) => cycle?.groupId
-    ? Number(FinancialCalculationService.getStudentFinancialStatusForGroup(studentId, cycle.groupId).currentPeriodDebt || 0)
-    : Number(status.currentPeriodDebt || 0);
+  ) => getPayableSessionPaymentCandidates(
+    status,
+    activeSessionId || undefined,
+  )
+    .filter((candidate) => !cycle || candidate.debtCycleId === cycle.id)
+    .reduce((sum, candidate) => sum + candidate.amountDue, 0);
 
   const getSessionPriceForCycle = (cycle?: DebtCycle): number | undefined => {
     if (!cycle?.groupId) return undefined;
@@ -965,23 +1009,54 @@ function ScannerContent() {
 
   const openQuickPaymentModal = (advance = false, requestedPurpose?: "session" | "cycle") => {
     if (!student || !financialStatus || !canCreatePayment) return;
-    const sessionPaymentAvailable = hasPayableSessionDebt(financialStatus);
+    let sessionStatus = attendanceGroupFinancialStatus || financialStatus;
+    const currentGroupId = getCurrentAttendanceGroupId();
+    if (currentGroupId) {
+      try {
+        sessionStatus = FinancialCalculationService.getStudentFinancialStatusForGroup(
+          student.id,
+          currentGroupId,
+        );
+        setAttendanceGroupFinancialStatus(sessionStatus);
+      } catch (error) {
+        setPaymentNotice({
+          title: "تعذر تحميل مستحقات المجموعة",
+          message: getUserErrorMessage(error),
+        });
+        return;
+      }
+    }
+    const sessionPaymentAvailable = getPayableSessionPaymentCandidates(
+      sessionStatus,
+      activeSessionId || undefined,
+    ).length > 0;
     const initialPurpose = advance
       ? "cycle"
       : requestedPurpose
         || (financialStatus.monthlyRemainingDebt > 0 ? "cycle" : sessionPaymentAvailable ? "session" : "cycle");
-    if (!advance && initialPurpose === "session" && !sessionPaymentAvailable) {
+    if (!advance && initialPurpose === "session" && !isCurrentAttendanceSessionOpen()) {
       setPaymentNotice({
-        title: "لا توجد رسوم حصص مستحقة",
-        message: "لا يمكن تسجيل دفع حصة إلا عند وجود مستحقات على دورة مضبوطة صراحةً بنظام الحصة.",
+        title: "جلسة الحضور غير مفتوحة",
+        message: "يجب فتح جلسة الحضور الحالية قبل تسجيل دفع الحصة من شاشة الحضور.",
       });
       return;
     }
-    const cycles = paymentCyclesForPurpose(financialStatus, initialPurpose);
+    if (!advance && initialPurpose === "session" && !sessionPaymentAvailable) {
+      setPaymentNotice({
+        title: "لا توجد رسوم حصص مستحقة",
+        message: getSessionPaymentUnavailableReason(
+          sessionStatus,
+          activeSessionId || undefined,
+        ) || "لا توجد حصة مستحقة للتحصيل في الجلسة الحالية.",
+      });
+      return;
+    }
+    const paymentStatus = initialPurpose === "session" ? sessionStatus : financialStatus;
+    const cycles = paymentCyclesForPurpose(paymentStatus, initialPurpose);
     const selectedCycle = cycles.length === 1 ? cycles[0] : undefined;
     const due = initialPurpose === "cycle"
       ? Number(selectedCycle?.remainingDebt ?? financialStatus.monthlyRemainingDebt)
-      : getSessionOutstandingForCycle(student.id, financialStatus, selectedCycle);
+      : getSessionOutstandingForCycle(paymentStatus, selectedCycle);
     setPaymentPurpose(initialPurpose);
     setIsAdvancePayment(advance);
     setSelectedPaymentCycleId(selectedCycle?.id || null);
@@ -993,6 +1068,11 @@ function ScannerContent() {
 
   const handleConfirmQuickPayment = async () => {
     if (paymentSubmissionRef.current || !student || !canCreatePayment) return;
+    if (!isAdvancePayment && paymentPurpose === "session" &&
+        !isCurrentAttendanceSessionOpen()) {
+      setPaymentFormError("يجب أن تظل جلسة الحضور مفتوحة حتى تأكيد دفع الحصة.");
+      return;
+    }
     const amount = Number(paymentAmount);
     if (!Number.isFinite(amount) || amount <= 0) {
       setPaymentFormError("يرجى إدخال مبلغ صحيح أكبر من صفر.");
@@ -1005,17 +1085,44 @@ function ScannerContent() {
     try {
       const latestStatus = FinancialCalculationService.getStudentFinancialStatus(student.id);
       setFinancialStatus(latestStatus);
-      const cycles = paymentCyclesForPurpose(latestStatus, isAdvancePayment ? "cycle" : paymentPurpose);
+      const currentGroupId = getCurrentAttendanceGroupId();
+      const latestSessionStatus = currentGroupId
+        ? FinancialCalculationService.getStudentFinancialStatusForGroup(
+            student.id,
+            currentGroupId,
+          )
+        : latestStatus;
+      setAttendanceGroupFinancialStatus(latestSessionStatus);
+      const activePaymentPurpose = isAdvancePayment ? "cycle" : paymentPurpose;
+      const paymentStatus = activePaymentPurpose !== "session"
+        ? latestStatus
+        : latestSessionStatus;
+      const cycles = paymentCyclesForPurpose(paymentStatus, activePaymentPurpose);
       const cycle = cycles.find((item) => item.id === selectedPaymentCycleId)
         || (cycles.length === 1 ? cycles[0] : undefined);
       if (!isAdvancePayment && cycles.length > 1 && !cycle) {
-        throw new Error(paymentPurpose === "session"
+        throw new Error(activePaymentPurpose === "session"
           ? "اختر مجموعة رسوم الحصص التي ستُنسب إليها الدفعة."
           : "اختر الاشتراك أو الباقة التي ستُنسب إليها الدفعة.");
       }
-      const outstanding = paymentPurpose === "cycle"
+      if (
+        activePaymentPurpose === "session" &&
+        getPayableSessionPaymentCandidates(
+          paymentStatus,
+          activeSessionId || undefined,
+        ).length === 0
+      ) {
+        throw new Error(
+          getSessionPaymentUnavailableReason(
+            paymentStatus,
+            activeSessionId || undefined,
+          )
+          || "لا توجد رسوم حصص مستحقة للتحصيل حاليًا.",
+        );
+      }
+      const outstanding = activePaymentPurpose === "cycle"
         ? Number(cycle?.remainingDebt ?? latestStatus.monthlyRemainingDebt ?? 0)
-        : getSessionOutstandingForCycle(student.id, latestStatus, cycle);
+        : getSessionOutstandingForCycle(paymentStatus, cycle);
       if (!isAdvancePayment && outstanding <= 0) {
         throw new Error("لا يوجد مبلغ مستحق للتحصيل عن هذا الالتزام.");
       }
@@ -1032,21 +1139,27 @@ function ScannerContent() {
         amount,
         paymentType,
         debtCycleId: cycle?.id,
+        sessionId:
+          paymentType === "session" ? activeSessionId || undefined : undefined,
         subscriptionId: cycle?.packageSubscriptionId,
         notes: paymentNotes.trim() || undefined,
         allowCreditBalance: isAdvancePayment,
       };
-      const paymentIdentity = resolvePaymentOperationIdentity(
+      await submitPaymentAction(
         paymentRequest,
         paymentOperationIdentityRef.current,
+        (identity) => { paymentOperationIdentityRef.current = identity; },
       );
-      paymentOperationIdentityRef.current = paymentIdentity;
-      await PaymentRepository.recordPayment({
-        ...paymentRequest,
-        operationId: paymentIdentity.operationId,
-      });
 
       setFinancialStatus(FinancialCalculationService.getStudentFinancialStatus(student.id));
+      setAttendanceGroupFinancialStatus(
+        currentGroupId
+          ? FinancialCalculationService.getStudentFinancialStatusForGroup(
+              student.id,
+              currentGroupId,
+            )
+          : null,
+      );
       setShowPaymentModal(false);
       setPaymentAmount("");
       setPaymentNotes("");
@@ -1064,6 +1177,37 @@ function ScannerContent() {
       setIsRecordingPayment(false);
     }
   };
+
+  const attendanceSessionPaymentActionState = !canCreatePayment
+    ? getSessionPaymentActionState(
+        attendanceGroupFinancialStatus || financialStatus,
+        false,
+        isRecordingPayment,
+        activeSessionId || undefined,
+      )
+    : !isCurrentAttendanceSessionOpen()
+      ? {
+          disabled: true,
+          reason: "يجب فتح جلسة الحضور الحالية قبل تسجيل دفع الحصة من شاشة الحضور.",
+        }
+      : getSessionPaymentActionState(
+          attendanceGroupFinancialStatus || financialStatus,
+          true,
+          isRecordingPayment,
+          activeSessionId || undefined,
+        );
+  const activeSessionPaymentCandidate = getPayableSessionPaymentCandidates(
+    attendanceGroupFinancialStatus || financialStatus,
+    activeSessionId || undefined,
+  )[0];
+  const attendanceSessionPaymentCycles = financialStatus
+    ? getSessionPaymentCycles(financialStatus.cycles, {
+        paymentCandidates: getPayableSessionPaymentCandidates(
+          financialStatus,
+          activeSessionId || undefined,
+        ),
+      })
+    : [];
 
   // Rebuilt attendance composition. The legacy JSX below is intentionally
   // unreachable while the migration is in progress; all business logic above
@@ -1430,8 +1574,8 @@ function ScannerContent() {
               {financialExpanded ? (
                 <>
                   {student && financialStatus.sessionDebt
-                    ? getSessionPaymentCycles(financialStatus.cycles, financialStatus.sessionDebt).map((cycle) => {
-                    const due = getSessionOutstandingForCycle(student.id, financialStatus, cycle);
+                    ? attendanceSessionPaymentCycles.map((cycle) => {
+                    const due = getSessionOutstandingForCycle(financialStatus, cycle);
                     const price = getSessionPriceForCycle(cycle);
                     return (
                       <View key={cycle.id} style={styles.attendanceSessionDebt}>
@@ -1457,9 +1601,9 @@ function ScannerContent() {
                   }) : null}
                   <Text style={styles.attendanceFinanceSubsection}>الاشتراكات الشهرية والباقات</Text>
                   {financialStatus.cycles.filter((cycle) =>
-                    cycle.billingMode !== "per_session" && cycle.cycleType !== "per_session",
+                    !isPerSessionBillingMode(cycle.billingMode, cycle.cycleType),
                   ).length ? financialStatus.cycles
-                    .filter((cycle) => cycle.billingMode !== "per_session" && cycle.cycleType !== "per_session")
+                    .filter((cycle) => !isPerSessionBillingMode(cycle.billingMode, cycle.cycleType))
                     .map((cycle) => {
                       const due = Math.max(0, Number(cycle.effectivePrice ?? cycle.effectiveDue ?? cycle.cyclePrice ?? 0));
                       const paid = Math.max(0, Number(cycle.paidAmount ?? cycle.totalPaid ?? 0));
@@ -1483,7 +1627,11 @@ function ScannerContent() {
                           <View style={styles.attendanceFinanceCardHeading}>
                             <View style={styles.attendanceFinanceRowCopy}>
                               <Text style={styles.attendanceFinanceRowTitle}>
-                                {cycle.cycleType === "package" ? "باقة" : "اشتراك شهري"} · {period || `${Strings.cycleNumberPrefix} ${cycle.cycleNumber}`}
+                                {cycle.cycleType === "package"
+                                  ? "باقة"
+                                  : cycle.billingMode === "pending"
+                                    ? "نظام فوترة غير محدد"
+                                    : "اشتراك شهري"} · {period || `${Strings.cycleNumberPrefix} ${cycle.cycleNumber}`}
                               </Text>
                               <Text style={styles.attendanceFinanceMeta}>{cycle.packageName || cycle.groupName || "التزام مالي"}</Text>
                             </View>
@@ -1498,6 +1646,11 @@ function ScannerContent() {
                             <View style={[styles.attendanceCycleProgress, { width: `${progress}%`, backgroundColor: remaining > 0 ? Colors.primary : Colors.success }]} />
                           </View>
                           {period ? <Text style={styles.attendanceCycleDates}>{formatLocalDate(cycle.startDate)} — {formatLocalDate(cycle.endDate)}</Text> : null}
+                          {cycle.billingMode === "pending" ? (
+                            <Text style={styles.attendanceFinanceMeta}>
+                              لم يُحدد نظام الفوترة؛ يجب ضبطه صراحةً قبل تحصيل رسوم الحصص.
+                            </Text>
+                          ) : null}
                         </View>
                       );
                     }) : <Text style={styles.attendanceFinanceEmpty}>لا توجد اشتراكات شهرية أو باقات مسجلة.</Text>}
@@ -1545,15 +1698,20 @@ function ScannerContent() {
                       <Text style={styles.attendanceClearedDebtText}>{Strings.noPendingDebt}</Text>
                     </View>
                   )}
-                  {hasPayableSessionDebt(financialStatus) ? (
-                    <AppButton
-                      title={`دفع رسوم الحصص · ${formatCurrency(financialStatus.currentPeriodDebt || 0)}`}
-                      onPress={() => openQuickPaymentModal(false, "session")}
-                      disabled={isRecordingPayment}
-                      size="md"
-                      variant="outline"
-                      style={styles.attendanceFinanceAction}
-                    />
+                  <AppButton
+                    title={`دفع رسوم الحصص${activeSessionPaymentCandidate
+                      ? ` · ${formatCurrency(activeSessionPaymentCandidate.amountDue)}`
+                      : ""}`}
+                    onPress={() => openQuickPaymentModal(false, "session")}
+                    disabled={attendanceSessionPaymentActionState.disabled}
+                    size="md"
+                    variant="outline"
+                    style={styles.attendanceFinanceAction}
+                  />
+                  {attendanceSessionPaymentActionState.reason ? (
+                    <Text style={styles.attendanceFinanceHint}>
+                      {attendanceSessionPaymentActionState.reason}
+                    </Text>
                   ) : null}
                   <TouchableOpacity
                     accessibilityRole="button"
@@ -1565,7 +1723,11 @@ function ScannerContent() {
                     <Text style={styles.attendanceAdvanceActionText}>إضافة رصيد مقدم</Text>
                   </TouchableOpacity>
                 </View>
-              ) : null}
+              ) : (
+                <Text style={styles.attendanceFinanceHint}>
+                  ليس لديك صلاحية تسجيل المدفوعات.
+                </Text>
+              )}
             </View>
           ) : null}
         </ScrollView>
@@ -1598,7 +1760,7 @@ function ScannerContent() {
               {(["session", "cycle"] as const).map((purpose) => {
                 const enabled = purpose === "cycle"
                   ? Number(financialStatus?.monthlyRemainingDebt || 0) > 0
-                  : Boolean(financialStatus && hasPayableSessionDebt(financialStatus));
+                  : !attendanceSessionPaymentActionState.disabled;
                 return (
                   <TouchableOpacity
                     key={purpose}
@@ -1610,11 +1772,14 @@ function ScannerContent() {
                     ]}
                     onPress={() => {
                       if (!financialStatus || !student) return;
-                      const cycles = paymentCyclesForPurpose(financialStatus, purpose);
+                      const purposeStatus = purpose === "session"
+                        ? attendanceGroupFinancialStatus || financialStatus
+                        : financialStatus;
+                      const cycles = paymentCyclesForPurpose(purposeStatus, purpose);
                       const cycle = cycles.length === 1 ? cycles[0] : undefined;
                       const due = purpose === "cycle"
                         ? Number(cycle?.remainingDebt ?? financialStatus.monthlyRemainingDebt)
-                        : getSessionOutstandingForCycle(student.id, financialStatus, cycle);
+                        : getSessionOutstandingForCycle(purposeStatus, cycle);
                       setPaymentPurpose(purpose);
                       setSelectedPaymentCycleId(cycle?.id || null);
                       setPaymentFormError("");
@@ -1628,6 +1793,12 @@ function ScannerContent() {
                 );
               })}
             </View> : null}
+            {!isAdvancePayment && paymentPurpose === "session" &&
+            attendanceSessionPaymentActionState.reason ? (
+              <Text style={styles.attendanceFinanceHint}>
+                {attendanceSessionPaymentActionState.reason}
+              </Text>
+            ) : null}
             {financialStatus ? (() => {
               const cycles = paymentCyclesForPurpose(financialStatus, isAdvancePayment ? "cycle" : paymentPurpose);
               const selectedCycle = cycles.find((cycle) => cycle.id === selectedPaymentCycleId)
@@ -1635,9 +1806,11 @@ function ScannerContent() {
               const outstanding = isAdvancePayment || paymentPurpose === "cycle"
                 ? Number(selectedCycle?.remainingDebt ?? financialStatus.monthlyRemainingDebt ?? 0)
                 : student
-                  ? getSessionOutstandingForCycle(student.id, financialStatus, selectedCycle)
+                  ? getSessionOutstandingForCycle(financialStatus, selectedCycle)
                   : 0;
-              const sessionPrice = selectedCycle ? getSessionPriceForCycle(selectedCycle) : undefined;
+              const sessionPrice = activeSessionPaymentCandidate
+                ? activeSessionPaymentCandidate.sessionPrice || undefined
+                : selectedCycle ? getSessionPriceForCycle(selectedCycle) : undefined;
               return (
                 <>
                   {cycles.length > 1 ? (
@@ -1655,7 +1828,7 @@ function ScannerContent() {
                           onPress={() => {
                             const due = isAdvancePayment || paymentPurpose === "cycle"
                               ? Number(cycle.remainingDebt ?? 0)
-                              : student ? getSessionOutstandingForCycle(student.id, financialStatus, cycle) : 0;
+                              : student ? getSessionOutstandingForCycle(financialStatus, cycle) : 0;
                             setSelectedPaymentCycleId(cycle.id);
                             setPaymentFormError("");
                             setPaymentAmount(due > 0 ? String(due) : "");
@@ -1666,7 +1839,7 @@ function ScannerContent() {
                             {paymentPurpose === "session"
                               ? `سعر الحصة: ${getSessionPriceForCycle(cycle) === undefined ? "غير متاح" : formatCurrency(getSessionPriceForCycle(cycle) || 0)} · `
                               : ""}
-                            المتبقي: {formatCurrency(isAdvancePayment || paymentPurpose === "cycle" ? Number(cycle.remainingDebt ?? 0) : student ? getSessionOutstandingForCycle(student.id, financialStatus, cycle) : 0)}
+                            المتبقي: {formatCurrency(isAdvancePayment || paymentPurpose === "cycle" ? Number(cycle.remainingDebt ?? 0) : student ? getSessionOutstandingForCycle(financialStatus, cycle) : 0)}
                           </Text>
                         </TouchableOpacity>
                       ))}
@@ -1682,10 +1855,17 @@ function ScannerContent() {
                   </View>
                   {!isAdvancePayment && paymentPurpose === "session" ? (
                     <View style={[styles.paymentDuePreview, { flexDirection: "column", alignItems: "stretch", gap: Spacing.sm }]}>
+                      {activeSessionPaymentCandidate ? (
+                        <Text style={styles.paymentDuePreviewLabel}>
+                          {activeSessionPaymentCandidate.groupName} · {formatLocalDate(activeSessionPaymentCandidate.sessionDate)}
+                        </Text>
+                      ) : null}
                       <View style={styles.attendanceFinanceCardHeading}>
                         <Text style={styles.paymentDuePreviewLabel}>سعر الحصة للوحدة</Text>
                         <Text style={styles.paymentDuePreviewValue}>
-                          {selectedCycle ? sessionPrice === undefined ? "غير متاح" : formatCurrency(sessionPrice) : "اختر المجموعة"}
+                          {sessionPrice === undefined
+                            ? "غير متاح"
+                            : formatCurrency(sessionPrice)}
                         </Text>
                       </View>
                       <View style={styles.attendanceFinanceCardHeading}>
@@ -1721,7 +1901,8 @@ function ScannerContent() {
                 disabled={
                   isRecordingPayment ||
                   !canCreatePayment ||
-                  (!isAdvancePayment && paymentPurpose === "session" && !hasPayableSessionDebt(financialStatus))
+                  (!isAdvancePayment && paymentPurpose === "session" &&
+                    attendanceSessionPaymentActionState.disabled)
                 }
                 variant="success"
                 style={{ flex: 1 }}

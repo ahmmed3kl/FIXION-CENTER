@@ -5,6 +5,7 @@ import {
 import { AttendanceRepository } from "../src/features/attendance/AttendanceRepository";
 import { AttendanceSessionService } from "../src/features/attendance/AttendanceSessionService";
 import { MakeupService } from "../src/features/attendance/MakeupService";
+import { SessionRepository } from "../src/features/sessions/SessionRepository";
 import { Attendance } from "../src/shared/types";
 
 describe("automatic regular barcode attendance", () => {
@@ -67,6 +68,7 @@ describe("automatic regular barcode attendance", () => {
       eligible: true,
       originalAbsenceId: sourceSessionId,
     });
+    jest.spyOn(SessionRepository, "findById").mockReturnValue(null);
     const recordMakeup = jest.spyOn(AttendanceRepository, "recordAttendance")
       .mockResolvedValue(attendance);
     try {

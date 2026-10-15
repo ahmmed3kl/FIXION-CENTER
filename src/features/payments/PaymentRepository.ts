@@ -19,8 +19,12 @@ import { isValidIsoDate } from "../../shared/utils/validation";
 import { useAuthStore } from "../auth/useAuthStore";
 import { SessionDateService } from "../sessions/SessionDateService";
 import { FinancialCalculationService } from "./FinancialCalculationService";
-import { DebtCycleRepository } from "./DebtCycleRepository";
-import { isSessionPaymentCycle } from "./paymentEligibility";
+import {
+  getPayableSessionPaymentCandidates,
+  getSessionPaymentUnavailableReason,
+  isSessionPaymentCycle,
+} from "./paymentEligibility";
+import { isPerSessionBillingMode } from "../../shared/utils/billingMode";
 
 function generateUUID(): string {
   return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
@@ -204,7 +208,7 @@ export class PaymentRepository {
         existingPayment.studentId !== params.studentId ||
         Number(existingPayment.amount) !== params.amount ||
         existingType !== normType ||
-        (params.sessionId && existingPayment.sessionId !== params.sessionId) ||
+        (existingPayment.sessionId || undefined) !== (params.sessionId || undefined) ||
         (params.debtCycleId && existingPayment.debtCycleId !== params.debtCycleId)
       ) {
         throw new ConflictError("معرّف العملية مستخدم لدفعة ببيانات مختلفة.");
@@ -232,17 +236,40 @@ export class PaymentRepository {
 
     let paymentSessionGroupId: string | undefined;
     let paymentSessionDate: string | undefined;
+    let paymentSessionPrice: number | undefined;
     if (params.sessionId) {
-      const session = db.getFirstSync<{ id: string; groupId: string; sessionDate: string }>(
-        `SELECT id, group_id as groupId, session_date as sessionDate
+      const session = db.getFirstSync<{
+        id: string;
+        groupId: string;
+        sessionDate: string;
+        status: string;
+      }>(
+        `SELECT id, group_id as groupId, session_date as sessionDate, status
          FROM sessions WHERE center_id = ? AND id = ?`,
         [centerId, params.sessionId],
       );
       if (!session) {
         throw new ValidationError("جلسة الحضور غير موجودة في هذا السنتر.");
       }
+      if (session.status === "cancelled") {
+        throw new ValidationError("لا يمكن تسجيل دفعة لحصة ملغاة.");
+      }
       paymentSessionGroupId = session.groupId;
       paymentSessionDate = session.sessionDate;
+      const group = db.getFirstSync<{ sessionPrice?: number }>(
+        `SELECT session_price as sessionPrice
+         FROM groups WHERE center_id = ? AND id = ?`,
+        [centerId, paymentSessionGroupId],
+      );
+      const configuredPrice = Number(group?.sessionPrice);
+      if (Number.isFinite(configuredPrice) && configuredPrice > 0) {
+        paymentSessionPrice = configuredPrice;
+      }
+      if (normType === "session" && !paymentSessionPrice) {
+        throw new ValidationError(
+          "سعر الحصة غير محدد للمجموعة. حدّد سعرًا موجبًا في تفاصيل المجموعة أولًا.",
+        );
+      }
     }
 
     const paymentId = `pay-${generateUUID()}`;
@@ -257,7 +284,10 @@ export class PaymentRepository {
                AND package_subscription_id = ? AND status NOT IN ('paid', 'cancelled')
              ORDER BY start_date ASC`
           : `SELECT id FROM debt_cycles
-             WHERE center_id = ? AND student_id = ? AND status NOT IN ('paid', 'cancelled')
+             WHERE center_id = ? AND student_id = ?
+               AND status NOT IN ('paid', 'cancelled')
+               AND NOT (billing_mode = 'per_session'
+                        OR (COALESCE(billing_mode, '') = '' AND cycle_type = 'per_session'))
              ORDER BY start_date ASC`,
         params.subscriptionId
           ? [centerId, params.studentId, params.subscriptionId]
@@ -267,14 +297,35 @@ export class PaymentRepository {
         assignedCycleId = openCycles[0].id;
       }
     }
-    // A profile-level class payment has no concrete session id. Link it only
-    // to a group cycle that was explicitly configured for per-session billing.
-    if (!assignedCycleId && normType === "session") {
+    if (!assignedCycleId && normType === "session" && params.sessionId) {
+      const sessionCycle = db.getFirstSync<{ id: string }>(
+        `SELECT id FROM debt_cycles
+         WHERE center_id = ? AND student_id = ? AND group_id = ?
+           AND start_date <= ? AND end_date >= ?
+           AND status NOT IN ('cancelled', 'paid')
+           AND package_subscription_id IS NULL
+           AND COALESCE(cycle_type, '') <> 'package'
+           AND COALESCE(billing_mode, '') <> 'package'
+         ORDER BY start_date DESC LIMIT 1`,
+        [
+          centerId,
+          params.studentId,
+          paymentSessionGroupId,
+          paymentSessionDate,
+          paymentSessionDate,
+        ],
+      );
+      assignedCycleId = sessionCycle?.id || null;
+    }
+    // Legacy profile payments without a concrete session remain supported
+    // only for cycles whose actual billing mode is per-session.
+    if (!assignedCycleId && normType === "session" && !params.sessionId) {
       const perSessionCycleQuery = `SELECT id, billing_mode as billingMode,
                                            cycle_type as cycleType, group_id as groupId
                                       FROM debt_cycles
                                      WHERE center_id = ? AND student_id = ?
-                                       AND (billing_mode = 'per_session' OR cycle_type = 'per_session')
+                                       AND (billing_mode = 'per_session'
+                                            OR (COALESCE(billing_mode, '') = '' AND cycle_type = 'per_session'))
                                        AND status NOT IN ('cancelled', 'paid')
                                        AND package_subscription_id IS NULL
                                        AND COALESCE(cycle_type, '') <> 'package'
@@ -305,7 +356,7 @@ export class PaymentRepository {
       }
       if (
         perSessionCycle &&
-        (perSessionCycle.billingMode === "per_session" || perSessionCycle.cycleType === "per_session") &&
+        isPerSessionBillingMode(perSessionCycle.billingMode, perSessionCycle.cycleType) &&
         (!params.sessionId || perSessionCycle.groupId === paymentSessionGroupId)
       ) {
         assignedCycleId = perSessionCycle.id;
@@ -347,34 +398,78 @@ export class PaymentRepository {
     const currentFinancialStatus = FinancialCalculationService.getStudentFinancialStatus(
       params.studentId,
     );
-    const targetCycle = assignedCycleId
+    let targetCycle = assignedCycleId
       ? currentFinancialStatus.cycles.find((cycle) => cycle.id === assignedCycleId)
       : undefined;
     if (assignedCycleId && !targetCycle) {
       throw new ValidationError("تعذر تحديث دورة المديونية قبل تسجيل الدفعة.");
     }
     const targetCycleIsPerSession = Boolean(targetCycle && isSessionPaymentCycle(targetCycle));
-    if (normType === "session") {
+    if (normType === "session" && params.sessionId) {
+      const candidate = getPayableSessionPaymentCandidates(
+        currentFinancialStatus,
+        params.sessionId,
+      )[0];
+      if (!candidate) {
+        throw new ValidationError(
+          getSessionPaymentUnavailableReason(
+            currentFinancialStatus,
+            params.sessionId,
+          ) || "لا توجد رسوم حصة مستحقة مرتبطة بهذه الجلسة.",
+        );
+      }
+      if (assignedCycleId && candidate.debtCycleId !== assignedCycleId) {
+        throw new ValidationError("دورة المديونية لا تخص الحصة المحددة.");
+      }
+      if (!paymentSessionPrice || candidate.sessionPrice !== paymentSessionPrice) {
+        throw new ValidationError(
+          "سعر الحصة غير محدد للمجموعة. حدّد سعرًا موجبًا في تفاصيل المجموعة أولًا.",
+        );
+      }
+      if (candidate.debtCycleId) {
+        assignedCycleId = candidate.debtCycleId;
+        targetCycle = currentFinancialStatus.cycles.find(
+          (cycle) => cycle.id === assignedCycleId,
+        );
+        if (
+          !targetCycle ||
+          targetCycle.groupId !== paymentSessionGroupId ||
+          (paymentSessionDate &&
+            (targetCycle.startDate > paymentSessionDate ||
+              targetCycle.endDate < paymentSessionDate))
+        ) {
+          throw new ValidationError("دورة المديونية لا تغطي تاريخ هذه الحصة.");
+        }
+      } else {
+        const externalAttendance = db.getFirstSync<{ isExternal?: number | boolean }>(
+          `SELECT is_external as isExternal FROM attendance
+           WHERE center_id = ? AND session_id = ? AND student_id = ?
+             AND status IN ('present', 'late')`,
+          [centerId, params.sessionId, params.studentId],
+        );
+        if (!externalAttendance?.isExternal) {
+          throw new ValidationError(
+            "الحصة لا ترتبط بدورة مستحقة، ولا يمكن تحصيلها كحضور خارجي.",
+          );
+        }
+      }
+      if (params.amount > candidate.amountDue + 0.000001) {
+        throw new ValidationError(
+          `المبلغ يتجاوز رسوم الحصة المتبقية (${candidate.amountDue}).`,
+        );
+      }
+    } else if (normType === "session") {
       if (!targetCycle || !targetCycleIsPerSession || !targetCycle.groupId) {
-        throw new ValidationError("دفع الحصة يتطلب دورة مضبوطة صراحةً على نظام per_session.");
-      }
-      if (params.sessionId && targetCycle.groupId !== paymentSessionGroupId) {
-        throw new ValidationError("دفع الحصة يتطلب دورة per_session تخص مجموعة الجلسة.");
-      }
-      if (
-        params.sessionId &&
-        paymentSessionDate &&
-        (targetCycle.startDate > paymentSessionDate || targetCycle.endDate < paymentSessionDate)
-      ) {
-        throw new ValidationError("دفع الحصة لا يخص فترة الجلسة المحددة.");
+        throw new ValidationError(
+          "لتسجيل دفعة حصة يجب تحديد جلسة حضرها الطالب أو استخدام دورة الدفع بالحصة.",
+        );
       }
       if (
-        !params.sessionId &&
-        (!currentFinancialStatus.sessionDebt ||
-          targetCycle.startDate > currentFinancialStatus.sessionDebt.periodEnd ||
-          targetCycle.endDate < currentFinancialStatus.sessionDebt.periodStart)
+        !currentFinancialStatus.sessionDebt ||
+        targetCycle.startDate > currentFinancialStatus.sessionDebt.periodEnd ||
+        targetCycle.endDate < currentFinancialStatus.sessionDebt.periodStart
       ) {
-        throw new ValidationError("دفع الحصة يتطلب دورة per_session نشطة في الفترة الحالية.");
+        throw new ValidationError("لا توجد دورة دفع بالحصة نشطة في الفترة الحالية.");
       }
     }
 
@@ -399,20 +494,16 @@ export class PaymentRepository {
     // capped to a selected cycle, or to the aggregate when the oldest cycle
     // was assigned automatically. Advance payments use a separate explicit path.
     if (!params.allowCreditBalance && normType !== "session") {
-      const cyclePriceOnMonthlySwitch = targetCycle && targetCycleIsPerSession
-        ? Math.max(
-            0,
-            Number(targetCycle.cyclePrice || 0) +
-              currentFinancialStatus.adjustments
-                .filter((adjustment) => adjustment.debtCycleId === targetCycle.id)
-                .reduce((sum, adjustment) => sum + Number(adjustment.adjustmentAmount || 0), 0),
-          )
-        : Number(targetCycle?.remainingDebt ?? 0);
       const outstanding = targetCycle
         ? params.debtCycleId
-          ? cyclePriceOnMonthlySwitch
+          ? Number(targetCycle.remainingDebt ?? 0)
           : Number(currentFinancialStatus.monthlyRemainingDebt || 0)
         : Number(currentFinancialStatus.monthlyRemainingDebt || 0);
+      if (targetCycleIsPerSession && params.debtCycleId) {
+        throw new ValidationError(
+          "لا يوجد رصيد شهري مستحق في دورة محسوبة بالدفع بالحصة.",
+        );
+      }
       if (outstanding <= 0) {
         throw new ValidationError("لا يوجد مبلغ مستحق للتحصيل حاليًا.");
       }
@@ -420,27 +511,6 @@ export class PaymentRepository {
         throw new ValidationError(
           `المبلغ يتجاوز المتبقي المستحق (${outstanding}). استخدم «إضافة رصيد مقدم» إذا كانت الدفعة مقصودة للمستقبل.`,
         );
-      }
-    }
-
-    if (assignedCycleId) {
-      const cycle = db.getFirstSync<{ billingMode?: string; cycleType?: string }>(
-        `SELECT billing_mode as billingMode, cycle_type as cycleType
-           FROM debt_cycles WHERE center_id = ? AND id = ?`,
-        [centerId, assignedCycleId],
-      );
-      // A pending cycle is resolved to monthly only by an explicit
-      // monthly/partial payment. Per-session mode must be selected separately.
-      if (cycle?.billingMode === "pending") {
-        if (normType !== "session") {
-          const selectedMode = cycle.cycleType === "package" ? "package" : "monthly";
-          DebtCycleRepository.setBillingMode(assignedCycleId, selectedMode);
-        }
-      } else if (cycle?.billingMode === "per_session" && normType !== "session" && cycle.cycleType !== "package") {
-        // An explicit monthly/partial settlement switches this period to the
-        // monthly plan. Earlier class payments remain immutable and become
-        // credit against the monthly cap.
-        DebtCycleRepository.setBillingMode(assignedCycleId, "monthly");
       }
     }
 
@@ -470,6 +540,24 @@ export class PaymentRepository {
       userId: user.id,
     };
     DatabaseService.runInTransaction(() => {
+      if (normType === "session" && params.sessionId) {
+        const latestStatus = FinancialCalculationService.getStudentFinancialStatus(
+          params.studentId,
+        );
+        const latestCandidate = getPayableSessionPaymentCandidates(
+          latestStatus,
+          params.sessionId,
+        )[0];
+        if (
+          !latestCandidate ||
+          (latestCandidate.debtCycleId || null) !== assignedCycleId ||
+          params.amount > latestCandidate.amountDue + 0.000001
+        ) {
+          throw new ValidationError(
+            "تغيّر المبلغ المستحق لهذه الحصة. حدّث البيانات المالية قبل تسجيل الدفعة.",
+          );
+        }
+      }
       db.runSync(
         `INSERT INTO payments (id, operation_id, center_id, student_id, subscription_id, debt_cycle_id, session_id, amount, payment_type, payment_method, payment_date, notes, is_reversed, created_at, user_id)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,

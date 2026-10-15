@@ -6,7 +6,9 @@ import {
     DuplicateAttendanceError,
     ForbiddenError,
     UnauthorizedError,
+    ValidationError,
 } from "../../core/errors";
+import { Logger } from "../../core/logger";
 import { PermissionService } from "../../core/permissions";
 import { SyncEngine, SyncRepository } from "../../core/sync";
 import { Attendance, AttendanceType, StudentGroupAttendanceSummary } from "../../shared/types";
@@ -19,6 +21,7 @@ import {
 import { useAuthStore } from "../auth/useAuthStore";
 import { AttendanceSessionService } from "./AttendanceSessionService";
 import { SessionDateService } from "../sessions/SessionDateService";
+import { parseLocalDateOnly, parseLocalTimeParts } from "../../shared/utils/date";
 
 function generateUUID(): string {
   return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
@@ -28,10 +31,11 @@ function generateUUID(): string {
   });
 }
 
-export interface StudentAttendanceHistoryRecord extends Omit<Attendance, "status"> {
+export interface StudentAttendanceHistoryRecord extends Omit<Attendance, "status" | "checkInTime"> {
   status: Attendance["status"] | "absent" | "excused" | "attended_elsewhere";
-  sessionDate: string;
-  startTime: string;
+  checkInTime?: string | null;
+  sessionDate?: string | null;
+  startTime?: string | null;
   isDerivedAbsence: boolean;
   absenceNote?: string | null;
 }
@@ -114,6 +118,9 @@ export class AttendanceRepository {
     ) {
       throw new ForbiddenError("ليس لديك صلاحية تسجيل حضور تعويضي.");
     }
+    if (params.attendanceType === "makeup" && !params.originalAbsenceId?.trim()) {
+      throw new ConflictError("يجب تحديد جلسة الغياب الأصلية قبل تسجيل الحضور التعويضي.");
+    }
 
     const db = DatabaseService.getDb();
 
@@ -128,6 +135,7 @@ export class AttendanceRepository {
     // Check session status
     const session = db.getFirstSync<any>(
       `SELECT s.id, s.status, s.group_id as groupId,
+              g.session_price as sessionPrice,
               COALESCE(s.subject_id, g.subject_id) as subjectId,
               COALESCE(s.teacher_id, g.teacher_id) as teacherId,
               s.session_date as sessionDate, s.start_time as startTime
@@ -175,10 +183,7 @@ export class AttendanceRepository {
         [centerId, canonicalOriginalAbsenceId],
       );
       if (!source) {
-        // Keep accepting opaque legacy IDs created by older clients. New
-        // scanner flows always use MakeupService and pass a real source
-        // session, so they receive the strict validation below.
-        canonicalOriginalAbsenceId = params.originalAbsenceId;
+        throw new ConflictError("الحصة الأصلية للتعويض غير موجودة.");
       } else if (source.status === "cancelled") {
         throw new ConflictError("الحصة الأصلية للتعويض غير موجودة.");
       } else {
@@ -224,13 +229,21 @@ export class AttendanceRepository {
         if (!sourceExpected && (sourceHasSnapshot || !legacyEnrollment)) {
           throw new ConflictError("الطالب غير متوقع في الحصة الأصلية.");
         }
-        const sourceAttendance = db.getAllSync<{ status: string }>(
-          `SELECT status FROM attendance
+        const sourceAttendance = db.getAllSync<{
+          status: string;
+          attendanceType?: string | null;
+        }>(
+          `SELECT status, attendance_type as attendanceType FROM attendance
            WHERE center_id = ? AND session_id = ? AND student_id = ?`,
           [centerId, source.id, params.studentId],
         );
         if (sourceAttendance.some((row) => row.status === "present" || row.status === "late")) {
           throw new ConflictError("لا يمكن تعويض حصة حضرها الطالب بالفعل.");
+        }
+        if (!sourceAttendance.some(
+          (row) => row.status === "absent" && row.attendanceType !== "makeup",
+        )) {
+          throw new ConflictError("لا توجد حالة غياب صريحة للطالب في الحصة الأصلية.");
         }
         const existingMakeup = db.getAllSync<{ originalAbsenceId?: string | null }>(
           `SELECT original_absence_id as originalAbsenceId FROM attendance
@@ -343,11 +356,12 @@ export class AttendanceRepository {
 
     // 2. If external makeup/attendance, record cash session payment (NO monthly debt)
     if (params.isExternal && !params.suppressExternalPayment) {
-      const session = db.getFirstSync<any>(
-        `SELECT session_price as sessionPrice FROM sessions WHERE center_id = ? AND id = ?`,
-        [centerId, params.sessionId],
-      );
-      const sessionPrice = Number(session?.sessionPrice ?? 0);
+      const sessionPrice = Number(session.sessionPrice ?? 0);
+      if (!Number.isFinite(sessionPrice) || sessionPrice <= 0) {
+        throw new ValidationError(
+          "سعر الحصة غير محدد للمجموعة. حدّد سعرًا موجبًا في تفاصيل المجموعة قبل تسجيل الحضور الخارجي.",
+        );
+      }
       if (sessionPrice > 0) {
         const payId = `pay-${generateUUID()}`;
         const payOpId = `op-pay-ext-${generateUUID()}`;
@@ -523,7 +537,7 @@ export class AttendanceRepository {
               absence_note.note_text as absenceNote,
               0 as isDerivedAbsence
        FROM attendance a
-       JOIN sessions ss ON ss.center_id = a.center_id AND ss.id = a.session_id
+       LEFT JOIN sessions ss ON ss.center_id = a.center_id AND ss.id = a.session_id
        LEFT JOIN absence_notes absence_note
          ON absence_note.center_id = a.center_id
         AND absence_note.session_id = a.session_id
@@ -537,13 +551,86 @@ export class AttendanceRepository {
        ORDER BY ss.session_date DESC, ss.start_time DESC, a.check_in_time DESC`,
       [centerId, studentId],
     );
-    const records: StudentAttendanceHistoryRecord[] = attendanceRows.map((row) => ({
-      ...row,
-      isLate: Boolean(row.isLate),
-      isExternal: Boolean(row.isExternal),
-      attendanceType: row.attendanceType || "present",
-      isDerivedAbsence: false,
-    }));
+    const noteOnlyAbsenceRows = db.getAllSync<any>(
+      `SELECT 'derived-absence-' || note.id as id,
+              note.center_id as centerId, note.student_id as studentId,
+              note.session_id as sessionId, NULL as checkInTime,
+              'absent' as status, 0 as isLate, 'present' as attendanceType,
+              NULL as originalAbsenceId, 0 as isExternal,
+              'derived-absence-' || note.id as operationId,
+              ss.group_id as groupId, g.name as groupName,
+              ss.session_date as sessionDate, ss.start_time as startTime,
+              subj.name as subjectName, t.name as teacherName,
+              note.note_text as absenceNote, 1 as isDerivedAbsence
+       FROM absence_notes note
+       LEFT JOIN sessions ss ON ss.center_id = note.center_id AND ss.id = note.session_id
+       LEFT JOIN groups g ON g.center_id = ss.center_id AND g.id = ss.group_id
+       LEFT JOIN subjects subj ON subj.center_id = ss.center_id
+         AND subj.id = COALESCE(ss.subject_id, g.subject_id)
+       LEFT JOIN teachers t ON t.center_id = ss.center_id
+         AND t.id = COALESCE(ss.teacher_id, g.teacher_id)
+       WHERE note.center_id = ? AND note.student_id = ?
+         AND NOT EXISTS (
+           SELECT 1 FROM attendance existing
+           WHERE existing.center_id = note.center_id
+             AND existing.session_id = note.session_id
+             AND existing.student_id = note.student_id
+         )`,
+      [centerId, studentId],
+    );
+    const records: StudentAttendanceHistoryRecord[] = [
+      ...attendanceRows,
+      ...noteOnlyAbsenceRows,
+    ].map((row) => {
+      const sessionDate = typeof row.sessionDate === "string" && row.sessionDate.trim()
+        ? row.sessionDate.trim()
+        : null;
+      const checkInTime = typeof row.checkInTime === "string" && row.checkInTime.trim()
+        ? row.checkInTime.trim()
+        : null;
+      const startTime = typeof row.startTime === "string" && row.startTime.trim()
+        ? row.startTime.trim()
+        : null;
+
+      if (!parseLocalDateOnly(sessionDate)) {
+        Logger.warn("attendance", "student_history_session_date_unavailable", {
+          centerId,
+          entityType: "attendance",
+          metadata: {
+            attendanceId: String(row.id),
+            sessionId: String(row.sessionId),
+            source: "sessions.session_date",
+            reason: sessionDate ? "invalid" : "missing",
+          },
+        });
+      }
+      if (
+        (row.status === "present" || row.status === "late") &&
+        !parseLocalTimeParts(checkInTime)
+      ) {
+        Logger.warn("attendance", "student_history_check_in_time_unavailable", {
+          centerId,
+          entityType: "attendance",
+          metadata: {
+            attendanceId: String(row.id),
+            sessionId: String(row.sessionId),
+            source: "attendance.check_in_time",
+            reason: checkInTime ? "invalid" : "missing",
+          },
+        });
+      }
+
+      return {
+        ...row,
+        checkInTime,
+        sessionDate,
+        startTime,
+        isLate: Boolean(row.isLate),
+        isExternal: Boolean(row.isExternal),
+        attendanceType: row.attendanceType || "present",
+        isDerivedAbsence: Boolean(row.isDerivedAbsence),
+      };
+    });
     return records.sort((a, b) =>
       `${b.sessionDate} ${b.startTime} ${b.checkInTime}`.localeCompare(
         `${a.sessionDate} ${a.startTime} ${a.checkInTime}`,

@@ -80,6 +80,41 @@ test("a duplicate debt-cycle create is not silently treated as a reset repair", 
   );
 });
 
+test("an explicit pending billing mode wins over a legacy per-session cycle type", async () => {
+  const statements = [];
+  const client = {
+    async query(sql, params) {
+      statements.push({ sql, params });
+      if (sql.includes("FROM students")) return { rows: [{ "?column?": 1 }] };
+      if (sql.includes("FROM student_group_enrollments")) return { rows: [{ "?column?": 1 }] };
+      if (sql.includes("FROM debt_cycles") && sql.includes("COALESCE(enrollment_id")) {
+        return { rows: [] };
+      }
+      if (sql.includes("INSERT INTO debt_cycles")) return { rows: [] };
+      throw new Error(`Unexpected query: ${sql}`);
+    },
+  };
+
+  await SyncProcessor.applyDomainMutation(client, {
+    centerId,
+    userId: "alias-test-user",
+    operationId: "alias-test-pending-cycle",
+    operationType: "debt_cycle.create",
+    entityType: "debt_cycle",
+    entityId: aliasId,
+    payload: {
+      ...makeCyclePayload(),
+      cycleType: "per_session",
+      billingMode: "pending",
+    },
+  });
+
+  const insert = statements.find(({ sql }) => sql.includes("INSERT INTO debt_cycles"));
+  assert.ok(insert);
+  assert.equal(insert.params[8], "per_session");
+  assert.equal(insert.params[9], "pending");
+});
+
 test("payment alias resolution returns only a canonical id recorded for this center", async () => {
   const queries = [];
   const client = {
@@ -99,6 +134,57 @@ test("payment alias resolution returns only a canonical id recorded for this cen
   );
   assert.equal(queries.length, 2);
   assert.deepEqual(queries[1].params, [centerId, aliasId]);
+});
+
+test("a per-session payment push preserves its billing type and linked debt cycle", async () => {
+  const statements = [];
+  const paymentId = "session-payment-id";
+  const paymentOperationId = "session-payment-operation";
+  const client = {
+    async query(sql, params) {
+      statements.push({ sql, params });
+      if (sql.includes("SELECT 1 FROM debt_cycles")) {
+        return { rows: [{ "?column?": 1 }] };
+      }
+      if (sql.includes("SELECT status, amount_due, enrollment_id, package_subscription_id")) {
+        return {
+          rows: [{
+            status: "open",
+            amount_due: 300,
+            enrollment_id: enrollmentId,
+            package_subscription_id: null,
+          }],
+        };
+      }
+      if (sql.includes("INSERT INTO payments")) return { rows: [] };
+      throw new Error(`Unexpected query: ${sql}`);
+    },
+  };
+
+  await SyncProcessor.applyDomainMutation(client, {
+    centerId,
+    userId: "alias-test-user",
+    operationId: paymentOperationId,
+    operationType: "payment.create",
+    entityType: "payment",
+    entityId: paymentId,
+    payload: {
+      id: paymentId,
+      studentId,
+      debtCycleId: canonicalId,
+      amount: 125,
+      paymentType: "session",
+      paymentMethod: "cash",
+      paymentDate: "2026-10-15",
+    },
+  });
+
+  const insert = statements.find(({ sql }) => sql.includes("INSERT INTO payments"));
+  assert.ok(insert);
+  assert.equal(insert.params[1], paymentOperationId);
+  assert.equal(insert.params[4], canonicalId);
+  assert.equal(insert.params[7], 125);
+  assert.equal(insert.params[9], "session");
 });
 
 test("unknown debt-cycle ids are not converted to an unrelated cycle", async () => {

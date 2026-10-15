@@ -1,5 +1,6 @@
 import * as SQLite from "expo-sqlite";
 import { LocalDataEvents } from "./localDataEvents";
+import { isPerSessionBillingMode } from "../../shared/utils/billingMode";
 
 export interface SqlDatabase {
   execSync(sql: string): void;
@@ -1979,10 +1980,7 @@ class InMemorySqliteMock implements SqlDatabase {
               row.status = "deleted";
               if (trimmed.includes("updated_at = ?"))
                 row.updated_at = params[0];
-            } else if (trimmed.includes("status = ?")) {
-              row.status = params[0];
-              if (params.length >= 2) row.updated_at = params[1];
-            } else if (params.length >= 8) {
+            } else if (params.length >= 10) {
               row.name = params[0];
               row.teacher_id = params[1];
               row.subject_id = params[2];
@@ -1993,6 +1991,9 @@ class InMemorySqliteMock implements SqlDatabase {
               row.late_after_minutes = params[7];
               row.status = params[8];
               row.updated_at = params[9];
+            } else if (trimmed.includes("status = ?")) {
+              row.status = params[0];
+              if (params.length >= 2) row.updated_at = params[1];
             }
           }
         } else if (tableName === "group_schedules") {
@@ -2017,6 +2018,16 @@ class InMemorySqliteMock implements SqlDatabase {
           const id = params[params.length - 1];
           const row = list.find((r) => r.id === id);
           if (row) {
+            if (trimmed.includes("special_monthly_price =")) {
+              const priceMatch = trimmed.match(
+                /special_monthly_price\s*=\s*(-?\d+(?:\.\d+)?)/i,
+              );
+              if (priceMatch) {
+                row.special_monthly_price = Number(priceMatch[1]);
+              } else if (trimmed.includes("special_monthly_price = ?")) {
+                row.special_monthly_price = params[0];
+              }
+            }
             if (trimmed.includes("status = 'ended'")) {
               row.status = "ended";
               if (trimmed.includes("end_date = ?")) row.end_date = params[0];
@@ -2440,6 +2451,51 @@ class InMemorySqliteMock implements SqlDatabase {
           String(left.start_code).localeCompare(String(right.start_code)),
         )
         .map((range) => ({ ...range })) as T[];
+    }
+
+    if (
+      trimmed.includes("FROM payments") &&
+      trimmed.includes("student_id = ?") &&
+      trimmed.includes("debt_cycle_id = ?") &&
+      trimmed.includes("session_id IN (") &&
+      trimmed.includes("FROM sessions") &&
+      trimmed.includes("payment_date >= ?") &&
+      trimmed.includes("payment_date <= ?")
+    ) {
+      const [
+        centerId,
+        studentId,
+        cycleId,
+        periodStart,
+        periodEnd,
+        sessionCenterId,
+        groupId,
+        sessionStart,
+        sessionEnd,
+      ] = params;
+      const sessions = this.tables.get("sessions") || [];
+      const periodSessionIds = new Set(
+        sessions
+          .filter(
+            (session) =>
+              session.center_id === sessionCenterId &&
+              session.group_id === groupId &&
+              session.session_date >= sessionStart &&
+              session.session_date <= sessionEnd,
+          )
+          .map((session) => session.id),
+      );
+      const payment = (this.tables.get("payments") || []).find(
+        (row) =>
+          row.center_id === centerId &&
+          row.student_id === studentId &&
+          (row.debt_cycle_id === cycleId ||
+            (!row.debt_cycle_id &&
+              row.payment_date >= periodStart &&
+              row.payment_date <= periodEnd) ||
+            (row.session_id && periodSessionIds.has(row.session_id))),
+      );
+      return payment ? ([{ id: payment.id }] as T[]) : ([] as T[]);
     }
 
     if (trimmed.includes("FROM sessions")) {
@@ -3642,7 +3698,7 @@ class InMemorySqliteMock implements SqlDatabase {
         debtCycles.some((cycle) =>
           cycle.center_id === params[0] &&
           cycle.id === cycleId &&
-          (cycle.billing_mode === "per_session" || cycle.cycle_type === "per_session"),
+          isPerSessionBillingMode(cycle.billing_mode, cycle.cycle_type),
         );
       let matchingPayments = payments.filter(
         (payment) =>
@@ -3732,6 +3788,32 @@ class InMemorySqliteMock implements SqlDatabase {
         };
       });
       if (
+        params.length >= 3 &&
+        trimmed.includes(
+          "COALESCE(enrollment_id, package_subscription_id) = ?",
+        ) &&
+        trimmed.includes("cycle_number = ?")
+      ) {
+        return mapped.filter(
+          (cycle) =>
+            cycle.centerId === params[0] &&
+            (cycle.enrollmentId || cycle.packageSubscriptionId) === params[1] &&
+            cycle.cycleNumber === params[2],
+        ) as T[];
+      }
+      if (
+        params.length >= 2 &&
+        trimmed.includes("cycle_type = 'package'") &&
+        trimmed.includes("id = ?")
+      ) {
+        return mapped.filter(
+            (cycle) =>
+              cycle.centerId === params[0] &&
+              cycle.id === params[1] &&
+              cycle.cycleType === "package",
+        ) as T[];
+      }
+      if (
         params.length >= 5 &&
         trimmed.includes("group_id = ?") &&
         trimmed.includes("start_date <= ?") &&
@@ -3748,8 +3830,28 @@ class InMemorySqliteMock implements SqlDatabase {
           !cycle.packageSubscriptionId &&
           cycle.cycleType !== "package" &&
           cycle.billingMode !== "package" &&
-          (cycle.billingMode === "per_session" || cycle.cycleType === "per_session"),
+          isPerSessionBillingMode(cycle.billingMode, cycle.cycleType),
         ) as T[];
+      }
+      if (
+        params.length >= 4 &&
+        trimmed.includes("enrollment_id = ?") &&
+        trimmed.includes("start_date <= ?") &&
+        trimmed.includes("end_date >= ?")
+      ) {
+        return mapped
+          .filter(
+            (cycle) =>
+              cycle.centerId === params[0] &&
+              cycle.enrollmentId === params[1] &&
+              cycle.startDate <= params[2] &&
+              cycle.endDate >= params[3],
+          )
+          .sort(
+            (left, right) =>
+              Number(right.cycleNumber || 0) - Number(left.cycleNumber || 0),
+          )
+          .slice(0, 1) as T[];
       }
       if (trimmed.includes("dc.status IN ('open', 'partial', 'pending')")) {
         const groupId = params[1];
@@ -3885,6 +3987,7 @@ class InMemorySqliteMock implements SqlDatabase {
         return list.filter(
           (r) =>
             r.center_id === centerId &&
+            (!trimmed.includes("payment_date = ''") || !r.payment_date) &&
             (!r.is_reversed || r.is_reversed === 0) &&
             ((r.payment_date || "") === pattern ||
               (r.created_at || "").startsWith(pattern)),
