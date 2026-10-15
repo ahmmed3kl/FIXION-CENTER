@@ -5,9 +5,10 @@ export function searchAttendanceStudents(
   students: Student[],
   query: string,
   groupGrade: string | null | undefined,
+  centerId: string | null | undefined,
 ): Student[] {
   const normalizedGroupGrade = groupGrade?.trim().toLocaleLowerCase();
-  if (!normalizedGroupGrade) return [];
+  if (!normalizedGroupGrade || !centerId) return [];
 
   const matches = smartSearch(students, query, [
     { get: (student) => student.fullName, weight: 3 },
@@ -17,6 +18,9 @@ export function searchAttendanceStudents(
     { get: (student) => student.cardCode },
   ]);
   return matches.filter(
-    (student) => student.grade.trim().toLocaleLowerCase() === normalizedGroupGrade,
+    (student) =>
+      student.centerId === centerId &&
+      typeof student.grade === "string" &&
+      student.grade.trim().toLocaleLowerCase() === normalizedGroupGrade,
   );
 }

@@ -44,95 +44,171 @@ router.get(
         // after this snapshot has selected its cursor.
         await client.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ");
         await SyncProcessor.acquireCenterSyncLock(client, centerId);
-        const [
-          studentsRes,
-          cardsRes,
-          groupsRes,
-          teachersRes,
-          subjectsRes,
-          teacherSubjectsRes,
-          schedulesRes,
-          sessionsRes,
-          expectedStudentsRes,
-          enrollmentsRes,
-          attendanceRes,
-          absenceNotesRes,
-          paymentsRes,
-          paymentReversalsRes,
-          debtAdjustmentsRes,
-          packagesRes,
-          packageSubjectsRes,
-          packageSubscriptionsRes,
-          overridesRes,
-          advanceCoveragesRes,
-          notificationTemplatesRes,
-          debtCyclesRes,
-          notificationEventsRes,
-          notificationDeliveriesRes,
-          sessionClosingsRes,
-          dailyClosingsRes,
-          gradeExamsRes,
-          gradeScoresRes,
-          homeworkStatusesRes,
-          homeworkEvaluationsRes,
-          academicStagesRes,
-          cardRangesRes,
-          resetStateRes,
-          maxSeqRes,
-        ] = await Promise.all([
-          client.query("SELECT * FROM students WHERE center_id = $1", [centerId]),
-          client.query("SELECT * FROM student_cards WHERE center_id = $1", [centerId]),
+        // Keep these awaited on the transaction client; Promise.all would queue
+        // later queries even if an earlier query aborts the transaction.
+        const studentsRes = await client.query(
+          "SELECT * FROM students WHERE center_id = $1",
+          [centerId],
+        );
+        const cardsRes = await client.query(
+          "SELECT * FROM student_cards WHERE center_id = $1",
+          [centerId],
+        );
+        const groupsRes = await client.query(
+          `SELECT g.*,
+                  EXISTS (
+                    SELECT 1 FROM server_sync_operations tombstone
+                     WHERE tombstone.center_id = g.center_id
+                       AND tombstone.entity_type = 'group'
+                       AND tombstone.entity_id = g.id
+                       AND UPPER(tombstone.operation_type) IN ('DELETE', 'REMOVE')
+                       AND tombstone.status = 'applied'
+                  ) AS deleted
+             FROM groups g WHERE g.center_id = $1`,
+          [centerId],
+        );
+        const teachersRes = await client.query(
+          "SELECT * FROM teachers WHERE center_id = $1",
+          [centerId],
+        );
+        const subjectsRes = await client.query(
+          "SELECT * FROM subjects WHERE center_id = $1",
+          [centerId],
+        );
+        const teacherSubjectsRes = await client.query(
+          "SELECT * FROM teacher_subjects WHERE center_id = $1",
+          [centerId],
+        );
+        const schedulesRes = await client.query(
+          "SELECT * FROM group_schedules WHERE center_id = $1",
+          [centerId],
+        );
+        const sessionsRes = await client.query(
+          `SELECT * FROM sessions
+            WHERE center_id = $1
+            ORDER BY group_id, COALESCE(schedule_id, ''), session_date, created_at, id`,
+          [centerId],
+        );
+        const sessionNaturalKeysRes =
+          await SyncProcessor.getSessionNaturalKeys(client, centerId);
+        const sessionAliasesRes =
+          await SyncProcessor.getSessionAliasMappings(client, centerId);
+        const expectedStudentsRes = await client.query(
+          "SELECT * FROM session_expected_students WHERE center_id = $1",
+          [centerId],
+        );
+        const enrollmentsRes = await client.query(
+          "SELECT * FROM student_group_enrollments WHERE center_id = $1",
+          [centerId],
+        );
+        const attendanceRes = await client.query(
+          `SELECT attendance.*,
+                  server_operation.payload->>'action' AS last_operation_action
+             FROM attendance
+             LEFT JOIN server_sync_operations server_operation
+               ON server_operation.center_id = attendance.center_id
+              AND server_operation.operation_id = attendance.operation_id
+            WHERE attendance.center_id = $1`,
+          [centerId],
+        );
+        const absenceNotesRes = await client.query(
+          "SELECT * FROM absence_notes WHERE center_id = $1",
+          [centerId],
+        );
+        const paymentsRes = await client.query(
+          "SELECT * FROM payments WHERE center_id = $1",
+          [centerId],
+        );
+        const paymentReversalsRes = await client.query(
+          "SELECT * FROM payment_reversals WHERE center_id = $1",
+          [centerId],
+        );
+        const debtAdjustmentsRes = await client.query(
+          "SELECT * FROM debt_adjustments WHERE center_id = $1",
+          [centerId],
+        );
+        const packagesRes = await client.query(
+          "SELECT * FROM packages WHERE center_id = $1",
+          [centerId],
+        );
+        const packageSubjectsRes = await client.query(
+          "SELECT * FROM package_subjects WHERE center_id = $1",
+          [centerId],
+        );
+        const packageSubscriptionsRes = await client.query(
+          "SELECT * FROM student_package_subscriptions WHERE center_id = $1",
+          [centerId],
+        );
+        const overridesRes = await client.query(
+          "SELECT * FROM package_subject_teacher_overrides WHERE center_id = $1",
+          [centerId],
+        );
+        const advanceCoveragesRes = await client.query(
+          "SELECT * FROM advance_coverages WHERE center_id = $1",
+          [centerId],
+        );
+        const notificationTemplatesRes = await client.query(
+          "SELECT * FROM notification_templates WHERE center_id = $1",
+          [centerId],
+        );
+        const debtCyclesRes = await client.query(
+          "SELECT * FROM debt_cycles WHERE center_id = $1",
+          [centerId],
+        );
+        const notificationEventsRes = await client.query(
+          "SELECT * FROM notification_events WHERE center_id = $1",
+          [centerId],
+        );
+        const notificationDeliveriesRes = await client.query(
+          "SELECT * FROM notification_deliveries WHERE center_id = $1",
+          [centerId],
+        );
+        const sessionClosingsRes = await client.query(
+          "SELECT * FROM session_closing_records WHERE center_id = $1",
+          [centerId],
+        );
+        const dailyClosingsRes = await client.query(
+          "SELECT * FROM daily_closing_summaries WHERE center_id = $1",
+          [centerId],
+        );
+        const gradeExamsRes = await client.query(
+          "SELECT * FROM grade_exams WHERE center_id = $1",
+          [centerId],
+        );
+        const gradeScoresRes = await client.query(
+          "SELECT * FROM grade_scores WHERE center_id = $1",
+          [centerId],
+        );
+        const homeworkStatusesRes = await client.query(
+          "SELECT * FROM homework_evaluation_statuses WHERE center_id = $1",
+          [centerId],
+        );
+        const homeworkEvaluationsRes = await client.query(
+          "SELECT * FROM session_homework_evaluations WHERE center_id = $1",
+          [centerId],
+        );
+        const academicStagesRes = await withBootstrapQueryContext(
           client.query(
-            `SELECT g.*,
-                    EXISTS (
-                      SELECT 1 FROM server_sync_operations tombstone
-                       WHERE tombstone.center_id = g.center_id
-                         AND tombstone.entity_type = 'group'
-                         AND tombstone.entity_id = g.id
-                         AND UPPER(tombstone.operation_type) IN ('DELETE', 'REMOVE')
-                         AND tombstone.status = 'applied'
-                    ) AS deleted
-               FROM groups g WHERE g.center_id = $1`,
+            "SELECT * FROM center_academic_stages WHERE center_id = $1",
             [centerId],
           ),
-          client.query("SELECT * FROM teachers WHERE center_id = $1", [centerId]),
-          client.query("SELECT * FROM subjects WHERE center_id = $1", [centerId]),
-          client.query("SELECT * FROM teacher_subjects WHERE center_id = $1", [centerId]),
-          client.query("SELECT * FROM group_schedules WHERE center_id = $1", [centerId]),
-          client.query("SELECT * FROM sessions WHERE center_id = $1", [centerId]),
-          client.query("SELECT * FROM session_expected_students WHERE center_id = $1", [centerId]),
-          client.query("SELECT * FROM student_group_enrollments WHERE center_id = $1", [centerId]),
-          client.query("SELECT * FROM attendance WHERE center_id = $1", [centerId]),
-          client.query("SELECT * FROM absence_notes WHERE center_id = $1", [centerId]),
-          client.query("SELECT * FROM payments WHERE center_id = $1", [centerId]),
-          client.query("SELECT * FROM payment_reversals WHERE center_id = $1", [centerId]),
-          client.query("SELECT * FROM debt_adjustments WHERE center_id = $1", [centerId]),
-          client.query("SELECT * FROM packages WHERE center_id = $1", [centerId]),
-          client.query("SELECT * FROM package_subjects WHERE center_id = $1", [centerId]),
-          client.query("SELECT * FROM student_package_subscriptions WHERE center_id = $1", [centerId]),
-          client.query("SELECT * FROM package_subject_teacher_overrides WHERE center_id = $1", [centerId]),
-          client.query("SELECT * FROM advance_coverages WHERE center_id = $1", [centerId]),
-          client.query("SELECT * FROM notification_templates WHERE center_id = $1", [centerId]),
-          client.query("SELECT * FROM debt_cycles WHERE center_id = $1", [centerId]),
-          client.query("SELECT * FROM notification_events WHERE center_id = $1", [centerId]),
-          client.query("SELECT * FROM notification_deliveries WHERE center_id = $1", [centerId]),
-          client.query("SELECT * FROM session_closing_records WHERE center_id = $1", [centerId]),
-          client.query("SELECT * FROM daily_closing_summaries WHERE center_id = $1", [centerId]),
-          client.query("SELECT * FROM grade_exams WHERE center_id = $1", [centerId]),
-          client.query("SELECT * FROM grade_scores WHERE center_id = $1", [centerId]),
-          client.query("SELECT * FROM homework_evaluation_statuses WHERE center_id = $1", [centerId]),
-          client.query("SELECT * FROM session_homework_evaluations WHERE center_id = $1", [centerId]),
-          withBootstrapQueryContext(
-            client.query("SELECT * FROM center_academic_stages WHERE center_id = $1", [centerId]),
-            "center_academic_stages",
+          "center_academic_stages",
+        );
+        const cardRangesRes = await withBootstrapQueryContext(
+          client.query(
+            "SELECT id, center_id, start_code, end_code, status, created_at, updated_at FROM card_ranges WHERE center_id = $1",
+            [centerId],
           ),
-          withBootstrapQueryContext(
-            client.query("SELECT id, center_id, start_code, end_code, status, created_at, updated_at FROM card_ranges WHERE center_id = $1", [centerId]),
-            "card_ranges",
-          ),
-          client.query("SELECT reset_generation, updated_at FROM center_data_state WHERE center_id = $1", [centerId]),
-          client.query("SELECT COALESCE(MAX(server_seq), 0) as max_seq FROM server_sync_operations WHERE center_id = $1", [centerId]),
-        ]);
+          "card_ranges",
+        );
+        const resetStateRes = await client.query(
+          "SELECT reset_generation, updated_at FROM center_data_state WHERE center_id = $1",
+          [centerId],
+        );
+        const maxSeqRes = await client.query(
+          "SELECT COALESCE(MAX(server_seq), 0) as max_seq FROM server_sync_operations WHERE center_id = $1",
+          [centerId],
+        );
 
         return {
         centerId,
@@ -144,6 +220,8 @@ router.get(
         teacherSubjects: teacherSubjectsRes.rows,
         schedules: schedulesRes.rows,
         sessions: sessionsRes.rows,
+        sessionNaturalKeys: sessionNaturalKeysRes,
+        sessionAliases: sessionAliasesRes,
         expectedStudents: expectedStudentsRes.rows,
         enrollments: enrollmentsRes.rows,
         attendance: attendanceRes.rows,
@@ -298,11 +376,22 @@ router.get("/pull", authMiddleware, deviceGuard, async (req, res, next) => {
       "SELECT reset_generation FROM center_data_state WHERE center_id = $1",
       [req.centerId],
     );
+    const canReadSessionReferences =
+      canReadSyncEntity("session", req.user) ||
+      canReadSyncEntity("attendance", req.user) ||
+      canReadSyncEntity("payment", req.user) ||
+      canReadSyncEntity("advance_coverage", req.user);
+    const sessionMappings = canReadSessionReferences
+      ? await db.withTransaction((client) =>
+          SyncProcessor.getSessionAliasMappings(client, req.centerId),
+        )
+      : [];
     const latestServerSeq = parseInt(latestRes.rows[0]?.max_seq || 0, 10);
     const resetGeneration = Number(resetStateRes.rows[0]?.reset_generation || 0);
     if (cursor > latestServerSeq) {
       return res.json({
         changes: [],
+        sessionMappings,
         nextCursor: "0",
         hasMore: false,
         cursorReset: true,
@@ -331,16 +420,53 @@ router.get("/pull", authMiddleware, deviceGuard, async (req, res, next) => {
     }
 
     // Format changes as ServerChangeRecord
-    const changes = returnedRows.filter((row) => canReadSyncEntity(row.entity_type, req.user)).map((row) => ({
-      sequenceNumber: parseInt(row.server_seq, 10),
-      operationId: row.operation_id,
-      entityType: row.entity_type,
-      entityId: row.entity_id,
-      action: String(row.operation_type || "update").toLowerCase(),
-      data:
-        typeof row.payload === "string" ? JSON.parse(row.payload) : row.payload,
-      serverTimestamp: row.applied_at,
-    }));
+    const sessionAliasMap = new Map(
+      sessionMappings.map((mapping) => [
+        String(mapping.localSessionId),
+        String(mapping.canonicalSessionId),
+      ]),
+    );
+    const changes = returnedRows
+      .filter((row) => canReadSyncEntity(row.entity_type, req.user))
+      .map((row) => {
+        const isSession =
+          String(row.entity_type || "").toLowerCase() === "session" ||
+          String(row.entity_type || "").toLowerCase() === "session_created";
+        const sourceSessionId = String(row.entity_id || "");
+        const entityId = isSession
+          ? SyncProcessor.resolveSessionAliasFromMap(sourceSessionId, sessionAliasMap)
+          : row.entity_id;
+        const payload =
+          typeof row.payload === "string" ? JSON.parse(row.payload) : row.payload;
+        let data = SyncProcessor.canonicalizePulledSessionReferences(
+          payload,
+          sessionAliasMap,
+        );
+        if (isSession && data && typeof data === "object") {
+          const payloadSessionId = String(data.id || data.sessionId || sourceSessionId);
+          const canonicalSessionId = SyncProcessor.resolveSessionAliasFromMap(
+            payloadSessionId,
+            sessionAliasMap,
+          );
+          data = {
+            ...data,
+            id: canonicalSessionId,
+            sessionId: canonicalSessionId,
+            ...(payloadSessionId !== canonicalSessionId
+              ? { clientSessionId: payloadSessionId }
+              : {}),
+          };
+        }
+        return {
+          sequenceNumber: parseInt(row.server_seq, 10),
+          operationId: row.operation_id,
+          entityType: row.entity_type,
+          entityId,
+          action: String(row.operation_type || "update").toLowerCase(),
+          data,
+          serverTimestamp: row.applied_at,
+        };
+      });
 
     // Update per-device checkpoint independently without modifying global server sequence
     if (returnedRows.length > 0) {
@@ -370,6 +496,7 @@ router.get("/pull", authMiddleware, deviceGuard, async (req, res, next) => {
 
     return res.json({
       changes,
+      sessionMappings,
       nextCursor,
       hasMore,
       serverTimestamp: new Date().toISOString(),

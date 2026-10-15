@@ -20,6 +20,7 @@ import { StudentRepository } from "../src/features/students/StudentRepository";
 import { SubjectRepository } from "../src/features/subjects/SubjectRepository";
 import { TeacherRepository } from "../src/features/teachers/TeacherRepository";
 import { TeacherSubjectRepository } from "../src/features/teachers/TeacherSubjectRepository";
+import { configureTestCenterTimeZones } from "./helpers/centerTimeZone";
 
 describe("Sprint 4 - FIXION Packages, Makeups & Unified Attendance/Financial Integration", () => {
   beforeAll(async () => {
@@ -29,6 +30,7 @@ describe("Sprint 4 - FIXION Packages, Makeups & Unified Attendance/Financial Int
     // 2. Login as Admin for center-1 setup
     await useAuthStore.getState().login("01000000001", "123456");
     await useAuthStore.getState().selectCenter("center-1");
+    configureTestCenterTimeZones();
     CardRangeRepository.replaceCenterRanges("center-1", [
       { id: "test-card-range-sprint4", startCode: "000000", endCode: "999999" },
     ]);
@@ -640,6 +642,11 @@ describe("Sprint 4 - FIXION Packages, Makeups & Unified Attendance/Financial Int
         parentPhone: "01133332222",
         grade: "الصف الثالث الثانوي",
       });
+      EnrollmentRepository.enrollStudent({
+        studentId: student.id,
+        groupId: "grp-1",
+        startDate: "2026-09-01",
+      });
 
       const db = DatabaseService.getDb();
       // Missed Session: 2026-11-01 10:00 (subj-1, teach-1)
@@ -650,6 +657,12 @@ describe("Sprint 4 - FIXION Packages, Makeups & Unified Attendance/Financial Int
       db.runSync(
         `INSERT INTO session_expected_students (id, center_id, session_id, student_id, created_at)
          VALUES ('exp-missed-1', 'center-1', 'sess-missed-1', ?, '2026-09-20')`,
+        [student.id],
+      );
+      db.runSync(
+        `INSERT INTO attendance
+         (id, center_id, student_id, session_id, check_in_time, status, is_late, attendance_type, operation_id)
+         VALUES ('att-missed-1', 'center-1', ?, 'sess-missed-1', '2026-11-01T10:00:00.000Z', 'absent', 0, 'present', 'op-missed-1')`,
         [student.id],
       );
 
@@ -849,21 +862,29 @@ describe("Sprint 4 - FIXION Packages, Makeups & Unified Attendance/Financial Int
       expect(financial.monthlyRemainingDebt).toBe(800);
     });
 
-    it("session payments NEVER reduce package or group monthly debt", async () => {
-      await PaymentRepository.recordSessionPayment({
+    it("requires an explicit per-session cycle and preserves package/group balances", async () => {
+      const before = FinancialCalculationService.getStudentFinancialStatus(
+        studentDual.id,
+      );
+      const operationId = "op-session-payment-without-per-session-cycle";
+      await expect(PaymentRepository.recordSessionPayment({
         studentId: studentDual.id,
-        sessionId: "sess-ext-target",
+        sessionId: "sess-1",
         amount: 200,
         paymentDate: "2026-10-03",
-      });
+        operationId,
+      })).rejects.toThrow("per_session");
 
       const financial = FinancialCalculationService.getStudentFinancialStatus(
         studentDual.id,
       );
-      // Monthly remaining debt remains 800
-      expect(financial.monthlyRemainingDebt).toBe(800);
-      expect(financial.packageRemainingDebt).toBe(800);
-      expect(financial.sessionTotalPaid).toBe(200);
+      expect(financial.monthlyRemainingDebt).toBe(before.monthlyRemainingDebt);
+      expect(financial.packageRemainingDebt).toBe(before.packageRemainingDebt);
+      expect(financial.sessionTotalPaid).toBe(before.sessionTotalPaid);
+      expect(DatabaseService.getDb().getFirstSync(
+        "SELECT id FROM payments WHERE center_id = ? AND operation_id = ?",
+        ["center-1", operationId],
+      )).toBeNull();
     });
   });
 
@@ -954,7 +975,7 @@ describe("Sprint 4 - FIXION Packages, Makeups & Unified Attendance/Financial Int
       });
     });
 
-    it("a) monthly debt + session payment: session payments do NOT reduce group subscription debt", async () => {
+    it("a) monthly billing rejects per-session payment without an explicit per-session cycle", async () => {
       const before = FinancialCalculationService.getStudentFinancialStatus(
         regStudent.id,
         "2026-11-01",
@@ -964,15 +985,13 @@ describe("Sprint 4 - FIXION Packages, Makeups & Unified Attendance/Financial Int
       expect(before.groupRemainingDebt).toBe(400);
 
       // Record a session payment of 150 EGP with paymentType: 'session', paymentMethod: 'cash'
-      const pay = await PaymentRepository.recordPayment({
+      await expect(PaymentRepository.recordPayment({
         studentId: regStudent.id,
         sessionId: "sess-1",
         amount: 150,
         paymentType: "session",
         paymentDate: "2026-11-02",
-      });
-      expect(pay.paymentType).toBe("session");
-      expect(pay.paymentMethod).toBe("cash");
+      })).rejects.toThrow("per_session");
 
       const after = FinancialCalculationService.getStudentFinancialStatus(
         regStudent.id,
@@ -984,9 +1003,8 @@ describe("Sprint 4 - FIXION Packages, Makeups & Unified Attendance/Financial Int
       expect(after.groupMonthlyPaid).toBe(0);
       expect(after.groupRemainingDebt).toBe(400);
 
-      // Session payment is isolated
-      expect(after.sessionTotalPaid).toBe(150);
-      expect(after.sessionPaymentsTotal).toBe(150);
+      expect(after.sessionTotalPaid).toBe(0);
+      expect(after.sessionPaymentsTotal).toBe(0);
 
       // totalDue, totalPaid, totalRemainingDebt must represent subscription debt only
       expect(after.totalDue).toBe(1000); // 400 group + 600 package
@@ -995,7 +1013,7 @@ describe("Sprint 4 - FIXION Packages, Makeups & Unified Attendance/Financial Int
       expect(after.remainingBalance).toBe(1000);
     });
 
-    it("b) package debt + session payment: session payments do NOT reduce package subscription debt", async () => {
+    it("b) package billing rejects per-session payment without an explicit per-session cycle", async () => {
       const status = FinancialCalculationService.getStudentFinancialStatus(
         regStudent.id,
         "2026-11-01",
@@ -1006,20 +1024,19 @@ describe("Sprint 4 - FIXION Packages, Makeups & Unified Attendance/Financial Int
       expect(status.packageMonthlyPaid).toBe(0);
       expect(status.packageRemainingDebt).toBe(600);
 
-      // Record another session payment of 100 EGP
-      await PaymentRepository.recordSessionPayment({
+      await expect(PaymentRepository.recordSessionPayment({
         studentId: regStudent.id,
         sessionId: "sess-2",
         amount: 100,
         paymentDate: "2026-11-03",
-      });
+      })).rejects.toThrow("per_session");
 
       const updated = FinancialCalculationService.getStudentFinancialStatus(
         regStudent.id,
         "2026-11-01",
       );
       expect(updated.packageRemainingDebt).toBe(600);
-      expect(updated.sessionPaymentsTotal).toBe(250); // 150 + 100
+      expect(updated.sessionPaymentsTotal).toBe(0);
       expect(updated.totalRemainingDebt).toBe(1000); // subscription debt intact
     });
 
@@ -1097,13 +1114,12 @@ describe("Sprint 4 - FIXION Packages, Makeups & Unified Attendance/Financial Int
       expect(initFin.groupMonthlyDue).toBe(300);
       expect(initFin.groupRemainingDebt).toBe(300);
 
-      // Student pays 1500 EGP for multiple private/extra sessions (5x the monthly price)
-      await PaymentRepository.recordSessionPayment({
+      await expect(PaymentRepository.recordSessionPayment({
         studentId: bigSessionStudent.id,
         sessionId: "sess-1",
         amount: 1500,
         paymentDate: "2026-11-02",
-      });
+      })).rejects.toThrow("per_session");
 
       const afterBigSess =
         FinancialCalculationService.getStudentFinancialStatus(
@@ -1118,10 +1134,10 @@ describe("Sprint 4 - FIXION Packages, Makeups & Unified Attendance/Financial Int
       expect(afterBigSess.totalPaid).toBe(0);
       expect(afterBigSess.totalRemainingDebt).toBe(300);
       expect(afterBigSess.remainingBalance).toBe(300);
-      expect(afterBigSess.sessionPaymentsTotal).toBe(1500);
+      expect(afterBigSess.sessionPaymentsTotal).toBe(0);
     });
 
-    it("e) payment reversal: restores subscription remaining debt and session payments independently", async () => {
+    it("e) payment reversal restores subscription debt and rejects an unconfigured session payment", async () => {
       // 1. Pay 400 EGP for group monthly cycle
       const cycles = DebtCycleRepository.getCyclesForStudent(regStudent.id);
       const groupCycle = cycles.find((c) => c.cycleType !== "package");
@@ -1155,36 +1171,29 @@ describe("Sprint 4 - FIXION Packages, Makeups & Unified Attendance/Financial Int
       // Group remaining debt is restored back to 400 EGP!
       expect(fin.groupRemainingDebt).toBe(400);
       expect(fin.totalRemainingDebt).toBe(1000);
-      expect(fin.sessionPaymentsTotal).toBe(250); // session payments unchanged
+      expect(fin.sessionPaymentsTotal).toBe(0);
 
-      // 2. Now record and reverse a session payment
-      const sessPay = await PaymentRepository.recordSessionPayment({
+      const operationId = "op-session-payment-rejected-before-reversal";
+      await expect(PaymentRepository.recordSessionPayment({
         studentId: regStudent.id,
         sessionId: "sess-1",
         amount: 50,
         paymentDate: "2026-11-05",
-      });
+        operationId,
+      })).rejects.toThrow("per_session");
 
       fin = FinancialCalculationService.getStudentFinancialStatus(
         regStudent.id,
         "2026-11-01",
       );
-      expect(fin.sessionPaymentsTotal).toBe(300); // 250 + 50
-
-      await PaymentRepository.reversePayment({
-        paymentId: sessPay.id,
-        reason: "إلغاء حصة إضافية",
-      });
-
-      fin = FinancialCalculationService.getStudentFinancialStatus(
-        regStudent.id,
-        "2026-11-01",
-      );
-      // Session payments drops back to 250 EGP, subscription debt remains 1000 EGP!
-      expect(fin.sessionPaymentsTotal).toBe(250);
+      expect(fin.sessionPaymentsTotal).toBe(0);
       expect(fin.groupRemainingDebt).toBe(400);
       expect(fin.packageRemainingDebt).toBe(600);
       expect(fin.totalRemainingDebt).toBe(1000);
+      expect(DatabaseService.getDb().getFirstSync(
+        "SELECT id FROM payments WHERE center_id = ? AND operation_id = ?",
+        ["center-1", operationId],
+      )).toBeNull();
     });
   });
 });

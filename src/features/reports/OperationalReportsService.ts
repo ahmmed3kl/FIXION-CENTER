@@ -215,6 +215,7 @@ export class OperationalReportsService {
       const lateCount = counts.late;
       const makeupCount = counts.makeup;
       const absentCount = counts.absent;
+      const unresolvedCount = counts.unresolved;
       const attendanceRate =
         expectedCount > 0
           ? Math.round((presentCount / expectedCount) * 100)
@@ -231,6 +232,7 @@ export class OperationalReportsService {
         expectedCount,
         presentCount,
         absentCount,
+        unresolvedCount,
         lateCount,
         makeupCount,
         attendanceRate,
@@ -242,6 +244,7 @@ export class OperationalReportsService {
       totalExpected: sessionReport.reduce((sum, s) => sum + s.expectedCount, 0),
       totalPresent: sessionReport.reduce((sum, s) => sum + s.presentCount, 0),
       totalAbsent: sessionReport.reduce((sum, s) => sum + s.absentCount, 0),
+      totalUnresolved: sessionReport.reduce((sum, s) => sum + s.unresolvedCount, 0),
       attendanceRate:
         sessionReport.reduce((sum, s) => sum + s.expectedCount, 0) > 0
           ? Math.round(
@@ -334,10 +337,11 @@ export class OperationalReportsService {
 
     const sessionDetails = sessions.map((s: any) => {
       const att = attendanceMap.get(s.id);
-      let status: "present" | "late" | "absent" | "makeup" | "not_expected" =
-        "absent";
+      let status: "present" | "late" | "absent" | "makeup" | "unresolved" | "not_expected" =
+        "unresolved";
       if (att) {
         if (att.attendance_type === "makeup") status = "makeup";
+        else if (att.status === "absent") status = "absent";
         else if (att.status === "late") status = "late";
         else status = "present";
       }
@@ -359,6 +363,9 @@ export class OperationalReportsService {
     const absentCount = sessionDetails.filter(
       (s) => s.status === "absent",
     ).length;
+    const unresolvedCount = sessionDetails.filter(
+      (s) => s.status === "unresolved",
+    ).length;
     const makeupCount = sessionDetails.filter(
       (s) => s.status === "makeup",
     ).length;
@@ -378,6 +385,7 @@ export class OperationalReportsService {
         presentCount,
         lateCount,
         absentCount,
+        unresolvedCount,
         makeupCount,
         attendanceRate,
       },

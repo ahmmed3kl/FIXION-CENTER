@@ -21,7 +21,6 @@ import { SessionRepository } from "../sessions/SessionRepository";
 import { StudentRepository } from "../students/StudentRepository";
 import { AttendanceRepository } from "./AttendanceRepository";
 import { AttendanceSessionService } from "./AttendanceSessionService";
-import { getLocalDateOnly } from "../../shared/utils/date";
 import {
   DEFAULT_TEACHER_WEEK_START_DAY,
   getTeacherWeekBounds,
@@ -48,6 +47,25 @@ export interface MakeupEligibility {
 }
 
 export class MakeupService {
+  private static hasExplicitAbsence(
+    centerId: string,
+    sessionId: string,
+    studentId: string,
+  ): boolean {
+    const attendance = DatabaseService.getDb().getAllSync<{
+      status: string;
+      attendanceType?: string | null;
+    }>(
+      `SELECT status, attendance_type as attendanceType FROM attendance
+       WHERE center_id = ? AND session_id = ? AND student_id = ?`,
+      [centerId, sessionId, studentId],
+    );
+    const hasPresent = attendance.some((row) => row.status === "present" || row.status === "late");
+    return !hasPresent && attendance.some(
+      (row) => row.status === "absent" && row.attendanceType !== "makeup",
+    );
+  }
+
   private static getActiveContext() {
     const { activeCenterId, currentUser } = useAuthStore.getState();
     if (!activeCenterId || !currentUser) {
@@ -287,13 +305,17 @@ export class MakeupService {
     }
 
     const db = DatabaseService.getDb();
+    if (
+      !this.hasExplicitAbsence(centerId, originalAbsenceSessionId, studentId) ||
+      this.isSessionCoveredInAdvance(studentId, originalAbsenceSessionId)
+    ) return null;
     const teacherWeek = db.getFirstSync<{ weekStartDay?: number | null }>(
       "SELECT week_start_day as weekStartDay FROM teachers WHERE center_id = ? AND id = ?",
       [centerId, originalSession.teacherId],
     );
     const weekStartDay = teacherWeek?.weekStartDay ?? DEFAULT_TEACHER_WEEK_START_DAY;
     const originalWeek = getTeacherWeekBounds(originalSession.sessionDate, weekStartDay);
-    if (getLocalDateOnly() > originalWeek.endDate) return null;
+    if (AttendanceSessionService.getCurrentSessionDate() > originalWeek.endDate) return null;
     // Get all candidate sessions for same subject & teacher chronologically after originalSession
     const allSessions = db.getAllSync<Session>(
       `SELECT s.id, s.center_id as centerId, s.group_id as groupId, s.schedule_id as scheduleId,
@@ -409,7 +431,7 @@ export class MakeupService {
       host.sessionDate,
       host.sessionDate,
       weekStartDay,
-      getLocalDateOnly(),
+      AttendanceSessionService.getCurrentSessionDate(),
     )) {
       return { eligible: false };
     }
@@ -463,7 +485,7 @@ export class MakeupService {
             source.sessionDate,
             host.sessionDate,
             weekStartDay,
-            getLocalDateOnly(),
+            AttendanceSessionService.getCurrentSessionDate(),
           )
         ) return false;
 
@@ -482,10 +504,9 @@ export class MakeupService {
       .sort((a, b) => b.sessionDate.localeCompare(a.sessionDate) || b.startTime.localeCompare(a.startTime));
 
     for (const source of sourceSessions) {
-      const attendedOrCovered = db.getFirstSync<any>(
-        `SELECT id FROM attendance WHERE center_id = ? AND session_id = ? AND student_id = ?`,
-        [centerId, source.id, studentId],
-      ) || this.isSessionCoveredInAdvance(studentId, source.id);
+      const attendedOrCovered =
+        !this.hasExplicitAbsence(centerId, source.id, studentId) ||
+        this.isSessionCoveredInAdvance(studentId, source.id);
       const alreadyMadeUp = db.getFirstSync<any>(
         `SELECT id FROM attendance WHERE center_id = ? AND student_id = ?
            AND (original_absence_id = ? OR original_absence_id = ('absence-' || ? || '-' || ?))`,
@@ -531,12 +552,6 @@ export class MakeupService {
     for (const row of expectedRows) {
       const sessionId = row.sessionId;
       // Check if student attended
-      const attendance = db.getFirstSync<any>(
-        `SELECT id FROM attendance WHERE center_id = ? AND session_id = ? AND student_id = ?`,
-        [centerId, sessionId, studentId],
-      );
-      if (attendance) continue;
-
       // Check if covered in advance
       if (this.isSessionCoveredInAdvance(studentId, sessionId)) continue;
 
@@ -588,7 +603,7 @@ export class MakeupService {
         [originalSession.centerId, originalSession.teacherId],
       );
       const weekStartDay = teacherWeek?.weekStartDay ?? DEFAULT_TEACHER_WEEK_START_DAY;
-      if (getLocalDateOnly() > getTeacherWeekBounds(originalSession.sessionDate, weekStartDay).endDate) {
+      if (AttendanceSessionService.getCurrentSessionDate() > getTeacherWeekBounds(originalSession.sessionDate, weekStartDay).endDate) {
         throw new ConflictError(
           TEACHER_MAKEUP_CYCLE_EXPIRED_ERROR,
           TEACHER_MAKEUP_CYCLE_EXPIRED_MESSAGE,

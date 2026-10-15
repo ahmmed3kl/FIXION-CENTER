@@ -32,6 +32,26 @@ const students: Student[] = [
     grade: "الصف الثاني الإعدادي",
     status: "active",
   },
+  {
+    id: "student-other-center",
+    centerId: "center-2",
+    studentCode: "2001",
+    fullName: "أحمد من مركز آخر",
+    phone: "01000000007",
+    parentPhone: "01000000008",
+    grade: "الصف الثالث الثانوي",
+    status: "active",
+  },
+  {
+    id: "student-unknown-grade",
+    centerId: "center-1",
+    studentCode: "1004",
+    fullName: "أحمد بلا مستوى",
+    phone: "01000000009",
+    parentPhone: "01000000010",
+    grade: "",
+    status: "active",
+  },
 ];
 
 describe("attendance student search scope", () => {
@@ -40,6 +60,7 @@ describe("attendance student search scope", () => {
       students,
       "أحمد",
       "الصف الثالث الثانوي",
+      "center-1",
     );
 
     expect(results.map((student) => student.id)).toEqual([
@@ -54,6 +75,7 @@ describe("attendance student search scope", () => {
       students,
       "",
       null,
+      "center-1",
     );
 
     expect(results).toEqual([]);
@@ -64,11 +86,30 @@ describe("attendance student search scope", () => {
       students,
       "أحمد",
       "  الصف الثالث الثانوي  ",
+      "center-1",
     );
 
     expect(results.map((student) => student.id)).toEqual([
       "student-session",
       "student-other-group",
     ]);
+  });
+
+  it("limits empty searches and cleared queries to known-grade students in the active center", () => {
+    expect(searchAttendanceStudents(
+      students,
+      "",
+      "الصف الثالث الثانوي",
+      "center-1",
+    ).map((student) => student.id)).toEqual([
+      "student-session",
+      "student-other-group",
+    ]);
+    expect(searchAttendanceStudents(
+      students,
+      "أحمد",
+      "الصف الثالث الثانوي",
+      null,
+    )).toEqual([]);
   });
 });

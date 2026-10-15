@@ -21,10 +21,13 @@ CREATE TABLE IF NOT EXISTS centers (
     code VARCHAR(64) NOT NULL UNIQUE,
     phone VARCHAR(32),
     address TEXT,
+    time_zone VARCHAR(64),
     status VARCHAR(32) NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'suspended', 'inactive')),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE centers ADD COLUMN IF NOT EXISTS time_zone VARCHAR(64);
 
 -- Monotonic operational-data generation. Clients clear local operational
 -- SQLite data when this value changes after a center reset.
@@ -242,10 +245,51 @@ CREATE TABLE IF NOT EXISTS sessions (
     end_time VARCHAR(16) NOT NULL,
     status VARCHAR(32) NOT NULL DEFAULT 'open' CHECK (status IN ('scheduled', 'open', 'closed', 'cancelled')),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    started_at TIMESTAMPTZ,
+    device_started_at TIMESTAMPTZ,
+    server_received_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-CREATE UNIQUE INDEX IF NOT EXISTS uq_sessions_group_sched_date
+CREATE INDEX IF NOT EXISTS idx_sessions_group_sched_date
     ON sessions(center_id, group_id, COALESCE(schedule_id, ''), session_date);
+
+-- A natural-key registry identifies scheduled lessons only. Legacy sessions
+-- without a schedule keep their existing IDs; an empty schedule key is not a
+-- safe identity and must not be used to create aliases.
+CREATE TABLE IF NOT EXISTS session_natural_keys (
+    center_id VARCHAR(64) NOT NULL REFERENCES centers(id) ON DELETE CASCADE,
+    group_id VARCHAR(64) NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+    schedule_key VARCHAR(64) NOT NULL DEFAULT '',
+    session_date DATE NOT NULL,
+    session_id VARCHAR(64) NOT NULL REFERENCES sessions(id) ON DELETE RESTRICT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT pk_session_natural_keys
+        PRIMARY KEY (center_id, group_id, schedule_key, session_date),
+    CONSTRAINT uq_session_natural_key_session UNIQUE (center_id, session_id)
+);
+
+CREATE TABLE IF NOT EXISTS session_id_aliases (
+    center_id VARCHAR(64) NOT NULL REFERENCES centers(id) ON DELETE CASCADE,
+    local_session_id VARCHAR(64) NOT NULL,
+    canonical_session_id VARCHAR(64) NOT NULL REFERENCES sessions(id) ON DELETE RESTRICT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT pk_session_id_aliases PRIMARY KEY (center_id, local_session_id)
+);
+CREATE INDEX IF NOT EXISTS idx_session_id_aliases_canonical
+    ON session_id_aliases(center_id, canonical_session_id);
+
+CREATE TABLE IF NOT EXISTS session_start_events (
+    center_id VARCHAR(64) NOT NULL REFERENCES centers(id) ON DELETE CASCADE,
+    session_id VARCHAR(64) NOT NULL REFERENCES sessions(id) ON DELETE RESTRICT,
+    operation_id VARCHAR(64) NOT NULL,
+    device_id VARCHAR(64),
+    device_started_at TIMESTAMPTZ NOT NULL,
+    accepted_started_at TIMESTAMPTZ NOT NULL,
+    server_received_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT pk_session_start_events PRIMARY KEY (center_id, operation_id)
+);
+CREATE INDEX IF NOT EXISTS idx_session_start_events_session
+    ON session_start_events(center_id, session_id, accepted_started_at);
 
 -- Session Expected Students (Manifest snapshot)
 CREATE TABLE IF NOT EXISTS session_expected_students (

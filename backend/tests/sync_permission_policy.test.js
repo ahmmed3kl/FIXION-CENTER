@@ -62,6 +62,14 @@ function run() {
     operationType: "CREATE",
     payload: { attendanceType: "makeup" },
   });
+  const sessionActivation = {
+    entityType: "session",
+    operationType: "UPDATE",
+    payload: { action: "activate", status: "open" },
+  };
+  assert.equal(requiredPermission(sessionActivation), "attendance.create");
+  assertSyncPermission(request(["attendance.create"]), sessionActivation);
+  rejectsWithPermission(request(["sessions.update"]), sessionActivation, "attendance.create");
   assert.equal(requiredPermission({
     entityType: "attendance",
     operationType: "UPDATE",
@@ -173,6 +181,20 @@ function run() {
       payload: { id: "teacher-1", weekStartDay: 3 },
     }),
     (error) => error.code === "FORBIDDEN" && error.statusCode === 403,
+  );
+  assert.equal(
+    canReadSyncEntity("student", {
+      role: "manager",
+      permissions: ["students.create", "students.update"],
+    }),
+    false,
+  );
+  assert.equal(
+    canReadSyncEntity("student", {
+      role: "manager",
+      permissions: ["students.view"],
+    }),
+    true,
   );
   assert.equal(canReadSyncEntity("payment", { role: "assistant", permissions: ["students.view"] }), false);
   assert.equal(canReadSyncEntity("group", { role: "assistant", permissions: ["groups.view"] }), true);

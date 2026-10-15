@@ -60,6 +60,11 @@ export class SessionRepository {
        LEFT JOIN subjects subj ON COALESCE(s.subject_id, g.subject_id) = subj.id
        LEFT JOIN teachers t ON COALESCE(s.teacher_id, g.teacher_id) = t.id
        WHERE s.center_id = ? AND s.session_date = ?
+         AND NOT EXISTS (
+           SELECT 1 FROM session_id_aliases alias
+           WHERE alias.center_id = s.center_id
+             AND alias.local_session_id = s.id
+         )
        ORDER BY s.start_time ASC`,
       [centerId, dateStr],
     );
@@ -86,6 +91,11 @@ export class SessionRepository {
        LEFT JOIN subjects subj ON COALESCE(s.subject_id, g.subject_id) = subj.id
        LEFT JOIN teachers t ON COALESCE(s.teacher_id, g.teacher_id) = t.id
        WHERE s.center_id = ? AND substr(s.session_date, 1, 7) = ?
+         AND NOT EXISTS (
+           SELECT 1 FROM session_id_aliases alias
+           WHERE alias.center_id = s.center_id
+             AND alias.local_session_id = s.id
+         )
        ORDER BY s.session_date DESC, s.start_time DESC`,
       [centerId, month],
     );

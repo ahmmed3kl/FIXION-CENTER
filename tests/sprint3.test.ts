@@ -16,7 +16,9 @@ import {
 } from "../src/features/payments/DebtCycleRepository";
 import { FinancialCalculationService } from "../src/features/payments/FinancialCalculationService";
 import { PaymentRepository } from "../src/features/payments/PaymentRepository";
+import { CardRangeRepository } from "../src/features/students/CardRangeRepository";
 import { StudentRepository } from "../src/features/students/StudentRepository";
+import { configureTestCenterTimeZones } from "./helpers/centerTimeZone";
 
 describe("Sprint 3 - FIXION Financial Core & Cash Payments", () => {
   beforeAll(async () => {
@@ -29,6 +31,16 @@ describe("Sprint 3 - FIXION Financial Core & Cash Payments", () => {
     // 2. Login as Demo Admin for center-1 setup
     await useAuthStore.getState().login("01000000001", "123456");
     await useAuthStore.getState().selectCenter("center-1");
+    configureTestCenterTimeZones();
+    for (const centerId of ["center-1", "center-2"]) {
+      CardRangeRepository.replaceCenterRanges(centerId, [{
+        id: `sprint3-test-range-${centerId}`,
+        center_id: centerId,
+        start_code: "000000",
+        end_code: "999999",
+        status: "active",
+      }]);
+    }
   });
 
   describe("1. Subscription-Based Debt Cycles & Boundary Rules", () => {
@@ -614,6 +626,8 @@ describe("Sprint 3 - FIXION Financial Core & Cash Payments", () => {
     let studentSec: any;
     let paymentSec: any;
     let cycleSec: any;
+    let nextCycleSec: any;
+    let enrollmentSec: any;
 
     beforeAll(async () => {
       // Create student and payment under admin
@@ -634,14 +648,14 @@ describe("Sprint 3 - FIXION Financial Core & Cash Payments", () => {
         sessionPrice: 75,
       });
 
-      const enr = EnrollmentRepository.enrollStudent({
+      enrollmentSec = EnrollmentRepository.enrollStudent({
         studentId: studentSec.id,
         groupId: grp.id,
         startDate: "2026-09-01",
       });
 
       const cycles = await DebtCycleRepository.generateCyclesForEnrollment(
-        enr.id,
+        enrollmentSec.id,
         "2026-09-01",
       );
       cycleSec = cycles[0];
@@ -650,6 +664,8 @@ describe("Sprint 3 - FIXION Financial Core & Cash Payments", () => {
         studentId: studentSec.id,
         amount: 300,
         paymentType: "monthly",
+        debtCycleId: cycleSec.id,
+        paymentDate: "2026-09-01",
       });
 
       // Switch auth context to Demo Secretary (01000000002)
@@ -673,10 +689,19 @@ describe("Sprint 3 - FIXION Financial Core & Cash Payments", () => {
     });
 
     it("secretary CAN record cash payments", async () => {
+      const cycles = await DebtCycleRepository.generateCyclesForEnrollment(
+        enrollmentSec.id,
+        "2026-10-01",
+      );
+      nextCycleSec = cycles[1];
+      expect(nextCycleSec).toBeDefined();
+
       const payment = await PaymentRepository.recordPayment({
         studentId: studentSec.id,
         amount: 50,
         paymentType: "partial",
+        debtCycleId: nextCycleSec.id,
+        paymentDate: "2026-10-01",
       });
       expect(payment.amount).toBe(50);
     });

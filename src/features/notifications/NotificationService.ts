@@ -2,7 +2,7 @@ import { AuditService } from "../../core/audit";
 import { env } from "../../config/env";
 import { DatabaseService } from "../../core/database";
 import { DeviceService } from "../../core/device";
-import { ForbiddenError, UnauthorizedError } from "../../core/errors";
+import { ConflictError, ForbiddenError, UnauthorizedError } from "../../core/errors";
 import { PermissionService } from "../../core/permissions";
 import { SyncRepository } from "../../core/sync";
 import {
@@ -77,6 +77,91 @@ export class NotificationService {
     return { centerId: activeCenterId, user: currentUser };
   }
 
+  private static findExplicitAbsence(
+    centerId: string,
+    sessionId: string,
+    studentId: string,
+  ): { id: string } | null {
+    const db = DatabaseService.getDb();
+    const session = db.getFirstSync<{
+      groupId: string | null;
+      status: string;
+    }>(
+      `SELECT group_id as groupId, status FROM sessions
+        WHERE center_id = ? AND id = ?`,
+      [centerId, sessionId],
+    );
+    if (
+      !session?.groupId ||
+      String(session.status || "").toLowerCase() === "cancelled"
+    ) {
+      return null;
+    }
+
+    const canonicalSessionId = SyncRepository.resolveSessionAlias(
+      centerId,
+      sessionId,
+    );
+    const aliases = db.getAllSync<{ localSessionId: string }>(
+      `SELECT aliases.local_session_id as localSessionId
+         FROM session_id_aliases aliases
+         LEFT JOIN sessions source
+           ON source.center_id = aliases.center_id
+          AND source.id = aliases.local_session_id
+         LEFT JOIN sessions canonical
+           ON canonical.center_id = aliases.center_id
+          AND canonical.id = aliases.canonical_session_id
+        WHERE aliases.center_id = ?
+          AND aliases.canonical_session_id = ?
+          AND NOT (
+            (canonical.status = 'cancelled' AND source.status IS NOT NULL
+              AND source.status <> 'cancelled')
+            OR (source.status = 'cancelled' AND canonical.status IS NOT NULL
+              AND canonical.status <> 'cancelled')
+          )`,
+      [centerId, canonicalSessionId],
+    );
+    const logicalSessionIds = Array.from(new Set([
+      sessionId,
+      canonicalSessionId,
+      ...aliases.map((alias) => String(alias.localSessionId)),
+    ]));
+    const placeholders = logicalSessionIds.map(() => "?").join(", ");
+    const attendance = db.getAllSync<{
+      id: string;
+      status: string;
+      attendanceType: string | null;
+    }>(
+      `SELECT id, status, attendance_type as attendanceType
+         FROM attendance
+        WHERE center_id = ? AND student_id = ?
+          AND session_id IN (${placeholders})`,
+      [centerId, studentId, ...logicalSessionIds],
+    );
+    if (
+      attendance.some((row) =>
+        ["present", "late"].includes(String(row.status || "").toLowerCase()),
+      )
+    ) {
+      return null;
+    }
+    const explicitAbsence = attendance.find(
+      (row) =>
+        String(row.status || "").toLowerCase() === "absent" &&
+        String(row.attendanceType || "present").toLowerCase() !== "makeup",
+    );
+    if (!explicitAbsence) return null;
+
+    const coverage = db.getFirstSync<{ id: string }>(
+      `SELECT id FROM advance_coverages
+        WHERE center_id = ? AND student_id = ?
+          AND target_future_session_id IN (${placeholders})
+        LIMIT 1`,
+      [centerId, studentId, ...logicalSessionIds],
+    );
+    return coverage ? null : { id: String(explicitAbsence.id) };
+  }
+
   /**
    * Creates a notification event and schedules push + SMS deliveries.
    * Idempotent per operationId — no duplicate events.
@@ -87,6 +172,7 @@ export class NotificationService {
     studentId: string;
     sessionId: string;
     attendanceId?: string;
+    sourceAttendanceId?: string;
     eventType: NotificationEventType;
     vars: Record<string, string>;
     customMessage?: string;
@@ -100,6 +186,19 @@ export class NotificationService {
       throw new ForbiddenError("ليس لديك صلاحية إرسال الإشعارات.");
     }
     const db = DatabaseService.getDb();
+    const validAbsence =
+      params.eventType === "absence"
+        ? this.findExplicitAbsence(
+            centerId,
+            params.sessionId,
+            params.studentId,
+          )
+        : null;
+    if (params.eventType === "absence" && !validAbsence) {
+      throw new ConflictError(
+        "لا يمكن إرسال إشعار الغياب دون غياب صريح صالح ومؤكد حاليًا.",
+      );
+    }
 
     // 1. Business event identity check:
     // For attendance notifications, attendance_id + event_type is strictly unique per center.
@@ -198,6 +297,11 @@ export class NotificationService {
         eventType: params.eventType,
         studentId: params.studentId,
         sessionId: params.sessionId,
+        attendanceId:
+          params.attendanceId ||
+          params.sourceAttendanceId ||
+          validAbsence?.id ||
+          undefined,
       },
     });
 
@@ -368,6 +472,17 @@ export class NotificationService {
   }> {
     const { centerId } = this.getActiveContext();
     const db = DatabaseService.getDb();
+    const event = db.getFirstSync<{
+      eventType: string;
+      sessionId: string;
+      studentId: string;
+    }>(
+      `SELECT event_type as eventType, session_id as sessionId,
+              student_id as studentId
+         FROM notification_events
+        WHERE center_id = ? AND id = ?`,
+      [centerId, eventId],
+    );
 
     const deliveries = db.getAllSync<any>(
       `SELECT id, channel, recipient, rendered_message as renderedMessage, retry_count as retryCount
@@ -381,6 +496,29 @@ export class NotificationService {
     const now = new Date().toISOString();
 
     for (const delivery of deliveries) {
+      if (
+        event?.eventType === "absence" &&
+        !this.findExplicitAbsence(
+          centerId,
+          event.sessionId,
+          event.studentId,
+        )
+      ) {
+        db.runSync(
+          `UPDATE notification_deliveries
+              SET status = ?, failure_reason = ?, updated_at = ?
+            WHERE center_id = ? AND id = ? AND status = 'pending'`,
+          [
+            "failed",
+            "غياب الطالب لم يعد صريحًا أو صالحًا؛ أُوقف الإرسال.",
+            new Date().toISOString(),
+            centerId,
+            delivery.id,
+          ],
+        );
+        failed++;
+        continue;
+      }
       // SMS deliveries are processed by the backend ZADX provider in
       // production. Mock/test mode uses a deterministic local provider so
       // offline unit tests can verify idempotency without sending real SMS.
@@ -524,10 +662,30 @@ export class NotificationService {
     selectedStudentIds: string[];
     operationPrefix?: string;
   }): NotificationEvent[] {
+    const { centerId, user } = this.getActiveContext();
+    if (
+      !PermissionService.hasPermission(user.permissions, "notifications.send")
+    ) {
+      throw new ForbiddenError("ليس لديك صلاحية إرسال الإشعارات.");
+    }
+    const selectedAbsences = new Map<string, string>();
+    for (const studentId of new Set(params.selectedStudentIds)) {
+      const absence = this.findExplicitAbsence(
+        centerId,
+        params.sessionId,
+        studentId,
+      );
+      if (!absence) {
+        throw new ConflictError(
+          "تغيّرت حالة أحد الطلاب؛ لا يمكن إرسال إشعار إلا عن غياب صريح صالح حاليًا.",
+        );
+      }
+      selectedAbsences.set(studentId, absence.id);
+    }
     const prefix = params.operationPrefix || `op-notif-abs-${params.sessionId}`;
     const events: NotificationEvent[] = [];
 
-    for (const studentId of params.selectedStudentIds) {
+    for (const studentId of selectedAbsences.keys()) {
       const opId = `${prefix}-${studentId}`;
       const vars = this.buildTemplateVariables(
         studentId,
@@ -539,6 +697,7 @@ export class NotificationService {
         operationId: opId,
         studentId,
         sessionId: params.sessionId,
+        sourceAttendanceId: selectedAbsences.get(studentId),
         eventType: "absence",
         vars,
       });

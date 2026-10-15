@@ -42,7 +42,13 @@ import { GroupRepository } from "../../features/groups/GroupRepository";
 import { HomeworkEvaluationRepository } from "../../features/homework/HomeworkEvaluationRepository";
 import { PaymentRepository } from "../../features/payments/PaymentRepository";
 import { FinancialCalculationService } from "../../features/payments/FinancialCalculationService";
+import {
+  getConfiguredSessionPrice,
+  getSessionPaymentCycles,
+  hasPayableSessionDebt,
+} from "../../features/payments/paymentEligibility";
 import { getDebtCyclePeriodLabel, getPaymentDescription } from "../../features/payments/paymentPresentation";
+import { PaymentOperationIdentity, resolvePaymentOperationIdentity } from "../../features/payments/paymentSubmissionIdentity";
 import { SessionRepository } from "../../features/sessions/SessionRepository";
 import { SessionClosingService } from "../../features/sessions/SessionClosingService";
 import { sortSessionsByActivation } from "../../features/sessions/sessionOrdering";
@@ -51,7 +57,7 @@ import { StudentRepository } from "../../features/students/StudentRepository";
 import { StudentNoteRepository } from "../../features/students/StudentNoteRepository";
 import { getStudentColorPresentation } from "../../features/students/studentColor";
 import { useAuthStore } from "../../features/auth/useAuthStore";
-import { formatLocalDate, formatLocalDateTime, getLocalDateOnly } from "../../shared/utils/date";
+import { formatLocalDate, formatLocalDateTime } from "../../shared/utils/date";
 import { TEACHER_MAKEUP_CYCLE_EXPIRED_ERROR } from "../../shared/utils/teacherWeeks";
 import { searchAttendanceStudents } from "../../features/attendance/attendanceStudentSearch";
 import {
@@ -128,6 +134,7 @@ function ScannerContent() {
   const [currentGroupLabel, setCurrentGroupLabel] = useState("");
   const [searchError, setSearchError] = useState<string | null>(null);
   const [todayGroups, setTodayGroups] = useState<Group[]>([]);
+  const [todaySessionDate, setTodaySessionDate] = useState<string | null>(null);
   const [allGroups, setAllGroups] = useState<Group[]>([]);
   const [showAllGroups, setShowAllGroups] = useState(false);
   const [activeSessionsByGroup, setActiveSessionsByGroup] = useState<Record<string, Session>>({});
@@ -171,7 +178,9 @@ function ScannerContent() {
   const [paymentNotes, setPaymentNotes] = useState("");
   const [isRecordingPayment, setIsRecordingPayment] = useState(false);
   const paymentSubmissionRef = useRef(false);
+  const paymentOperationIdentityRef = useRef<PaymentOperationIdentity | null>(null);
   const [paymentFormError, setPaymentFormError] = useState("");
+  const [paymentNotice, setPaymentNotice] = useState<{ title: string; message: string; success?: boolean } | null>(null);
   const [financialExpanded, setFinancialExpanded] = useState(true);
 
   const isScanningBlockedRef = useRef(false);
@@ -213,10 +222,20 @@ function ScannerContent() {
 
   const refreshTodayData = useCallback(() => {
     try {
-      setTodayGroups(AttendanceSessionService.getTodayGroups());
-      const sessions = AttendanceSessionService.getTodaySessions();
+      const sessionDate = AttendanceSessionService.getCurrentSessionDate();
+      setTodaySessionDate(sessionDate);
+      setTodayGroups(AttendanceSessionService.getTodayGroups(sessionDate));
+      const sessions = AttendanceSessionService.getTodaySessions(sessionDate);
       setActiveSessionsByGroup(Object.fromEntries(sessions.map((session) => [`${session.groupId}:${session.scheduleId}`, session])));
       setSessionActivationTimes(SessionRepository.getActivationTimestamps(sessions.map((session) => session.id)));
+    } catch (error) {
+      setTodaySessionDate(null);
+      setTodayGroups([]);
+      setActiveSessionsByGroup({});
+      setSessionActivationTimes(new Map());
+      setSearchError(getUserErrorMessage(error));
+    }
+    try {
       setAllGroups(GroupRepository.getAll());
       setAllStudents(StudentRepository.getAllForAttendance());
       try {
@@ -227,10 +246,6 @@ function ScannerContent() {
         setHomeworkError(getUserErrorMessage(error));
       }
     } catch (error) {
-      setTodayGroups([]);
-      setAllGroups([]);
-      setActiveSessionsByGroup({});
-      setSessionActivationTimes(new Map());
       setSearchError(getUserErrorMessage(error));
     }
   }, []);
@@ -347,7 +362,7 @@ function ScannerContent() {
       }
       if (!activeCenterId) throw new Error("يجب تحديد المركز الحالي.");
 
-      const sessionDate = getLocalDateOnly();
+      const sessionDate = AttendanceSessionService.getCurrentSessionDate();
       const session = AttendanceSessionService.ensureSessionForGroup(groupId, sessionDate, scheduleId);
       if (
         session.centerId !== activeCenterId ||
@@ -405,8 +420,9 @@ function ScannerContent() {
   };
 
   const visibleGroupSchedules = useMemo(() => {
-    const today = getLocalDateOnly();
-    const todayDayOfWeek = new Date(`${today}T12:00:00`).getDay();
+    const todayDayOfWeek = todaySessionDate
+      ? new Date(`${todaySessionDate}T12:00:00`).getDay()
+      : -1;
     const entries = (showAllGroups ? allGroups : todayGroups).flatMap((group) =>
       GroupScheduleRepository.getSchedulesForGroup(group.id)
         .filter((schedule) => showAllGroups || schedule.dayOfWeek === todayDayOfWeek)
@@ -432,7 +448,7 @@ function ScannerContent() {
       if (leftRank !== rightRank) return leftRank - rightRank;
       return left.group.id.localeCompare(right.group.id) || left.schedule.id.localeCompare(right.schedule.id);
     });
-  }, [activeSessionsByGroup, allGroups, sessionActivationTimes, showAllGroups, todayGroups]);
+  }, [activeSessionsByGroup, allGroups, sessionActivationTimes, showAllGroups, todayGroups, todaySessionDate]);
 
   const selectedSession = selectedGroupId
     ? activeSessionsByGroup[`${selectedGroupId}:${selectedScheduleId || ""}`]
@@ -696,8 +712,8 @@ function ScannerContent() {
     if (!activeSessionId) return [];
     const session = SessionRepository.findById(activeSessionId);
     const groupGrade = allGroups.find((group) => group.id === session?.groupId)?.grade;
-    return searchAttendanceStudents(allStudents, allStudentSearch, groupGrade);
-  }, [activeSessionId, allGroups, allStudentSearch, allStudents]);
+    return searchAttendanceStudents(allStudents, allStudentSearch, groupGrade, activeCenterId);
+  }, [activeCenterId, activeSessionId, allGroups, allStudentSearch, allStudents]);
 
   const openAttendanceNotes = async () => {
     if (!student) return;
@@ -820,6 +836,15 @@ function ScannerContent() {
       setAttendanceResult(result);
       setIsAlreadyAttended(true);
       setAttendanceSummary(AttendanceSessionService.getSummary(session.id));
+      try {
+        setFinancialStatus(FinancialCalculationService.getStudentFinancialStatus(targetStudent.id));
+      } catch (financialError) {
+        setFinancialStatus(null);
+        setPaymentNotice({
+          title: "تعذر تحديث الموقف المالي",
+          message: getUserErrorMessage(financialError),
+        });
+      }
       
       console.log("[Scanner] Attendance recorded. Session details:", {
         sessionId: session.id,
@@ -916,9 +941,9 @@ function ScannerContent() {
   const paymentCyclesForPurpose = (
     status: DetailedStudentFinancialStatus,
     purpose: "session" | "cycle",
-  ) => status.cycles.filter((cycle) => purpose === "session"
-    ? cycle.billingMode === "per_session" || cycle.cycleType === "per_session"
-    : (cycle.remainingDebt ?? 0) > 0);
+  ) => purpose === "session"
+    ? getSessionPaymentCycles(status.cycles, status.sessionDebt)
+    : status.cycles.filter((cycle) => (cycle.remainingDebt ?? 0) > 0);
 
   const getSessionOutstandingForCycle = (
     studentId: string,
@@ -928,9 +953,30 @@ function ScannerContent() {
     ? Number(FinancialCalculationService.getStudentFinancialStatusForGroup(studentId, cycle.groupId).currentPeriodDebt || 0)
     : Number(status.currentPeriodDebt || 0);
 
-  const openQuickPaymentModal = (advance = false) => {
+  const getSessionPriceForCycle = (cycle?: DebtCycle): number | undefined => {
+    if (!cycle?.groupId) return undefined;
+    const group = allGroups.find((item) => item.id === cycle.groupId)
+      || todayGroups.find((item) => item.id === cycle.groupId);
+    if (group) return getConfiguredSessionPrice(group);
+    if (!PermissionService.hasPermission(currentUser?.permissions || [], "groups.view")) return undefined;
+    const loadedGroup = GroupRepository.findById(cycle.groupId);
+    return loadedGroup ? getConfiguredSessionPrice(loadedGroup) : undefined;
+  };
+
+  const openQuickPaymentModal = (advance = false, requestedPurpose?: "session" | "cycle") => {
     if (!student || !financialStatus || !canCreatePayment) return;
-    const initialPurpose = advance || financialStatus.monthlyRemainingDebt > 0 ? "cycle" : "session";
+    const sessionPaymentAvailable = hasPayableSessionDebt(financialStatus);
+    const initialPurpose = advance
+      ? "cycle"
+      : requestedPurpose
+        || (financialStatus.monthlyRemainingDebt > 0 ? "cycle" : sessionPaymentAvailable ? "session" : "cycle");
+    if (!advance && initialPurpose === "session" && !sessionPaymentAvailable) {
+      setPaymentNotice({
+        title: "لا توجد رسوم حصص مستحقة",
+        message: "لا يمكن تسجيل دفع حصة إلا عند وجود مستحقات على دورة مضبوطة صراحةً بنظام الحصة.",
+      });
+      return;
+    }
     const cycles = paymentCyclesForPurpose(financialStatus, initialPurpose);
     const selectedCycle = cycles.length === 1 ? cycles[0] : undefined;
     const due = initialPurpose === "cycle"
@@ -977,10 +1023,11 @@ function ScannerContent() {
         throw new Error(`المبلغ يتجاوز المتبقي المستحق (${formatCurrency(outstanding)}).`);
       }
 
-      const paymentType = !isAdvancePayment && paymentPurpose === "session"
+      const paymentType: "session" | "monthly" | "partial" = !isAdvancePayment && paymentPurpose === "session"
         ? "session"
         : cycle && amount >= Number(cycle.remainingDebt ?? 0) ? "monthly" : "partial";
-      await PaymentRepository.recordPayment({
+      const paymentRequest = {
+        centerId: student.centerId,
         studentId: student.id,
         amount,
         paymentType,
@@ -988,6 +1035,15 @@ function ScannerContent() {
         subscriptionId: cycle?.packageSubscriptionId,
         notes: paymentNotes.trim() || undefined,
         allowCreditBalance: isAdvancePayment,
+      };
+      const paymentIdentity = resolvePaymentOperationIdentity(
+        paymentRequest,
+        paymentOperationIdentityRef.current,
+      );
+      paymentOperationIdentityRef.current = paymentIdentity;
+      await PaymentRepository.recordPayment({
+        ...paymentRequest,
+        operationId: paymentIdentity.operationId,
       });
 
       setFinancialStatus(FinancialCalculationService.getStudentFinancialStatus(student.id));
@@ -995,7 +1051,12 @@ function ScannerContent() {
       setPaymentAmount("");
       setPaymentNotes("");
       setIsAdvancePayment(false);
-      Alert.alert("نجاح", Strings.paymentRecordedSuccess);
+      paymentOperationIdentityRef.current = null;
+      setPaymentNotice({
+        title: "تم تسجيل الدفعة",
+        message: Strings.paymentRecordedSuccess,
+        success: true,
+      });
     } catch (err) {
       setPaymentFormError(getUserErrorMessage(err));
     } finally {
@@ -1368,19 +1429,32 @@ function ScannerContent() {
               ) : null}
               {financialExpanded ? (
                 <>
-                  {financialStatus.sessionDebt && Number(financialStatus.sessionDebt.currentDebt) > 0 ? (
-                    <View style={styles.attendanceSessionDebt}>
-                      <View style={styles.attendanceFinanceCardHeading}>
-                        <View>
-                          <Text style={styles.attendanceFinanceRowTitle}>رسوم الحصص المستحقة</Text>
-                          <Text style={styles.attendanceFinanceMeta}>
-                            {formatLocalDate(financialStatus.sessionDebt.periodStart)} إلى {formatLocalDate(financialStatus.sessionDebt.periodEnd)}
-                          </Text>
+                  {student && financialStatus.sessionDebt
+                    ? getSessionPaymentCycles(financialStatus.cycles, financialStatus.sessionDebt).map((cycle) => {
+                    const due = getSessionOutstandingForCycle(student.id, financialStatus, cycle);
+                    const price = getSessionPriceForCycle(cycle);
+                    return (
+                      <View key={cycle.id} style={styles.attendanceSessionDebt}>
+                        <View style={styles.attendanceFinanceCardHeading}>
+                          <View style={styles.attendanceFinanceRowCopy}>
+                            <Text style={styles.attendanceFinanceRowTitle}>{cycle.groupName || "رسوم الحصص"}</Text>
+                            <Text style={styles.attendanceFinanceMeta}>
+                              سعر الحصة: {price === undefined ? "غير متاح" : formatCurrency(price)}
+                            </Text>
+                            {financialStatus.sessionDebt ? (
+                              <Text style={styles.attendanceFinanceMeta}>
+                                {formatLocalDate(financialStatus.sessionDebt.periodStart)} إلى {formatLocalDate(financialStatus.sessionDebt.periodEnd)}
+                              </Text>
+                            ) : null}
+                          </View>
+                          <View style={{ alignItems: "flex-end", gap: 4 }}>
+                            <Text style={styles.attendanceSessionDebtAmount}>{formatCurrency(due)}</Text>
+                            <StatusBadge text={due > 0 ? "مستحق" : "لا توجد مستحقات"} type={due > 0 ? "warning" : "neutral"} />
+                          </View>
                         </View>
-                        <Text style={styles.attendanceSessionDebtAmount}>{formatCurrency(financialStatus.sessionDebt.currentDebt)}</Text>
                       </View>
-                    </View>
-                  ) : null}
+                    );
+                  }) : null}
                   <Text style={styles.attendanceFinanceSubsection}>الاشتراكات الشهرية والباقات</Text>
                   {financialStatus.cycles.filter((cycle) =>
                     cycle.billingMode !== "per_session" && cycle.cycleType !== "per_session",
@@ -1471,6 +1545,16 @@ function ScannerContent() {
                       <Text style={styles.attendanceClearedDebtText}>{Strings.noPendingDebt}</Text>
                     </View>
                   )}
+                  {hasPayableSessionDebt(financialStatus) ? (
+                    <AppButton
+                      title={`دفع رسوم الحصص · ${formatCurrency(financialStatus.currentPeriodDebt || 0)}`}
+                      onPress={() => openQuickPaymentModal(false, "session")}
+                      disabled={isRecordingPayment}
+                      size="md"
+                      variant="outline"
+                      style={styles.attendanceFinanceAction}
+                    />
+                  ) : null}
                   <TouchableOpacity
                     accessibilityRole="button"
                     style={styles.attendanceAdvanceAction}
@@ -1491,7 +1575,10 @@ function ScannerContent() {
         transparent
         animationType="fade"
         onRequestClose={() => {
-          if (!isRecordingPayment) setShowPaymentModal(false);
+          if (!isRecordingPayment) {
+            setShowPaymentModal(false);
+            paymentOperationIdentityRef.current = null;
+          }
         }}
       >
         <View style={styles.modalBackdrop}>
@@ -1509,12 +1596,9 @@ function ScannerContent() {
             ) : null}
             {!isAdvancePayment ? <View style={styles.paymentPurposeRow}>
               {(["session", "cycle"] as const).map((purpose) => {
-                const availableCycles = financialStatus
-                  ? paymentCyclesForPurpose(financialStatus, purpose)
-                  : [];
                 const enabled = purpose === "cycle"
                   ? Number(financialStatus?.monthlyRemainingDebt || 0) > 0
-                  : Number(financialStatus?.currentPeriodDebt || 0) > 0;
+                  : Boolean(financialStatus && hasPayableSessionDebt(financialStatus));
                 return (
                   <TouchableOpacity
                     key={purpose}
@@ -1553,6 +1637,7 @@ function ScannerContent() {
                 : student
                   ? getSessionOutstandingForCycle(student.id, financialStatus, selectedCycle)
                   : 0;
+              const sessionPrice = selectedCycle ? getSessionPriceForCycle(selectedCycle) : undefined;
               return (
                 <>
                   {cycles.length > 1 ? (
@@ -1578,6 +1663,9 @@ function ScannerContent() {
                         >
                           <Text style={styles.paymentCycleName}>{cycle.groupName || cycle.packageName || "دورة مديونية"}</Text>
                           <Text style={styles.paymentCycleAmount}>
+                            {paymentPurpose === "session"
+                              ? `سعر الحصة: ${getSessionPriceForCycle(cycle) === undefined ? "غير متاح" : formatCurrency(getSessionPriceForCycle(cycle) || 0)} · `
+                              : ""}
                             المتبقي: {formatCurrency(isAdvancePayment || paymentPurpose === "cycle" ? Number(cycle.remainingDebt ?? 0) : student ? getSessionOutstandingForCycle(student.id, financialStatus, cycle) : 0)}
                           </Text>
                         </TouchableOpacity>
@@ -1592,6 +1680,20 @@ function ScannerContent() {
                     </Text>
                     <Text style={styles.paymentDuePreviewValue}>{formatCurrency(outstanding)}</Text>
                   </View>
+                  {!isAdvancePayment && paymentPurpose === "session" ? (
+                    <View style={[styles.paymentDuePreview, { flexDirection: "column", alignItems: "stretch", gap: Spacing.sm }]}>
+                      <View style={styles.attendanceFinanceCardHeading}>
+                        <Text style={styles.paymentDuePreviewLabel}>سعر الحصة للوحدة</Text>
+                        <Text style={styles.paymentDuePreviewValue}>
+                          {selectedCycle ? sessionPrice === undefined ? "غير متاح" : formatCurrency(sessionPrice) : "اختر المجموعة"}
+                        </Text>
+                      </View>
+                      <View style={styles.attendanceFinanceCardHeading}>
+                        <Text style={styles.paymentDuePreviewLabel}>حالة المستحق</Text>
+                        <StatusBadge text={outstanding > 0 ? "مستحق" : "لا توجد مستحقات"} type={outstanding > 0 ? "warning" : "neutral"} />
+                      </View>
+                    </View>
+                  ) : null}
                   <AppInput
                     label="المبلغ المدفوع (ج.م)"
                     keyboardType="numeric"
@@ -1616,18 +1718,46 @@ function ScannerContent() {
                 title={Strings.confirmPaymentButton}
                 onPress={handleConfirmQuickPayment}
                 loading={isRecordingPayment}
-                disabled={isRecordingPayment || !canCreatePayment}
+                disabled={
+                  isRecordingPayment ||
+                  !canCreatePayment ||
+                  (!isAdvancePayment && paymentPurpose === "session" && !hasPayableSessionDebt(financialStatus))
+                }
                 variant="success"
                 style={{ flex: 1 }}
               />
               <AppButton
                 title={Strings.cancelButton}
                 variant="outline"
-                onPress={() => setShowPaymentModal(false)}
+                onPress={() => {
+                  setShowPaymentModal(false);
+                  paymentOperationIdentityRef.current = null;
+                }}
                 disabled={isRecordingPayment}
                 style={{ flex: 1 }}
               />
             </View>
+          </View>
+        </View>
+      </Modal>
+      <Modal
+        visible={Boolean(paymentNotice)}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setPaymentNotice(null)}
+      >
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalContent}>
+            <View style={{ alignItems: "center", marginBottom: Spacing.sm }}>
+              <Ionicons
+                name={paymentNotice?.success ? "checkmark-circle-outline" : "alert-circle-outline"}
+                size={26}
+                color={paymentNotice?.success ? Colors.successText : Colors.warningText}
+              />
+            </View>
+            <Text style={styles.modalTitle}>{paymentNotice?.title}</Text>
+            <Text style={styles.modalSub}>{paymentNotice?.message}</Text>
+            <AppButton title="حسنًا" onPress={() => setPaymentNotice(null)} />
           </View>
         </View>
       </Modal>
@@ -1820,8 +1950,9 @@ function ScannerContent() {
             {(showAllGroups ? allGroups : todayGroups).length === 0 ? (
               <Text style={styles.emptySessionText}>لا توجد جلسات مجدولة اليوم.</Text>
             ) : (showAllGroups ? allGroups : todayGroups).flatMap((group) => {
-              const today = getLocalDateOnly();
-              const todayDayOfWeek = new Date(`${today}T12:00:00`).getDay();
+              const todayDayOfWeek = todaySessionDate
+                ? new Date(`${todaySessionDate}T12:00:00`).getDay()
+                : -1;
               const schedules = GroupScheduleRepository.getSchedulesForGroup(group.id).filter((item) => item.dayOfWeek === todayDayOfWeek);
               return schedules.map((schedule) => {
               const key = `${group.id}:${schedule.id}`;

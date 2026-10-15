@@ -14,7 +14,8 @@ import {
     View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { getLocalDateOnly } from "../../shared/utils/date";
+import { addDateOnlyDays } from "../../shared/utils/date";
+import { getUserErrorMessage } from "../../core/errors";
 import { useLocalDataRevision } from "../../core/database/useLocalDataRevision";
 import { Strings } from "../../core/localization";
 import {
@@ -28,6 +29,7 @@ import { GroupRepository } from "../../features/groups/GroupRepository";
 import { GroupScheduleRepository } from "../../features/groups/GroupScheduleRepository";
 import { GROUPS_ROUTE, returnToGroupsIfRequested } from "../../features/groups/groupNavigation";
 import { SessionGenerationService } from "../../features/sessions/SessionGenerationService";
+import { SessionDateService } from "../../features/sessions/SessionDateService";
 import { SubjectRepository } from "../../features/subjects/SubjectRepository";
 import { TeacherRepository } from "../../features/teachers/TeacherRepository";
 import { TeacherSubjectRepository } from "../../features/teachers/TeacherSubjectRepository";
@@ -97,6 +99,7 @@ export default function AcademicScreen() {
   const [groupTeacherFilter, setGroupTeacherFilter] = useState<string>("");
   const [teacherSearch, setTeacherSearch] = useState("");
   const [todaySessions, setTodaySessions] = useState<Session[]>([]);
+  const [sessionDateConfigurationError, setSessionDateConfigurationError] = useState<string | null>(null);
   const [academicStages, setAcademicStages] = useState<AcademicStage[]>(() => DEFAULT_ACADEMIC_STAGES.map((stage) => ({ ...stage, grades: [...stage.grades] })));
   const [customStageLabel, setCustomStageLabel] = useState("");
   const [customGradeByStage, setCustomGradeByStage] = useState<Record<string, string>>({});
@@ -150,13 +153,22 @@ export default function AcademicScreen() {
   const [schedEnd, setSchedEnd] = useState("16:00");
 
   // Session Generation State
-  const todayStr = getLocalDateOnly();
-  const nextWeekStr = new Date(Date.now() + 7 * 86400000)
-    .toISOString()
-    .split("T")[0];
-  const [genFromDate, setGenFromDate] = useState(todayStr);
-  const [genToDate, setGenToDate] = useState(nextWeekStr);
+  const [genFromDate, setGenFromDate] = useState("");
+  const [genToDate, setGenToDate] = useState("");
   const [generatedSessions, setGeneratedSessions] = useState<Session[]>([]);
+
+  useEffect(() => {
+    try {
+      const today = SessionDateService.getCurrentSessionDate(activeCenterId);
+      setGenFromDate(today);
+      setGenToDate(addDateOnlyDays(today, 7));
+      setSessionDateConfigurationError(null);
+    } catch (error) {
+      setGenFromDate("");
+      setGenToDate("");
+      setSessionDateConfigurationError(getUserErrorMessage(error));
+    }
+  }, [activeCenterId]);
 
   const generatedGroupName = () => {
     const teacher = teachers.find((item) => item.id === groupTeacherId)?.name;
@@ -229,13 +241,19 @@ export default function AcademicScreen() {
 
   const loadData = () => {
     try {
-      const currentDate = getLocalDateOnly();
+      let currentDate: string | null = null;
+      try {
+        currentDate = SessionDateService.getCurrentSessionDate(activeCenterId);
+        setSessionDateConfigurationError(null);
+      } catch (error) {
+        setSessionDateConfigurationError(getUserErrorMessage(error));
+      }
       setTeachers(canViewTeachers ? TeacherRepository.getAll() : []);
       setSubjects(canViewSubjects ? SubjectRepository.getAll() : []);
       setGroups(canViewGroups ? GroupRepository.getAll(true) : []);
-      const todayDayOfWeek = new Date(`${currentDate}T12:00:00`).getDay();
-      setTodayGroupIds(canViewGroups ? GroupRepository.getGroupsForDay(todayDayOfWeek).map((group) => group.id) : []);
-      setTodaySessions(canViewSessions ? SessionGenerationService.getSessionsForDate(currentDate) : []);
+      const todayDayOfWeek = currentDate ? new Date(`${currentDate}T12:00:00`).getDay() : -1;
+      setTodayGroupIds(currentDate && canViewGroups ? GroupRepository.getGroupsForDay(todayDayOfWeek).map((group) => group.id) : []);
+      setTodaySessions(currentDate && canViewSessions ? SessionGenerationService.getSessionsForDate(currentDate) : []);
       setAcademicStages(canViewStages ? CenterAcademicStageRepository.getStages() : []);
     } catch (e: any) {
       console.error("Academic loadData error:", e);
@@ -894,6 +912,11 @@ export default function AcademicScreen() {
               <Text style={styles.sectionHeaderTitle}>
                 حصص اليوم ({todaySessions.length})
               </Text>
+              {sessionDateConfigurationError ? (
+                <Text style={{ color: Colors.danger, marginBottom: Spacing.sm }}>
+                  {sessionDateConfigurationError}
+                </Text>
+              ) : null}
               {todaySessions.length === 0 ? (
                 <EmptyState message="لا توجد حصص مجدولة لليوم" />
               ) : (

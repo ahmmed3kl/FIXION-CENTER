@@ -22,12 +22,13 @@ function makeClient({
     statements,
     async query(sql, params) {
       statements.push({ sql, params });
-      if (sql.includes("FROM sessions s") && sql.includes("JOIN students st")) {
+      if (sql.includes("FROM sessions s") && sql.includes("WHERE s.center_id = $1::varchar")) {
         return {
           rows: sessionExists
             ? [{
                 session_date: "2026-10-11",
                 group_id: "attendance-scope-group",
+                validated_group_id: "attendance-scope-group",
                 subject_id: "attendance-scope-subject",
                 teacher_id: "attendance-scope-teacher",
                 group_subject_id: "attendance-scope-subject",
@@ -36,6 +37,51 @@ function makeClient({
               }]
             : [],
         };
+      }
+      if (sql.includes("SELECT center_id FROM sessions WHERE id = $1::varchar")) {
+        return { rows: sessionExists ? [{ center_id: centerId }] : [] };
+      }
+      if (sql.includes("WITH RECURSIVE session_ids(session_id)")) {
+        return { rows: [{ session_id: sessionId }] };
+      }
+      if (sql.includes("FROM attendance a") && sql.includes("FOR UPDATE OF a")) {
+        return { rows: [] };
+      }
+      if (
+        sql.includes("FROM attendance") &&
+        sql.includes("session_id = ANY($2::varchar[])") &&
+        sql.includes("student_id = $3")
+      ) {
+        return {
+          rows: [{
+            id: "attendance-scope-source-absence",
+            session_id: "source-session",
+            status: "absent",
+            attendance_type: "present",
+          }],
+        };
+      }
+      if (
+        sql.includes("FROM attendance") &&
+        sql.includes("attendance_type = 'makeup'") &&
+        sql.includes("original_absence_id = ANY")
+      ) {
+        return { rows: [] };
+      }
+      if (sql.includes("FROM session_id_aliases aliases")) {
+        return { rows: [] };
+      }
+      if (sql.includes("FROM session_id_aliases") && sql.includes("canonical_session_id = $2")) {
+        return { rows: [] };
+      }
+      if (sql.includes("FROM advance_coverages")) {
+        return { rows: [] };
+      }
+      if (sql.includes("FROM students") && sql.includes("deleted_at IS NULL")) {
+        return { rows: [{ center_id: centerId }] };
+      }
+      if (sql.includes("SELECT center_id FROM students WHERE id = $1::varchar")) {
+        return { rows: [{ center_id: centerId }] };
       }
       if (
         sql.includes("FROM session_expected_students") &&
@@ -70,12 +116,37 @@ function makeClient({
       if (sql.includes("FROM student_package_subscriptions")) {
         return { rows: packageEligible ? [{ "?column?": 1 }] : [] };
       }
+      if (sql.includes("SELECT id, operation_id, status, attendance_type") && sql.includes("FROM attendance")) {
+        return { rows: [] };
+      }
       if (sql.includes("INSERT INTO attendance")) {
         inserted = true;
         return { rows: [] };
       }
       if (sql.includes("SELECT operation_id FROM attendance")) {
         return { rows: inserted ? [{ operation_id: operationId }] : [] };
+      }
+      if (sql.includes("FROM attendance") && sql.includes("WHERE center_id = $1 AND id = $2")) {
+        return { rows: inserted ? [{ id: "attendance-scope-row" }] : [] };
+      }
+      if (sql.includes("FROM sessions s") && sql.includes("FOR UPDATE OF s")) {
+        const requestedSessionId = params[1];
+        const isSourceSession = requestedSessionId === "source-session";
+        return {
+          rows: [{
+            id: requestedSessionId,
+            group_id: "attendance-scope-group",
+            session_date: isSourceSession ? "2026-10-10" : "2026-10-11",
+            start_time: isSourceSession ? "09:00" : "10:00",
+            status: "open",
+            validated_group_id: "attendance-scope-group",
+            subject_id: "attendance-scope-subject",
+            teacher_id: "attendance-scope-teacher",
+            group_subject_id: "attendance-scope-subject",
+            group_teacher_id: "attendance-scope-teacher",
+            group_grade: "الصف الثالث الثانوي",
+          }],
+        };
       }
       throw new Error(`Unexpected query: ${sql}`);
     },
@@ -186,7 +257,7 @@ test("attendance cannot target a student outside the authenticated center", asyn
 
   await assert.rejects(
     mutation(client),
-    /ATTENDANCE_TARGET_NOT_FOUND/,
+    /ATTENDANCE_SESSION_NOT_FOUND/,
   );
   assert.equal(
     client.statements.some(({ sql }) => sql.includes("INSERT INTO attendance")),

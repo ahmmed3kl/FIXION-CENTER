@@ -1,8 +1,8 @@
 import { DatabaseService } from "../../core/database";
 import { UnauthorizedError } from "../../core/errors";
 import { Session } from "../../shared/types";
-import { getLocalDateOnly } from "../../shared/utils/date";
 import { useAuthStore } from "../auth/useAuthStore";
+import { SessionDateService } from "../sessions/SessionDateService";
 
 export class ScannerService {
   /**
@@ -56,7 +56,7 @@ export class ScannerService {
     }
 
     const db = DatabaseService.getDb();
-    const dateStr = targetDate || getLocalDateOnly();
+    const dateStr = targetDate || SessionDateService.getCurrentSessionDate(centerId);
 
     // 1. Base eligibility: session_expected_students snapshot OR active group enrollment / subscription
     const baseSessions = db.getAllSync<Session>(
@@ -71,6 +71,11 @@ export class ScannerService {
        LEFT JOIN teachers t ON COALESCE(s.teacher_id, g.teacher_id) = t.id
        LEFT JOIN session_expected_students ses ON s.center_id = ses.center_id AND s.id = ses.session_id AND ses.student_id = ?
        WHERE s.center_id = ? AND s.session_date = ? AND (s.status = 'open' OR s.status = 'scheduled')
+          AND NOT EXISTS (
+            SELECT 1 FROM session_id_aliases alias
+            WHERE alias.center_id = s.center_id
+              AND alias.local_session_id = s.id
+          )
           AND (
             ses.student_id IS NOT NULL
             OR (
@@ -121,7 +126,13 @@ export class ScannerService {
                 subject_id as subjectId, teacher_id as teacherId, session_price as sessionPrice,
                 late_after_minutes as lateAfterMinutes, session_date as sessionDate,
                 start_time as startTime, end_time as endTime, status
-         FROM sessions WHERE center_id = ? AND session_date = ?`,
+         FROM sessions s
+         WHERE s.center_id = ? AND s.session_date = ?
+           AND NOT EXISTS (
+             SELECT 1 FROM session_id_aliases alias
+             WHERE alias.center_id = s.center_id
+               AND alias.local_session_id = s.id
+           )`,
         [centerId, dateStr],
       );
       const pkgSubjects = db.getAllSync<any>(

@@ -20,8 +20,8 @@ import { useAuthStore } from "../../features/auth/useAuthStore";
 import { DailyClosingService } from "../../features/reports/DailyClosingService";
 import { SessionClosingService } from "../../features/sessions/SessionClosingService";
 import { SessionRepository } from "../../features/sessions/SessionRepository";
+import { SessionDateService } from "../../features/sessions/SessionDateService";
 import { DailyClosingSummary, Session } from "../../shared/types";
-import { getLocalDateOnly } from "../../shared/utils/date";
 
 export default function ClosingScreen() {
   const { colors } = useTheme();
@@ -30,7 +30,8 @@ export default function ClosingScreen() {
   const [activeTab, setActiveTab] = useState<"daily" | "sessions">("daily");
 
   const [loading, setLoading] = useState(false);
-  const [todayDate] = useState(() => getLocalDateOnly());
+  const [todayDate, setTodayDate] = useState<string | null>(null);
+  const [businessDateError, setBusinessDateError] = useState("");
 
   // Daily Closing State
   const [todayDailyClosing, setTodayDailyClosing] = useState<DailyClosingSummary | null>(null);
@@ -46,15 +47,44 @@ export default function ClosingScreen() {
 
   const localDataRevision = useLocalDataRevision();
   const lastLoadedRevisionRef = useRef(localDataRevision);
+  const lastLoadedBusinessDateRef = useRef<string | null>(null);
   const hasInitialLoadedRef = useRef(false);
 
+  const resolveBusinessDate = useCallback((): string | null => {
+    if (!activeCenterId) {
+      setTodayDate(null);
+      setBusinessDateError("يجب تحديد المركز قبل عرض بيانات اليوم.");
+      return null;
+    }
+    try {
+      const businessDate = SessionDateService.getCurrentSessionDate(activeCenterId);
+      setTodayDate(businessDate);
+      setBusinessDateError("");
+      return businessDate;
+    } catch (error) {
+      console.warn("Failed to resolve center business date:", error);
+      setTodayDate(null);
+      setBusinessDateError("تعذر تحديد تاريخ العمل للمركز. تحقق من إعداد المنطقة الزمنية.");
+      return null;
+    }
+  }, [activeCenterId]);
+
   const loadData = useCallback(() => {
-    if (!activeCenterId) return;
     setLoading(true);
+    const businessDate = resolveBusinessDate();
+    if (!businessDate) {
+      lastLoadedBusinessDateRef.current = null;
+      setTodayDailyClosing(null);
+      setClosingsHistory([]);
+      setTodaySessions([]);
+      setLoading(false);
+      return;
+    }
+    lastLoadedBusinessDateRef.current = businessDate;
     try {
       // Daily closings
       try {
-        const todayClosing = DailyClosingService.getClosingForDate(todayDate);
+        const todayClosing = DailyClosingService.getClosingForDate(businessDate);
         setTodayDailyClosing(todayClosing);
         const history = DailyClosingService.getAllClosings();
         setClosingsHistory(history);
@@ -64,7 +94,7 @@ export default function ClosingScreen() {
 
       // Today sessions
       try {
-        const sessions = SessionRepository.getSessionsForDate(todayDate);
+        const sessions = SessionRepository.getSessionsForDate(businessDate);
         setTodaySessions(sessions);
       } catch (e) {
         // Permission might be restricted
@@ -74,7 +104,7 @@ export default function ClosingScreen() {
     } finally {
       setLoading(false);
     }
-  }, [activeCenterId, todayDate]);
+  }, [resolveBusinessDate]);
 
   useEffect(() => {
     loadData();
@@ -84,11 +114,20 @@ export default function ClosingScreen() {
 
   useFocusEffect(
     useCallback(() => {
-      if (hasInitialLoadedRef.current && lastLoadedRevisionRef.current !== localDataRevision) {
+      if (hasInitialLoadedRef.current) {
         lastLoadedRevisionRef.current = localDataRevision;
         loadData();
       }
-    }, [localDataRevision, loadData]),
+      const intervalId = setInterval(() => {
+        if (!lastLoadedBusinessDateRef.current) return;
+        const businessDate = resolveBusinessDate();
+        if (businessDate !== lastLoadedBusinessDateRef.current) {
+          lastLoadedRevisionRef.current = localDataRevision;
+          loadData();
+        }
+      }, 60_000);
+      return () => clearInterval(intervalId);
+    }, [localDataRevision, loadData, resolveBusinessDate]),
   );
 
   useEffect(() => {
@@ -99,9 +138,14 @@ export default function ClosingScreen() {
   }, [localDataRevision, loadData]);
 
   const handleCloseDaily = () => {
+    const businessDate = resolveBusinessDate();
+    if (!businessDate) {
+      Alert.alert("تعذر تحديد تاريخ العمل", "تحقق من إعداد المنطقة الزمنية للمركز ثم أعد المحاولة.");
+      return;
+    }
     Alert.alert(
       "تأكيد الإغلاق اليومي",
-      `هل أنت متأكد من رغبتك في إغلاق الصندوق ليوم ${todayDate}؟ لن تتمكن من إجراء تعديلات بعد الإغلاق إلا بصلاحية المدير.`,
+      `هل أنت متأكد من رغبتك في إغلاق الصندوق ليوم ${businessDate}؟ لن تتمكن من إجراء تعديلات بعد الإغلاق إلا بصلاحية المدير.`,
       [
         { text: "إلغاء", style: "cancel" },
         {
@@ -109,7 +153,7 @@ export default function ClosingScreen() {
           style: "destructive",
           onPress: () => {
             try {
-              DailyClosingService.closeDailyForDate(todayDate);
+              DailyClosingService.closeDailyForDate(businessDate);
               Alert.alert("تم الإغلاق", "تم إغلاق الصندوق وتجميع الإيرادات بنجاح.");
               loadData();
             } catch (err: any) {
@@ -214,13 +258,14 @@ export default function ClosingScreen() {
           {/* Today Status Card */}
           <View style={styles.card}>
             <View style={styles.cardHeader}>
-              <Text style={styles.cardTitle}>صندوق اليوم ({todayDate})</Text>
+              <Text style={styles.cardTitle}>صندوق اليوم ({todayDate || "—"})</Text>
               <View
                 style={[
                   styles.statusBadge,
                   {
-                    backgroundColor:
-                      todayDailyClosing?.status === "closed" ? Colors.successLight : Colors.warningLight,
+                    backgroundColor: !todayDate
+                      ? Colors.slate100
+                      : todayDailyClosing?.status === "closed" ? Colors.successLight : Colors.warningLight,
                   },
                 ]}
               >
@@ -228,17 +273,20 @@ export default function ClosingScreen() {
                   style={[
                     styles.statusBadgeText,
                     {
-                      color:
-                        todayDailyClosing?.status === "closed" ? Colors.successText : Colors.warningText,
+                      color: !todayDate
+                        ? Colors.slate700
+                        : todayDailyClosing?.status === "closed" ? Colors.successText : Colors.warningText,
                     },
                   ]}
                 >
-                  {todayDailyClosing?.status === "closed" ? "مغلق" : "مفتوح"}
+                  {!todayDate ? "غير متاح" : todayDailyClosing?.status === "closed" ? "مغلق" : "مفتوح"}
                 </Text>
               </View>
             </View>
 
-            {todayDailyClosing ? (
+            {businessDateError ? (
+              <Text style={[styles.emptyText, { color: Colors.dangerText }]}>{businessDateError}</Text>
+            ) : todayDailyClosing ? (
               <View style={styles.breakdownContainer}>
                 <View style={styles.totalBox}>
                   <Text style={styles.totalLabel}>إجمالي النقدية المقفلة</Text>
@@ -280,6 +328,7 @@ export default function ClosingScreen() {
                     <TouchableOpacity
                       style={styles.reopenBtn}
                       onPress={() => {
+                        if (!todayDate) return;
                         setTargetBusinessDate(todayDate);
                         setReopenModalVisible(true);
                       }}
@@ -330,7 +379,7 @@ export default function ClosingScreen() {
           ListEmptyComponent={
             <View style={styles.emptyContainer}>
               <Ionicons name="calendar-outline" size={48} color={Colors.slate400} />
-              <Text style={styles.emptyText}>لا توجد حصص مجدولة لليوم.</Text>
+              <Text style={styles.emptyText}>{businessDateError || "لا توجد حصص مجدولة لليوم."}</Text>
             </View>
           }
           renderItem={({ item }) => (

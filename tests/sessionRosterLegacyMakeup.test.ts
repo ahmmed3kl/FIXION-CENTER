@@ -241,11 +241,12 @@ describe("legacy compensation rows in expected session roster", () => {
     expect(SessionRepository.getExpectedStudents(CURRENT_SESSION_ID).map((student) => student.id))
       .toEqual([MEMBER_ID]);
     expect(AbsenceService.getAbsenteesForSession(CURRENT_SESSION_ID).map((student) => student.id))
-      .toEqual([MEMBER_ID]);
+      .toEqual([]);
     expect(AttendanceSessionService.getSummary(CURRENT_SESSION_ID)).toEqual({
       total: 1,
       present: 0,
-      absent: 1,
+      absent: 0,
+      unresolved: 1,
       makeup: 0,
     });
     for (const studentId of VISITOR_IDS) {
@@ -294,7 +295,8 @@ describe("legacy compensation rows in expected session roster", () => {
       .toEqual([MEMBER_ID]);
     expect(AttendanceSessionService.getSummary(CURRENT_SESSION_ID)).toMatchObject({
       total: 1,
-      absent: 1,
+      absent: 0,
+      unresolved: 1,
     });
     expect(SyncRepository.getPendingOperations(CENTER_ID).map((operation) => operation.operationId))
       .toEqual(expect.arrayContaining(pendingBeforeActivation));

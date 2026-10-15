@@ -1,7 +1,7 @@
 import React from "react";
 import { Ionicons } from "@expo/vector-icons";
 import { useFocusEffect, useRouter } from "expo-router";
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -21,6 +21,7 @@ import { useServiceVisibility } from "../../core/services/ServiceVisibilityConte
 import { useAuthStore } from "../../features/auth/useAuthStore";
 import { useLocalDataRevision } from "../../core/database/useLocalDataRevision";
 import { AbsenceReportsService, AbsenceSessionReport, AbsenceSessionSummary, CompensationReportRow, MonthlyCrossGroupMakeupRow, MonthlyNeverAttendedRow } from "../../features/attendance/AbsenceReportsService";
+import { SessionDateService } from "../../features/sessions/SessionDateService";
 import { NotificationService } from "../../features/notifications/NotificationService";
 import { AbsenceNoteRepository } from "../../features/attendance/AbsenceNoteRepository";
 import { getStudentColorPresentation } from "../../features/students/studentColor";
@@ -186,6 +187,7 @@ function monthKey(date: Date): string {
 }
 
 function monthLabel(key: string): string {
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(key)) return "جارٍ تحديد الشهر...";
   const [year, month] = key.split("-").map(Number);
   return `${MONTH_NAMES[(month || 1) - 1]} ${year}`;
 }
@@ -211,8 +213,11 @@ export default function AbsenceReportsScreen() {
   // free of global mutations.
   const services = useServiceVisibility();
   const currentUser = useAuthStore((state) => state.currentUser);
+  const activeCenterId = useAuthStore((state) => state.activeCenterId);
   const localDataRevision = useLocalDataRevision();
-  const [month, setMonth] = useState(() => monthKey(new Date()));
+  const monthManuallySelectedRef = useRef(false);
+  const [month, setMonth] = useState("");
+  const [businessMonthWarning, setBusinessMonthWarning] = useState("");
   const [sessions, setSessions] = useState<AbsenceSessionSummary[]>([]);
   const [monthlyNeverAttended, setMonthlyNeverAttended] = useState<MonthlyNeverAttendedRow[]>([]);
   const [monthlyCrossGroupMakeups, setMonthlyCrossGroupMakeups] = useState<MonthlyCrossGroupMakeupRow[]>([]);
@@ -233,9 +238,9 @@ export default function AbsenceReportsScreen() {
   const sendingSelectedAbsencesRef = useRef(false);
   const [report, setReport] = useState<AbsenceSessionReport | null>(null);
   const [search, setSearch] = useState("");
-  const [tab, setTab] = useState<"absent" | "present" | "compensation">("absent");
+  const [tab, setTab] = useState<"absent" | "unresolved" | "present" | "compensation">("absent");
   const [absenceSubsection, setAbsenceSubsection] = useState<AbsenceSubsection>("session-absent");
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [detailLoading, setDetailLoading] = useState(false);
   const [error, setError] = useState("");
   const [noteTarget, setNoteTarget] = useState<Student | null>(null);
@@ -270,7 +275,35 @@ export default function AbsenceReportsScreen() {
   const canView = PermissionService.hasAnyPermission(currentUser?.permissions || [], ["attendance.view", "reports.attendance.view", "reports.view"]);
   const canEditAbsenceNotes = PermissionService.hasPermission(currentUser?.permissions || [], "attendance.edit");
   const canSendAbsenceNotifications = PermissionService.hasPermission(currentUser?.permissions || [], "notifications.send");
+  const resolveDefaultMonth = useCallback((currentMonth: string): string => {
+    if (monthManuallySelectedRef.current) return currentMonth;
+    try {
+      if (!activeCenterId) throw new Error("A center must be selected before resolving its report month.");
+      const centerMonth = SessionDateService.getCurrentSessionMonth(activeCenterId);
+      setBusinessMonthWarning("");
+      if (centerMonth !== currentMonth) setMonth(centerMonth);
+      return centerMonth;
+    } catch (error) {
+      console.warn("Failed to resolve center month for absence reports:", error);
+      const fallbackMonth = monthKey(new Date());
+      setBusinessMonthWarning(
+        "تعذر تحديد الشهر الحالي وفق المنطقة الزمنية للمركز؛ يعرض شهر الجهاز كبداية ويمكنك تغييره يدويًا.",
+      );
+      if (fallbackMonth !== currentMonth) setMonth(fallbackMonth);
+      return fallbackMonth;
+    }
+  }, [activeCenterId]);
+
+  useEffect(() => {
+    monthManuallySelectedRef.current = false;
+    resolveDefaultMonth("");
+  }, [activeCenterId, resolveDefaultMonth]);
+
   const loadSessions = useCallback(() => {
+    if (!month) {
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     setError("");
     try {
@@ -290,6 +323,8 @@ export default function AbsenceReportsScreen() {
 
   useFocusEffect(useCallback(() => {
     if (!services.loaded || !canView) return;
+    const resolvedMonth = resolveDefaultMonth(month);
+    if (resolvedMonth !== month) return;
     loadSessions();
     if (selectedSessionId) {
       try {
@@ -298,7 +333,7 @@ export default function AbsenceReportsScreen() {
         setError(err?.message || "تعذر تحديث ملاحظات الحصة.");
       }
     }
-  }, [canView, loadSessions, localDataRevision, month, selectedSessionId, services.loaded]));
+  }, [canView, loadSessions, localDataRevision, month, resolveDefaultMonth, selectedSessionId, services.loaded]));
 
   useFocusEffect(useCallback(() => () => {
     setSelectionModes({
@@ -343,6 +378,7 @@ export default function AbsenceReportsScreen() {
   };
 
   const filteredAbsent = useMemo(() => report ? smartSearch(report.absent, search, [{ get: (student) => student.fullName }, { get: (student) => student.studentCode }]) : [], [report, search]);
+  const filteredUnresolved = useMemo(() => report ? smartSearch(report.unresolved, search, [{ get: (student) => student.fullName }, { get: (student) => student.studentCode }]) : [], [report, search]);
   const filteredPresent = useMemo(() => report ? report.present.filter(({ student }) => smartSearch([student], search, [{ get: (item) => item.fullName }, { get: (item) => item.studentCode }]).length) : [], [report, search]);
   const filteredCompensation = useMemo(() => report ? report.compensation.filter(({ student }) => smartSearch([student], search, [{ get: (item) => item.fullName }, { get: (item) => item.studentCode }]).length) : [], [report, search]);
   const crossGroupMakeupsForSession = useMemo(() => monthlyCrossGroupMakeups
@@ -370,6 +406,7 @@ export default function AbsenceReportsScreen() {
   const getAbsenceScopeStudentIds = (scope: AbsenceRecipientScope, sourceReport = report): string[] => {
     if (!sourceReport) return [];
     if (scope === "session-absent") return sourceReport.absent.map((student) => student.id);
+    if (scope === "never-attended") return [];
     const absentIds = new Set(sourceReport.absent.map((student) => student.id));
     if (scope === "cross-group-makeups") {
       return monthlyCrossGroupMakeups
@@ -553,7 +590,17 @@ export default function AbsenceReportsScreen() {
       return;
     }
     try {
-      const events = NotificationService.notifyAbsentees({ sessionId: selectedSessionId, selectedStudentIds: report.absent.map((student) => student.id), operationPrefix: `op-a-${selectedSessionId.slice(-8)}-${Date.now().toString(36).slice(-5)}` });
+      const refreshedReport = AbsenceReportsService.getSessionReport(selectedSessionId);
+      setReport(refreshedReport);
+      if (!refreshedReport.absent.length) {
+        Alert.alert("تغيّرت حالة الغياب", "لم يعد هناك غياب صريح صالح لإرسال إشعارات عنه.");
+        return;
+      }
+      const events = NotificationService.notifyAbsentees({
+        sessionId: selectedSessionId,
+        selectedStudentIds: refreshedReport.absent.map((student) => student.id),
+        operationPrefix: `op-a-${selectedSessionId.slice(-8)}-${Date.now().toString(36).slice(-5)}`,
+      });
       setAbsenceSentBefore(true);
       let sent = 0;
       for (const event of events) {
@@ -575,6 +622,7 @@ export default function AbsenceReportsScreen() {
   ) => {
     const selectedIds = selectedRecipientIds[scope];
     const selectionMode = selectionModes[scope];
+    const notificationEligible = scope !== "never-attended";
     const scopedIds = getAbsenceScopeStudentIds(scope);
     const scopedSelectedIds = getSelectedAbsenceRecipientIds(selectedIds, scopedIds);
     const allSelected = scopedIds.length > 0 && scopedSelectedIds.length === scopedIds.length;
@@ -593,7 +641,7 @@ export default function AbsenceReportsScreen() {
           >
             <Text style={styles.selectAllText}>{allSelected ? "إلغاء تحديد الكل" : "تحديد الكل"}</Text>
           </TouchableOpacity>
-          {canSendAbsenceNotifications ? (
+          {canSendAbsenceNotifications && notificationEligible ? (
             <TouchableOpacity
               accessibilityRole="button"
               disabled={!scopedSelectedIds.length || sendingSelectedAbsences}
@@ -617,9 +665,11 @@ export default function AbsenceReportsScreen() {
         <View style={styles.actionRow}>
           <View style={styles.headerCopy}>
             <Text style={styles.sectionTitle}>{title} ({students.length})</Text>
-            <Text style={styles.selectionHint}>اختر القائمة وحدد المستلمين قبل الإرسال</Text>
+            <Text style={styles.selectionHint}>
+              {notificationEligible ? "اختر القائمة وحدد المستلمين قبل الإرسال" : "قائمة استرشادية؛ لا تمثل غياباً مؤكداً ولا ترسل إشعار غياب."}
+            </Text>
           </View>
-          {canSendAbsenceNotifications ? (
+          {canSendAbsenceNotifications && notificationEligible ? (
             <View style={styles.absentActions}>
               <TouchableOpacity style={styles.selectAllButton} onPress={() => enterRecipientSelection(scope)}>
                 <Text style={styles.selectAllText}>تحديد أفراد</Text>
@@ -658,7 +708,7 @@ export default function AbsenceReportsScreen() {
           selectionMode={selectionMode}
           sendStatus={absenceSendStatuses[`${scope}:${student.id}`]}
           onToggleSelection={() => toggleRecipientSelection(scope, student.id)}
-          onLongPress={canSendAbsenceNotifications ? () => enterRecipientSelection(scope, student.id) : undefined}
+          onLongPress={canSendAbsenceNotifications && notificationEligible ? () => enterRecipientSelection(scope, student.id) : undefined}
           onNotePress={!selectionMode && canEditAbsenceNotes ? () => openAbsenceNote(student) : undefined}
           onPress={() => {
             if (selectionMode) toggleRecipientSelection(scope, student.id);
@@ -677,8 +727,8 @@ export default function AbsenceReportsScreen() {
   if (selectedSessionId && report) {
     return <SafeAreaView style={styles.safe}><ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
       <View style={styles.detailHeader}><TouchableOpacity onPress={() => { setSelectedSessionId(null); setReport(null); }} style={styles.backButton}><Ionicons name="chevron-forward" size={23} color={Colors.slate800} /></TouchableOpacity><View style={styles.headerCopy}><Text style={styles.eyebrow}>تفاصيل الحصة</Text><Text style={styles.title}>{report.session.groupName || "مجموعة"}</Text><Text style={styles.subtitle}>{report.session.subjectName || ""}  •  {report.session.teacherName || "مدرس غير محدد"}</Text></View><View style={styles.headerIcon}><Ionicons name="calendar-outline" size={22} color={Colors.primary} /></View></View>
-      <View style={styles.sessionInfo}><Text style={styles.sessionInfoLine}>{formatDate(report.session.sessionDate)}  •  {formatTimeArabic(report.session.startTime)} - {formatTimeArabic(report.session.endTime)}</Text><View style={styles.counterRow}><Counter label="الكل" value={report.expected.length} tone="blue" /><Counter label="حاضر" value={report.present.length} tone="green" /><Counter label="غائب" value={report.absent.length} tone="red" /><Counter label="تعويض" value={report.compensated} tone="purple" /></View></View>
-      <View style={styles.tabRow}>{[["present", "الحاضرين", report.present.length], ["absent", "الغائبين", report.absent.length], ["compensation", "التعويض", report.compensation.length]].map(([key, label, count]) => <TouchableOpacity key={String(key)} onPress={() => setTab(key as typeof tab)} style={[styles.tab, tab === key && styles.tabActive]}><Text style={[styles.tabText, tab === key && styles.tabTextActive]}>{label} ({count})</Text></TouchableOpacity>)}</View>
+      <View style={styles.sessionInfo}><Text style={styles.sessionInfoLine}>{formatDate(report.session.sessionDate)}  •  {formatTimeArabic(report.session.startTime)} - {formatTimeArabic(report.session.endTime)}</Text><View style={styles.counterRow}><Counter label="الكل" value={report.expected.length} tone="blue" /><Counter label="حاضر" value={report.present.length} tone="green" /><Counter label="غائب" value={report.absent.length} tone="red" /><Counter label="لم يحسم" value={report.unresolved.length} tone="blue" /><Counter label="تعويض" value={report.compensated} tone="purple" /></View></View>
+      <View style={styles.tabRow}>{[["present", "الحاضرين", report.present.length], ["absent", "الغائبين", report.absent.length], ["unresolved", "لم يحسموا", report.unresolved.length], ["compensation", "التعويض", report.compensation.length]].map(([key, label, count]) => <TouchableOpacity key={String(key)} onPress={() => setTab(key as typeof tab)} style={[styles.tab, tab === key && styles.tabActive]}><Text style={[styles.tabText, tab === key && styles.tabTextActive]}>{label} ({count})</Text></TouchableOpacity>)}</View>
       <View style={styles.searchWrap}><Ionicons name="search-outline" size={18} color={Colors.slate400} /><TextInputLike value={search} onChangeText={setSearch} placeholder="ابحث باسم الطالب أو الكود" /></View>
       {tab === "absent" ? <>
         <View style={styles.reportExtraTabs}>
@@ -731,6 +781,7 @@ export default function AbsenceReportsScreen() {
           : null}
       </> : null}
       {tab === "present" ? <>{filteredPresent.map(({ student, attendance }) => <StudentRow key={student.id} student={student} status={attendanceLabel(attendance)} statusTone={attendance.status === "late" ? "orange" : "green"} onPress={() => router.push({ pathname: "/(main)/students", params: { studentId: student.id } } as any)} />)}{!filteredPresent.length ? <EmptyMessage text={search ? "لا توجد نتائج مطابقة." : "لا يوجد حضور مسجل لهذه الحصة."} /> : null}</> : null}
+      {tab === "unresolved" ? <>{filteredUnresolved.map((student) => <StudentRow key={student.id} student={student} status="لم تُحسم الحالة" statusTone="orange" onPress={() => router.push({ pathname: "/(main)/students", params: { studentId: student.id } } as any)} />)}{!filteredUnresolved.length ? <EmptyMessage text={search ? "لا توجد نتائج مطابقة." : "تم حسم حالة جميع الطلاب المتوقعين."} /> : null}</> : null}
       {tab === "compensation" ? <>{filteredCompensation.map((row) => <CompensationRow key={`${row.student.id}-${row.kind}-${row.attendance?.id || row.opportunity?.nextEligibleSessionId || "advance"}`} row={row} targetSession={report.session} onPress={() => router.push({ pathname: "/(main)/students", params: { studentId: row.student.id } } as any)} />)}{!filteredCompensation.length ? <EmptyMessage text={search ? "لا توجد نتائج مطابقة." : "لا توجد بيانات تعويض لهذه الحصة."} /> : null}</> : null}
     </ScrollView>
     <Modal visible={Boolean(noteTarget)} transparent animationType="fade" onRequestClose={() => { if (!savingAbsenceNote) setNoteTarget(null); }}>
@@ -777,13 +828,22 @@ export default function AbsenceReportsScreen() {
           <View style={styles.headerIcon}><Ionicons name="bar-chart-outline" size={23} color={Colors.primary} /></View>
         </View>
         <View style={styles.monthPicker}>
-          <TouchableOpacity onPress={() => setMonth((value) => shiftMonth(value, -1))}><Ionicons name="chevron-forward" size={20} color={Colors.slate600} /></TouchableOpacity>
+          <TouchableOpacity onPress={() => {
+            if (!month) return;
+            monthManuallySelectedRef.current = true;
+            setMonth((value) => shiftMonth(value, -1));
+          }}><Ionicons name="chevron-forward" size={20} color={Colors.slate600} /></TouchableOpacity>
           <View style={styles.monthCenter}>
             <Text style={styles.monthLabel}>{monthLabel(month)}</Text>
             <Text style={styles.monthHint}>الشهر المحدد</Text>
           </View>
-          <TouchableOpacity onPress={() => setMonth((value) => shiftMonth(value, 1))}><Ionicons name="chevron-back" size={20} color={Colors.slate600} /></TouchableOpacity>
+          <TouchableOpacity onPress={() => {
+            if (!month) return;
+            monthManuallySelectedRef.current = true;
+            setMonth((value) => shiftMonth(value, 1));
+          }}><Ionicons name="chevron-back" size={20} color={Colors.slate600} /></TouchableOpacity>
         </View>
+        {businessMonthWarning ? <Text style={[styles.muted, { color: Colors.dangerText }]}>{businessMonthWarning}</Text> : null}
         {loading ? (
           <View style={styles.loadingBox}><ActivityIndicator color={Colors.primary} /><Text style={styles.muted}>جارٍ تحميل التقارير...</Text></View>
         ) : error ? (

@@ -7,6 +7,9 @@ async function verifyGroupUpdateCannotCrossCenters() {
   let insertQuery = "";
   const client = {
     async query(sql, params) {
+      if (sql.includes("FROM server_sync_operations")) {
+        return { rows: [] };
+      }
       if (sql.includes("SELECT name, teacher_id, subject_id")) {
         return { rows: [] };
       }

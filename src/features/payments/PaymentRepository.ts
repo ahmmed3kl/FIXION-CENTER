@@ -16,10 +16,11 @@ import {
     PaymentReversal,
 } from "../../shared/types";
 import { isValidIsoDate } from "../../shared/utils/validation";
-import { getLocalDateOnly } from "../../shared/utils/date";
 import { useAuthStore } from "../auth/useAuthStore";
+import { SessionDateService } from "../sessions/SessionDateService";
 import { FinancialCalculationService } from "./FinancialCalculationService";
 import { DebtCycleRepository } from "./DebtCycleRepository";
+import { isSessionPaymentCycle } from "./paymentEligibility";
 
 function generateUUID(): string {
   return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
@@ -161,10 +162,8 @@ export class PaymentRepository {
     const operationId = params.operationId || `op-pay-${generateUUID()}`;
     const deviceId = DeviceService.getDeviceIdSync();
     const createdAt = new Date().toISOString();
-    // Payment dates are business-calendar values. Deriving them from the UTC
-    // ISO timestamp makes late-night Cairo payments appear on the previous
-    // day in the dashboard and daily closing reports.
-    const paymentDate = params.paymentDate || getLocalDateOnly();
+    const paymentDate =
+      params.paymentDate || SessionDateService.getCurrentSessionDate(centerId);
     if (!isValidIsoDate(paymentDate)) {
       throw new ValidationError("تاريخ الدفع غير صحيح.");
     }
@@ -210,6 +209,7 @@ export class PaymentRepository {
       ) {
         throw new ConflictError("معرّف العملية مستخدم لدفعة ببيانات مختلفة.");
       }
+      FinancialCalculationService.getStudentFinancialStatus(params.studentId);
       return {
         id: existingPayment.id,
         operationId: existingPayment.operationId,
@@ -228,6 +228,21 @@ export class PaymentRepository {
         userId: existingPayment.userId,
         updatedAt: existingPayment.updatedAt || undefined,
       };
+    }
+
+    let paymentSessionGroupId: string | undefined;
+    let paymentSessionDate: string | undefined;
+    if (params.sessionId) {
+      const session = db.getFirstSync<{ id: string; groupId: string; sessionDate: string }>(
+        `SELECT id, group_id as groupId, session_date as sessionDate
+         FROM sessions WHERE center_id = ? AND id = ?`,
+        [centerId, params.sessionId],
+      );
+      if (!session) {
+        throw new ValidationError("جلسة الحضور غير موجودة في هذا السنتر.");
+      }
+      paymentSessionGroupId = session.groupId;
+      paymentSessionDate = session.sessionDate;
     }
 
     const paymentId = `pay-${generateUUID()}`;
@@ -252,38 +267,47 @@ export class PaymentRepository {
         assignedCycleId = openCycles[0].id;
       }
     }
-    // A profile-level "pay a class" entry has no concrete session id. Keep
-    // it in the active per-session period so it can be allocated to the next
-    // attended class instead of disappearing as an unassigned cash event.
+    // A profile-level class payment has no concrete session id. Link it only
+    // to a group cycle that was explicitly configured for per-session billing.
     if (!assignedCycleId && normType === "session") {
-      const perSessionCycle = params.sessionId
-        ? db.getFirstSync<{ id: string; billingMode?: string; cycleType?: string; groupId?: string; sessionGroupId?: string }>(
-            `SELECT dc.id, dc.billing_mode as billingMode, dc.cycle_type as cycleType,
-                    dc.group_id as groupId, s.group_id as sessionGroupId
-               FROM debt_cycles dc
-               JOIN sessions s ON s.center_id = dc.center_id AND s.group_id = dc.group_id
-              WHERE dc.center_id = ? AND dc.student_id = ? AND s.id = ?
-                AND (dc.billing_mode IN ('per_session', 'pending') OR dc.cycle_type = 'per_session')
-                AND dc.status NOT IN ('cancelled', 'paid')
-                AND dc.start_date <= s.session_date AND dc.end_date >= s.session_date
-              ORDER BY dc.start_date DESC LIMIT 1`,
-            [centerId, params.studentId, params.sessionId],
-          )
-        : db.getFirstSync<{ id: string; billingMode?: string; cycleType?: string }>(
-            `SELECT id, billing_mode as billingMode, cycle_type as cycleType FROM debt_cycles
-              WHERE center_id = ? AND student_id = ?
-                AND (billing_mode = 'per_session' OR cycle_type = 'per_session')
-                AND status NOT IN ('cancelled', 'paid')
-              ORDER BY start_date DESC LIMIT 1`,
-            [centerId, params.studentId],
-          );
-      // Defensive check also protects the test/in-memory adapter, whose
-      // lightweight SQL matcher may return the first debt row for a complex
-      // predicate instead of applying the billing-mode filter.
-      const canUsePendingCycle = (perSessionCycle as any)?.billingMode === "pending"
-        && Boolean((perSessionCycle as any)?.groupId)
-        && String((perSessionCycle as any).groupId) === String((perSessionCycle as any).sessionGroupId);
-      if (perSessionCycle && (canUsePendingCycle || (perSessionCycle as any).billingMode === "per_session" || (perSessionCycle as any).cycleType === "per_session")) {
+      const perSessionCycleQuery = `SELECT id, billing_mode as billingMode,
+                                           cycle_type as cycleType, group_id as groupId
+                                      FROM debt_cycles
+                                     WHERE center_id = ? AND student_id = ?
+                                       AND (billing_mode = 'per_session' OR cycle_type = 'per_session')
+                                       AND status NOT IN ('cancelled', 'paid')
+                                       AND package_subscription_id IS NULL
+                                       AND COALESCE(cycle_type, '') <> 'package'
+                                       AND COALESCE(billing_mode, '') <> 'package'`;
+      type PerSessionCycleRow = {
+        id: string;
+        billingMode?: string;
+        cycleType?: string;
+        groupId?: string | null;
+      };
+      let perSessionCycle: PerSessionCycleRow | null = null;
+      if (params.sessionId) {
+        if (!paymentSessionGroupId || !paymentSessionDate) {
+          throw new ValidationError("تعذر تحديد مجموعة وتاريخ جلسة دفع الحصة.");
+        }
+        perSessionCycle = db.getFirstSync<PerSessionCycleRow>(
+          `${perSessionCycleQuery}
+             AND group_id = ? AND start_date <= ? AND end_date >= ?
+           ORDER BY start_date DESC LIMIT 1`,
+          [centerId, params.studentId, paymentSessionGroupId, paymentSessionDate, paymentSessionDate],
+        );
+      } else {
+        perSessionCycle = db.getFirstSync<PerSessionCycleRow>(
+          `${perSessionCycleQuery}
+           ORDER BY start_date DESC LIMIT 1`,
+          [centerId, params.studentId],
+        );
+      }
+      if (
+        perSessionCycle &&
+        (perSessionCycle.billingMode === "per_session" || perSessionCycle.cycleType === "per_session") &&
+        (!params.sessionId || perSessionCycle.groupId === paymentSessionGroupId)
+      ) {
         assignedCycleId = perSessionCycle.id;
       }
     }
@@ -320,16 +344,6 @@ export class PaymentRepository {
       }
     }
 
-    if (params.sessionId) {
-      const session = db.getFirstSync<{ id: string }>(
-        `SELECT id FROM sessions WHERE center_id = ? AND id = ?`,
-        [centerId, params.sessionId],
-      );
-      if (!session) {
-        throw new ValidationError("جلسة الحضور غير موجودة في هذا السنتر.");
-      }
-    }
-
     const currentFinancialStatus = FinancialCalculationService.getStudentFinancialStatus(
       params.studentId,
     );
@@ -339,31 +353,40 @@ export class PaymentRepository {
     if (assignedCycleId && !targetCycle) {
       throw new ValidationError("تعذر تحديث دورة المديونية قبل تسجيل الدفعة.");
     }
-    const targetCycleIsPerSession = Boolean(
-      targetCycle &&
-      (targetCycle.billingMode === "per_session" || targetCycle.cycleType === "per_session"),
-    );
-    const targetCycleIsSessionLane = Boolean(
-      targetCycle &&
-      (targetCycle.billingMode === "pending" || targetCycleIsPerSession),
-    );
-    if (normType === "session" && targetCycle && !targetCycleIsSessionLane) {
-      throw new ValidationError("دفعة الحصة لا تخص دورة الاشتراك الشهري أو الباقة.");
-    }
-    const isUnlinkedSessionPayment = normType === "session" &&
-      !assignedCycleId &&
-      !params.sessionId;
-    if (isUnlinkedSessionPayment && Number(currentFinancialStatus.currentPeriodDebt || 0) <= 0) {
-      throw new ValidationError("لا توجد رسوم حصص مستحقة للتحصيل حاليًا.");
+    const targetCycleIsPerSession = Boolean(targetCycle && isSessionPaymentCycle(targetCycle));
+    if (normType === "session") {
+      if (!targetCycle || !targetCycleIsPerSession || !targetCycle.groupId) {
+        throw new ValidationError("دفع الحصة يتطلب دورة مضبوطة صراحةً على نظام per_session.");
+      }
+      if (params.sessionId && targetCycle.groupId !== paymentSessionGroupId) {
+        throw new ValidationError("دفع الحصة يتطلب دورة per_session تخص مجموعة الجلسة.");
+      }
+      if (
+        params.sessionId &&
+        paymentSessionDate &&
+        (targetCycle.startDate > paymentSessionDate || targetCycle.endDate < paymentSessionDate)
+      ) {
+        throw new ValidationError("دفع الحصة لا يخص فترة الجلسة المحددة.");
+      }
+      if (
+        !params.sessionId &&
+        (!currentFinancialStatus.sessionDebt ||
+          targetCycle.startDate > currentFinancialStatus.sessionDebt.periodEnd ||
+          targetCycle.endDate < currentFinancialStatus.sessionDebt.periodStart)
+      ) {
+        throw new ValidationError("دفع الحصة يتطلب دورة per_session نشطة في الفترة الحالية.");
+      }
     }
 
     if (normType === "session" && !params.sessionId) {
-      const outstanding = targetCycleIsPerSession && targetCycle?.groupId
-        ? Number(FinancialCalculationService.getStudentFinancialStatusForGroup(
-            params.studentId,
-            targetCycle.groupId,
-          ).currentPeriodDebt || 0)
-        : Number(currentFinancialStatus.currentPeriodDebt || 0);
+      const groupId = targetCycle?.groupId;
+      if (!groupId) {
+        throw new ValidationError("تعذر تحديد مجموعة دورة دفع الحصة.");
+      }
+      const outstanding = Number(FinancialCalculationService.getStudentFinancialStatusForGroup(
+        params.studentId,
+        groupId,
+      ).currentPeriodDebt || 0);
       if (outstanding <= 0) {
         throw new ValidationError("لا توجد رسوم حصص مستحقة للتحصيل في هذه الدورة.");
       }
@@ -406,16 +429,9 @@ export class PaymentRepository {
            FROM debt_cycles WHERE center_id = ? AND id = ?`,
         [centerId, assignedCycleId],
       );
-      // The first settlement chooses the policy for this billing period. A
-      // session payment means pay-as-you-go; monthly/partial means the
-      // discounted monthly obligation. Never change a package cycle.
+      // A pending cycle is resolved to monthly only by an explicit
+      // monthly/partial payment. Per-session mode must be selected separately.
       if (cycle?.billingMode === "pending") {
-        // A session payment does NOT lock in per-session billing for the
-        // entire period. It is recorded as an independent payment against the
-        // current obligation. Only an explicit monthly/partial payment selects
-        // the monthly plan; per-session mode requires a deliberate choice
-        // through the billing settings, not an implicit side-effect of a
-        // single session payment during attendance.
         if (normType !== "session") {
           const selectedMode = cycle.cycleType === "package" ? "package" : "monthly";
           DebtCycleRepository.setBillingMode(assignedCycleId, selectedMode);
@@ -463,6 +479,7 @@ export class PaymentRepository {
       AuditService.recordEvent({ operationId, centerId, userId: user.id, deviceId, entityType: "payment", entityId: paymentId, action: "payment.record", payload: { studentId: params.studentId, amount: params.amount, paymentType: normType, debtCycleId: assignedCycleId, sessionId: params.sessionId, subscriptionId: params.subscriptionId, notes: paymentNotes || null, actorName: user.fullName } });
     });
 
+    FinancialCalculationService.getStudentFinancialStatus(params.studentId);
     return paymentEvent;
   }
 

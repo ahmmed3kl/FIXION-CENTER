@@ -6,6 +6,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { Colors, Spacing, Typography, useTheme } from "../../core/theme";
 import { GradeBookRepository, GradeExam, GradeScore } from "../../features/grades/GradeBookRepository";
 import { saveGradeEdit } from "../../features/grades/gradeScoreEdit";
+import { mergeGradeScoreDrafts } from "../../features/grades/gradeScoreDrafts";
 import { GroupScheduleRepository } from "../../features/groups/GroupScheduleRepository";
 import { NotificationService } from "../../features/notifications/NotificationService";
 import { getStudentColorPresentation } from "../../features/students/studentColor";
@@ -42,15 +43,24 @@ export default function GradesScreen() {
     .map((schedule) => `${["الأحد", "الإثنين", "الثلاثاء", "الأربعاء", "الخميس", "الجمعة", "السبت"][schedule.dayOfWeek]} ${schedule.startTime}`)
     .join(" • ") || "موعد غير محدد";
 
-  const loadGroup = useCallback((group: Group) => {
+  const loadGroup = useCallback((group: Group, preserveDrafts = false) => {
     const nextStudents = GradeBookRepository.getStudentsForGroup(group.id);
     const nextExams = GradeBookRepository.getExams(group.id, group.grade);
     const nextSessions = GradeBookRepository.getSessionsForGroup(group.id);
     const nextScores = GradeBookRepository.getScores(nextExams.map((e) => e.id), nextStudents.map((s) => s.id));
     const values: Record<string, string> = {};
+    for (const exam of nextExams) {
+      for (const student of nextStudents) {
+        values[`${exam.id}:${student.id}`] = "";
+      }
+    }
     nextScores.forEach((row: GradeScore) => { values[`${row.examId}:${row.studentId}`] = row.score === null ? "" : String(row.score); });
+    const previousSavedScores = savedScoresRef.current;
     savedScoresRef.current = values;
-    setStudents(nextStudents); setExams(nextExams); setScores(values);
+    setStudents(nextStudents); setExams(nextExams);
+    setScores((current) => preserveDrafts
+      ? mergeGradeScoreDrafts(current, previousSavedScores, values)
+      : values);
     setGroupSessions(nextSessions);
     setSelectedExamSessionId((current) => nextSessions.some((session) => session.id === current) ? current : "");
     const sent: Record<string, boolean> = {};
@@ -66,7 +76,7 @@ export default function GradesScreen() {
       if (current) {
         const fresh = nextGroups.find((group) => group.id === current.id) || nextGroups[0] || null;
         selectedGroupRef.current = fresh; setSelectedGroup(fresh);
-        if (fresh) loadGroup(fresh);
+        if (fresh) loadGroup(fresh, fresh.id === current.id);
       }
     } catch (error: any) { Alert.alert("خطأ", error?.message || "تعذر تحميل رصد الدرجات."); }
   }, [loadGroup]);
@@ -94,7 +104,12 @@ export default function GradesScreen() {
       if (group) selectGroup(group);
     } catch {}
   }, [groupId]));
-  const selectGroup = (group: Group) => { selectedGroupRef.current = group; setSelectedGroup(group); loadGroup(group); };
+  const selectGroup = (group: Group) => {
+    const preserveDrafts = selectedGroupRef.current?.id === group.id;
+    selectedGroupRef.current = group;
+    setSelectedGroup(group);
+    loadGroup(group, preserveDrafts);
+  };
   const createExam = () => {
     if (!selectedGroup) return;
     try {
@@ -103,7 +118,7 @@ export default function GradesScreen() {
       // mutation result immediately as well. This keeps the new exam visible
       // even when the screen was opened before the local invalidation event.
       setExams((current) => current.some((exam) => exam.id === createdExam.id) ? current : [...current, createdExam]);
-      setExamName(""); setMaxScore("100"); setSelectedExamSessionId(""); setShowExamForm(false); loadGroup(selectedGroup);
+      setExamName(""); setMaxScore("100"); setSelectedExamSessionId(""); setShowExamForm(false); loadGroup(selectedGroup, true);
     }
     catch (error: any) { Alert.alert("بيانات غير صحيحة", error?.message || "تعذر إضافة الامتحان."); }
   };

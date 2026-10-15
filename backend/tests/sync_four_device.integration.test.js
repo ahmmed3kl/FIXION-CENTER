@@ -5,20 +5,26 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 
-require("dotenv").config({ path: path.join(__dirname, "../.env") });
-
-if (process.env.FIXION_TEST_DATABASE_ACK !== "1") {
-  throw new Error(
-    "Refusing to write to PostgreSQL without FIXION_TEST_DATABASE_ACK=1.",
-  );
-}
-if (!process.env.DATABASE_URL) {
-  throw new Error("A dedicated test DATABASE_URL must be configured.");
-}
-
-const app = require("../src/server");
-const db = require("../src/db");
-const config = require("../src/config");
+const {
+  assertPostgresTestDatabaseIdentity,
+  withPostgresTestDatabase,
+} = require("./postgres-test-database");
+const {
+  buildAttendancePullSql,
+  buildPaymentReversalPullSql,
+  buildSessionAliasPullSql,
+  buildSessionPullSql,
+  pullAllClients,
+  sqlValue,
+} = require("./sync-pull-sql");
+const {
+  target: testDatabase,
+  resources: { app, db, config },
+} = withPostgresTestDatabase(process.env, () => ({
+  app: require("../src/server"),
+  db: require("../src/db"),
+  config: require("../src/config"),
+}));
 const bcrypt = require("bcryptjs");
 const SyncProcessor = require("../src/services/SyncProcessor");
 
@@ -36,13 +42,6 @@ let server;
 let baseUrl;
 let fixtureReady = false;
 
-function sqlValue(value) {
-  if (value === null || value === undefined) return "NULL";
-  if (typeof value === "number") return String(value);
-  if (typeof value === "boolean") return value ? "1" : "0";
-  return `'${String(value).replace(/'/g, "''")}'`;
-}
-
 function sqlite(databasePath, sql, json = false) {
   const args = ["-batch"];
   if (json) args.push("-json");
@@ -52,7 +51,8 @@ function sqlite(databasePath, sql, json = false) {
     input: sql,
     stdio: ["pipe", "pipe", "pipe"],
   }).trim();
-  return json && output ? JSON.parse(output) : output;
+  if (!json) return output;
+  return output ? JSON.parse(output) : [];
 }
 
 function makeClientDatabase(deviceNumber) {
@@ -97,6 +97,22 @@ function makeClientDatabase(deviceNumber) {
         subject_id TEXT NOT NULL,
         grade TEXT NOT NULL,
         status TEXT NOT NULL
+      );
+      CREATE TABLE sessions (
+        id TEXT PRIMARY KEY,
+        center_id TEXT NOT NULL,
+        group_id TEXT NOT NULL,
+        session_date TEXT NOT NULL,
+        start_time TEXT NOT NULL,
+        end_time TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'open',
+        schedule_id TEXT,
+        subject_id TEXT,
+        teacher_id TEXT,
+        session_price REAL NOT NULL DEFAULT 0,
+        late_after_minutes INTEGER NOT NULL DEFAULT 15,
+        created_at TEXT,
+        updated_at TEXT
       );
       CREATE TABLE teachers (
         id TEXT PRIMARY KEY,
@@ -230,6 +246,11 @@ function makeClientDatabase(deviceNumber) {
              status=excluded.status;`,
         );
       } else if (
+        operation.entityType === "session" ||
+        operation.entityType === "session_created"
+      ) {
+        sqlite(filename, this.localApplySql(operation));
+      } else if (
         operation.entityType === "teacher" ||
         operation.entityType === "subject" ||
         operation.entityType === "package"
@@ -278,7 +299,11 @@ function makeClientDatabase(deviceNumber) {
           `SELECT server_revision FROM debt_cycles WHERE id=${sqlValue(cycleId)}`,
           true,
         )[0];
-        const serverRevision = cycle.server_revision ?? cycle.serverRevision ?? localCycle?.server_revision ?? 0;
+        const serverRevision =
+          cycle.server_revision ??
+          cycle.serverRevision ??
+          localCycle?.server_revision ??
+          0;
         sqlite(
           filename,
           `INSERT INTO debt_cycles
@@ -302,7 +327,9 @@ function makeClientDatabase(deviceNumber) {
              server_revision=excluded.server_revision;`,
         );
       } else {
-        throw new Error(`Unexpected integration entity: ${operation.entityType}`);
+        throw new Error(
+          `Unexpected integration entity: ${operation.entityType}`,
+        );
       }
     },
     async push({ loseResponse = false } = {}) {
@@ -337,7 +364,9 @@ function makeClientDatabase(deviceNumber) {
         },
       });
       if (response.status !== 200) {
-        throw new Error(`Push failed (${response.status}): ${JSON.stringify(response.body)}`);
+        throw new Error(
+          `Push failed (${response.status}): ${JSON.stringify(response.body)}`,
+        );
       }
       if (loseResponse) {
         throw new Error("Simulated response loss after server commit");
@@ -370,7 +399,9 @@ function makeClientDatabase(deviceNumber) {
           { token: this.token, deviceId: this.deviceId },
         );
         if (response.status !== 200) {
-          throw new Error(`Pull failed (${response.status}): ${JSON.stringify(response.body)}`);
+          throw new Error(
+            `Pull failed (${response.status}): ${JSON.stringify(response.body)}`,
+          );
         }
         const changes = response.body.changes || [];
         const nextCursor = String(response.body.nextCursor || cursor);
@@ -381,6 +412,12 @@ function makeClientDatabase(deviceNumber) {
           throw new Error("Pull response made no cursor progress");
         }
         const statements = ["BEGIN IMMEDIATE;"];
+        const attendanceRows = this.rows("attendance");
+        const sessionAliasPlan = buildSessionAliasPullSql(
+          response.body.sessionMappings || [],
+          attendanceRows,
+        );
+        statements.push(...sessionAliasPlan.statements);
         for (const change of changes) {
           const operation = {
             operationId: change.operationId,
@@ -389,7 +426,13 @@ function makeClientDatabase(deviceNumber) {
             entityId: change.entityId,
             payload: change.data || {},
           };
-          statements.push(this.localApplySql(operation));
+          statements.push(
+            this.localApplySql(
+              operation,
+              attendanceRows,
+              sessionAliasPlan.aliases,
+            ),
+          );
           if (change.operationId) {
             statements.push(
               `INSERT OR IGNORE INTO applied_operations (operation_id, sequence_number)
@@ -416,12 +459,21 @@ function makeClientDatabase(deviceNumber) {
       }
       return seen;
     },
-    localApplySql(operation) {
+    localApplySql(operation, attendanceRows, sessionAliases) {
       const payload = operation.payload || {};
-      if (operation.entityType === "student" || operation.entityType === "student_created" || operation.entityType === "student_updated") {
+      if (
+        operation.entityType === "student" ||
+        operation.entityType === "student_created" ||
+        operation.entityType === "student_updated"
+      ) {
         const student = payload.student || payload;
         const studentId = student.id || operation.entityId;
-        const code = student.student_code || student.studentCode || student.card_code || student.cardCode || "";
+        const code =
+          student.student_code ||
+          student.studentCode ||
+          student.card_code ||
+          student.cardCode ||
+          "";
         return `INSERT INTO students
           (id, student_code, card_code, full_name, grade, phone, parent_phone, status)
           VALUES (${sqlValue(studentId)}, ${sqlValue(code)},
@@ -436,7 +488,16 @@ function makeClientDatabase(deviceNumber) {
             phone=excluded.phone, parent_phone=excluded.parent_phone,
             status=excluded.status;`;
       }
-      if (operation.entityType === "group" || operation.entityType === "group_updated") {
+      if (
+        operation.entityType === "session" ||
+        operation.entityType === "session_created"
+      ) {
+        return buildSessionPullSql(operation, centerId);
+      }
+      if (
+        operation.entityType === "group" ||
+        operation.entityType === "group_updated"
+      ) {
         const group = payload.group || payload;
         return `INSERT INTO groups (id, name, teacher_id, subject_id, grade, status)
           VALUES (${sqlValue(group.id || operation.entityId)}, ${sqlValue(group.name || "")},
@@ -484,45 +545,39 @@ function makeClientDatabase(deviceNumber) {
             billing_cycle=excluded.billing_cycle, status=excluded.status,
             updated_at=excluded.updated_at;`;
       }
-      if (operation.entityType === "attendance" || operation.entityType === "attendance_marked") {
-        const attendance = payload.attendance || payload;
-        return `INSERT INTO attendance (id, session_id, student_id, operation_id, status)
-          VALUES (${sqlValue(attendance.id || operation.entityId)},
-            ${sqlValue(attendance.session_id || attendance.sessionId)},
-            ${sqlValue(attendance.student_id || attendance.studentId)},
-            ${sqlValue(operation.operationId || `server-${operation.entityId}`)},
-            ${sqlValue(attendance.status || "present")})
-          ON CONFLICT(session_id, student_id) DO NOTHING;`;
+      if (
+        operation.entityType === "attendance" ||
+        operation.entityType === "attendance_marked"
+      ) {
+        return buildAttendancePullSql(
+          operation,
+          attendanceRows || this.rows("attendance"),
+          sessionAliases,
+        );
       }
       if (operation.entityType === "payment") {
         const payment = payload.payment || payload;
         const paymentId = payment.id || operation.entityId;
-        const statements = [`INSERT INTO payments (id, operation_id, student_id, amount, is_reversed)
+        const statements = [
+          `INSERT INTO payments (id, operation_id, student_id, amount, is_reversed)
           VALUES (${sqlValue(paymentId)},
             ${sqlValue(operation.operationId || payment.operation_id || payment.operationId || `srv-pay-${paymentId}`)},
             ${sqlValue(payment.student_id || payment.studentId)}, ${Number(payment.amount || 0)},
             ${payment.is_reversed || payment.isReversed ? 1 : 0})
-          ON CONFLICT(id) DO UPDATE SET amount=excluded.amount, is_reversed=excluded.is_reversed;`];
-        if (payload.debtCycle) statements.push(this.localApplySql({
-          entityType: "debt_cycle",
-          entityId: payload.debtCycle.id,
-          payload: payload.debtCycle,
-        }));
+          ON CONFLICT(id) DO UPDATE SET amount=excluded.amount, is_reversed=excluded.is_reversed;`,
+        ];
+        if (payload.debtCycle)
+          statements.push(
+            this.localApplySql({
+              entityType: "debt_cycle",
+              entityId: payload.debtCycle.id,
+              payload: payload.debtCycle,
+            }),
+          );
         return statements.join("\n");
       }
       if (operation.entityType === "payment_reversal") {
-        const reversal = payload.reversal || payload;
-        const paymentId = reversal.payment_id || reversal.paymentId;
-        return `UPDATE payments SET is_reversed=1 WHERE id=${sqlValue(paymentId)};
-          DELETE FROM payment_reversals
-           WHERE payment_id=${sqlValue(paymentId)}
-             AND operation_id<>${sqlValue(operation.operationId || reversal.operation_id || reversal.operationId)};
-          INSERT INTO payment_reversals (id, operation_id, payment_id, reversed_amount)
-          VALUES (${sqlValue(reversal.id || operation.entityId)},
-            ${sqlValue(operation.operationId || reversal.operation_id || reversal.operationId)},
-            ${sqlValue(paymentId)},
-            ${Number(reversal.reversed_amount ?? reversal.reversedAmount ?? 0)})
-          ON CONFLICT(operation_id) DO NOTHING;`;
+        return buildPaymentReversalPullSql(operation);
       }
       if (operation.entityType === "debt_cycle") {
         const cycle = payload.debtCycle || payload;
@@ -546,7 +601,9 @@ function makeClientDatabase(deviceNumber) {
             status=excluded.status, updated_at=excluded.updated_at,
             server_revision=excluded.server_revision;`;
       }
-      throw new Error(`Unsupported pulled entity type: ${operation.entityType}`);
+      throw new Error(
+        `Unsupported pulled entity type: ${operation.entityType}`,
+      );
     },
     async bootstrap() {
       const response = await request("/v1/sync/bootstrap", {
@@ -554,7 +611,9 @@ function makeClientDatabase(deviceNumber) {
         deviceId: this.deviceId,
       });
       if (response.status !== 200) {
-        throw new Error(`Bootstrap failed (${response.status}): ${JSON.stringify(response.body)}`);
+        throw new Error(
+          `Bootstrap failed (${response.status}): ${JSON.stringify(response.body)}`,
+        );
       }
       const data = response.body;
       const statements = ["BEGIN IMMEDIATE;"];
@@ -576,38 +635,57 @@ function makeClientDatabase(deviceNumber) {
           }),
         );
       }
-      for (const attendance of data.attendance || []) {
+      for (const session of data.sessions || []) {
         statements.push(
           this.localApplySql({
-            entityType: "attendance",
-            entityId: attendance.id,
-            operationId: attendance.operation_id || attendance.operationId,
-            payload: attendance,
+            entityType: "session",
+            entityId: session.id,
+            payload: session,
           }),
         );
       }
+      const attendanceRows = this.rows("attendance");
+      for (const attendance of data.attendance || []) {
+        statements.push(
+          this.localApplySql(
+            {
+              entityType: "attendance",
+              entityId: attendance.id,
+              operationId: attendance.operation_id || attendance.operationId,
+              payload: attendance,
+            },
+            attendanceRows,
+          ),
+        );
+      }
       for (const cycle of data.debtCycles || []) {
-        statements.push(this.localApplySql({
-          entityType: "debt_cycle",
-          entityId: cycle.id,
-          payload: cycle,
-        }));
+        statements.push(
+          this.localApplySql({
+            entityType: "debt_cycle",
+            entityId: cycle.id,
+            payload: cycle,
+          }),
+        );
       }
       for (const payment of data.payments || []) {
-        statements.push(this.localApplySql({
-          entityType: "payment",
-          entityId: payment.id,
-          operationId: payment.operation_id,
-          payload: payment,
-        }));
+        statements.push(
+          this.localApplySql({
+            entityType: "payment",
+            entityId: payment.id,
+            operationId: payment.operation_id,
+            payload: payment,
+          }),
+        );
       }
       for (const reversal of data.paymentReversals || []) {
-        statements.push(this.localApplySql({
-          entityType: "payment_reversal",
-          entityId: reversal.id,
-          operationId: reversal.operation_id,
-          payload: reversal,
-        }));
+        statements.push(
+          this.localApplySql({
+            entityType: "payment_reversal",
+            entityId: reversal.id,
+            operationId: reversal.operation_id,
+            payload: reversal,
+          }),
+        );
       }
       statements.push(
         `INSERT INTO sync_cursors (center_id, server_cursor)
@@ -627,10 +705,23 @@ function makeClientDatabase(deviceNumber) {
       return rows[0]?.server_cursor || "0";
     },
     rows(table) {
-      if (!["students", "groups", "attendance", "payments", "payment_reversals", "debt_cycles", "sync_operations", "applied_operations"].includes(table)) {
+      if (
+        ![
+          "students",
+          "groups",
+          "sessions",
+          "attendance",
+          "payments",
+          "payment_reversals",
+          "debt_cycles",
+          "sync_operations",
+          "applied_operations",
+        ].includes(table)
+      ) {
         throw new Error(`Invalid local table: ${table}`);
       }
-      const orderBy = table === "applied_operations" ? " ORDER BY sequence_number" : "";
+      const orderBy =
+        table === "applied_operations" ? " ORDER BY sequence_number" : "";
       return sqlite(filename, `SELECT * FROM ${table}${orderBy}`, true);
     },
   };
@@ -664,7 +755,14 @@ function cardCode(index) {
   return `9${cardPrefix}${String(index).padStart(2, "0")}`;
 }
 
-function studentOperation(operationId, studentId, code, name, operationType = "create", baseUpdatedAt) {
+function studentOperation(
+  operationId,
+  studentId,
+  code,
+  name,
+  operationType = "create",
+  baseUpdatedAt,
+) {
   return {
     operationId,
     operationType,
@@ -765,25 +863,26 @@ function debtCycleUpdate(operationId, revision, updates) {
 }
 
 async function verifyDebtCycleAliasRecovery(clients) {
-  const aliasEnrollmentId = `sync-it-cycle-owner-${runId}`;
+  const studentId = `sync-it-att-student-${runId}`;
+  const groupId = `sync-it-group-${runId}`;
+  const enrollmentResult = await db.query(
+    `SELECT id FROM student_group_enrollments
+      WHERE center_id=$1 AND student_id=$2 AND group_id=$3`,
+    [centerId, studentId, groupId],
+  );
+  assert.strictEqual(
+    enrollmentResult.rows.length,
+    1,
+    "Debt-cycle alias recovery must reuse the fixture's existing student enrollment",
+  );
+  const enrollmentId = enrollmentResult.rows[0].id;
   const canonicalCycleId = `sync-it-cycle-canonical-${runId}`;
   const aliasCycleId = `sync-it-cycle-alias-${runId}`;
-  await db.query(
-    `INSERT INTO student_group_enrollments
-       (id, center_id, student_id, group_id, status)
-     VALUES ($1, $2, $3, $4, 'active')`,
-    [
-      aliasEnrollmentId,
-      centerId,
-      `sync-it-att-student-${runId}`,
-      `sync-it-group-${runId}`,
-    ],
-  );
   const cyclePayload = (id) => ({
     id,
-    studentId: `sync-it-att-student-${runId}`,
-    enrollmentId: aliasEnrollmentId,
-    groupId: `sync-it-group-${runId}`,
+    studentId,
+    enrollmentId,
+    groupId,
     cycleNumber: 77,
     cycleType: "monthly",
     billingMode: "monthly",
@@ -799,7 +898,11 @@ async function verifyDebtCycleAliasRecovery(clients) {
     entityId: canonicalCycleId,
     payload: cyclePayload(canonicalCycleId),
   });
-  assert.ok((await clients[0].push()).syncedOperationIds.includes(canonicalCreate.operationId));
+  assert.ok(
+    (await clients[0].push()).syncedOperationIds.includes(
+      canonicalCreate.operationId,
+    ),
+  );
 
   const duplicateRepair = await clients[1].enqueue({
     operationId: uniqueOperation("cycle-alias-repair"),
@@ -809,10 +912,14 @@ async function verifyDebtCycleAliasRecovery(clients) {
     payload: cyclePayload(aliasCycleId),
   });
   const repairResponse = await clients[1].push();
-  assert.ok(repairResponse.syncedOperationIds.includes(duplicateRepair.operationId));
-  assert.ok(!repairResponse.conflicts.some(
-    (item) => item.operationId === duplicateRepair.operationId,
-  ));
+  assert.ok(
+    repairResponse.syncedOperationIds.includes(duplicateRepair.operationId),
+  );
+  assert.ok(
+    !repairResponse.conflicts.some(
+      (item) => item.operationId === duplicateRepair.operationId,
+    ),
+  );
 
   const aliasedPayment = paymentOperation(
     uniqueOperation("payment-through-cycle-alias"),
@@ -822,13 +929,20 @@ async function verifyDebtCycleAliasRecovery(clients) {
   );
   aliasedPayment.payload.debtCycleId = aliasCycleId;
   const queuedAliasedPayment = await clients[2].enqueue(aliasedPayment);
-  assert.ok((await clients[2].push()).syncedOperationIds.includes(queuedAliasedPayment.operationId));
+  assert.ok(
+    (await clients[2].push()).syncedOperationIds.includes(
+      queuedAliasedPayment.operationId,
+    ),
+  );
   const canonicalCycleRows = await db.query(
     `SELECT id FROM debt_cycles
       WHERE center_id=$1 AND enrollment_id=$2 AND cycle_number=77`,
-    [centerId, aliasEnrollmentId],
+    [centerId, enrollmentId],
   );
-  assert.deepStrictEqual(canonicalCycleRows.rows.map((row) => row.id), [canonicalCycleId]);
+  assert.deepStrictEqual(
+    canonicalCycleRows.rows.map((row) => row.id),
+    [canonicalCycleId],
+  );
   const aliasPaymentRow = await db.query(
     "SELECT debt_cycle_id FROM payments WHERE center_id=$1 AND id=$2",
     [centerId, `sync-it-payment-alias-${runId}`],
@@ -842,7 +956,9 @@ async function verifyDebtCycleAliasRecovery(clients) {
   );
   assert.strictEqual(aliasLedgerRow.rows[0].entity_id, canonicalCycleId);
   assert.strictEqual(aliasLedgerRow.rows[0].alias_id, aliasCycleId);
-  console.log("   PASS: reset repair alias and a later payment both use the canonical debt cycle");
+  console.log(
+    "   PASS: reset repair alias and a later payment both use the canonical debt cycle",
+  );
 }
 
 async function waitForSequenceAfter(previousValue, timeoutMs = 10000) {
@@ -855,7 +971,9 @@ async function waitForSequenceAfter(previousValue, timeoutMs = 10000) {
     if (value > previousValue) return value;
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
-  throw new Error("The delayed Push did not allocate a server sequence in time.");
+  throw new Error(
+    "The delayed Push did not allocate a server sequence in time.",
+  );
 }
 
 async function maxCenterSequence() {
@@ -876,7 +994,13 @@ async function seedBacklog(prefix, count, userId, deviceId) {
        SELECT $1 || i, $2, $3 || i, 'Backlog student ' || i, $4 || i,
               '', '', 'test', 'registered', 'active'
          FROM generate_series(1, $5) AS i`,
-      [`${prefix}-student-`, centerId, `${prefix}-code-`, `${prefix}-card-`, count],
+      [
+        `${prefix}-student-`,
+        centerId,
+        `${prefix}-code-`,
+        `${prefix}-card-`,
+        count,
+      ],
     );
     await client.query(
       `INSERT INTO server_sync_operations
@@ -917,6 +1041,17 @@ async function setupFixture() {
      VALUES ($1, $2, $3, 'active')`,
     [centerId, `Sync Integration ${runId}`, `SYNC-${runId}`],
   );
+  await db.query(
+    `INSERT INTO card_ranges
+       (id, center_id, start_code, end_code, status)
+     VALUES ($1, $2, $3, $4, 'active')`,
+    [
+      `sync-it-card-range-${runId}`,
+      centerId,
+      `9${cardPrefix}00`,
+      `9${cardPrefix}99`,
+    ],
+  );
   fixtureReady = true;
   await db.query(
     "INSERT INTO center_data_state (center_id) VALUES ($1) ON CONFLICT DO NOTHING",
@@ -926,11 +1061,26 @@ async function setupFixture() {
   const passwordHash = await bcrypt.hash(`SyncTest-${runId}-Only`, 4);
   const devices = [];
   const managerSyncPermissions = [
-    "students.create", "students.update",
-    "teachers.create", "teachers.update",
-    "subjects.create", "subjects.update",
-    "groups.create", "groups.update",
-    "attendance.create", "payments.create", "payments.reverse",
+    "students.view",
+    "students.create",
+    "students.update",
+    "teachers.view",
+    "teachers.create",
+    "teachers.update",
+    "subjects.view",
+    "subjects.create",
+    "subjects.update",
+    "groups.view",
+    "groups.create",
+    "groups.update",
+    "sessions.generate",
+    "sessions.update",
+    "attendance.view",
+    "attendance.create",
+    "payments.view",
+    "payments.create",
+    "payments.reverse",
+    "packages.view",
     "packages.manage",
   ];
   for (let index = 1; index <= 4; index += 1) {
@@ -1001,6 +1151,42 @@ async function setupFixture() {
      VALUES ($1, $2, $3, 'Attendance Test Student', $3, '', '', 'test')`,
     [`sync-it-att-student-${runId}`, centerId, cardCode(90)],
   );
+  for (const [studentId, code, name] of [
+    [
+      `sync-it-att-device-a-${runId}`,
+      cardCode(91),
+      "Device A Attendance Student",
+    ],
+    [
+      `sync-it-att-device-b-${runId}`,
+      cardCode(92),
+      "Device B Attendance Student",
+    ],
+  ]) {
+    await db.query(
+      `INSERT INTO students
+         (id, center_id, student_code, full_name, card_code, phone, parent_phone, grade)
+       VALUES ($1, $2, $3, $4, $3, '', '', 'test')`,
+      [studentId, centerId, code, name],
+    );
+  }
+  for (const studentId of [
+    `sync-it-att-student-${runId}`,
+    `sync-it-att-device-a-${runId}`,
+    `sync-it-att-device-b-${runId}`,
+  ]) {
+    await db.query(
+      `INSERT INTO student_group_enrollments
+         (id, center_id, student_id, group_id, status)
+       VALUES ($1, $2, $3, $4, 'active')`,
+      [
+        `sync-it-enrollment-${studentId}`,
+        centerId,
+        studentId,
+        `sync-it-group-${runId}`,
+      ],
+    );
+  }
   await db.query(
     `INSERT INTO sessions (id, center_id, group_id, session_date, start_time, end_time, status)
      VALUES ($1, $2, $3, CURRENT_DATE, '10:00', '11:00', 'open')`,
@@ -1024,17 +1210,25 @@ async function setupFixture() {
 
 async function cleanupFixture() {
   try {
-    await db.query(`DROP TRIGGER IF EXISTS ${delayTrigger} ON server_sync_operations`);
+    await db.query(
+      `DROP TRIGGER IF EXISTS ${delayTrigger} ON server_sync_operations`,
+    );
     await db.query(`DROP FUNCTION IF EXISTS ${delayFunction}()`);
   } catch {}
   if (fixtureReady) {
-    await db.query("DELETE FROM center_data_state WHERE center_id = $1", [centerId]);
+    await db.query("DELETE FROM center_data_state WHERE center_id = $1", [
+      centerId,
+    ]);
     await db.query("DELETE FROM centers WHERE id = $1", [centerId]);
   }
 }
 
 async function runTests() {
-  assert.ok(config.databaseUrl, "Test DATABASE_URL is required");
+  await assertPostgresTestDatabaseIdentity(
+    db,
+    config.databaseUrl,
+    testDatabase,
+  );
   await db.ensureSchemaCompatibility();
   await new Promise((resolve) => {
     server = app.listen(0, "127.0.0.1", resolve);
@@ -1057,35 +1251,71 @@ async function runTests() {
     }
 
     console.log("1. Four separate SQLite databases and dedicated logins");
-    assert.strictEqual(new Set(clients.map((client) => client.filename)).size, 4);
-    assert.strictEqual(new Set(clients.map((client) => client.deviceId)).size, 4);
+    assert.strictEqual(
+      new Set(clients.map((client) => client.filename)).size,
+      4,
+    );
+    assert.strictEqual(
+      new Set(clients.map((client) => client.deviceId)).size,
+      4,
+    );
     assert.ok(clients.every((client) => fs.existsSync(client.filename)));
     console.log("   PASS: four independent SQLite files, users, and devices");
 
     console.log("2. Local-first work, concurrent Push, and cross-device Pull");
-    const initialOperations = await Promise.all(clients.map((client, index) =>
-      client.enqueue(
-        studentOperation(
-          uniqueOperation(`multi-${index}`),
-          `sync-it-student-${runId}-${index}`,
-          cardCode(index),
-          `Device ${index} student`,
+    const initialOperations = await Promise.all(
+      clients.map((client, index) =>
+        client.enqueue(
+          studentOperation(
+            uniqueOperation(`multi-${index}`),
+            `sync-it-student-${runId}-${index}`,
+            cardCode(index),
+            `Device ${index} student`,
+          ),
         ),
       ),
-    ));
+    );
     assert.strictEqual(clients[0].rows("students").length, 1);
-    const pushResponses = await Promise.all(clients.map((client) => client.push()));
+    const pushResponses = await Promise.all(
+      clients.map((client) => client.push()),
+    );
+
+    console.dir(
+      pushResponses.map((response, index) => ({
+        device: index + 1,
+        syncedOperationIds: response.syncedOperationIds,
+        conflicts: response.conflicts,
+      })),
+      { depth: 6 },
+    );
+
     assert.ok(
-      pushResponses.every((response) => response.syncedOperationIds.length === 1),
+      pushResponses.every(
+        (response) => response.syncedOperationIds.length === 1,
+      ),
+    );
+
+    assert.ok(
+      pushResponses.every(
+        (response) => response.syncedOperationIds.length === 1,
+      ),
     );
     for (const client of clients) await client.pullAll();
+
     for (let index = 0; index < 4; index += 1) {
-      const ids = new Set(clients[index].rows("students").map((student) => student.id));
+      const ids = new Set(
+        clients[index].rows("students").map((student) => student.id),
+      );
       for (const operation of initialOperations) {
-        assert.ok(ids.has(operation.entityId), `Device ${index + 1} missed ${operation.entityId}`);
+        assert.ok(
+          ids.has(operation.entityId),
+          `Device ${index + 1} missed ${operation.entityId}`,
+        );
       }
     }
-    console.log("   PASS: concurrent Push and all four devices received all four records");
+    console.log(
+      "   PASS: concurrent Push and all four devices received all four records",
+    );
 
     console.log("3. Response loss after commit and idempotent retry");
     const retryOperationId = uniqueOperation("lost-response");
@@ -1102,7 +1332,9 @@ async function runTests() {
       /Simulated response loss after server commit/,
     );
     assert.strictEqual(
-      clients[0].rows("sync_operations").find((row) => row.operation_id === retryOperationId).status,
+      clients[0]
+        .rows("sync_operations")
+        .find((row) => row.operation_id === retryOperationId).status,
       "pending",
     );
     const retried = await clients[0].push();
@@ -1117,10 +1349,12 @@ async function runTests() {
     );
     assert.strictEqual(ledgerRetryCount.rows[0].count, 1);
     assert.strictEqual(domainRetryCount.rows[0].count, 1);
-    console.log("   PASS: response-loss retry produced one ledger row and one student");
+    console.log(
+      "   PASS: response-loss retry produced one ledger row and one student",
+    );
 
     console.log("4. Concurrent student/group updates and overlapping Pull");
-    await Promise.all(clients.map((client) => client.pullAll()));
+    await pullAllClients(clients);
     const studentVersion = await db.query(
       "SELECT updated_at::text AS updated_at FROM students WHERE center_id=$1 AND id=$2",
       [centerId, `sync-it-student-${runId}-0`],
@@ -1129,28 +1363,32 @@ async function runTests() {
       "SELECT updated_at::text AS updated_at FROM groups WHERE center_id=$1 AND id=$2",
       [centerId, `sync-it-group-${runId}`],
     );
-    const updateOps = await Promise.all(clients.map((client, index) =>
-      client.enqueue(
-        studentOperation(
-          uniqueOperation(`student-update-${index}`),
-          `sync-it-student-${runId}-0`,
-          cardCode(0),
-          `Concurrent student update ${index}`,
-          "update",
-          studentVersion.rows[0].updated_at,
+    const updateOps = await Promise.all(
+      clients.map((client, index) =>
+        client.enqueue(
+          studentOperation(
+            uniqueOperation(`student-update-${index}`),
+            `sync-it-student-${runId}-0`,
+            cardCode(0),
+            `Concurrent student update ${index}`,
+            "update",
+            studentVersion.rows[0].updated_at,
+          ),
         ),
       ),
-    ));
-    const groupOps = await Promise.all(clients.map((client, index) =>
-      client.enqueue(
-        groupOperation(
-          uniqueOperation(`group-update-${index}`),
-          `sync-it-group-${runId}`,
-          `Concurrent group update ${index}`,
-          groupVersion.rows[0].updated_at,
+    );
+    const groupOps = await Promise.all(
+      clients.map((client, index) =>
+        client.enqueue(
+          groupOperation(
+            uniqueOperation(`group-update-${index}`),
+            `sync-it-group-${runId}`,
+            `Concurrent group update ${index}`,
+            groupVersion.rows[0].updated_at,
+          ),
         ),
       ),
-    ));
+    );
     const overlappingPull = clients[2].pullAll();
     const concurrentPush = Promise.all(clients.map((client) => client.push()));
     const [pushResults] = await Promise.all([concurrentPush, overlappingPull]);
@@ -1158,7 +1396,8 @@ async function runTests() {
       (sum, response) => sum + response.syncedOperationIds.length,
       0,
     );
-    const staleUpdateCount = pushResults.flatMap((response) => response.conflicts || [])
+    const staleUpdateCount = pushResults
+      .flatMap((response) => response.conflicts || [])
       .filter((conflict) => /STALE_UPDATE/.test(conflict.reason)).length;
     assert.strictEqual(appliedUpdateCount, 2);
     assert.strictEqual(staleUpdateCount, 6);
@@ -1176,7 +1415,9 @@ async function runTests() {
       [centerId, `sync-it-group-${runId}`],
     );
     assert.match(groupState.rows[0].name, /^Concurrent group update [0-3]$/);
-    console.log("   PASS: one version won per mutable row, six stale writes conflicted; overlapping Pull completed");
+    console.log(
+      "   PASS: one version won per mutable row, six stale writes conflicted; overlapping Pull completed",
+    );
     await clients[2].pullAll();
     const refreshedStudent = await db.query(
       "SELECT updated_at::text AS updated_at FROM students WHERE center_id=$1 AND id=$2",
@@ -1193,28 +1434,52 @@ async function runTests() {
       ),
     );
     const refreshedUpdateResponse = await clients[2].push();
-    assert.ok(refreshedUpdateResponse.syncedOperationIds.includes(refreshedUpdate.operationId));
-    console.log("   PASS: refreshing the server token allows an intentional student retry");
+    assert.ok(
+      refreshedUpdateResponse.syncedOperationIds.includes(
+        refreshedUpdate.operationId,
+      ),
+    );
+    console.log(
+      "   PASS: refreshing the server token allows an intentional student retry",
+    );
 
-    console.log("4a. Teacher, subject, and package updates reject stale base versions");
+    console.log(
+      "4a. Teacher, subject, and package updates reject stale base versions",
+    );
     const mutableFixtures = [
       {
         entityType: "teacher",
         entityId: `sync-it-teacher-${runId}`,
         table: "teachers",
-        payload: { name: "Updated Integration Teacher", phone: null, notes: null, status: "active" },
+        payload: {
+          name: "Updated Integration Teacher",
+          phone: null,
+          notes: null,
+          status: "active",
+        },
       },
       {
         entityType: "subject",
         entityId: `sync-it-subject-${runId}`,
         table: "subjects",
-        payload: { name: "Updated Integration Subject", code: `SUB-${runId}-V2`, status: "active" },
+        payload: {
+          name: "Updated Integration Subject",
+          code: `SUB-${runId}-V2`,
+          status: "active",
+        },
       },
       {
         entityType: "package",
         entityId: `sync-it-package-${runId}`,
         table: "packages",
-        payload: { name: "Updated Integration Package", grade: "test", price: 125, maxSelections: 1, billingCycle: "monthly", status: "active" },
+        payload: {
+          name: "Updated Integration Package",
+          grade: "test",
+          price: 125,
+          maxSelections: 1,
+          billingCycle: "monthly",
+          status: "active",
+        },
       },
     ];
     for (const fixture of mutableFixtures) {
@@ -1229,59 +1494,496 @@ async function runTests() {
         operationType: "UPDATE",
         entityType: fixture.entityType,
         entityId: fixture.entityId,
-        payload: { ...fixture.payload, id: fixture.entityId, baseUpdatedAt: token },
+        payload: {
+          ...fixture.payload,
+          id: fixture.entityId,
+          baseUpdatedAt: token,
+        },
       });
-      assert.ok((await clients[0].push()).syncedOperationIds.includes(accepted.operationId));
+      assert.ok(
+        (await clients[0].push()).syncedOperationIds.includes(
+          accepted.operationId,
+        ),
+      );
       const stale = await clients[3].enqueue({
         operationId: uniqueOperation(`${fixture.entityType}-stale`),
         operationType: "UPDATE",
         entityType: fixture.entityType,
         entityId: fixture.entityId,
-        payload: { ...fixture.payload, id: fixture.entityId, baseUpdatedAt: token },
+        payload: {
+          ...fixture.payload,
+          id: fixture.entityId,
+          baseUpdatedAt: token,
+        },
       });
       const staleResponse = await clients[3].push();
-      assert.ok(staleResponse.conflicts.some(
-        (conflict) => conflict.operationId === stale.operationId && /STALE_UPDATE/.test(conflict.reason),
-      ), `${fixture.entityType} stale update was not rejected`);
+      assert.ok(
+        staleResponse.conflicts.some(
+          (conflict) =>
+            conflict.operationId === stale.operationId &&
+            /STALE_UPDATE/.test(conflict.reason),
+        ),
+        `${fixture.entityType} stale update was not rejected`,
+      );
     }
-    console.log("   PASS: teacher, subject, and package metadata/config updates use server-issued stale-write tokens");
+    console.log(
+      "   PASS: teacher, subject, and package metadata/config updates use server-issued stale-write tokens",
+    );
 
-    console.log("5. Duplicate attendance from two independent devices");
-    const attendanceOps = await Promise.all([clients[0], clients[1]].map((client, index) =>
-      client.enqueue({
-        operationId: uniqueOperation(`attendance-dup-${index}`),
-        operationType: "mark",
-        entityType: "attendance",
-        entityId: `sync-it-attendance-${runId}-${index}`,
-        payload: {
-          id: `sync-it-attendance-${runId}-${index}`,
-          session_id: `sync-it-session-${runId}`,
-          student_id: `sync-it-att-student-${runId}`,
-          status: "present",
-        },
-      }),
-    ));
+    console.log(
+      "5. Concurrent session IDs converge across requests and keep start-time provenance",
+    );
+    const fixtureSessionDate = new Date(Date.now() + 24 * 60 * 60 * 1000)
+      .toISOString()
+      .slice(0, 10);
+    const sessionScheduleId = `sync-it-session-schedule-${runId}`;
+    const localSessionIds = [
+      `sync-it-local-session-a-${runId}`,
+      `sync-it-local-session-b-${runId}`,
+    ];
+    const deviceStartTimes = [
+      new Date(Date.now() - 2 * 60 * 1000).toISOString(),
+      new Date(Date.now() - 60 * 1000).toISOString(),
+    ];
+    const sessionOperations = await Promise.all(
+      [clients[0], clients[1]].map((client, index) =>
+        client.enqueue({
+          operationId: uniqueOperation(`session-alias-${index}`),
+          operationType: "CREATE",
+          entityType: "session",
+          entityId: localSessionIds[index],
+          payload: {
+            id: localSessionIds[index],
+            groupId: `sync-it-group-${runId}`,
+            scheduleId: sessionScheduleId,
+            subjectId: `sync-it-subject-${runId}`,
+            teacherId: `sync-it-teacher-${runId}`,
+            sessionDate: fixtureSessionDate,
+            startTime: "10:00",
+            endTime: "11:00",
+            status: "open",
+            createdAt: deviceStartTimes[index],
+          },
+        }),
+      ),
+    );
+    for (let index = 0; index < sessionOperations.length; index += 1) {
+      const client = clients[index];
+      const localSession = client.rows("sessions")[0];
+      assert.strictEqual(client.rows("sessions").length, 1);
+      assert.strictEqual(localSession.id, localSessionIds[index]);
+      assert.strictEqual(localSession.center_id, centerId);
+      assert.strictEqual(localSession.group_id, `sync-it-group-${runId}`);
+      assert.strictEqual(localSession.schedule_id, sessionScheduleId);
+      assert.strictEqual(localSession.session_date, fixtureSessionDate);
+      assert.strictEqual(localSession.start_time, "10:00");
+      assert.strictEqual(localSession.end_time, "11:00");
+      assert.strictEqual(localSession.status, "open");
+      assert.strictEqual(localSession.created_at, deviceStartTimes[index]);
+      client.applyLocal(sessionOperations[index]);
+      assert.strictEqual(
+        client.rows("sessions").length,
+        1,
+        "Reapplying the same local session must not create a duplicate row",
+      );
+    }
+    const lostSessionResponse = assert.rejects(
+      clients[0].push({ loseResponse: true }),
+      /Simulated response loss after server commit/,
+    );
+    const secondDeviceSessionPush = clients[1].push();
+    const [, secondDeviceResponse] = await Promise.all([
+      lostSessionResponse,
+      secondDeviceSessionPush,
+    ]);
+    const firstDeviceRetry = await clients[0].push();
+    const sessionPushes = [firstDeviceRetry, secondDeviceResponse];
+    const sessionMappings = sessionPushes.flatMap(
+      (response) => response.sessionMappings || [],
+    );
+    const aliasMappings = sessionMappings.filter(
+      (mapping) =>
+        mapping.localSessionId !== mapping.canonicalSessionId,
+    );
+    assert.strictEqual(
+      aliasMappings.length,
+      1,
+      "The two Push responses must return only the non-canonical session alias",
+    );
+    const canonicalSessionId = aliasMappings[0]?.canonicalSessionId;
+    assert.ok(canonicalSessionId);
+    assert.ok(
+      localSessionIds.includes(canonicalSessionId),
+      "The canonical session ID must be one of the two device-local session IDs",
+    );
+    for (let index = 0; index < sessionPushes.length; index += 1) {
+      assert.ok(
+        sessionPushes[index].syncedOperationIds.includes(
+          sessionOperations[index].operationId,
+        ),
+      );
+    }
+    for (const localSessionId of localSessionIds) {
+      const mappingsForLocalId = sessionMappings.filter(
+        (mapping) => mapping.localSessionId === localSessionId,
+      );
+      if (localSessionId === canonicalSessionId) {
+        assert.strictEqual(
+          mappingsForLocalId.length,
+          0,
+          "The canonical session ID must not be returned as a self-alias",
+        );
+      } else {
+        assert.ok(
+          mappingsForLocalId.some(
+            (mapping) =>
+              mapping.canonicalSessionId === canonicalSessionId,
+          ),
+          "The non-canonical session ID must map to the canonical session",
+        );
+      }
+    }
+    const canonicalIdentity = await db.query(
+      `SELECT session_id FROM session_natural_keys
+        WHERE center_id=$1 AND group_id=$2 AND schedule_key=$3 AND session_date=$4`,
+      [
+        centerId,
+        `sync-it-group-${runId}`,
+        sessionScheduleId,
+        fixtureSessionDate,
+      ],
+    );
+    assert.strictEqual(canonicalIdentity.rows.length, 1);
+    assert.strictEqual(
+      canonicalIdentity.rows[0].session_id,
+      canonicalSessionId,
+    );
+    const canonicalRows = await db.query(
+      `SELECT COUNT(*)::int AS count FROM sessions
+        WHERE center_id=$1 AND group_id=$2 AND schedule_id=$3 AND session_date=$4`,
+      [
+        centerId,
+        `sync-it-group-${runId}`,
+        sessionScheduleId,
+        fixtureSessionDate,
+      ],
+    );
+    assert.strictEqual(canonicalRows.rows[0].count, 1);
+    const aliases = await db.query(
+      `SELECT local_session_id, canonical_session_id
+         FROM session_id_aliases
+        WHERE center_id=$1 AND local_session_id = ANY($2::text[])
+          AND canonical_session_id=$3
+        ORDER BY local_session_id`,
+      [centerId, localSessionIds, canonicalSessionId],
+    );
+    const expectedAliasIds = localSessionIds
+      .filter((localSessionId) => localSessionId !== canonicalSessionId)
+      .sort();
+    assert.deepStrictEqual(
+      aliases.rows.map(({ local_session_id, canonical_session_id }) => [
+        local_session_id,
+        canonical_session_id,
+      ]),
+      expectedAliasIds.map((localSessionId) => [
+        localSessionId,
+        canonicalSessionId,
+      ]),
+      "Only non-canonical scheduled session IDs are stored as aliases",
+    );
+    const startEvents = await db.query(
+      `SELECT COUNT(*)::int AS count,
+              MIN(accepted_started_at) AS earliest_accepted_start,
+              MIN(device_started_at) AS earliest_device_start
+         FROM session_start_events
+        WHERE center_id=$1 AND session_id=$2 AND operation_id = ANY($3::text[])`,
+      [
+        centerId,
+        canonicalSessionId,
+        sessionOperations.map((operation) => operation.operationId),
+      ],
+    );
+    assert.strictEqual(startEvents.rows[0].count, 2);
+    const effectiveStart = await db.query(
+      "SELECT started_at FROM sessions WHERE center_id=$1 AND id=$2",
+      [centerId, canonicalSessionId],
+    );
+    assert.strictEqual(
+      new Date(effectiveStart.rows[0].started_at).toISOString(),
+      new Date(startEvents.rows[0].earliest_accepted_start).toISOString(),
+    );
+    const sessionPulls = await pullAllClients([clients[2], clients[3]]);
+    const sessionOperationIds = new Set(
+      sessionOperations.map((operation) => operation.operationId),
+    );
+    for (let index = 0; index < sessionPulls.length; index += 1) {
+      const pulledSessionChanges = sessionPulls[index]
+        .filter(
+          (change) =>
+            change.entityType === "session" &&
+            sessionOperationIds.has(change.operationId),
+        );
+      const pulledSessionOperationIds = pulledSessionChanges
+        .map((change) => change.operationId)
+        .sort();
+      assert.deepStrictEqual(
+        pulledSessionOperationIds,
+        [...sessionOperationIds].sort(),
+        `Device ${index + 3} must pull both session operations`,
+      );
+      assert.ok(
+        pulledSessionChanges.every(
+          (change) => Number.isFinite(Date.parse(change.data.startedAt)),
+        ),
+        `Device ${index + 3} must receive each server-approved session start time`,
+      );
+      const pulledSessions = clients[index + 2].rows("sessions");
+      assert.strictEqual(
+        pulledSessions.length,
+        1,
+        `Device ${index + 3} must store one canonical session after Pull`,
+      );
+      assert.strictEqual(pulledSessions[0].id, canonicalSessionId);
+      assert.strictEqual(pulledSessions[0].status, "open");
+      assert.strictEqual(
+        new Date(pulledSessions[0].created_at).toISOString(),
+        new Date(startEvents.rows[0].earliest_device_start).toISOString(),
+        `Device ${index + 3} must retain the earliest device start time`,
+      );
+    }
+    console.log(
+      "   PASS: parallel PostgreSQL Pushes shared one natural key, stored only the non-canonical alias, and both Pulls converged on one session with the earliest start time",
+    );
+
+    const otherScheduleOperation = await clients[2].enqueue({
+      operationId: uniqueOperation("different-schedule-session"),
+      operationType: "CREATE",
+      entityType: "session",
+      entityId: `sync-it-other-schedule-session-${runId}`,
+      payload: {
+        id: `sync-it-other-schedule-session-${runId}`,
+        groupId: `sync-it-group-${runId}`,
+        scheduleId: `sync-it-other-schedule-${runId}`,
+        subjectId: `sync-it-subject-${runId}`,
+        teacherId: `sync-it-teacher-${runId}`,
+        sessionDate: fixtureSessionDate,
+        startTime: "12:00",
+        endTime: "13:00",
+        status: "open",
+        createdAt: deviceStartTimes[0],
+      },
+    });
+    const otherSchedulePush = await clients[2].push();
+    assert.ok(
+      otherSchedulePush.syncedOperationIds.includes(
+        otherScheduleOperation.operationId,
+      ),
+    );
+    assert.deepStrictEqual(
+      otherSchedulePush.sessionMappings,
+      [],
+      "A new canonical session must not be returned as a self-alias",
+    );
+    const otherScheduleIdentity = await db.query(
+      `SELECT session_id FROM session_natural_keys
+        WHERE center_id=$1 AND group_id=$2 AND schedule_key=$3
+          AND session_date=$4`,
+      [
+        centerId,
+        `sync-it-group-${runId}`,
+        `sync-it-other-schedule-${runId}`,
+        fixtureSessionDate,
+      ],
+    );
+    assert.strictEqual(
+      otherScheduleIdentity.rows.length,
+      1,
+      "The independently scheduled lesson must have one canonical natural-key row",
+    );
+    const otherScheduleId = otherScheduleIdentity.rows[0].session_id;
+    assert.ok(otherScheduleId);
+    assert.strictEqual(
+      otherScheduleId,
+      otherScheduleOperation.entityId,
+      "A newly created distinct scheduled session remains canonical under its submitted ID",
+    );
+    assert.notStrictEqual(otherScheduleId, canonicalSessionId);
+    const distinctLessons = await db.query(
+      `SELECT COUNT(*)::int AS count FROM session_natural_keys
+        WHERE center_id=$1 AND group_id=$2 AND session_date=$3`,
+      [centerId, `sync-it-group-${runId}`, fixtureSessionDate],
+    );
+    assert.strictEqual(distinctLessons.rows[0].count, 2);
+    console.log(
+      "   PASS: a second schedule for the same group/date retains a distinct session",
+    );
+
+    console.log(
+      "7. Duplicate attendance from two independent devices, including absent/present conflict",
+    );
+    const attendanceSpecs = [
+      {
+        clientIndex: 0,
+        studentId: `sync-it-att-student-${runId}`,
+        status: "absent",
+      },
+      {
+        clientIndex: 1,
+        studentId: `sync-it-att-student-${runId}`,
+        status: "present",
+      },
+      {
+        clientIndex: 0,
+        studentId: `sync-it-att-device-a-${runId}`,
+        status: "present",
+      },
+      {
+        clientIndex: 1,
+        studentId: `sync-it-att-device-b-${runId}`,
+        status: "present",
+      },
+    ];
+    const attendanceOps = await Promise.all(
+      attendanceSpecs.map(({ clientIndex, studentId, status }, index) =>
+        clients[clientIndex].enqueue({
+          operationId: uniqueOperation(`attendance-merge-${index}`),
+          operationType: "mark",
+          entityType: "attendance",
+          entityId: `sync-it-attendance-${runId}-${index}`,
+          payload: {
+            id: `sync-it-attendance-${runId}-${index}`,
+            session_id: localSessionIds[clientIndex],
+            student_id: studentId,
+            status,
+          },
+        }),
+      ),
+    );
     const attendancePushes = await Promise.all([
       clients[0].push(),
       clients[1].push(),
     ]);
-    assert.strictEqual(
-      attendancePushes.filter((response) => response.syncedOperationIds.includes(attendanceOps[0].operationId) || response.syncedOperationIds.includes(attendanceOps[1].operationId)).length,
-      1,
+    const syncedAttendanceOperations = new Set(
+      attendancePushes.flatMap((response) => response.syncedOperationIds),
     );
-    assert.strictEqual(
-      attendancePushes.flatMap((response) => response.conflicts || []).filter((item) => /ATTENDANCE_ALREADY_RECORDED/.test(item.reason)).length,
-      1,
+    assert.ok(
+      attendanceOps.every((operation) =>
+        syncedAttendanceOperations.has(operation.operationId),
+      ),
     );
     const attendanceRows = await db.query(
-      `SELECT COUNT(*)::int AS count FROM attendance
-       WHERE center_id=$1 AND session_id=$2 AND student_id=$3`,
-      [centerId, `sync-it-session-${runId}`, `sync-it-att-student-${runId}`],
+      `SELECT student_id, status FROM attendance
+        WHERE center_id=$1 AND session_id=$2
+        ORDER BY student_id`,
+      [centerId, canonicalSessionId],
     );
-    assert.strictEqual(attendanceRows.rows[0].count, 1);
-    console.log("   PASS: one attendance row; competing operation returned a conflict");
+    assert.strictEqual(attendanceRows.rows.length, 3);
+    assert.deepStrictEqual(
+      attendanceRows.rows.map(({ student_id, status }) => [student_id, status]),
+      [
+        [`sync-it-att-device-a-${runId}`, "present"],
+        [`sync-it-att-device-b-${runId}`, "present"],
+        [`sync-it-att-student-${runId}`, "present"],
+      ],
+    );
+    const attendanceAudits = await db.query(
+      `SELECT COUNT(*)::int AS count FROM audit_logs
+        WHERE center_id=$1 AND operation_id = ANY($2::text[])`,
+      [centerId, attendanceOps.map((operation) => operation.operationId)],
+    );
+    assert.strictEqual(attendanceAudits.rows[0].count, 4);
+    console.log(
+      "   PASS: device rosters merged, one duplicate was retained with present winning, and all operations were audited",
+    );
 
-    console.log("6. Lower-sequence Push delayed before commit; higher Push and Bootstrap/Pull overlap");
+    console.log(
+      "8. A cancelled shared session cannot be revived by a stale device start",
+    );
+    const cancelSession = await clients[3].enqueue({
+      operationId: uniqueOperation("cancel-shared-session"),
+      operationType: "UPDATE",
+      entityType: "session",
+      entityId: canonicalSessionId,
+      payload: {
+        id: canonicalSessionId,
+        groupId: `sync-it-group-${runId}`,
+        scheduleId: sessionScheduleId,
+        subjectId: `sync-it-subject-${runId}`,
+        teacherId: `sync-it-teacher-${runId}`,
+        sessionDate: fixtureSessionDate,
+        startTime: "10:00",
+        endTime: "11:00",
+        status: "cancelled",
+      },
+    });
+    assert.ok(
+      (await clients[3].push()).syncedOperationIds.includes(
+        cancelSession.operationId,
+      ),
+    );
+    const staleSessionIndex = localSessionIds.findIndex(
+      (localSessionId) => localSessionId !== canonicalSessionId,
+    );
+    assert.notStrictEqual(staleSessionIndex, -1);
+    const staleSessionStart = await clients[staleSessionIndex].enqueue({
+      operationId: uniqueOperation("stale-shared-session-start"),
+      operationType: "CREATE",
+      entityType: "session",
+      entityId: localSessionIds[staleSessionIndex],
+      payload: {
+        id: localSessionIds[staleSessionIndex],
+        groupId: `sync-it-group-${runId}`,
+        scheduleId: sessionScheduleId,
+        subjectId: `sync-it-subject-${runId}`,
+        teacherId: `sync-it-teacher-${runId}`,
+        sessionDate: fixtureSessionDate,
+        startTime: "10:00",
+        endTime: "11:00",
+        status: "open",
+        createdAt: deviceStartTimes[staleSessionIndex],
+      },
+    });
+    const staleSessionResponse = await clients[staleSessionIndex].push();
+    assert.ok(
+      !staleSessionResponse.syncedOperationIds.includes(
+        staleSessionStart.operationId,
+      ),
+      "The rejected stale start must not be marked as synchronized",
+    );
+    assert.ok(
+      staleSessionResponse.conflicts.some(
+        (conflict) =>
+          conflict.operationId === staleSessionStart.operationId &&
+          /SESSION_NATURAL_KEY_CANCELLED_CONFLICT/.test(conflict.reason),
+      ),
+      "A stale non-canonical session ID must be rejected after canonical cancellation",
+    );
+    assert.strictEqual(
+      clients[staleSessionIndex]
+        .rows("sync_operations")
+        .find((row) => row.operation_id === staleSessionStart.operationId)
+        .status,
+      "conflict",
+      "The rejected stale start remains in the local outbox for review",
+    );
+    const staleStartEvents = await db.query(
+      `SELECT COUNT(*)::int AS count FROM session_start_events
+        WHERE center_id=$1 AND operation_id=$2`,
+      [centerId, staleSessionStart.operationId],
+    );
+    assert.strictEqual(staleStartEvents.rows[0].count, 0);
+    const cancelledSession = await db.query(
+      "SELECT status FROM sessions WHERE center_id=$1 AND id=$2",
+      [centerId, canonicalSessionId],
+    );
+    assert.strictEqual(cancelledSession.rows[0].status, "cancelled");
+    console.log(
+      "   PASS: an old offline start did not reopen the cancelled canonical session",
+    );
+
+    console.log(
+      "9. Lower-sequence Push delayed before commit; higher Push and Bootstrap/Pull overlap",
+    );
     const sequenceBefore = await db.query(
       "SELECT last_value::text AS value FROM server_sync_operations_server_seq_seq",
     );
@@ -1318,7 +2020,9 @@ async function runTests() {
     const allocatedLowerSequence = await Promise.race([
       waitForSequenceAfter(Number(sequenceBefore.rows[0].value)),
       lowerPush.then(() => {
-        throw new Error("The delayed Push completed before its sequence was observed.");
+        throw new Error(
+          "The delayed Push completed before its sequence was observed.",
+        );
       }),
     ]);
     const higherPush = clients[1].push();
@@ -1326,7 +2030,9 @@ async function runTests() {
     const bootstrap = deviceC.bootstrap();
     const pullDuringUncommitted = await deviceC.pullAll();
     assert.ok(
-      !pullDuringUncommitted.some((change) => change.operationId === slowOp.operationId),
+      !pullDuringUncommitted.some(
+        (change) => change.operationId === slowOp.operationId,
+      ),
       "Pull must not observe an uncommitted ledger row",
     );
 
@@ -1351,22 +2057,45 @@ async function runTests() {
       [centerId, [slowOp.operationId, fastOp.operationId]],
     );
     const sequenceByOperation = new Map(
-      lowerAndHigherSequences.rows.map((row) => [row.operation_id, Number(row.server_seq)]),
+      lowerAndHigherSequences.rows.map((row) => [
+        row.operation_id,
+        Number(row.server_seq),
+      ]),
     );
     assert.ok(
-      sequenceByOperation.get(slowOp.operationId) < sequenceByOperation.get(fastOp.operationId),
+      sequenceByOperation.get(slowOp.operationId) <
+        sequenceByOperation.get(fastOp.operationId),
       "The higher Push must allocate only after the lower Push commits",
     );
-    assert.ok(bootstrapData.latestServerSeq <= sequenceByOperation.get(fastOp.operationId));
+    assert.ok(
+      bootstrapData.latestServerSeq <=
+        sequenceByOperation.get(fastOp.operationId),
+    );
     const afterBootstrapPull = await deviceC.pullAll();
-    const deviceCStudents = new Set(deviceC.rows("students").map((row) => row.id));
+    const deviceCStudents = new Set(
+      deviceC.rows("students").map((row) => row.id),
+    );
     assert.ok(deviceCStudents.has(slowOp.entityId));
     assert.ok(deviceCStudents.has(fastOp.entityId));
-    assert.ok(afterBootstrapPull.some((change) => change.operationId === slowOp.operationId) ||
-      bootstrapData.students.some((student) => student.id === slowOp.entityId));
-    assert.ok(afterBootstrapPull.some((change) => change.operationId === fastOp.operationId) ||
-      bootstrapData.students.some((student) => student.id === fastOp.entityId));
-    console.log("   PASS: no higher sequence allocated before lower commit; Bootstrap/Pull converged on both");
+    assert.ok(
+      afterBootstrapPull.some(
+        (change) => change.operationId === slowOp.operationId,
+      ) ||
+        bootstrapData.students.some(
+          (student) => student.id === slowOp.entityId,
+        ),
+    );
+    assert.ok(
+      afterBootstrapPull.some(
+        (change) => change.operationId === fastOp.operationId,
+      ) ||
+        bootstrapData.students.some(
+          (student) => student.id === fastOp.entityId,
+        ),
+    );
+    console.log(
+      "   PASS: no higher sequence allocated before lower commit; Bootstrap/Pull converged on both",
+    );
 
     console.log("7. Offline outbox then reconnect");
     const offlineOp = await clients[3].enqueue(
@@ -1377,11 +2106,22 @@ async function runTests() {
         "Offline-first student",
       ),
     );
-    assert.strictEqual(clients[3].rows("sync_operations").find((row) => row.operation_id === offlineOp.operationId).status, "pending");
-    assert.ok(clients[3].rows("students").some((row) => row.id === offlineOp.entityId));
+    assert.strictEqual(
+      clients[3]
+        .rows("sync_operations")
+        .find((row) => row.operation_id === offlineOp.operationId).status,
+      "pending",
+    );
+    assert.ok(
+      clients[3].rows("students").some((row) => row.id === offlineOp.entityId),
+    );
     const reconnectResponse = await clients[3].push();
-    assert.ok(reconnectResponse.syncedOperationIds.includes(offlineOp.operationId));
-    console.log("   PASS: local row/outbox existed before reconnect; later Push acknowledged it");
+    assert.ok(
+      reconnectResponse.syncedOperationIds.includes(offlineOp.operationId),
+    );
+    console.log(
+      "   PASS: local row/outbox existed before reconnect; later Push acknowledged it",
+    );
 
     console.log("8. Pull backlog of 501, 1000, and 1518 operations");
     const backlogDevice501 = makeClientDatabase("backlog-501");
@@ -1389,12 +2129,23 @@ async function runTests() {
     backlogDevice501.deviceId = clients[0].deviceId;
     backlogDevice501.token = clients[0].token;
     const start501 = await maxCenterSequence();
-    sqlite(backlogDevice501.filename, `INSERT INTO sync_cursors (center_id, server_cursor) VALUES (${sqlValue(centerId)}, ${sqlValue(String(start501))});`);
-    await seedBacklog(`b501-${runId}`, 501, clients[0].userId, clients[0].deviceId);
+    sqlite(
+      backlogDevice501.filename,
+      `INSERT INTO sync_cursors (center_id, server_cursor) VALUES (${sqlValue(centerId)}, ${sqlValue(String(start501))});`,
+    );
+    await seedBacklog(
+      `b501-${runId}`,
+      501,
+      clients[0].userId,
+      clients[0].deviceId,
+    );
     const changes501 = await backlogDevice501.pullAll(100);
     assert.strictEqual(changes501.length, 501);
     assert.strictEqual(backlogDevice501.rows("students").length, 501);
-    assert.strictEqual(backlogDevice501.cursor(), String(await maxCenterSequence()));
+    assert.strictEqual(
+      backlogDevice501.cursor(),
+      String(await maxCenterSequence()),
+    );
     assert.strictEqual(backlogDevice501.rows("applied_operations").length, 501);
 
     const backlogDevice1000 = makeClientDatabase("backlog-1000");
@@ -1402,16 +2153,33 @@ async function runTests() {
     backlogDevice1000.deviceId = clients[1].deviceId;
     backlogDevice1000.token = clients[1].token;
     const start1000 = await maxCenterSequence();
-    sqlite(backlogDevice1000.filename, `INSERT INTO sync_cursors (center_id, server_cursor) VALUES (${sqlValue(centerId)}, ${sqlValue(String(start1000))});`);
-    await seedBacklog(`b1000-${runId}`, 1000, clients[1].userId, clients[1].deviceId);
+    sqlite(
+      backlogDevice1000.filename,
+      `INSERT INTO sync_cursors (center_id, server_cursor) VALUES (${sqlValue(centerId)}, ${sqlValue(String(start1000))});`,
+    );
+    await seedBacklog(
+      `b1000-${runId}`,
+      1000,
+      clients[1].userId,
+      clients[1].deviceId,
+    );
     const changes1000 = await backlogDevice1000.pullAll(100);
     assert.strictEqual(changes1000.length, 1000);
     assert.strictEqual(backlogDevice1000.rows("students").length, 1000);
-    assert.strictEqual(backlogDevice1000.cursor(), String(await maxCenterSequence()));
-    assert.strictEqual(backlogDevice1000.rows("applied_operations").length, 1000);
+    assert.strictEqual(
+      backlogDevice1000.cursor(),
+      String(await maxCenterSequence()),
+    );
+    assert.strictEqual(
+      backlogDevice1000.rows("applied_operations").length,
+      1000,
+    );
     const replay = await backlogDevice1000.pullAll(100);
     assert.strictEqual(replay.length, 0);
-    assert.strictEqual(backlogDevice1000.rows("applied_operations").length, 1000);
+    assert.strictEqual(
+      backlogDevice1000.rows("applied_operations").length,
+      1000,
+    );
     const cursorAfterBacklog1000 = backlogDevice1000.cursor();
 
     const backlogDevice1518 = makeClientDatabase("backlog-1518");
@@ -1419,42 +2187,82 @@ async function runTests() {
     backlogDevice1518.deviceId = clients[2].deviceId;
     backlogDevice1518.token = clients[2].token;
     const start1518 = await maxCenterSequence();
-    sqlite(backlogDevice1518.filename, `INSERT INTO sync_cursors (center_id, server_cursor) VALUES (${sqlValue(centerId)}, ${sqlValue(String(start1518))});`);
-    await seedBacklog(`b1518-${runId}`, 1518, clients[2].userId, clients[2].deviceId);
+    sqlite(
+      backlogDevice1518.filename,
+      `INSERT INTO sync_cursors (center_id, server_cursor) VALUES (${sqlValue(centerId)}, ${sqlValue(String(start1518))});`,
+    );
+    await seedBacklog(
+      `b1518-${runId}`,
+      1518,
+      clients[2].userId,
+      clients[2].deviceId,
+    );
     const changes1518 = await backlogDevice1518.pullAll(100);
     assert.strictEqual(changes1518.length, 1518);
     assert.strictEqual(backlogDevice1518.rows("students").length, 1518);
-    assert.strictEqual(backlogDevice1518.cursor(), String(await maxCenterSequence()));
-    assert.strictEqual(backlogDevice1518.rows("applied_operations").length, 1518);
+    assert.strictEqual(
+      backlogDevice1518.cursor(),
+      String(await maxCenterSequence()),
+    );
+    assert.strictEqual(
+      backlogDevice1518.rows("applied_operations").length,
+      1518,
+    );
     const replay1518 = await backlogDevice1518.pullAll(100);
     assert.strictEqual(replay1518.length, 0);
-    assert.strictEqual(backlogDevice1518.rows("applied_operations").length, 1518);
-    console.log("   PASS: 501, 1000, and 1518 changes fully applied with exact cursors and no replay duplicates");
+    assert.strictEqual(
+      backlogDevice1518.rows("applied_operations").length,
+      1518,
+    );
+    console.log(
+      "   PASS: 501, 1000, and 1518 changes fully applied with exact cursors and no replay duplicates",
+    );
 
-    console.log("9. Payment reversal integrity: offline duplicates, races, and lost response retry");
+    console.log(
+      "9. Payment reversal integrity: offline duplicates, races, and lost response retry",
+    );
     const paymentId = `sync-it-payment-${runId}`;
     const paymentCreate = await clients[0].enqueue(
-      paymentOperation(uniqueOperation("payment-create"), paymentId, `sync-it-att-student-${runId}`),
+      paymentOperation(
+        uniqueOperation("payment-create"),
+        paymentId,
+        `sync-it-att-student-${runId}`,
+      ),
     );
     const paymentCreateResponse = await clients[0].push();
-    assert.ok(paymentCreateResponse.syncedOperationIds.includes(paymentCreate.operationId));
-    await Promise.all(clients.map((client) => client.pullAll()));
+    assert.ok(
+      paymentCreateResponse.syncedOperationIds.includes(
+        paymentCreate.operationId,
+      ),
+    );
+    await pullAllClients(clients);
 
-    const duplicateReversals = await Promise.all([clients[0], clients[1]].map((client, index) =>
-      client.enqueue(reversalOperation(
-        uniqueOperation(`offline-reversal-${index}`),
-        paymentId,
-        `sync-it-reversal-${runId}-${index}`,
-      )),
-    ));
-    const reversalResponses = await Promise.all([clients[0].push(), clients[1].push()]);
+    const duplicateReversals = await Promise.all(
+      [clients[0], clients[1]].map((client, index) =>
+        client.enqueue(
+          reversalOperation(
+            uniqueOperation(`offline-reversal-${index}`),
+            paymentId,
+            `sync-it-reversal-${runId}-${index}`,
+          ),
+        ),
+      ),
+    );
+    const reversalResponses = await Promise.all([
+      clients[0].push(),
+      clients[1].push(),
+    ]);
     assert.strictEqual(
-      reversalResponses.reduce((count, result) => count + result.syncedOperationIds.length, 0),
+      reversalResponses.reduce(
+        (count, result) => count + result.syncedOperationIds.length,
+        0,
+      ),
       1,
       "Exactly one concurrent offline reversal may be accepted",
     );
     assert.strictEqual(
-      reversalResponses.flatMap((result) => result.conflicts || [])
+      reversalResponses
+        .flatMap((result) => result.conflicts || [])
         .filter((item) => /PAYMENT_ALREADY_REVERSED/.test(item.reason)).length,
       1,
     );
@@ -1463,70 +2271,210 @@ async function runTests() {
       [centerId, paymentId],
     );
     assert.strictEqual(firstReversalRows.rows[0].count, 1);
+    const acceptedReversalOperationId = reversalResponses
+      .flatMap((result) => result.syncedOperationIds)
+      .find(Boolean);
+    const winningReversalIndex = duplicateReversals.findIndex(
+      (operation) => operation.operationId === acceptedReversalOperationId,
+    );
+    assert.notStrictEqual(winningReversalIndex, -1);
+    const winningReversal = await db.query(
+      `SELECT id, operation_id FROM payment_reversals
+        WHERE center_id=$1 AND payment_id=$2`,
+      [centerId, paymentId],
+    );
+    assert.strictEqual(
+      winningReversal.rows[0].operation_id,
+      acceptedReversalOperationId,
+    );
+    assert.strictEqual(
+      winningReversal.rows[0].id,
+      duplicateReversals[winningReversalIndex].entityId,
+    );
+    const losingReversalIndex = 1 - winningReversalIndex;
+    const losingReversal = duplicateReversals[losingReversalIndex];
+    assert.strictEqual(
+      clients[losingReversalIndex]
+        .rows("sync_operations")
+        .find((row) => row.operation_id === losingReversal.operationId).status,
+      "conflict",
+      "The rejected offline reversal must remain in the local outbox",
+    );
+    await pullAllClients([clients[0], clients[1]]);
+    for (const client of [clients[0], clients[1]]) {
+      const localReversals = client
+        .rows("payment_reversals")
+        .filter((row) => row.payment_id === paymentId);
+      assert.strictEqual(localReversals.length, 1);
+      assert.strictEqual(localReversals[0].id, winningReversal.rows[0].id);
+      assert.strictEqual(
+        localReversals[0].operation_id,
+        acceptedReversalOperationId,
+      );
+    }
+    assert.ok(
+      clients[losingReversalIndex]
+        .rows("sync_operations")
+        .some(
+          (row) =>
+            row.operation_id === losingReversal.operationId &&
+            row.status === "conflict",
+        ),
+      "Pull must preserve the losing reversal operation for audit/review",
+    );
 
     const sequentialDuplicate = await clients[2].enqueue(
-      reversalOperation(uniqueOperation("sequential-reversal"), paymentId, `sync-it-reversal-seq-${runId}`),
+      reversalOperation(
+        uniqueOperation("sequential-reversal"),
+        paymentId,
+        `sync-it-reversal-seq-${runId}`,
+      ),
     );
     const sequentialDuplicateResponse = await clients[2].push();
-    assert.ok(sequentialDuplicateResponse.conflicts.some(
-      (item) => item.operationId === sequentialDuplicate.operationId && /PAYMENT_ALREADY_REVERSED/.test(item.reason),
-    ));
+    assert.ok(
+      sequentialDuplicateResponse.conflicts.some(
+        (item) =>
+          item.operationId === sequentialDuplicate.operationId &&
+          /PAYMENT_ALREADY_REVERSED/.test(item.reason),
+      ),
+    );
     const reversalAfterSequentialRetry = await db.query(
       "SELECT COUNT(*)::int AS count FROM payment_reversals WHERE center_id=$1 AND payment_id=$2",
       [centerId, paymentId],
     );
     assert.strictEqual(reversalAfterSequentialRetry.rows[0].count, 1);
+    assert.strictEqual(
+      clients[2]
+        .rows("sync_operations")
+        .find((row) => row.operation_id === sequentialDuplicate.operationId)
+        .status,
+      "conflict",
+    );
 
     const secondPaymentId = `sync-it-payment-loss-${runId}`;
     const secondPayment = await clients[3].enqueue(
-      paymentOperation(uniqueOperation("payment-loss-create"), secondPaymentId, `sync-it-att-student-${runId}`),
+      paymentOperation(
+        uniqueOperation("payment-loss-create"),
+        secondPaymentId,
+        `sync-it-att-student-${runId}`,
+      ),
     );
-    assert.ok((await clients[3].push()).syncedOperationIds.includes(secondPayment.operationId));
-    await Promise.all(clients.map((client) => client.pullAll()));
+    assert.ok(
+      (await clients[3].push()).syncedOperationIds.includes(
+        secondPayment.operationId,
+      ),
+    );
+    await pullAllClients(clients);
+    const deviceTwoReversals = clients[2]
+      .rows("payment_reversals")
+      .filter((row) => row.payment_id === paymentId);
+    assert.strictEqual(deviceTwoReversals.length, 1);
+    assert.strictEqual(deviceTwoReversals[0].id, winningReversal.rows[0].id);
+    assert.ok(
+      clients[2]
+        .rows("sync_operations")
+        .some(
+          (row) =>
+            row.operation_id === sequentialDuplicate.operationId &&
+            row.status === "conflict",
+        ),
+    );
     const lostReversal = await clients[2].enqueue(
-      reversalOperation(uniqueOperation("reversal-loss"), secondPaymentId, `sync-it-reversal-loss-${runId}`),
+      reversalOperation(
+        uniqueOperation("reversal-loss"),
+        secondPaymentId,
+        `sync-it-reversal-loss-${runId}`,
+      ),
     );
-    await assert.rejects(clients[2].push({ loseResponse: true }), /Simulated response loss after server commit/);
+    await assert.rejects(
+      clients[2].push({ loseResponse: true }),
+      /Simulated response loss after server commit/,
+    );
     assert.strictEqual(
-      clients[2].rows("sync_operations").find((row) => row.operation_id === lostReversal.operationId).status,
+      clients[2]
+        .rows("sync_operations")
+        .find((row) => row.operation_id === lostReversal.operationId).status,
       "pending",
     );
-    assert.ok((await clients[2].push()).syncedOperationIds.includes(lostReversal.operationId));
+    assert.ok(
+      (await clients[2].push()).syncedOperationIds.includes(
+        lostReversal.operationId,
+      ),
+    );
+    await pullAllClients([clients[2]]);
     const lostRetryRows = await db.query(
       "SELECT COUNT(*)::int AS count FROM payment_reversals WHERE center_id=$1 AND payment_id=$2",
       [centerId, secondPaymentId],
     );
     assert.strictEqual(lostRetryRows.rows[0].count, 1);
+    const localLostRetryReversals = clients[2]
+      .rows("payment_reversals")
+      .filter((row) => row.payment_id === secondPaymentId);
+    assert.strictEqual(localLostRetryReversals.length, 1);
+    assert.strictEqual(localLostRetryReversals[0].id, lostReversal.entityId);
+    assert.strictEqual(
+      clients[2]
+        .rows("sync_operations")
+        .find((row) => row.operation_id === lostReversal.operationId).status,
+      "synced",
+    );
     const reversalIndex = await db.query(
       `SELECT indexdef FROM pg_indexes
         WHERE schemaname='public' AND indexname='uq_payment_reversals_payment'`,
     );
     assert.match(reversalIndex.rows[0].indexdef, /UNIQUE.*payment_id/i);
     assert.strictEqual(duplicateReversals.length, 2);
-    console.log("   PASS: sequential/concurrent/different-ID/offline reversals and response-loss retry leave one row per payment");
+    console.log(
+      "   PASS: sequential/concurrent/different-ID/offline reversals and response-loss retry leave one row per payment",
+    );
 
-    console.log("10. Debt-cycle revision CAS: stale conflict then refresh-and-retry");
+    console.log(
+      "10. Debt-cycle revision CAS: stale conflict then refresh-and-retry",
+    );
     const beforeCycleUpdate = await clients[0].bootstrap();
     const beforeCycleUpdateB = await clients[1].bootstrap();
-    const serverCycle = beforeCycleUpdate.debtCycles.find((cycle) => cycle.id === `sync-it-debt-cycle-${runId}`);
-    const serverCycleB = beforeCycleUpdateB.debtCycles.find((cycle) => cycle.id === `sync-it-debt-cycle-${runId}`);
+    const serverCycle = beforeCycleUpdate.debtCycles.find(
+      (cycle) => cycle.id === `sync-it-debt-cycle-${runId}`,
+    );
+    const serverCycleB = beforeCycleUpdateB.debtCycles.find(
+      (cycle) => cycle.id === `sync-it-debt-cycle-${runId}`,
+    );
     assert.ok(serverCycle && serverCycleB);
-    assert.strictEqual(Number(serverCycle.server_revision), Number(serverCycleB.server_revision));
+    assert.strictEqual(
+      Number(serverCycle.server_revision),
+      Number(serverCycleB.server_revision),
+    );
     const baseRevision = Number(serverCycle.server_revision);
     const cycleA = await clients[0].enqueue(
-      debtCycleUpdate(uniqueOperation("debt-cycle-device-a"), baseRevision, { status: "cancelled" }),
+      debtCycleUpdate(uniqueOperation("debt-cycle-device-a"), baseRevision, {
+        status: "cancelled",
+      }),
     );
     const cycleB = await clients[1].enqueue(
-      debtCycleUpdate(uniqueOperation("debt-cycle-device-b"), baseRevision, { status: "waived", cyclePrice: 0 }),
+      debtCycleUpdate(uniqueOperation("debt-cycle-device-b"), baseRevision, {
+        status: "waived",
+        cyclePrice: 0,
+      }),
     );
-    assert.ok((await clients[0].push()).syncedOperationIds.includes(cycleA.operationId));
+    assert.ok(
+      (await clients[0].push()).syncedOperationIds.includes(cycleA.operationId),
+    );
     const staleCycleResponse = await clients[1].push();
-    assert.ok(staleCycleResponse.conflicts.some(
-      (item) => item.operationId === cycleB.operationId && /STALE_UPDATE/.test(item.reason),
-    ));
+    assert.ok(
+      staleCycleResponse.conflicts.some(
+        (item) =>
+          item.operationId === cycleB.operationId &&
+          /STALE_UPDATE/.test(item.reason),
+      ),
+    );
     await clients[1].pullAll();
-    const refreshedCycle = clients[1].rows("debt_cycles").find((cycle) => cycle.id === `sync-it-debt-cycle-${runId}`);
-    assert.strictEqual(Number(refreshedCycle.server_revision), baseRevision + 1);
+    const refreshedCycle = clients[1]
+      .rows("debt_cycles")
+      .find((cycle) => cycle.id === `sync-it-debt-cycle-${runId}`);
+    assert.strictEqual(
+      Number(refreshedCycle.server_revision),
+      baseRevision + 1,
+    );
     const cycleRetry = await clients[1].enqueue(
       debtCycleUpdate(
         uniqueOperation("debt-cycle-refresh-retry"),
@@ -1534,16 +2482,27 @@ async function runTests() {
         { status: "waived", cyclePrice: 0 },
       ),
     );
-    assert.ok((await clients[1].push()).syncedOperationIds.includes(cycleRetry.operationId));
+    assert.ok(
+      (await clients[1].push()).syncedOperationIds.includes(
+        cycleRetry.operationId,
+      ),
+    );
     const finalCycle = await db.query(
       "SELECT status, server_revision FROM debt_cycles WHERE center_id=$1 AND id=$2",
       [centerId, `sync-it-debt-cycle-${runId}`],
     );
     assert.strictEqual(finalCycle.rows[0].status, "waived");
-    assert.strictEqual(Number(finalCycle.rows[0].server_revision), baseRevision + 2);
-    console.log("   PASS: stale debt-cycle revision conflicts; pull refresh and new revision retry succeed");
+    assert.strictEqual(
+      Number(finalCycle.rows[0].server_revision),
+      baseRevision + 2,
+    );
+    console.log(
+      "   PASS: stale debt-cycle revision conflicts; pull refresh and new revision retry succeed",
+    );
 
-    console.log("11. Reset repair aliases duplicate debt cycles and routes later payments to the canonical cycle");
+    console.log(
+      "11. Reset repair aliases duplicate debt cycles and routes later payments to the canonical cycle",
+    );
     await verifyDebtCycleAliasRecovery(clients);
 
     console.log("12. Final committed ledger visibility and cursor invariants");

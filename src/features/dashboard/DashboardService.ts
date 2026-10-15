@@ -2,13 +2,14 @@ import { DatabaseService } from "../../core/database";
 import { UnauthorizedError } from "../../core/errors";
 import { useAuthStore } from "../auth/useAuthStore";
 import { calculateSessionAttendanceCounts } from "../attendance/AttendanceCalculations";
-import { getLocalDateOnly } from "../../shared/utils/date";
+import { SessionDateService } from "../sessions/SessionDateService";
 
 export interface DashboardSummary {
   expectedCount: number;
   presentCount: number;
   lateCount: number;
   absentCount: number;
+  unresolvedCount: number;
   makeupCount: number;
   totalSessions: number;
   openSessions: number;
@@ -76,7 +77,7 @@ export class DashboardService {
     const centerId = useAuthStore.getState().activeCenterId;
     if (!centerId) throw new UnauthorizedError("يجب تحديد مركز نشط.");
     const db = DatabaseService.getDb();
-    const dateStr = targetDate || getLocalDateOnly();
+    const dateStr = targetDate || SessionDateService.getCurrentSessionDate(centerId);
     const dayOfWeek = new Date(`${dateStr}T12:00:00`).getDay();
     const groups = db.getAllSync<any>(
       `SELECT DISTINCT g.id, gs.id as scheduleId, g.subject_id as subjectId, g.teacher_id as teacherId
@@ -130,6 +131,7 @@ export class DashboardService {
     let presentCount = 0;
     let lateCount = 0;
     let absentCount = 0;
+    let unresolvedCount = 0;
     let makeupCount = 0;
     let openSessions = 0;
     let closedSessions = 0;
@@ -141,7 +143,12 @@ export class DashboardService {
     const allTodaySessions = db.getAllSync<any>(
       `SELECT id, group_id as groupId, status, session_date as sessionDate
        FROM sessions WHERE center_id = ? 
-       AND (session_date = ? OR session_date LIKE ? || '%')`,
+       AND (session_date = ? OR session_date LIKE ? || '%')
+       AND NOT EXISTS (
+         SELECT 1 FROM session_id_aliases alias
+         WHERE alias.center_id = sessions.center_id
+           AND alias.local_session_id = sessions.id
+       )`,
       [centerId, dateStr, dateStr],
     );
     console.log("[Dashboard] All sessions for date:", dateStr, "Count:", allTodaySessions.length, "Sessions:", allTodaySessions);
@@ -151,6 +158,11 @@ export class DashboardService {
         `SELECT id, status, subject_id as subjectId, teacher_id as teacherId
          FROM sessions WHERE center_id = ? AND group_id = ? 
          AND (session_date = ? OR session_date LIKE ? || '%')
+           AND NOT EXISTS (
+             SELECT 1 FROM session_id_aliases alias
+             WHERE alias.center_id = sessions.center_id
+               AND alias.local_session_id = sessions.id
+           )
            AND (schedule_id = ? OR (schedule_id IS NULL AND NOT EXISTS (
              SELECT 1 FROM sessions exact_session
              WHERE exact_session.center_id = sessions.center_id
@@ -239,6 +251,7 @@ export class DashboardService {
       presentCount += Math.max(0, counts.present - counts.late) + counts.makeup;
       lateCount += counts.late;
       absentCount += counts.absent;
+      unresolvedCount += counts.unresolved;
       makeupCount += counts.makeup;
     }
 
@@ -255,12 +268,13 @@ export class DashboardService {
       presentCount,
       lateCount,
       absentCount,
+      unresolvedCount,
       makeupCount,
       totalSessions: groups.length,
       openSessions,
       closedSessions,
     });
     
-    return { expectedCount, presentCount, lateCount, absentCount, makeupCount, totalSessions: groups.length, openSessions, closedSessions, todayCollections };
+    return { expectedCount, presentCount, lateCount, absentCount, unresolvedCount, makeupCount, totalSessions: groups.length, openSessions, closedSessions, todayCollections };
   }
 }

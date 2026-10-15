@@ -20,6 +20,8 @@ let failCardRanges = false;
 let failAcademicStages = false;
 let scopedQueries = [];
 let transactionErrors = [];
+let activeTransactionQueries = 0;
+let maxActiveTransactionQueries = 0;
 const rangesByCenter = {
   "center-a": [{
     id: "range-a",
@@ -49,40 +51,59 @@ before(async () => {
     let transactionAborted = false;
     let queryQueue = Promise.resolve();
     const query = (sql, parameters) => {
+      activeTransactionQueries += 1;
+      maxActiveTransactionQueries = Math.max(
+        maxActiveTransactionQueries,
+        activeTransactionQueries,
+      );
       const execute = async () => {
-        const table = sql.match(/\bFROM\s+([a-z_]+)/i)?.[1];
-        if (transactionAborted) {
-          const error = new Error("current transaction is aborted");
-          error.code = "25P02";
-          transactionErrors.push({ table, code: error.code });
-          throw error;
+        try {
+          const table = sql.match(/\bFROM\s+([a-z_]+)/i)?.[1];
+          if (transactionAborted) {
+            const error = new Error("current transaction is aborted");
+            error.code = "25P02";
+            transactionErrors.push({ table, code: error.code });
+            throw error;
+          }
+          if (table && parameters?.length) {
+            scopedQueries.push({ table, centerId: parameters[0], sql });
+          }
+          if (table === "center_academic_stages" && failAcademicStages) {
+            const error = new Error('relation "center_academic_stages" does not exist');
+            error.code = "42P01";
+            error.table = "center_academic_stages";
+            transactionAborted = true;
+            transactionErrors.push({ table, code: error.code });
+            throw error;
+          }
+          if (table === "card_ranges" && failCardRanges) {
+            const error = new Error('relation "card_ranges" does not exist');
+            error.code = "42P01";
+            error.table = "card_ranges";
+            transactionAborted = true;
+            transactionErrors.push({ table, code: error.code });
+            throw error;
+          }
+          if (table === "card_ranges") {
+            return { rows: rangesByCenter[parameters[0]] || [] };
+          }
+          if (table === "server_sync_operations") {
+            return { rows: [{ max_seq: "7" }] };
+          }
+          if (table === "attendance") {
+            return {
+              rows: [{
+                id: "attendance-a",
+                center_id: parameters[0],
+                operation_id: "cancel-operation",
+                last_operation_action: "attendance.cancel",
+              }],
+            };
+          }
+          return { rows: [] };
+        } finally {
+          activeTransactionQueries -= 1;
         }
-        if (table && parameters?.length) {
-          scopedQueries.push({ table, centerId: parameters[0] });
-        }
-        if (table === "center_academic_stages" && failAcademicStages) {
-          const error = new Error('relation "center_academic_stages" does not exist');
-          error.code = "42P01";
-          error.table = "center_academic_stages";
-          transactionAborted = true;
-          transactionErrors.push({ table, code: error.code });
-          throw error;
-        }
-        if (table === "card_ranges" && failCardRanges) {
-          const error = new Error('relation "card_ranges" does not exist');
-          error.code = "42P01";
-          error.table = "card_ranges";
-          transactionAborted = true;
-          transactionErrors.push({ table, code: error.code });
-          throw error;
-        }
-        if (table === "card_ranges") {
-          return { rows: rangesByCenter[parameters[0]] || [] };
-        }
-        if (table === "server_sync_operations") {
-          return { rows: [{ max_seq: "7" }] };
-        }
-        return { rows: [] };
       };
       const result = queryQueue.then(execute);
       queryQueue = result.catch(() => {});
@@ -118,6 +139,7 @@ after(async () => {
 test("bootstrap includes configured card ranges in the response", async () => {
   failCardRanges = false;
   scopedQueries = [];
+  maxActiveTransactionQueries = 0;
   const response = await fetch(`${baseUrl}/sync/bootstrap`, {
     headers: { "X-Center-Id": "center-a", "X-Device-Id": "device-a" },
   });
@@ -127,6 +149,25 @@ test("bootstrap includes configured card ranges in the response", async () => {
   assert.equal(snapshot.latestServerSeq, 7);
   assert.ok(scopedQueries.length > 0);
   assert.ok(scopedQueries.every((query) => query.centerId === "center-a"));
+  assert.equal(maxActiveTransactionQueries, 1);
+});
+
+test("bootstrap exposes the current attendance action needed to apply a confirmed cancellation", async () => {
+  scopedQueries = [];
+  const response = await fetch(`${baseUrl}/sync/bootstrap`, {
+    headers: { "X-Center-Id": "center-a", "X-Device-Id": "device-a" },
+  });
+  assert.equal(response.status, 200);
+  const snapshot = await response.json();
+  assert.deepEqual(snapshot.attendance, [{
+    id: "attendance-a",
+    center_id: "center-a",
+    operation_id: "cancel-operation",
+    last_operation_action: "attendance.cancel",
+  }]);
+  const attendanceQuery = scopedQueries.find((query) => query.table === "attendance");
+  assert.match(attendanceQuery.sql, /server_sync_operations/);
+  assert.match(attendanceQuery.sql, /last_operation_action/);
 });
 
 test("bootstrap succeeds with an empty card-range configuration", async () => {
@@ -165,6 +206,7 @@ test("a missing card_ranges table remains a generic 500 but logs the failing tab
 
 test("missing academic stages table logs its original SQL failure instead of a later transaction-aborted error", async () => {
   failAcademicStages = true;
+  scopedQueries = [];
   transactionErrors = [];
   const logged = [];
   const originalConsoleError = console.error;
@@ -183,10 +225,14 @@ test("missing academic stages table logs its original SQL failure instead of a l
     assert.equal(diagnostic.table, "center_academic_stages");
     assert.equal(diagnostic.centerId, "center-a");
     assert.equal(diagnostic.path, "/sync/bootstrap");
-    assert.deepEqual(transactionErrors.slice(0, 2), [
+    assert.deepEqual(transactionErrors, [
       { table: "center_academic_stages", code: "42P01" },
-      { table: "card_ranges", code: "25P02" },
     ]);
+    assert.equal(
+      scopedQueries.some((query) => query.table === "card_ranges"),
+      false,
+      "bootstrap stops issuing transaction queries after the first failure",
+    );
   } finally {
     console.error = originalConsoleError;
     failAcademicStages = false;
@@ -211,9 +257,10 @@ test("startup schema compatibility declares card_ranges with idempotent DDL", as
     return { rows: [] };
   };
   await db.ensureSchemaCompatibility();
-  assert.match(statements[0], /CREATE TABLE IF NOT EXISTS card_ranges/);
-  assert.match(statements[0], /uq_card_range_identity/);
-  assert.match(statements[0], /idx_card_ranges_codes/);
-  assert.match(statements[0], /CREATE TABLE IF NOT EXISTS center_academic_stages/);
-  assert.match(statements[0], /stages_json JSONB NOT NULL DEFAULT '\[\]'::jsonb/);
+  assert.match(statements[0], /ALTER TABLE centers ADD COLUMN IF NOT EXISTS time_zone/);
+  const cardRangeSchema = statements.find((statement) => /CREATE TABLE IF NOT EXISTS card_ranges/.test(statement));
+  assert.match(cardRangeSchema, /uq_card_range_identity/);
+  assert.match(cardRangeSchema, /idx_card_ranges_codes/);
+  assert.match(cardRangeSchema, /CREATE TABLE IF NOT EXISTS center_academic_stages/);
+  assert.match(cardRangeSchema, /stages_json JSONB NOT NULL DEFAULT '\[\]'::jsonb/);
 });

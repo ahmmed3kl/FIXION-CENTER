@@ -96,6 +96,7 @@ function requiredPermission(operation) {
     return "enrollments.update";
   }
   if (entity === "session" || entity === "session_created") {
+    if (action === "activate") return "attendance.create";
     if (action === "close") return "sessions.close";
     if (action === "reopen") return "sessions.reopen";
     if (operationType === "create" || action === "create") return "sessions.generate";
@@ -286,6 +287,13 @@ function filterBootstrapSnapshot(snapshot, user) {
   for (const [key, entity] of Object.entries(tablePermissions)) {
     if (!canReadSyncEntity(entity, user)) filtered[key] = [];
   }
+  if (!canReadSyncEntity("session", user)) filtered.sessionNaturalKeys = [];
+  const canReadSessionReferences =
+    canReadSyncEntity("session", user) ||
+    canReadSyncEntity("attendance", user) ||
+    canReadSyncEntity("payment", user) ||
+    canReadSyncEntity("advance_coverage", user);
+  if (!canReadSessionReferences) filtered.sessionAliases = [];
   if (!canReadSyncEntity("center_academic_stage", user)) filtered.academicStages = null;
   return filtered;
 }

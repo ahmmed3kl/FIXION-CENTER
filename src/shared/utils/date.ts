@@ -12,6 +12,50 @@ export function getLocalDateOnly(date: Date = new Date()): string {
   ].join("-");
 }
 
+export function getDateOnlyInTimeZone(date: Date, timeZone: string): string {
+  if (!Number.isFinite(date.getTime())) {
+    throw new RangeError("Cannot derive a business date from an invalid instant.");
+  }
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    calendar: "gregory",
+    numberingSystem: "latn",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+  const year = parts.find((part) => part.type === "year")?.value;
+  const month = parts.find((part) => part.type === "month")?.value;
+  const day = parts.find((part) => part.type === "day")?.value;
+  if (!year || !month || !day) {
+    throw new RangeError("Could not derive a business date in the configured time zone.");
+  }
+  return `${year.padStart(4, "0")}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`;
+}
+
+export function addDateOnlyDays(value: string, days: number): string {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value.trim());
+  if (!match || !Number.isInteger(days)) {
+    throw new RangeError("A date-only value and whole-day offset are required.");
+  }
+  const date = new Date(0);
+  date.setUTCFullYear(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  date.setUTCHours(12, 0, 0, 0);
+  if (
+    date.getUTCFullYear() !== Number(match[1]) ||
+    date.getUTCMonth() !== Number(match[2]) - 1 ||
+    date.getUTCDate() !== Number(match[3])
+  ) {
+    throw new RangeError("The date-only value is not a valid calendar date.");
+  }
+  date.setUTCDate(date.getUTCDate() + days);
+  return [
+    date.getUTCFullYear(),
+    String(date.getUTCMonth() + 1).padStart(2, "0"),
+    String(date.getUTCDate()).padStart(2, "0"),
+  ].join("-");
+}
+
 /** Parse a date-only value without allowing the JavaScript Date parser to
  * silently turn malformed/UTC values into an "Invalid Date" label. */
 export function parseLocalDateOnly(value: unknown): Date | null {

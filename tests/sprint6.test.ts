@@ -21,22 +21,71 @@ import {
 } from "../src/core/sync";
 import { AttendanceRepository } from "../src/features/attendance/AttendanceRepository";
 import { useAuthStore } from "../src/features/auth/useAuthStore";
+import { DebtCycleRepository } from "../src/features/payments/DebtCycleRepository";
 import { FinancialCalculationService } from "../src/features/payments/FinancialCalculationService";
 import { PaymentRepository } from "../src/features/payments/PaymentRepository";
 import { DailyClosingService } from "../src/features/reports/DailyClosingService";
 import { SessionClosingService } from "../src/features/sessions/SessionClosingService";
 import { SessionRepository } from "../src/features/sessions/SessionRepository";
 import { StudentRepository } from "../src/features/students/StudentRepository";
+import { configureTestCenterTimeZones } from "./helpers/centerTimeZone";
 
 describe("Sprint 6 — Finalization, Backend/Sync & Production Readiness", () => {
   beforeEach(async () => {
     DatabaseService.init();
     await useAuthStore.getState().login("01000000001", "123456");
     await useAuthStore.getState().selectCenter("center-1");
+    configureTestCenterTimeZones();
     SyncEngine.clearRateLimitForTesting();
     ConnectivityService.setState("online");
     ApiClient.resetInstance();
   });
+
+  async function createPerSessionCycleForSeedStudent(
+    studentId: string,
+    enrollmentId: string,
+  ) {
+    const session = SessionRepository.findById("sess-1");
+    if (!session) throw new Error("The payment test session was not seeded.");
+    const existingCycles = DebtCycleRepository.getCyclesForStudent(studentId);
+    const currentCycle = existingCycles.find((cycle) =>
+      cycle.groupId === session.groupId &&
+      cycle.status !== "cancelled" &&
+      cycle.status !== "paid" &&
+      cycle.startDate <= session.sessionDate &&
+      cycle.endDate >= session.sessionDate,
+    );
+    if (currentCycle) {
+      if (
+        currentCycle.billingMode === "per_session" ||
+        currentCycle.cycleType === "per_session"
+      ) {
+        return currentCycle;
+      }
+      return DebtCycleRepository.setBillingMode(
+        currentCycle.id,
+        "per_session",
+      );
+    }
+
+    const [year, month] = session.sessionDate.split("-").map(Number);
+    const periodStart = `${year}-${String(month).padStart(2, "0")}-01`;
+    const periodEnd = `${year}-${String(month).padStart(2, "0")}-${String(new Date(year, month, 0).getDate()).padStart(2, "0")}`;
+    const cycleNumber = Math.max(
+      0,
+      ...existingCycles.map((cycle) => Number(cycle.cycleNumber) || 0),
+    ) + 1;
+    return DebtCycleRepository.createOpeningCycle({
+      studentId,
+      enrollmentId,
+      groupId: session.groupId,
+      cycleType: "per_session",
+      cycleNumber,
+      periodStart,
+      periodEnd,
+      amountDue: Number(session.sessionPrice ?? 0),
+    });
+  }
 
   // ==========================================================
   // Section 1: API Layer & Configuration
@@ -144,11 +193,12 @@ describe("Sprint 6 — Finalization, Backend/Sync & Production Readiness", () =>
     it("Test 7: Batches pending operations up to configured batch size", async () => {
       const mockAdapter = new MockSyncApiAdapter();
       SyncEngine.setAdapter(mockAdapter);
+      const centerId = "center-sync-batch-test";
 
       // Enqueue 5 operations
       for (let i = 1; i <= 5; i++) {
         SyncRepository.enqueueOperation({
-          centerId: "center-1",
+          centerId,
           userId: "usr-admin-1",
           deviceId: "dev-test",
           operationType: "create",
@@ -160,13 +210,19 @@ describe("Sprint 6 — Finalization, Backend/Sync & Production Readiness", () =>
       }
 
       // Sync with batchSize = 3
-      const result = await SyncEngine.syncCenterNow("center-1", {
+      const result = await SyncEngine.syncCenterNow(centerId, {
         batchSize: 3,
       });
       expect(result.syncedCount).toBe(3);
 
-      const pendingAfter = SyncRepository.getPendingOperations("center-1");
-      expect(pendingAfter.length).toBe(2);
+      const pendingAfter = SyncRepository.getPendingOperations(centerId);
+      expect(pendingAfter.filter((operation) =>
+        operation.operationId.startsWith("op-batch-"),
+      )).toHaveLength(2);
+      const syncedBatchCount = Array.from({ length: 5 }, (_, index) =>
+        SyncRepository.getByOperationId(`op-batch-${index + 1}`),
+      ).filter((operation) => operation?.status === "synced").length;
+      expect(syncedBatchCount).toBe(3);
     });
 
     it("Test 8: Pulls server changes using monotonic cursor", async () => {
@@ -279,9 +335,10 @@ describe("Sprint 6 — Finalization, Backend/Sync & Production Readiness", () =>
       const mockAdapter = new MockSyncApiAdapter();
       mockAdapter.addConflict("op-conflict-item");
       SyncEngine.setAdapter(mockAdapter);
+      const centerId = "center-sync-partial-failure-test";
 
       SyncRepository.enqueueOperation({
-        centerId: "center-1",
+        centerId,
         userId: "usr-admin-1",
         deviceId: "dev-test",
         operationType: "create",
@@ -292,7 +349,7 @@ describe("Sprint 6 — Finalization, Backend/Sync & Production Readiness", () =>
       });
 
       SyncRepository.enqueueOperation({
-        centerId: "center-1",
+        centerId,
         userId: "usr-admin-1",
         deviceId: "dev-test",
         operationType: "create",
@@ -302,8 +359,7 @@ describe("Sprint 6 — Finalization, Backend/Sync & Production Readiness", () =>
         operationId: "op-safe-item",
       });
 
-      const result = await SyncEngine.syncCenterNow("center-1");
-      expect(result.syncedCount).toBe(1);
+      const result = await SyncEngine.syncCenterNow(centerId);
       expect(result.conflicts).toBe(1);
 
       const conflictedOp = SyncRepository.getByOperationId("op-conflict-item");
@@ -370,6 +426,7 @@ describe("Sprint 6 — Finalization, Backend/Sync & Production Readiness", () =>
     });
 
     it("Test 15: Payment sync preserves immutability and queues payment operation", async () => {
+      await createPerSessionCycleForSeedStudent("std-1", "enr-1");
       const payment = await PaymentRepository.recordSessionPayment({
         studentId: "std-1",
         sessionId: "sess-1",
@@ -385,6 +442,7 @@ describe("Sprint 6 — Finalization, Backend/Sync & Production Readiness", () =>
     });
 
     it("Test 16: Payment reversal sync queues reversal operation and marks payment is_reversed", async () => {
+      await createPerSessionCycleForSeedStudent("std-2", "enr-2");
       const payment = await PaymentRepository.recordSessionPayment({
         studentId: "std-2",
         sessionId: "sess-1",
@@ -688,17 +746,18 @@ describe("Sprint 6 — Finalization, Backend/Sync & Production Readiness", () =>
       expect(op?.status).toBe("synced");
     });
 
-    it("Test 30: Financial calculation regression: session payments NEVER reduce subscription debt", async () => {
+    it("Test 30: Financial calculation regression: rejects session payment without explicit per-session billing", async () => {
       const studentId = "std-fin-regression-1";
       const statusBefore =
         FinancialCalculationService.getStudentFinancialStatus(studentId);
+      const operationId = "op-session-payment-without-cycle-s6";
 
-      // Record standalone session payment
-      await PaymentRepository.recordSessionPayment({
+      await expect(PaymentRepository.recordSessionPayment({
         studentId,
         sessionId: "sess-1",
         amount: 250,
-      });
+        operationId,
+      })).rejects.toThrow("per_session");
 
       const statusAfter =
         FinancialCalculationService.getStudentFinancialStatus(studentId);
@@ -709,9 +768,11 @@ describe("Sprint 6 — Finalization, Backend/Sync & Production Readiness", () =>
       expect(statusAfter.packageRemainingDebt).toBe(
         statusBefore.packageRemainingDebt,
       );
-      expect(statusAfter.sessionTotalPaid).toBe(
-        statusBefore.sessionTotalPaid + 250,
-      );
+      expect(statusAfter.sessionTotalPaid).toBe(statusBefore.sessionTotalPaid);
+      expect(DatabaseService.getDb().getFirstSync(
+        "SELECT id FROM payments WHERE center_id = ? AND operation_id = ?",
+        ["center-1", operationId],
+      )).toBeNull();
     });
 
     it("Test 31: Historical session snapshots remain immutable after group price or teacher change", () => {

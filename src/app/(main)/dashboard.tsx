@@ -310,6 +310,15 @@ export default function DashboardScreen() {
             <MetricTile
               styles={styles}
               icon="repeat"
+              label="لم تُحسم"
+              value={formatNumber(summary?.unresolvedCount || 0)}
+              color={Colors.primary}
+              textColor={Colors.primaryDark}
+              backgroundColor={Colors.primaryMuted}
+            />
+            <MetricTile
+              styles={styles}
+              icon="repeat"
               label="تعويض"
               value={formatNumber(summary?.makeupCount || 0)}
               color={Colors.warning}

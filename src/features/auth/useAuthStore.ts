@@ -3,15 +3,16 @@ import { ApiClient } from "../../core/api";
 import { AuditService } from "../../core/audit";
 import { LocalDataEvents } from "../../core/database/localDataEvents";
 import { DeviceRepository, DeviceService } from "../../core/device";
-import { ForbiddenError } from "../../core/errors";
+import { ForbiddenError, getUserErrorMessage } from "../../core/errors";
 import {
     resolveUserPermissions
 } from "../../core/permissions";
 import { SecureStorageService } from "../../core/storage";
 import { SyncEngine } from "../../core/sync";
 import { Center, User } from "../../shared/types";
-import { AuthRepository } from "./AuthRepository";
+import { AuthRepository, CenterTimeZoneMismatchError } from "./AuthRepository";
 import { canSwitchCenters } from "./centerAccess";
+import { LastAuthorizedRouteStore } from "./lastAuthorizedRoute";
 
 // Automatically logout when receiving a 401 Unauthorized from API
 ApiClient.setUnauthorizedHandler(async () => {
@@ -36,6 +37,7 @@ interface AuthState {
 }
 
 let permissionsRefreshPromise: Promise<void> | null = null;
+let sessionRestorePromise: Promise<boolean> | null = null;
 
 export const useAuthStore = create<AuthState>((set, get) => ({
   currentUser: null,
@@ -124,6 +126,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       throw new ForbiddenError("المركز المحدد غير متاح لهذا المستخدم");
     }
 
+    await LastAuthorizedRouteStore.clear();
     await SecureStorageService.setItem("active_center_id", centerId);
 
     const deviceId = DeviceService.getDeviceIdSync();
@@ -171,51 +174,69 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
 
   restoreSession: async () => {
+    const current = get();
+    if (current.isAuthenticated && current.currentUser && current.activeCenterId) {
+      return true;
+    }
+    if (sessionRestorePromise) return sessionRestorePromise;
+
     set({ isLoading: true });
-    try {
-      const session = await AuthRepository.restoreSession();
-      if (!session) {
-        set({ isAuthenticated: false, isLoading: false });
+    sessionRestorePromise = (async () => {
+      try {
+        const session = await AuthRepository.restoreSession();
+        if (!session) {
+          set({ isAuthenticated: false, isLoading: false });
+          return false;
+        }
+
+        const refreshedUser = await AuthRepository.refreshSessionUser();
+        const effectiveUser = refreshedUser || session.user;
+        const centers = AuthRepository.getCentersForUser(effectiveUser.centerIds);
+        const savedCenterId =
+          (await SecureStorageService.getItem("active_center_id")) ||
+          effectiveUser.centerId ||
+          effectiveUser.centerIds[0];
+        const activeCenter =
+          centers.find((c) => c.id === savedCenterId) || centers[0] || null;
+
+        const resolvedPermissions = resolveUserPermissions(effectiveUser);
+        const normalizedUser = {
+          ...effectiveUser,
+          permissions: resolvedPermissions,
+        };
+
+        await SecureStorageService.setItem("user_session", JSON.stringify(normalizedUser));
+
+        set({
+          currentUser: normalizedUser,
+          availableCenters: centers,
+          activeCenterId: activeCenter ? activeCenter.id : null,
+          activeCenter,
+          isAuthenticated: true,
+          isLoading: false,
+        });
+
+        if (activeCenter?.id) {
+          SyncEngine.syncCenterNow(activeCenter.id).catch((err) => {
+            console.warn("Restore session background sync notice:", err);
+          });
+        }
+
+        return true;
+      } catch (error) {
+        set({
+          isAuthenticated: false,
+          isLoading: false,
+          error: getUserErrorMessage(error),
+        });
         return false;
       }
+    })();
 
-      const refreshedUser = await AuthRepository.refreshSessionUser();
-      const effectiveUser = refreshedUser || session.user;
-      const centers = AuthRepository.getCentersForUser(effectiveUser.centerIds);
-      const savedCenterId =
-        (await SecureStorageService.getItem("active_center_id")) ||
-        effectiveUser.centerId ||
-        effectiveUser.centerIds[0];
-      let activeCenter =
-        centers.find((c) => c.id === savedCenterId) || centers[0] || null;
-
-      const resolvedPermissions = resolveUserPermissions(effectiveUser);
-      const normalizedUser = {
-        ...effectiveUser,
-        permissions: resolvedPermissions,
-      };
-
-      await SecureStorageService.setItem("user_session", JSON.stringify(normalizedUser));
-
-      set({
-        currentUser: normalizedUser,
-        availableCenters: centers,
-        activeCenterId: activeCenter ? activeCenter.id : null,
-        activeCenter,
-        isAuthenticated: true,
-        isLoading: false,
-      });
-
-      if (activeCenter?.id) {
-        SyncEngine.syncCenterNow(activeCenter.id).catch((err) => {
-          console.warn("Restore session background sync notice:", err);
-        });
-      }
-
-      return true;
-    } catch {
-      set({ isAuthenticated: false, isLoading: false });
-      return false;
+    try {
+      return await sessionRestorePromise;
+    } finally {
+      sessionRestorePromise = null;
     }
   },
 
@@ -236,7 +257,24 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       };
       await SecureStorageService.setItem("user_session", JSON.stringify(normalizedUser));
       set({ currentUser: normalizedUser });
-    })().catch((error) => {
+    })().catch(async (error) => {
+      if (error instanceof CenterTimeZoneMismatchError) {
+        try {
+          await AuthRepository.logout();
+        } catch (logoutError) {
+          console.error("Could not clear a session with mismatched center time zone:", logoutError);
+        }
+        set({
+          currentUser: null,
+          activeCenterId: null,
+          activeCenter: null,
+          availableCenters: [],
+          isAuthenticated: false,
+          isLoading: false,
+          error: error.userMessage,
+        });
+        return;
+      }
       console.warn("Could not refresh session permissions:", error);
     }).finally(() => {
       permissionsRefreshPromise = null;

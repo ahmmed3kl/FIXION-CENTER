@@ -10,7 +10,6 @@ import {
 import { PermissionService } from "../../core/permissions";
 import { SyncEngine, SyncRepository } from "../../core/sync";
 import { Attendance, AttendanceType, StudentGroupAttendanceSummary } from "../../shared/types";
-import { getLocalDateOnly } from "../../shared/utils/date";
 import {
   DEFAULT_TEACHER_WEEK_START_DAY,
   isTeacherMakeupCycleOpen,
@@ -19,6 +18,7 @@ import {
 } from "../../shared/utils/teacherWeeks";
 import { useAuthStore } from "../auth/useAuthStore";
 import { AttendanceSessionService } from "./AttendanceSessionService";
+import { SessionDateService } from "../sessions/SessionDateService";
 
 function generateUUID(): string {
   return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
@@ -198,7 +198,7 @@ export class AttendanceRepository {
           source.sessionDate,
           session.sessionDate,
           weekStartDay,
-          getLocalDateOnly(),
+          AttendanceSessionService.getCurrentSessionDate(),
         )) {
           throw new ConflictError(
             TEACHER_MAKEUP_CYCLE_EXPIRED_ERROR,
@@ -224,18 +224,23 @@ export class AttendanceRepository {
         if (!sourceExpected && (sourceHasSnapshot || !legacyEnrollment)) {
           throw new ConflictError("الطالب غير متوقع في الحصة الأصلية.");
         }
-        if (db.getFirstSync<any>(
-          `SELECT id FROM attendance WHERE center_id = ? AND session_id = ? AND student_id = ?`,
+        const sourceAttendance = db.getAllSync<{ status: string }>(
+          `SELECT status FROM attendance
+           WHERE center_id = ? AND session_id = ? AND student_id = ?`,
           [centerId, source.id, params.studentId],
-        )) {
+        );
+        if (sourceAttendance.some((row) => row.status === "present" || row.status === "late")) {
           throw new ConflictError("لا يمكن تعويض حصة حضرها الطالب بالفعل.");
         }
-        if (db.getFirstSync<any>(
-          `SELECT id FROM attendance
-           WHERE center_id = ? AND student_id = ?
-             AND (original_absence_id = ? OR original_absence_id = ?)`,
-          [centerId, params.studentId, canonicalOriginalAbsenceId, params.originalAbsenceId],
-        )) {
+        const existingMakeup = db.getAllSync<{ originalAbsenceId?: string | null }>(
+          `SELECT original_absence_id as originalAbsenceId FROM attendance
+           WHERE center_id = ? AND student_id = ?`,
+          [centerId, params.studentId],
+        ).some((row) =>
+          row.originalAbsenceId === canonicalOriginalAbsenceId ||
+          row.originalAbsenceId === params.originalAbsenceId,
+        );
+        if (existingMakeup) {
           throw new ConflictError("تم تسجيل تعويض لهذا الغياب مسبقًا.");
         }
         const betweenSessions = db.getAllSync<any>(
@@ -292,6 +297,9 @@ export class AttendanceRepository {
     const deviceId = await DeviceService.getDeviceId();
 
     const now = new Date();
+    const externalBusinessDate = params.isExternal
+      ? SessionDateService.getCurrentSessionDate(centerId, now)
+      : undefined;
     // Keep a full ISO timestamp in SQLite and the outbox. PostgreSQL stores
     // this field as timestamptz; the old HH:mm:ss-only value could never be
     // uploaded and was parked as a permanent conflict.
@@ -343,7 +351,10 @@ export class AttendanceRepository {
       if (sessionPrice > 0) {
         const payId = `pay-${generateUUID()}`;
         const payOpId = `op-pay-ext-${generateUUID()}`;
-        const payDate = getLocalDateOnly(now);
+        const payDate = externalBusinessDate;
+        if (!payDate) {
+          throw new Error("External attendance payment date was not resolved.");
+        }
 
         db.runSync(
           `INSERT INTO payments (id, operation_id, center_id, student_id, session_id, amount, payment_type, payment_method, payment_date, is_reversed, notes, created_at, user_id)
@@ -526,60 +537,6 @@ export class AttendanceRepository {
        ORDER BY ss.session_date DESC, ss.start_time DESC, a.check_in_time DESC`,
       [centerId, studentId],
     );
-    const today = getLocalDateOnly();
-    const nowTime = new Date().toTimeString().slice(0, 5);
-    const absenceRows = db.getAllSync<any>(
-      `SELECT ss.id as sessionId, ss.group_id as groupId, g.name as groupName,
-              ss.session_date as sessionDate, ss.start_time as startTime,
-              subj.name as subjectName, t.name as teacherName,
-              absence_note.note_text as absenceNote
-       FROM sessions ss
-       JOIN groups g ON g.center_id = ss.center_id AND g.id = ss.group_id
-       LEFT JOIN absence_notes absence_note
-         ON absence_note.center_id = ss.center_id
-        AND absence_note.session_id = ss.id
-        AND absence_note.student_id = ?
-       LEFT JOIN subjects subj ON subj.center_id = ss.center_id
-         AND subj.id = COALESCE(ss.subject_id, g.subject_id)
-       LEFT JOIN teachers t ON t.center_id = ss.center_id
-         AND t.id = COALESCE(ss.teacher_id, g.teacher_id)
-       WHERE ss.center_id = ? AND ss.status IN ('open', 'closed', 'completed')
-         AND (ss.session_date < ? OR (ss.session_date = ? AND ss.end_time <= ?))
-         AND (
-           EXISTS (
-             SELECT 1 FROM session_expected_students expected
-             WHERE expected.center_id = ss.center_id
-               AND expected.session_id = ss.id AND expected.student_id = ?
-           )
-           OR (
-             NOT EXISTS (
-               SELECT 1 FROM session_expected_students any_expected
-               WHERE any_expected.center_id = ss.center_id AND any_expected.session_id = ss.id
-             )
-             AND EXISTS (
-               SELECT 1 FROM student_group_enrollments enrollment
-               WHERE enrollment.center_id = ss.center_id
-                 AND enrollment.group_id = ss.group_id
-                 AND enrollment.student_id = ? AND enrollment.status = 'active'
-                 AND enrollment.start_date <= ss.session_date
-                 AND (enrollment.end_date IS NULL OR enrollment.end_date >= ss.session_date)
-             )
-           )
-         )
-         AND NOT EXISTS (
-           SELECT 1 FROM attendance recorded
-           WHERE recorded.center_id = ss.center_id
-             AND recorded.session_id = ss.id AND recorded.student_id = ?
-         )
-         AND NOT EXISTS (
-           SELECT 1 FROM advance_coverages covered
-           WHERE covered.center_id = ss.center_id
-             AND covered.student_id = ? AND covered.target_future_session_id = ss.id
-         )
-       ORDER BY ss.session_date DESC, ss.start_time DESC`,
-      [studentId, centerId, today, today, nowTime, studentId, studentId, studentId, studentId],
-    );
-
     const records: StudentAttendanceHistoryRecord[] = attendanceRows.map((row) => ({
       ...row,
       isLate: Boolean(row.isLate),
@@ -587,27 +544,6 @@ export class AttendanceRepository {
       attendanceType: row.attendanceType || "present",
       isDerivedAbsence: false,
     }));
-    for (const row of absenceRows) {
-      records.push({
-        id: `absence:${row.sessionId}:${studentId}`,
-        centerId,
-        studentId,
-        sessionId: row.sessionId,
-        checkInTime: "",
-        status: "absent",
-        isLate: false,
-        attendanceType: "present",
-        operationId: "",
-        groupId: row.groupId,
-        groupName: row.groupName,
-        subjectName: row.subjectName,
-        teacherName: row.teacherName,
-        sessionDate: row.sessionDate,
-        startTime: row.startTime,
-        absenceNote: row.absenceNote || null,
-        isDerivedAbsence: true,
-      });
-    }
     return records.sort((a, b) =>
       `${b.sessionDate} ${b.startTime} ${b.checkInTime}`.localeCompare(
         `${a.sessionDate} ${a.startTime} ${a.checkInTime}`,
@@ -695,6 +631,7 @@ export class AttendanceRepository {
           isLate: false,
           attendanceType: existing.attendanceType || "present",
           originalAbsenceId: existing.originalAbsenceId || null,
+          expectedOperationId: existing.operationId || null,
           action: "attendance.cancel",
           canceledAt,
           previousStatus: previousEffectiveStatus,
@@ -741,10 +678,8 @@ export class AttendanceRepository {
   }
 
   /**
-   * Returns attendance and derived absence totals per group. Absence is
-   * calculated from the expected-student snapshot, so a student who never
-   * checked in is counted even though there is no attendance row for them.
-   * Makeup attendance is kept on the group where it was actually recorded.
+   * Returns explicit attendance outcomes and unresolved expected sessions per
+   * group. Makeup attendance stays with the group where it was recorded.
    */
   static getStudentGroupAttendanceSummaries(
     studentId: string,
@@ -754,7 +689,7 @@ export class AttendanceRepository {
       throw new ForbiddenError("ليس لديك صلاحية عرض بيانات الحضور.");
     }
     const db = DatabaseService.getDb();
-    const today = getLocalDateOnly();
+    const today = AttendanceSessionService.getCurrentSessionDate();
     const expectedRows = db.getAllSync<any>(
       `SELECT DISTINCT ss.id as sessionId, ss.group_id as groupId,
               g.name as groupName, subj.name as subjectName, t.name as teacherName
@@ -792,7 +727,14 @@ export class AttendanceRepository {
       [centerId, studentId, today],
     );
     const attendanceBySession = new Map<string, any>();
-    for (const row of attendanceRows) attendanceBySession.set(row.sessionId, row);
+    const statusRank = (status: string) =>
+      status === "present" || status === "late" ? 2 : status === "absent" ? 1 : 0;
+    for (const row of attendanceRows) {
+      const current = attendanceBySession.get(row.sessionId);
+      if (!current || statusRank(row.status) > statusRank(current.status)) {
+        attendanceBySession.set(row.sessionId, row);
+      }
+    }
     const summaries = new Map<string, StudentGroupAttendanceSummary>();
     const ensure = (row: any) => {
       if (!row.groupId) return null;
@@ -806,6 +748,7 @@ export class AttendanceRepository {
           expectedSessions: 0,
           presentCount: 0,
           absentCount: 0,
+          unresolvedCount: 0,
           makeupCount: 0,
         };
         summaries.set(row.groupId, summary);
@@ -833,7 +776,7 @@ export class AttendanceRepository {
          WHERE center_id = ? AND student_id = ? AND target_future_session_id = ? LIMIT 1`,
         [centerId, studentId, row.sessionId],
       );
-      if (!covered) summary.absentCount += 1;
+      if (!covered) summary.unresolvedCount += 1;
     }
 
     // A makeup session is normally not in the student's expected snapshot.

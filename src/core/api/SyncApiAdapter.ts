@@ -22,6 +22,20 @@ export interface BootstrapResponse {
   teacherSubjects?: any[];
   schedules?: any[];
   sessions: any[];
+  sessionNaturalKeys?: Array<{
+    centerId?: string;
+    groupId: string;
+    scheduleKey: string;
+    sessionDate: string;
+    canonicalSessionId: string;
+    status?: string;
+    hasNonCancelledDuplicate?: boolean;
+    hasCancelledDuplicate?: boolean;
+  }>;
+  sessionAliases?: Array<{
+    localSessionId: string;
+    canonicalSessionId: string;
+  }>;
   expectedStudents?: any[];
   enrollments: any[];
   attendance?: any[];
@@ -321,6 +335,7 @@ export class MockSyncApiAdapter implements ISyncApiAdapter {
     return {
       success: conflicts.length === 0,
       syncedOperationIds,
+      sessionMappings: [],
       conflicts,
       serverCursor: `srv_seq_${this.currentCursorSeq}`,
       processedAt: new Date().toISOString(),

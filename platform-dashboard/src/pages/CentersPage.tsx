@@ -14,4 +14,140 @@ export function CentersPage() {
 
 function CenterForm({ onClose, onSaved }: { onClose: () => void; onSaved: () => void }) { const [name, setName] = useState(""); const [code, setCode] = useState(""); const [error, setError] = useState(""); const [saving, setSaving] = useState(false); async function submit(event: FormEvent) { event.preventDefault(); if (name.trim().length < 2 || !code.trim()) { setError("اسم المركز والكود مطلوبان."); return; } setSaving(true); try { await platformApi.createCenter({ name: name.trim(), code: code.trim() }); onSaved(); } catch (err) { setError(err instanceof ApiError ? err.message : "تعذر إنشاء المركز."); } finally { setSaving(false); } } return <div className="modal-backdrop"><form className="modal-card" onSubmit={submit}><h3>إضافة مركز</h3><label>اسم المركز<input value={name} onChange={event => setName(event.target.value)} maxLength={255} required /></label><label>كود المركز<input value={code} onChange={event => setCode(event.target.value)} maxLength={64} required /></label>{error && <div className="alert error">{error}</div>}<div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>إلغاء</button><button className="primary-button" disabled={saving}>{saving ? "جارٍ الحفظ..." : "حفظ"}</button></div></form></div>; }
 
-export function CenterDetailsPage() { const navigate = useNavigate(); const id = window.location.pathname.split("/").pop() ?? ""; const [center, setCenter] = useState<Center | null>(null); const [loading, setLoading] = useState(true); const [error, setError] = useState(""); const [saving, setSaving] = useState(false); useEffect(() => { void platformApi.center(id).then(result => setCenter(result.center)).catch(err => setError(err instanceof ApiError ? err.message : "تعذر تحميل المركز.")).finally(() => setLoading(false)); }, [id]); async function toggleStatus() { if (!center || !window.confirm(center.status === "active" ? "هل أنت متأكد من إيقاف هذا المركز؟" : "هل تريد إعادة تفعيل هذا المركز؟")) return; setSaving(true); try { const result = await platformApi.updateCenter(center.id, { status: center.status === "active" ? "suspended" : "active" }); setCenter(result.center); } catch (err) { setError(err instanceof ApiError ? err.message : "تعذر تحديث حالة المركز."); } finally { setSaving(false); } } if (loading) return <div className="panel loading-state">جارٍ تحميل بيانات المركز...</div>; if (error || !center) return <div className="panel alert error">{error || "المركز غير موجود"}</div>; return <section><button className="back-link" onClick={() => navigate("/centers")}>← العودة للمراكز</button><div className="page-heading"><div><p className="eyebrow">تفاصيل المركز</p><h2>{center.name}</h2><p className="muted">كود المركز: {center.code}</p></div><div><StatusBadge status={center.status} /><button className="secondary-button action-button" onClick={() => void toggleStatus()} disabled={saving}>{saving ? "جارٍ الحفظ..." : center.status === "active" ? "إيقاف المركز" : "إعادة التفعيل"}</button></div></div><div className="kpi-grid"><article className="kpi-card"><span className="muted">الطلاب</span><strong>{center.student_count ?? 0}</strong></article><article className="kpi-card"><span className="muted">الأجهزة النشطة</span><strong>{center.active_device_count ?? 0}</strong></article><article className="kpi-card"><span className="muted">عمليات معلقة</span><strong>{center.pending_operations ?? 0}</strong></article><article className="kpi-card"><span className="muted">عمليات فاشلة</span><strong>{center.failed_operations ?? 0}</strong></article></div><div className="panel details-grid"><div><span className="muted">الحالة</span><strong><StatusBadge status={center.status} /></strong></div><div><span className="muted">تاريخ الإنشاء</span><strong>{new Date(center.created_at).toLocaleDateString("ar-EG")}</strong></div><div><span className="muted">المستخدمون النشطون</span><strong>{center.user_count ?? 0}</strong></div></div></section>; }
+function CenterTimeZoneForm({
+  center,
+  onSaved,
+}: {
+  center: Center;
+  onSaved: (center: Center) => void;
+}) {
+  const [timeZone, setTimeZone] = useState("");
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    if (!timeZone.trim()) {
+      setError("أدخل المنطقة الزمنية بصيغة IANA.");
+      return;
+    }
+    setSaving(true);
+    setError("");
+    try {
+      const result = await platformApi.updateCenter(center.id, {
+        timeZone: timeZone.trim(),
+      });
+      onSaved(result.center);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "تعذر ضبط المنطقة الزمنية.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <form className="panel" onSubmit={submit}>
+      <h3>المنطقة الزمنية للمركز</h3>
+      <p className="muted">
+        يلزم ضبطها قبل إنشاء جلسات جديدة. يثبت الإعداد بعد أول حفظ لحماية هوية الجلسات بين الأجهزة.
+      </p>
+      <label>
+        معرّف المنطقة الزمنية (IANA)
+        <input
+          value={timeZone}
+          onChange={(event) => setTimeZone(event.target.value)}
+          placeholder="مثال: Africa/Cairo"
+          autoCapitalize="none"
+          autoCorrect="off"
+          maxLength={64}
+          required
+        />
+      </label>
+      {error && <div className="alert error">{error}</div>}
+      <div className="modal-actions">
+        <button className="primary-button" disabled={saving}>
+          {saving ? "جارٍ الحفظ..." : "حفظ المنطقة الزمنية"}
+        </button>
+      </div>
+    </form>
+  );
+}
+
+export function CenterDetailsPage() {
+  const navigate = useNavigate();
+  const id = window.location.pathname.split("/").pop() ?? "";
+  const [center, setCenter] = useState<Center | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    void platformApi.center(id)
+      .then((result) => setCenter(result.center))
+      .catch((err) => setError(err instanceof ApiError ? err.message : "تعذر تحميل المركز."))
+      .finally(() => setLoading(false));
+  }, [id]);
+
+  async function toggleStatus() {
+    if (!center || !window.confirm(center.status === "active" ? "هل أنت متأكد من إيقاف هذا المركز؟" : "هل تريد إعادة تفعيل هذا المركز؟")) return;
+    setSaving(true);
+    try {
+      const result = await platformApi.updateCenter(center.id, {
+        status: center.status === "active" ? "suspended" : "active",
+      });
+      setCenter(result.center);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "تعذر تحديث حالة المركز.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (loading) return <div className="panel loading-state">جارٍ تحميل بيانات المركز...</div>;
+  if (error || !center) return <div className="panel alert error">{error || "المركز غير موجود"}</div>;
+
+  return (
+    <section>
+      <button className="back-link" onClick={() => navigate("/centers")}>← العودة للمراكز</button>
+      <div className="page-heading">
+        <div>
+          <p className="eyebrow">تفاصيل المركز</p>
+          <h2>{center.name}</h2>
+          <p className="muted">كود المركز: {center.code}</p>
+        </div>
+        <div>
+          <StatusBadge status={center.status} />
+          <button
+            className="secondary-button action-button"
+            onClick={() => void toggleStatus()}
+            disabled={saving}
+          >
+            {saving ? "جارٍ الحفظ..." : center.status === "active" ? "إيقاف المركز" : "إعادة التفعيل"}
+          </button>
+        </div>
+      </div>
+      <div className="kpi-grid">
+        <article className="kpi-card"><span className="muted">الطلاب</span><strong>{center.student_count ?? 0}</strong></article>
+        <article className="kpi-card"><span className="muted">الأجهزة النشطة</span><strong>{center.active_device_count ?? 0}</strong></article>
+        <article className="kpi-card"><span className="muted">عمليات معلقة</span><strong>{center.pending_operations ?? 0}</strong></article>
+        <article className="kpi-card"><span className="muted">عمليات فاشلة</span><strong>{center.failed_operations ?? 0}</strong></article>
+      </div>
+      {center.time_zone ? (
+        <div className="panel details-grid">
+          <div>
+            <span className="muted">المنطقة الزمنية (IANA)</span>
+            <strong>{center.time_zone}</strong>
+          </div>
+          <div className="muted">إعداد ثابت؛ تغييره يتطلب إجراء صيانة مضبوطًا.</div>
+        </div>
+      ) : (
+        <CenterTimeZoneForm center={center} onSaved={setCenter} />
+      )}
+      <div className="panel details-grid">
+        <div><span className="muted">الحالة</span><strong><StatusBadge status={center.status} /></strong></div>
+        <div><span className="muted">تاريخ الإنشاء</span><strong>{new Date(center.created_at).toLocaleDateString("ar-EG")}</strong></div>
+        <div><span className="muted">المستخدمون النشطون</span><strong>{center.user_count ?? 0}</strong></div>
+      </div>
+    </section>
+  );
+}

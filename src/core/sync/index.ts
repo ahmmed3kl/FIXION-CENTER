@@ -8,7 +8,7 @@ import {
 } from "../api/SyncApiAdapter";
 import { SyncOperationPayload } from "../api/contracts";
 import { ConnectivityService } from "../connectivity";
-import { DatabaseService } from "../database";
+import { DatabaseService, SqlDatabase } from "../database";
 import { DeviceRepository, DeviceService } from "../device";
 import { DatabaseError } from "../errors";
 import { Logger } from "../logger";
@@ -114,6 +114,24 @@ function canonicalEntityType(entityType: string): string {
   if (normalized === "makeup_attendance") return "makeup";
   if (normalized === "session_payment") return "payment";
   return normalized;
+}
+
+type EntityArrivalMap = Map<string, Set<string>>;
+
+function addEntityArrival(
+  arrivals: EntityArrivalMap,
+  entityType: string,
+  entityId: unknown,
+): void {
+  const id = String(entityId ?? "").trim();
+  const type = canonicalEntityType(entityType);
+  if (!type || !id) return;
+  let ids = arrivals.get(type);
+  if (!ids) {
+    ids = new Set<string>();
+    arrivals.set(type, ids);
+  }
+  ids.add(id);
 }
 
 function parseOperationPayload(payload: unknown): any {
@@ -341,6 +359,25 @@ function orderOperationsByDependencies(rows: SyncOperation[]): SyncOperation[] {
       byKey.set(key, operation);
     }
   }
+  const byExplicitAbsence = new Map<string, SyncOperation>();
+  for (const operation of baseSorted) {
+    if (canonicalEntityType(operation.entityType) !== "attendance") continue;
+    const payload = parseOperationPayload(operation.payload);
+    const attendanceType = String(
+      payload.attendanceType || payload.attendance_type || "present",
+    ).toLowerCase();
+    if (
+      String(payload.status || "").toLowerCase() !== "absent" ||
+      attendanceType === "makeup"
+    ) {
+      continue;
+    }
+    const sessionId = String(payload.sessionId || payload.session_id || "");
+    const studentId = String(payload.studentId || payload.student_id || "");
+    if (sessionId && studentId) {
+      byExplicitAbsence.set(JSON.stringify([sessionId, studentId]), operation);
+    }
+  }
 
   const dependencies = (operation: SyncOperation): string[] => {
     const payload = parseOperationPayload(operation.payload);
@@ -369,6 +406,30 @@ function orderOperationsByDependencies(rows: SyncOperation[]): SyncOperation[] {
       refs.push(["session", value("sessionId", "session_id", "advanceSessionId", "advance_session_id", "targetFutureSessionId", "target_future_session_id")]);
       refs.push(["student", value("studentId", "student_id")]);
     }
+    if (entity === "attendance" || entity === "makeup") {
+      const attendanceType = String(
+        value("attendanceType", "attendance_type") || "present",
+      ).toLowerCase();
+      if (attendanceType === "makeup") {
+        const sourceReference = String(
+          value("originalAbsenceId", "original_absence_id") || "",
+        );
+        const studentId = String(value("studentId", "student_id") || "");
+        const legacySuffix = `-${studentId}`;
+        const sourceSessionId =
+          sourceReference.startsWith("absence-") &&
+          sourceReference.endsWith(legacySuffix) &&
+          sourceReference.length > "absence-".length + legacySuffix.length
+            ? sourceReference.slice("absence-".length, -legacySuffix.length)
+            : sourceReference;
+        if (sourceSessionId && studentId) {
+          refs.push([
+            "explicit_absence",
+            JSON.stringify([sourceSessionId, studentId]),
+          ]);
+        }
+      }
+    }
     if (entity === "payment" || entity === "payment_reversal" || entity === "debt_adjustment") {
       refs.push(["debt_cycle", value("debtCycleId", "debt_cycle_id")]);
       refs.push(["session", value("sessionId", "session_id")]);
@@ -386,6 +447,13 @@ function orderOperationsByDependencies(rows: SyncOperation[]): SyncOperation[] {
     }
     if (entity === "student_card" || entity === "student_color") {
       refs.push(["student", value("studentId", "student_id") || operation.entityId]);
+    }
+    if (entity === "notification_delivery") {
+      const delivery = payload.delivery || payload;
+      refs.push([
+        "notification_event",
+        firstValue(delivery, "notificationEventId", "notification_event_id"),
+      ]);
     }
     if (entity === "package_subject") refs.push(["package", value("packageId", "package_id")]);
     if (entity === "package_subscription") {
@@ -409,7 +477,10 @@ function orderOperationsByDependencies(rows: SyncOperation[]): SyncOperation[] {
     if (visited.has(operationKey) || visiting.has(operationKey)) return;
     visiting.add(operationKey);
     for (const dependencyKey of dependencies(operation)) {
-      const dependency = byKey.get(dependencyKey);
+      const explicitAbsencePrefix = "explicit_absence:";
+      const dependency = dependencyKey.startsWith(explicitAbsencePrefix)
+        ? byExplicitAbsence.get(dependencyKey.slice(explicitAbsencePrefix.length))
+        : byKey.get(dependencyKey);
       if (dependency) visit(dependency);
     }
     visiting.delete(operationKey);
@@ -427,9 +498,9 @@ function retryDelayMs(retryCount: number): number {
 // Missing parent rows are expected while a repair or an offline batch is
 // being replayed. Keep the operation pending with backoff so the next pass
 // can send the parent first; these are not permanent manual-review conflicts.
-function isRetryableDependencyConflict(reason: unknown): boolean {
+export function isRetryableDependencyConflict(reason: unknown): boolean {
   const text = String(reason || "");
-  return /PAYMENT_DEBT_CYCLE_NOT_FOUND|PAYMENT_SESSION_NOT_FOUND|attendance_session_id_fkey|foreign key constraint|violates foreign key|session[^\n]*not found|debt[_ ]cycle[^\n]*not found/i.test(text);
+  return /SESSION_ACTIVATION_TARGET_NOT_FOUND|ATTENDANCE_SESSION_NOT_FOUND|ATTENDANCE_TARGET_NOT_FOUND|ATTENDANCE_CANCEL_TARGET_NOT_FOUND|ADVANCE_COVERAGE_SESSION_NOT_FOUND|ABSENCE_NOTIFICATION_TARGET_NOT_FOUND|NOTIFICATION_EVENT_NOT_FOUND|PAYMENT_DEBT_CYCLE_NOT_FOUND|PAYMENT_SESSION_NOT_FOUND|attendance_session_id_fkey/i.test(text);
 }
 
 export class SyncRepository {
@@ -811,10 +882,6 @@ export class SyncRepository {
                OR last_error LIKE '%duplicate key%'
              )
            )
-           OR (
-             entity_type IN ('attendance', 'makeup')
-             AND (last_error LIKE '%session%' OR last_error LIKE '%foreign key%')
-           )
          )`,
       [centerId],
     );
@@ -984,6 +1051,1268 @@ export class SyncRepository {
     );
   }
 
+  static resolveSessionAlias(centerId: string, sessionId: string): string {
+    const db = DatabaseService.getDb();
+    let canonicalId = sessionId;
+    const visited = new Set<string>();
+    while (canonicalId) {
+      if (visited.has(canonicalId)) {
+        throw new Error("Session alias mapping contains a cycle.");
+      }
+      visited.add(canonicalId);
+      const alias = db.getFirstSync<{
+        canonicalSessionId: string;
+        sourceStatus: string | null;
+        canonicalStatus: string | null;
+        sourceCenterId: string | null;
+        canonicalCenterId: string | null;
+        sourceGroupId: string | null;
+        canonicalGroupId: string | null;
+        sourceScheduleId: string | null;
+        canonicalScheduleId: string | null;
+        sourceSessionDate: string | null;
+        canonicalSessionDate: string | null;
+      }>(
+        `SELECT aliases.canonical_session_id as canonicalSessionId,
+                  source.status as sourceStatus,
+                  canonical.status as canonicalStatus,
+                  source.center_id as sourceCenterId,
+                  canonical.center_id as canonicalCenterId,
+                  source.group_id as sourceGroupId,
+                  canonical.group_id as canonicalGroupId,
+                  source.schedule_id as sourceScheduleId,
+                  canonical.schedule_id as canonicalScheduleId,
+                  source.session_date as sourceSessionDate,
+                  canonical.session_date as canonicalSessionDate
+             FROM session_id_aliases aliases
+           LEFT JOIN sessions source
+               ON source.id = aliases.local_session_id
+           LEFT JOIN sessions canonical
+               ON canonical.id = aliases.canonical_session_id
+            WHERE aliases.center_id = ? AND aliases.local_session_id = ?`,
+        [centerId, canonicalId],
+      );
+      if (!alias?.canonicalSessionId) break;
+      if (
+        (alias.sourceCenterId &&
+            String(alias.sourceCenterId) !== String(centerId)) ||
+        (alias.canonicalCenterId &&
+            String(alias.canonicalCenterId) !== String(centerId))
+      ) {
+        throw new Error("Session alias mapping crosses center boundaries.");
+      }
+      if (
+        !String(alias.canonicalScheduleId || "").trim() ||
+        (alias.sourceCenterId &&
+          (!String(alias.sourceScheduleId || "").trim() ||
+            String(alias.sourceGroupId) !== String(alias.canonicalGroupId) ||
+            String(alias.sourceScheduleId).trim() !==
+              String(alias.canonicalScheduleId).trim() ||
+            String(alias.sourceSessionDate).slice(0, 10) !==
+              String(alias.canonicalSessionDate).slice(0, 10)))
+      ) {
+        Logger.warn("sync", "unscheduled_session_alias_ignored", {
+          centerId,
+          metadata: {
+            localSessionId: canonicalId,
+            canonicalSessionId: alias.canonicalSessionId,
+          },
+        });
+        break;
+      }
+      if (alias.canonicalSessionId === canonicalId) break;
+      if (
+        (String(alias.canonicalStatus || "").toLowerCase() === "cancelled" &&
+          alias.sourceStatus &&
+          String(alias.sourceStatus).toLowerCase() !== "cancelled") ||
+        (String(alias.sourceStatus || "").toLowerCase() === "cancelled" &&
+          alias.canonicalStatus &&
+          String(alias.canonicalStatus).toLowerCase() !== "cancelled")
+      ) {
+        Logger.warn("sync", "session_alias_cancelled_conflict", {
+          centerId,
+          metadata: {
+            localSessionId: canonicalId,
+            canonicalSessionId: alias.canonicalSessionId,
+          },
+        });
+        break;
+      }
+      canonicalId = alias.canonicalSessionId;
+    }
+    return canonicalId;
+  }
+
+  static recordSessionMappings(
+    centerId: string,
+    mappings: Array<{ localSessionId: string; canonicalSessionId: string }> = [],
+  ): void {
+    if (!mappings.length) return;
+    const db = DatabaseService.getDb();
+    DatabaseService.runInTransaction(() => {
+      this.recordSessionMappingsInTransaction(db, centerId, mappings);
+    });
+  }
+
+  static recordSessionMappingsInTransaction(
+    db: SqlDatabase,
+    centerId: string,
+    mappings: Array<{ localSessionId: string; canonicalSessionId: string }> = [],
+  ): void {
+    const mappingsByLocalId = new Map<string, string>();
+    const establishedMappings = new Map<string, string>();
+    for (const mapping of mappings) {
+      const localSessionId = String(mapping.localSessionId || "");
+      const canonicalSessionId = String(mapping.canonicalSessionId || "");
+      if (!localSessionId || !canonicalSessionId) {
+        throw new Error("The server returned an invalid session ID mapping.");
+      }
+
+      const localSessions = new Map<string, {
+        centerId: string;
+        groupId: string;
+        scheduleId: string | null;
+        sessionDate: string;
+        status: string | null;
+      }>();
+      for (const sessionId of new Set([localSessionId, canonicalSessionId])) {
+        const owner = db.getFirstSync<{
+          centerId: string;
+          groupId: string;
+          scheduleId: string | null;
+          sessionDate: string;
+          status: string | null;
+        }>(
+          `SELECT center_id as centerId, group_id as groupId,
+                  schedule_id as scheduleId, session_date as sessionDate,
+                  status
+             FROM sessions WHERE id = ?`,
+          [sessionId],
+        );
+        if (owner && String(owner.centerId) !== String(centerId)) {
+          throw new Error("The server returned a session mapping across center boundaries.");
+        }
+        if (owner) localSessions.set(sessionId, owner);
+      }
+      const source = localSessions.get(localSessionId);
+      const canonical = localSessions.get(canonicalSessionId);
+      if (
+        (source && !String(source.scheduleId || "").trim()) ||
+        (canonical && !String(canonical.scheduleId || "").trim()) ||
+        (source && canonical &&
+          (source.groupId !== canonical.groupId ||
+            String(source.scheduleId).trim() !== String(canonical.scheduleId).trim() ||
+            String(source.sessionDate).slice(0, 10) !==
+              String(canonical.sessionDate).slice(0, 10)))
+      ) {
+        Logger.warn("sync", "unscheduled_session_mapping_rejected", {
+          centerId,
+          metadata: { localSessionId, canonicalSessionId },
+        });
+        continue;
+      }
+      if (
+        source &&
+        canonical &&
+        ((String(source.status || "").toLowerCase() === "cancelled" &&
+          String(canonical.status || "").toLowerCase() !== "cancelled") ||
+          (String(canonical.status || "").toLowerCase() === "cancelled" &&
+            String(source.status || "").toLowerCase() !== "cancelled"))
+      ) {
+        Logger.warn("sync", "cancelled_session_mapping_rejected", {
+          centerId,
+          metadata: { localSessionId, canonicalSessionId },
+        });
+        continue;
+      }
+      const batchCanonicalId = mappingsByLocalId.get(localSessionId);
+      if (batchCanonicalId && batchCanonicalId !== canonicalSessionId) {
+        throw new Error("The server returned conflicting canonical IDs for one session.");
+      }
+      mappingsByLocalId.set(localSessionId, canonicalSessionId);
+      const existing = db.getFirstSync<{ canonicalSessionId: string }>(
+        `SELECT canonical_session_id as canonicalSessionId
+           FROM session_id_aliases
+          WHERE center_id = ? AND local_session_id = ?`,
+        [centerId, localSessionId],
+      );
+      if (existing && existing.canonicalSessionId !== canonicalSessionId) {
+        if (localSessionId === canonicalSessionId) {
+          throw new Error("The server attempted to replace an established session alias with itself.");
+        }
+        establishedMappings.set(localSessionId, existing.canonicalSessionId);
+      }
+      if (localSessionId === canonicalSessionId) continue;
+      if (!existing) {
+        db.runSync(
+          `INSERT OR IGNORE INTO session_id_aliases
+             (center_id, local_session_id, canonical_session_id, created_at)
+           VALUES (?, ?, ?, ?)`,
+          [centerId, localSessionId, canonicalSessionId, new Date().toISOString()],
+        );
+      }
+    }
+    for (const localSessionId of mappingsByLocalId.keys()) {
+      this.resolveSessionAlias(centerId, localSessionId);
+    }
+    for (const [localSessionId, existingCanonicalId] of establishedMappings) {
+      const requestedCanonicalId = mappingsByLocalId.get(localSessionId);
+      if (!requestedCanonicalId) {
+        throw new Error("The server returned an incomplete session ID mapping.");
+      }
+      const existingResolvedId = this.resolveSessionAlias(
+        centerId,
+        existingCanonicalId,
+      );
+      const requestedResolvedId = this.resolveSessionAlias(
+        centerId,
+        requestedCanonicalId,
+      );
+      if (existingResolvedId !== requestedResolvedId) {
+        throw new Error("The server attempted to change an established session ID mapping.");
+      }
+    }
+  }
+
+  static canonicalizeSessionReferences<T>(
+    centerId: string,
+    value: T,
+    includeOriginalAbsence = false,
+  ): T {
+    const sessionReferenceKeys = new Set([
+      "sessionId",
+      "session_id",
+      "advanceSessionId",
+      "advance_session_id",
+      "targetFutureSessionId",
+      "target_future_session_id",
+    ]);
+    if (includeOriginalAbsence) {
+      sessionReferenceKeys.add("originalAbsenceId");
+      sessionReferenceKeys.add("original_absence_id");
+    }
+    const mapReferences = (item: any): any => {
+      if (Array.isArray(item)) return item.map(mapReferences);
+      if (!item || typeof item !== "object") return item;
+      const mapped: Record<string, any> = {};
+      for (const [key, nested] of Object.entries(item)) {
+        mapped[key] =
+          sessionReferenceKeys.has(key) && typeof nested === "string" && nested
+            ? this.resolveSessionAlias(centerId, nested)
+            : mapReferences(nested);
+      }
+      return mapped;
+    };
+    return mapReferences(value) as T;
+  }
+
+  static upsertPulledPaymentReversal(
+    db: SqlDatabase,
+    centerId: string,
+    rawReversal: any,
+    operationId: string,
+  ): boolean {
+    const reversal = rawReversal.reversal || rawReversal;
+    const reversalId = String(reversal.id || "");
+    const rowCenterId = String(reversal.center_id || reversal.centerId || centerId);
+    const paymentId = String(reversal.payment_id || reversal.paymentId || "");
+    const studentId = String(reversal.student_id || reversal.studentId || "");
+    const reversalOperationId = String(
+      operationId ||
+        reversal.operation_id ||
+        reversal.operationId ||
+        `pulled-reversal-${reversalId}`,
+    );
+    const reversedAmount = Number(
+      reversal.reversed_amount ?? reversal.reversedAmount ?? 0,
+    );
+    const reason = String(reversal.reason || "");
+    const reversedBy = String(
+      reversal.reversed_by ||
+        reversal.reversedBy ||
+        reversal.user_id ||
+        "system",
+    );
+    const reversedAt = String(
+      reversal.reversed_at ||
+        reversal.reversedAt ||
+        reversal.created_at ||
+        new Date().toISOString(),
+    );
+    const createdAt = String(
+      reversal.created_at || new Date().toISOString(),
+    );
+    if (rowCenterId !== String(centerId)) {
+      throw new Error("Pulled payment reversal belongs to another center.");
+    }
+    if (!reversalId || !paymentId || !reversalOperationId) {
+      throw new Error("Pulled payment reversal is missing its immutable identity.");
+    }
+
+    const selectBy = (column: "id" | "operation_id" | "payment_id", value: string) =>
+      db.getFirstSync<any>(
+        `SELECT id, operation_id, center_id, payment_id, student_id,
+                reversed_amount, reason, reversed_by, reversed_at
+           FROM payment_reversals
+          WHERE center_id = ? AND ${column} = ?`,
+        [centerId, value],
+      );
+    const existingRows = [
+      selectBy("id", reversalId),
+      selectBy("operation_id", reversalOperationId),
+      selectBy("payment_id", paymentId),
+    ].filter((row, index, rows) =>
+      row && rows.findIndex((candidate) => candidate?.id === row.id) === index,
+    );
+    const sameReversal = (row: any) =>
+      String(row.center_id) === String(centerId) &&
+      String(row.id) === reversalId &&
+      String(row.operation_id) === reversalOperationId &&
+      String(row.payment_id) === paymentId &&
+      String(row.student_id) === studentId &&
+      Number(row.reversed_amount) === reversedAmount &&
+      String(row.reason || "") === reason &&
+      String(row.reversed_by || "") === reversedBy &&
+      new Date(row.reversed_at).getTime() === new Date(reversedAt).getTime();
+
+    if (existingRows.length > 0) {
+      if (existingRows.length === 1 && sameReversal(existingRows[0])) return true;
+      const existing = existingRows[0];
+      const conflictReason =
+        "PAYMENT_REVERSAL_IDENTITY_CONFLICT: incoming reversal conflicts with preserved local financial history.";
+      db.runSync(
+        `INSERT INTO sync_conflicts
+           (id, operation_id, center_id, entity_type, entity_id, reason,
+            local_payload, server_payload, created_at)
+         VALUES (?, ?, ?, 'payment_reversal', ?, ?, ?, ?, ?)
+         ON CONFLICT(operation_id) DO UPDATE SET
+           reason = excluded.reason,
+           local_payload = excluded.local_payload,
+           server_payload = excluded.server_payload,
+           created_at = excluded.created_at,
+           resolved_at = NULL`,
+        [
+          `conflict-${generateUUID()}`,
+          reversalOperationId,
+          centerId,
+          paymentId,
+          conflictReason,
+          existing ? JSON.stringify(existing) : null,
+          JSON.stringify(reversal),
+          new Date().toISOString(),
+        ],
+      );
+      Logger.error(
+        "sync",
+        "payment_reversal_conflict_preserved",
+        new Error(conflictReason),
+        {
+          centerId,
+          metadata: {
+            reversalId,
+            reversalOperationId,
+            paymentId,
+            existingReversalId: existing?.id || null,
+          },
+        },
+      );
+      return false;
+    }
+
+    db.runSync(
+      `INSERT OR IGNORE INTO payment_reversals
+         (id, operation_id, center_id, payment_id, student_id,
+          reversed_amount, reason, reversed_by, reversed_at, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        reversalId,
+        reversalOperationId,
+        centerId,
+        paymentId,
+        studentId,
+        reversedAmount,
+        reason,
+        reversedBy,
+        reversedAt,
+        createdAt,
+      ],
+    );
+    const inserted = selectBy("operation_id", reversalOperationId);
+    if (!inserted || !sameReversal(inserted)) {
+      const conflictReason =
+        "PAYMENT_REVERSAL_INSERT_CONFLICT: incoming reversal was not inserted because an immutable financial key is already occupied.";
+      db.runSync(
+        `INSERT INTO sync_conflicts
+           (id, operation_id, center_id, entity_type, entity_id, reason,
+            local_payload, server_payload, created_at)
+         VALUES (?, ?, ?, 'payment_reversal', ?, ?, ?, ?, ?)
+         ON CONFLICT(operation_id) DO UPDATE SET
+           reason = excluded.reason,
+           local_payload = excluded.local_payload,
+           server_payload = excluded.server_payload,
+           created_at = excluded.created_at,
+           resolved_at = NULL`,
+        [
+          `conflict-${generateUUID()}`,
+          reversalOperationId,
+          centerId,
+          paymentId,
+          conflictReason,
+          inserted ? JSON.stringify(inserted) : null,
+          JSON.stringify(reversal),
+          new Date().toISOString(),
+        ],
+      );
+      Logger.error(
+        "sync",
+        "payment_reversal_conflict_preserved",
+        new Error(conflictReason),
+        { centerId, metadata: { reversalId, reversalOperationId, paymentId } },
+      );
+      return false;
+    }
+    return true;
+  }
+
+  static requeueResolvedAttendanceDependencies(
+    centerId: string,
+    arrivedSessionIds: ReadonlySet<string> = new Set(),
+    arrivedAttendanceIds: ReadonlySet<string> = new Set(),
+    arrivedEntityIds: ReadonlyMap<string, ReadonlySet<string>> = new Map(),
+  ): number {
+    if (
+      arrivedSessionIds.size === 0 &&
+      arrivedAttendanceIds.size === 0 &&
+      arrivedEntityIds.size === 0
+    ) return 0;
+    const db = DatabaseService.getDb();
+    const candidates = db.getAllSync<{
+      operationId: string;
+      entityType: string;
+      entityId: string;
+      payload: unknown;
+      lastError: string | null;
+    }>(
+      `SELECT operation_id as operationId, entity_type as entityType,
+              entity_id as entityId,
+              payload, last_error as lastError
+         FROM sync_operations
+        WHERE center_id = ?
+          AND status IN ('failed', 'conflict')
+          AND (
+            last_error LIKE '%ATTENDANCE_TARGET_NOT_FOUND%'
+            OR last_error LIKE '%ATTENDANCE_SESSION_NOT_FOUND%'
+            OR last_error LIKE '%ATTENDANCE_CANCEL_TARGET_NOT_FOUND%'
+            OR last_error LIKE '%ADVANCE_COVERAGE_SESSION_NOT_FOUND%'
+            OR last_error LIKE '%ABSENCE_NOTIFICATION_TARGET_NOT_FOUND%'
+            OR last_error LIKE '%NOTIFICATION_EVENT_NOT_FOUND%'
+            OR last_error LIKE '%PAYMENT_DEBT_CYCLE_NOT_FOUND%'
+            OR last_error LIKE '%PAYMENT_SESSION_NOT_FOUND%'
+          )`,
+      [centerId],
+    );
+    const arrivedSessions = new Set(Array.from(arrivedSessionIds, String));
+    const arrivedAttendances = new Set(Array.from(arrivedAttendanceIds, String));
+    const hasArrival = (entityType: string, ...entityIds: string[]) => {
+      const type = canonicalEntityType(entityType);
+      const ids = new Set(
+        Array.from(arrivedEntityIds.get(type) || [], String),
+      );
+      if (type === "session") {
+        for (const id of arrivedSessions) ids.add(id);
+      }
+      if (type === "attendance") {
+        for (const id of arrivedAttendances) ids.add(id);
+      }
+      return entityIds.some((id) => id && ids.has(String(id)));
+    };
+    const operationTypeAliases: Record<string, string[]> = {
+      session: ["session", "session_created", "session_updated"],
+      attendance: ["attendance", "attendance_marked", "makeup", "makeup_attendance"],
+      student: ["student", "student_created", "student_updated"],
+      debt_cycle: ["debt_cycle"],
+      notification_event: ["notification_event"],
+    };
+    const isParentConfirmed = (entityType: string, rawId: string) => {
+      if (!rawId) return false;
+      let id = String(rawId);
+      if (canonicalEntityType(entityType) === "session") {
+        try {
+          id = this.resolveSessionAlias(centerId, id);
+        } catch (error) {
+          Logger.warn("sync", "dependency_parent_alias_conflict", {
+            centerId,
+            metadata: {
+              entityType,
+              entityId: rawId,
+              error: error instanceof Error ? error.message : String(error),
+            },
+          });
+          return false;
+        }
+      }
+      if (hasArrival(entityType, rawId, id)) return true;
+      const operationTypes = operationTypeAliases[canonicalEntityType(entityType)];
+      if (!operationTypes) return false;
+      const placeholders = operationTypes.map(() => "?").join(", ");
+      const unresolvedOperation = db.getFirstSync<{ operationId: string }>(
+        `SELECT operation_id as operationId
+           FROM sync_operations
+          WHERE center_id = ?
+            AND lower(entity_type) IN (${placeholders})
+            AND entity_id IN (?, ?)
+            AND status <> 'synced'
+          LIMIT 1`,
+        [centerId, ...operationTypes, String(rawId), id],
+      );
+      return !unresolvedOperation;
+    };
+    const localEntityExists = (entityType: string, entityId: string) => {
+      const tableByType: Record<string, string> = {
+        session: "sessions",
+        student: "students",
+        attendance: "attendance",
+        debt_cycle: "debt_cycles",
+        notification_event: "notification_events",
+      };
+      const table = tableByType[canonicalEntityType(entityType)];
+      if (!table || !entityId) return false;
+      const row = db.getFirstSync<{ id: string }>(
+        `SELECT id FROM ${table} WHERE center_id = ? AND id = ?`,
+        [centerId, entityId],
+      );
+      return Boolean(row);
+    };
+    let requeued = 0;
+
+    for (const candidate of candidates) {
+      let payload: any;
+      try {
+        payload = typeof candidate.payload === "string"
+          ? JSON.parse(candidate.payload || "{}")
+          : candidate.payload || {};
+        if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+          throw new Error("Retryable dependency operation payload must be an object.");
+        }
+      } catch (error) {
+        Logger.error(
+          "sync",
+          "dependency_payload_invalid",
+          error instanceof Error ? error : new Error(String(error)),
+          { centerId, metadata: { operationId: candidate.operationId } },
+        );
+        continue;
+      }
+      const entityType = canonicalEntityType(candidate.entityType);
+      const lastError = String(candidate.lastError || "");
+      let canRequeue = false;
+
+      if (entityType === "attendance" || entityType === "makeup") {
+        const studentId = String(payload.student_id || payload.studentId || "");
+        const rawTargetId = String(
+          payload.session_id || payload.sessionId || candidate.entityId || "",
+        );
+        if (!studentId || !rawTargetId) continue;
+        let targetSessionId: string;
+        try {
+          targetSessionId = this.resolveSessionAlias(centerId, rawTargetId);
+        } catch (error) {
+          Logger.warn("sync", "attendance_dependency_alias_conflict", {
+            centerId,
+            metadata: {
+              operationId: candidate.operationId,
+              error: error instanceof Error ? error.message : String(error),
+            },
+          });
+          continue;
+        }
+        const targetSession = db.getFirstSync<{ status: string }>(
+          "SELECT status FROM sessions WHERE center_id = ? AND id = ?",
+          [centerId, targetSessionId],
+        );
+        if (!targetSession || String(targetSession.status).toLowerCase() === "cancelled") {
+          continue;
+        }
+
+        const isAttendanceCancellation =
+          String(payload.action || "").toLowerCase() === "attendance.cancel";
+        if (isAttendanceCancellation) {
+          if (!/ATTENDANCE_CANCEL_TARGET_NOT_FOUND/.test(lastError)) continue;
+          const attendanceId = String(payload.id || candidate.entityId || "");
+          const localAttendance = attendanceId
+            ? db.getFirstSync<{ id: string; sessionId: string; studentId: string }>(
+                `SELECT id, session_id as sessionId, student_id as studentId
+                   FROM attendance
+                  WHERE center_id = ? AND id = ?`,
+                [centerId, attendanceId],
+              )
+            : null;
+          if (
+            !localAttendance ||
+            String(localAttendance.studentId) !== studentId
+          ) continue;
+          let localSessionId: string;
+          try {
+            localSessionId = this.resolveSessionAlias(
+              centerId,
+              localAttendance.sessionId,
+            );
+          } catch (error) {
+            Logger.warn("sync", "attendance_cancel_dependency_alias_conflict", {
+              centerId,
+              metadata: {
+                operationId: candidate.operationId,
+                error: error instanceof Error ? error.message : String(error),
+              },
+            });
+            continue;
+          }
+          if (
+            localSessionId !== targetSessionId ||
+            !hasArrival("attendance", attendanceId) ||
+            !isParentConfirmed("session", rawTargetId)
+          ) continue;
+          canRequeue = true;
+        } else {
+          const attendanceType = String(
+            payload.attendance_type || payload.attendanceType || "present",
+          ).toLowerCase();
+          const targetArrived = hasArrival("session", rawTargetId, targetSessionId);
+          if (attendanceType !== "makeup") {
+            canRequeue = targetArrived;
+          } else {
+            const rawSourceId = String(
+              payload.original_absence_id || payload.originalAbsenceId || "",
+            );
+            if (!rawSourceId) continue;
+            const legacySuffix = `-${studentId}`;
+            const normalizedSourceId =
+              rawSourceId.startsWith("absence-") &&
+              rawSourceId.endsWith(legacySuffix) &&
+              rawSourceId.length > "absence-".length + legacySuffix.length
+                ? rawSourceId.slice("absence-".length, -legacySuffix.length)
+                : rawSourceId;
+            let sourceSessionId: string;
+            try {
+              sourceSessionId = this.resolveSessionAlias(centerId, normalizedSourceId);
+            } catch (error) {
+              Logger.warn("sync", "makeup_dependency_alias_conflict", {
+                centerId,
+                metadata: {
+                  operationId: candidate.operationId,
+                  error: error instanceof Error ? error.message : String(error),
+                },
+              });
+              continue;
+            }
+
+            const absenceById = db.getFirstSync<{
+              id: string;
+              sessionId: string;
+              status: string;
+              attendanceType: string | null;
+            }>(
+              `SELECT id, session_id as sessionId, status,
+                      attendance_type as attendanceType
+                 FROM attendance
+                WHERE center_id = ? AND student_id = ? AND id = ?`,
+              [centerId, studentId, rawSourceId],
+            );
+            let explicitAbsence = absenceById &&
+              String(absenceById.status).toLowerCase() === "absent" &&
+              String(absenceById.attendanceType || "present").toLowerCase() !== "makeup"
+              ? absenceById
+              : null;
+
+            if (!explicitAbsence) {
+              const sourceIds = Array.from(new Set([
+                normalizedSourceId,
+                sourceSessionId,
+              ]));
+              const placeholders = sourceIds.map(() => "?").join(", ");
+              const sourceRows = db.getAllSync<{
+                id: string;
+                sessionId: string;
+                status: string;
+                attendanceType: string | null;
+              }>(
+                `SELECT id, session_id as sessionId, status,
+                        attendance_type as attendanceType
+                   FROM attendance
+                  WHERE center_id = ? AND student_id = ?
+                    AND session_id IN (${placeholders})`,
+                [centerId, studentId, ...sourceIds],
+              );
+              const validAbsences = sourceRows.filter(
+                (row) =>
+                  String(row.status).toLowerCase() === "absent" &&
+                  String(row.attendanceType || "present").toLowerCase() !== "makeup",
+              );
+              const hasConflictingState = sourceRows.some(
+                (row) =>
+                  String(row.status).toLowerCase() !== "absent" ||
+                  String(row.attendanceType || "present").toLowerCase() === "makeup",
+              );
+              if (validAbsences.length === 1 && !hasConflictingState) {
+                explicitAbsence = validAbsences[0];
+              }
+            }
+            if (!explicitAbsence) continue;
+            const absenceSession = db.getFirstSync<{ status: string }>(
+              "SELECT status FROM sessions WHERE center_id = ? AND id = ?",
+              [centerId, explicitAbsence.sessionId],
+            );
+            if (!absenceSession || String(absenceSession.status).toLowerCase() === "cancelled") {
+              continue;
+            }
+            const sourceArrived = hasArrival(
+              "session",
+              normalizedSourceId,
+              sourceSessionId,
+              explicitAbsence.sessionId,
+            ) || hasArrival("attendance", rawSourceId, explicitAbsence.id);
+            canRequeue =
+              (targetArrived || sourceArrived) &&
+              isParentConfirmed("session", rawTargetId) &&
+              isParentConfirmed("session", normalizedSourceId) &&
+              isParentConfirmed("attendance", explicitAbsence.id);
+          }
+        }
+      } else if (entityType === "advance_coverage") {
+        const coverage = payload.coverage || payload;
+        const studentId = String(coverage.student_id || coverage.studentId || "");
+        const rawAdvanceSessionId = String(
+          coverage.advance_session_id || coverage.advanceSessionId || "",
+        );
+        const rawTargetSessionId = String(
+          coverage.target_future_session_id ||
+            coverage.targetFutureSessionId ||
+            "",
+        );
+        if (
+          !/ADVANCE_COVERAGE_SESSION_NOT_FOUND/.test(lastError) ||
+          !studentId ||
+          !rawAdvanceSessionId ||
+          !rawTargetSessionId
+        ) continue;
+        let advanceSessionId: string;
+        let targetSessionId: string;
+        try {
+          advanceSessionId = this.resolveSessionAlias(centerId, rawAdvanceSessionId);
+          targetSessionId = this.resolveSessionAlias(centerId, rawTargetSessionId);
+        } catch (error) {
+          Logger.warn("sync", "advance_coverage_dependency_alias_conflict", {
+            centerId,
+            metadata: {
+              operationId: candidate.operationId,
+              error: error instanceof Error ? error.message : String(error),
+            },
+          });
+          continue;
+        }
+        const dependencyArrived = hasArrival(
+          "session",
+          rawAdvanceSessionId,
+          advanceSessionId,
+          rawTargetSessionId,
+          targetSessionId,
+        );
+        canRequeue =
+          dependencyArrived &&
+          localEntityExists("session", advanceSessionId) &&
+          localEntityExists("session", targetSessionId) &&
+          localEntityExists("student", studentId) &&
+          isParentConfirmed("session", rawAdvanceSessionId) &&
+          isParentConfirmed("session", rawTargetSessionId) &&
+          isParentConfirmed("student", studentId);
+      } else if (entityType === "notification_event") {
+        const event = payload.event || payload;
+        const eventId = String(event.id || candidate.entityId || "");
+        const studentId = String(event.student_id || event.studentId || "");
+        const rawSessionId = String(event.session_id || event.sessionId || "");
+        if (
+          !/ABSENCE_NOTIFICATION_TARGET_NOT_FOUND/.test(lastError) ||
+          !eventId ||
+          !studentId ||
+          !rawSessionId
+        ) continue;
+        let sessionId: string;
+        try {
+          sessionId = this.resolveSessionAlias(centerId, rawSessionId);
+        } catch (error) {
+          Logger.warn("sync", "notification_dependency_alias_conflict", {
+            centerId,
+            metadata: {
+              operationId: candidate.operationId,
+              error: error instanceof Error ? error.message : String(error),
+            },
+          });
+          continue;
+        }
+        const session = db.getFirstSync<{ status: string }>(
+          "SELECT status FROM sessions WHERE center_id = ? AND id = ?",
+          [centerId, sessionId],
+        );
+        if (
+          !session ||
+          String(session.status || "").toLowerCase() === "cancelled" ||
+          !localEntityExists("student", studentId) ||
+          !localEntityExists("notification_event", eventId) ||
+          !isParentConfirmed("session", rawSessionId) ||
+          !isParentConfirmed("student", studentId)
+        ) continue;
+        if (String(event.event_type || event.eventType || "") !== "absence") {
+          continue;
+        }
+        const aliasRows = db.getAllSync<{ sessionId: string }>(
+          `WITH RECURSIVE session_ids(session_id) AS (
+             SELECT ?
+             UNION
+             SELECT aliases.local_session_id
+               FROM session_id_aliases aliases
+               JOIN session_ids resolved
+                 ON aliases.canonical_session_id = resolved.session_id
+              WHERE aliases.center_id = ?
+           )
+           SELECT session_id as sessionId FROM session_ids`,
+          [sessionId, centerId],
+        );
+        const logicalSessionIds = Array.from(new Set([
+          sessionId,
+          rawSessionId,
+          ...aliasRows.map((row) => String(row.sessionId)),
+        ]));
+        const placeholders = logicalSessionIds.map(() => "?").join(", ");
+        const absenceRows = db.getAllSync<{
+          id: string;
+          status: string;
+          attendanceType: string | null;
+        }>(
+          `SELECT id, status, attendance_type as attendanceType
+             FROM attendance
+            WHERE center_id = ? AND student_id = ?
+              AND session_id IN (${placeholders})`,
+          [centerId, studentId, ...logicalSessionIds],
+        );
+        if (
+          absenceRows.some((row) =>
+            ["present", "late"].includes(String(row.status || "").toLowerCase()),
+          )
+        ) continue;
+        const explicitAbsences = absenceRows.filter(
+          (row) =>
+            String(row.status || "").toLowerCase() === "absent" &&
+            String(row.attendanceType || "present").toLowerCase() !== "makeup",
+        );
+        if (explicitAbsences.length !== 1) continue;
+        const explicitAbsence = explicitAbsences[0];
+        const requestedAttendanceId = String(
+          event.attendance_id || event.attendanceId || "",
+        );
+        if (
+          (requestedAttendanceId && requestedAttendanceId !== explicitAbsence.id) ||
+          !isParentConfirmed("attendance", explicitAbsence.id)
+        ) continue;
+        const coverage = db.getFirstSync<{ id: string }>(
+          `SELECT id FROM advance_coverages
+            WHERE center_id = ? AND student_id = ?
+              AND target_future_session_id IN (${placeholders})
+            LIMIT 1`,
+          [centerId, studentId, ...logicalSessionIds],
+        );
+        const dependencyArrived =
+          hasArrival("session", rawSessionId, sessionId) ||
+          hasArrival("student", studentId) ||
+          hasArrival("attendance", explicitAbsence.id);
+        canRequeue = dependencyArrived && !coverage;
+      } else if (entityType === "notification_delivery") {
+        const delivery = payload.delivery || payload;
+        const notificationEventId = String(
+          delivery.notification_event_id ||
+            delivery.notificationEventId ||
+            "",
+        );
+        if (
+          !/NOTIFICATION_EVENT_NOT_FOUND/.test(lastError) ||
+          !notificationEventId ||
+          !hasArrival("notification_event", notificationEventId) ||
+          !localEntityExists("notification_event", notificationEventId) ||
+          !isParentConfirmed("notification_event", notificationEventId)
+        ) continue;
+        canRequeue = true;
+      } else if (entityType === "payment") {
+        const payment = payload.payment || payload;
+        const studentId = String(payment.student_id || payment.studentId || "");
+        const rawSessionId = String(payment.session_id || payment.sessionId || "");
+        const debtCycleId = String(payment.debt_cycle_id || payment.debtCycleId || "");
+        const sessionError = /PAYMENT_SESSION_NOT_FOUND/.test(lastError);
+        const cycleError = /PAYMENT_DEBT_CYCLE_NOT_FOUND/.test(lastError);
+        if ((!sessionError && !cycleError) || !studentId) continue;
+        let sessionId = rawSessionId;
+        if (rawSessionId) {
+          try {
+            sessionId = this.resolveSessionAlias(centerId, rawSessionId);
+          } catch (error) {
+            Logger.warn("sync", "payment_dependency_alias_conflict", {
+              centerId,
+              metadata: {
+                operationId: candidate.operationId,
+                error: error instanceof Error ? error.message : String(error),
+              },
+            });
+            continue;
+          }
+        }
+        const dependencyArrived =
+          (sessionError && hasArrival("session", rawSessionId, sessionId)) ||
+          (cycleError && hasArrival("debt_cycle", debtCycleId));
+        if (
+          !dependencyArrived ||
+          !localEntityExists("student", studentId) ||
+          !isParentConfirmed("student", studentId) ||
+          (rawSessionId &&
+            (!localEntityExists("session", sessionId) ||
+              !isParentConfirmed("session", rawSessionId))) ||
+          (debtCycleId &&
+            (!localEntityExists("debt_cycle", debtCycleId) ||
+              !isParentConfirmed("debt_cycle", debtCycleId)))
+        ) continue;
+        canRequeue = true;
+      } else {
+        continue;
+      }
+
+      if (!canRequeue) continue;
+      const result = db.runSync(
+        `UPDATE sync_operations
+            SET status = 'pending', retry_count = 0,
+                next_retry_at = NULL, last_error = NULL
+          WHERE center_id = ? AND operation_id = ?
+            AND status IN ('failed', 'conflict')`,
+        [centerId, candidate.operationId],
+      );
+      if (Number(result?.changes || 0) > 0) {
+        requeued += 1;
+        Logger.info("sync", "dependency_requeued", {
+          centerId,
+          operationId: candidate.operationId,
+          metadata: { entityType, entityId: candidate.entityId },
+        });
+      }
+    }
+    return requeued;
+  }
+
+  static upsertPulledAdvanceCoverage(
+    db: SqlDatabase,
+    centerId: string,
+    coverage: any,
+  ): void {
+    const rowCenterId = String(coverage.center_id || coverage.centerId || centerId);
+    const id = String(coverage.id || "");
+    const studentId = String(coverage.student_id || coverage.studentId || "");
+    const advanceSessionId = String(
+      coverage.advance_session_id || coverage.advanceSessionId || "",
+    );
+    const targetSessionId = String(
+      coverage.target_future_session_id || coverage.targetFutureSessionId || "",
+    );
+    if (rowCenterId !== String(centerId)) {
+      throw new Error("Pulled advance coverage belongs to another center.");
+    }
+    if (!id || !studentId || !advanceSessionId || !targetSessionId) {
+      Logger.error(
+        "sync",
+        "advance_coverage_identity_missing",
+        new Error("Pulled advance coverage is missing its immutable identity."),
+        { centerId, metadata: { id, studentId, advanceSessionId, targetSessionId } },
+      );
+      return;
+    }
+
+    const sameIdentity = (row: any) =>
+      String(row.center_id) === String(centerId) &&
+      String(row.student_id) === studentId &&
+      String(row.advance_session_id) === advanceSessionId &&
+      String(row.target_future_session_id) === targetSessionId;
+    const existingById = db.getFirstSync<any>(
+      `SELECT id, center_id, student_id, advance_session_id, target_future_session_id
+         FROM advance_coverages WHERE id = ?`,
+      [id],
+    );
+    if (existingById) {
+      if (!sameIdentity(existingById)) {
+        Logger.error(
+          "sync",
+          "advance_coverage_id_conflict_preserved",
+          new Error("An existing coverage ID has different immutable references."),
+          { centerId, metadata: { id, studentId, advanceSessionId, targetSessionId } },
+        );
+      }
+      return;
+    }
+
+    const existingTarget = db.getFirstSync<any>(
+      `SELECT id, center_id, student_id, advance_session_id, target_future_session_id
+         FROM advance_coverages
+        WHERE center_id = ? AND student_id = ? AND target_future_session_id = ?`,
+      [centerId, studentId, targetSessionId],
+    );
+    const existingAdvance = db.getFirstSync<any>(
+      `SELECT id, center_id, student_id, advance_session_id, target_future_session_id
+         FROM advance_coverages
+        WHERE center_id = ? AND student_id = ? AND advance_session_id = ?`,
+      [centerId, studentId, advanceSessionId],
+    );
+    for (const existing of [existingTarget, existingAdvance]) {
+      if (!existing) continue;
+      if (sameIdentity(existing)) {
+        Logger.warn("sync", "advance_coverage_duplicate_identity_preserved", {
+          centerId,
+          metadata: { incomingId: id, existingId: existing.id },
+        });
+      } else {
+        Logger.error(
+          "sync",
+          "advance_coverage_reference_conflict_preserved",
+          new Error("An existing coverage occupies one of the 1-to-1 references."),
+          {
+            centerId,
+            metadata: {
+              incomingId: id,
+              existingId: existing.id,
+              studentId,
+              advanceSessionId,
+              targetSessionId,
+            },
+          },
+        );
+      }
+      return;
+    }
+
+    db.runSync(
+      `INSERT OR IGNORE INTO advance_coverages
+         (id, operation_id, center_id, student_id, advance_session_id,
+          target_future_session_id, created_by, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        id,
+        coverage.operation_id || coverage.operationId || `pulled-coverage-${id}`,
+        centerId,
+        studentId,
+        advanceSessionId,
+        targetSessionId,
+        coverage.created_by || coverage.createdBy || "system",
+        coverage.created_at || coverage.createdAt || new Date().toISOString(),
+      ],
+    );
+    const inserted = db.getFirstSync<any>(
+      `SELECT id, center_id, student_id, advance_session_id, target_future_session_id
+         FROM advance_coverages WHERE id = ?`,
+      [id],
+    );
+    if (!inserted || !sameIdentity(inserted)) {
+      Logger.error(
+        "sync",
+        "advance_coverage_insert_conflict_preserved",
+        new Error("Coverage could not be inserted without conflicting with existing history."),
+        { centerId, metadata: { id, studentId, advanceSessionId, targetSessionId } },
+      );
+    }
+  }
+
+  static upsertPulledAttendance(
+    db: SqlDatabase,
+    centerId: string,
+    rawAttendance: any,
+  ): void {
+    const attendance = this.canonicalizeSessionReferences(
+      centerId,
+      rawAttendance,
+    );
+    const rowCenterId = String(attendance.center_id || attendance.centerId || centerId);
+    const attendanceId = String(attendance.id || "");
+    const studentId = String(attendance.student_id || attendance.studentId || "");
+    const sessionId = String(attendance.session_id || attendance.sessionId || "");
+    if (rowCenterId !== String(centerId)) {
+      throw new Error("Pulled attendance belongs to another center.");
+    }
+    if (!attendanceId || !studentId || !sessionId) {
+      throw new Error("Pulled attendance is missing its center, student, or session identity.");
+    }
+    const checkInTime = String(
+      attendance.check_in_time ||
+        attendance.checkInTime ||
+        attendance.created_at ||
+        attendance.createdAt ||
+        new Date().toISOString(),
+    );
+    const attendanceType = String(
+      attendance.attendance_type || attendance.attendanceType || "present",
+    );
+    const originalAbsenceId =
+      attendance.original_absence_id || attendance.originalAbsenceId || null;
+    const operationId = String(
+      attendance.operation_id ||
+        attendance.operationId ||
+        `bootstrap-attendance-${attendanceId}`,
+    );
+    const isLate = Boolean(attendance.is_late || attendance.isLate);
+    const incomingStatus = isLate || String(attendance.status || "").toLowerCase() === "late"
+      ? "late"
+      : String(attendance.status || "present").toLowerCase();
+    const incomingOutcome = incomingStatus === "late" ? "present" : incomingStatus;
+    const isExplicitCancellation =
+      String(attendance.action || attendance.last_operation_action || "")
+        .toLowerCase() === "attendance.cancel";
+
+    const existingById = db.getFirstSync<any>(
+      `SELECT id, center_id, session_id, student_id, check_in_time, status,
+              is_late, attendance_type, original_absence_id, operation_id
+         FROM attendance WHERE id = ?`,
+      [attendanceId],
+    );
+    if (existingById && String(existingById.center_id) !== String(centerId)) {
+      throw new Error("Pulled attendance ID is already owned by another center.");
+    }
+    const sessionAliases = db.getAllSync<{ localSessionId: string }>(
+      `SELECT aliases.local_session_id as localSessionId
+         FROM session_id_aliases aliases
+         LEFT JOIN sessions source
+           ON source.center_id = aliases.center_id
+          AND source.id = aliases.local_session_id
+         LEFT JOIN sessions canonical
+           ON canonical.center_id = aliases.center_id
+          AND canonical.id = aliases.canonical_session_id
+        WHERE aliases.center_id = ?
+          AND aliases.canonical_session_id = ?
+          AND NOT (
+            (canonical.status = 'cancelled' AND source.status IS NOT NULL
+              AND source.status <> 'cancelled')
+            OR (source.status = 'cancelled' AND canonical.status IS NOT NULL
+              AND canonical.status <> 'cancelled')
+          )`,
+      [centerId, sessionId],
+    );
+    const logicalSessionIds = Array.from(
+      new Set([sessionId, ...sessionAliases.map((alias) => alias.localSessionId)]),
+    );
+    const sessionPlaceholders = logicalSessionIds.map(() => "?").join(", ");
+    const sameLogicalSessionRecords = db.getAllSync<any>(
+      `SELECT id, center_id, session_id, student_id, check_in_time, status,
+              is_late, attendance_type, original_absence_id, operation_id
+         FROM attendance
+        WHERE center_id = ? AND student_id = ?
+          AND session_id IN (${sessionPlaceholders})`,
+      [centerId, studentId, ...logicalSessionIds],
+    );
+    if (sameLogicalSessionRecords.length > 1) {
+      throw new Error(
+        "Pulled attendance has multiple historical rows for the same logical session and student; all references were preserved for manual review.",
+      );
+    }
+    const naturalMatch = sameLogicalSessionRecords[0] || null;
+    if (existingById && naturalMatch && existingById.id !== naturalMatch.id) {
+      throw new Error(
+        "Pulled attendance conflicts with a different existing record for the same student and session.",
+      );
+    }
+    const existing = existingById || naturalMatch;
+    if (existing) {
+      const existingStatus = String(existing.status || "present").toLowerCase();
+      const existingOutcome = existingStatus === "late" ? "present" : existingStatus;
+      const incomingWins =
+        (existingOutcome === "absent" && incomingOutcome === "present") ||
+        (isExplicitCancellation && incomingOutcome === "absent");
+      const existingWins =
+        !isExplicitCancellation &&
+        existingOutcome === "present" && incomingOutcome === "absent";
+      const sameOutcome = existingOutcome === incomingOutcome;
+      if (!incomingWins && !existingWins && !sameOutcome && existing.id !== attendanceId) {
+        throw new Error(
+          "Pulled attendance has conflicting non-present/absent statuses for the same student and session.",
+        );
+      }
+      if (incomingWins) {
+        db.runSync(
+          `UPDATE attendance
+              SET status = ?, is_late = ?, check_in_time = ?, operation_id = ?
+            WHERE center_id = ? AND id = ?`,
+          [
+            incomingStatus,
+            isLate ? 1 : 0,
+            checkInTime,
+            operationId,
+            centerId,
+            existing.id,
+          ],
+        );
+      } else if (!existingWins && !sameOutcome && existing.id === attendanceId) {
+        db.runSync(
+          `UPDATE attendance
+              SET status = ?, is_late = ?, check_in_time = ?, operation_id = ?
+            WHERE center_id = ? AND id = ?`,
+          [
+            incomingStatus,
+            isLate ? 1 : 0,
+            checkInTime,
+            operationId,
+            centerId,
+            existing.id,
+          ],
+        );
+      } else if (sameOutcome) {
+        db.runSync(
+          `UPDATE attendance
+              SET operation_id = ?
+            WHERE center_id = ? AND id = ?`,
+          [operationId, centerId, existing.id],
+        );
+      }
+      return;
+    }
+
+    db.runSync(
+      `INSERT INTO attendance
+         (id, center_id, student_id, session_id, check_in_time, status, is_late,
+          attendance_type, original_absence_id, operation_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        attendanceId,
+        centerId,
+        studentId,
+        sessionId,
+        checkInTime,
+        incomingStatus,
+        isLate ? 1 : 0,
+        attendanceType,
+        originalAbsenceId,
+        operationId,
+      ],
+    );
+  }
+
+  static prepareOperationForPush<T extends SyncOperationPayload>(operation: T): T {
+    const payload =
+      typeof operation.payload === "string"
+        ? JSON.parse(operation.payload || "{}")
+        : operation.payload || {};
+    const mappedPayload = SyncRepository.canonicalizeSessionReferences(
+      operation.centerId,
+      payload,
+      true,
+    );
+    const entityId =
+      canonicalEntityType(operation.entityType) === "session"
+        ? SyncRepository.resolveSessionAlias(operation.centerId, operation.entityId)
+        : operation.entityId;
+    if (canonicalEntityType(operation.entityType) === "session" && mappedPayload.id) {
+      mappedPayload.id = entityId;
+    }
+    return { ...operation, entityId, payload: mappedPayload };
+  }
+
   static markAsSynced(
     operationId: string,
     options?: { resolveOnlyThisOperation?: boolean },
@@ -1088,7 +2417,8 @@ export class SyncRepository {
        ON CONFLICT(operation_id) DO UPDATE SET
          reason = excluded.reason,
          server_payload = excluded.server_payload,
-         created_at = excluded.created_at`,
+         created_at = excluded.created_at,
+         resolved_at = NULL`,
       [
         `conflict-${generateUUID()}`,
         operationId,
@@ -1344,32 +2674,99 @@ export class SyncRepository {
     }
   }
 
+  static resolvePulledSessionStatus(
+    existingStatus: string | null | undefined,
+    incomingStatus: string | null | undefined,
+    action = "",
+  ): string {
+    const existing = String(existingStatus || "").toLowerCase();
+    const incoming = String(incomingStatus || "open").toLowerCase();
+    const normalizedAction = String(action || "").toLowerCase();
+    if (existing === "cancelled" || incoming === "cancelled") return "cancelled";
+    if (normalizedAction === "close") return "closed";
+    if (normalizedAction === "reopen") return "open";
+    if (existing === "closed") return "closed";
+    if (normalizedAction === "activate") {
+      return existing === "scheduled" || existing === "open"
+        ? "open"
+        : existing || incoming;
+    }
+    if (existing === "open" && incoming === "scheduled") return "open";
+    return incoming || existing || "open";
+  }
+
   /** Resolve a stale local session with the same natural key as a server row. */
   static reconcileSessionNaturalKey(
-    db: any,
+    db: SqlDatabase,
     centerId: string,
     sessionId: string,
     groupId: string,
     scheduleId: string | null | undefined,
     sessionDate: string,
+    canonicalStatus?: string | null,
   ): void {
-    if (!groupId || !scheduleId || !sessionDate) return;
+    if (!groupId || !sessionDate || !String(scheduleId || "").trim()) return;
+    const persistedCanonicalStatus = db.getFirstSync<{ status: string }>(
+      `SELECT status FROM sessions WHERE center_id = ? AND id = ?`,
+      [centerId, sessionId],
+    )?.status;
+    const resolvedCanonicalStatus =
+      String(persistedCanonicalStatus || "").toLowerCase() === "cancelled"
+        ? persistedCanonicalStatus
+        : canonicalStatus || persistedCanonicalStatus;
     // A previous bootstrap could have left more than one local row for the
-    // same natural key. Merge every duplicate before the upsert below so one
-    // stale row cannot make the entire bootstrap transaction fail.
-    const duplicates: Array<{ id: string }> = db.getAllSync(
-      `SELECT id FROM sessions
-       WHERE center_id = ? AND group_id = ? AND schedule_id = ?
+    // same natural key. Keep every historical row untouched; aliases are
+    // used only while preparing pending operations for upload.
+    const duplicates: Array<{ id: string; status: string }> = db.getAllSync(
+      `SELECT id, status FROM sessions
+       WHERE center_id = ? AND group_id = ?
+         AND schedule_id = ?
          AND session_date = ? AND id <> ? ORDER BY created_at ASC`,
       [centerId, groupId, scheduleId, sessionDate, sessionId],
     );
     for (const duplicate of duplicates) {
-      for (const table of ["attendance", "payments", "session_expected_students", "session_closing_records"]) {
-        try {
-          db.runSync(`UPDATE ${table} SET session_id = ? WHERE center_id = ? AND session_id = ?`, [sessionId, centerId, duplicate.id]);
-        } catch {}
+      if (
+        (String(resolvedCanonicalStatus || "").toLowerCase() === "cancelled" &&
+          String(duplicate.status || "").toLowerCase() !== "cancelled") ||
+        (String(duplicate.status || "").toLowerCase() === "cancelled" &&
+          resolvedCanonicalStatus &&
+          String(resolvedCanonicalStatus).toLowerCase() !== "cancelled")
+      ) {
+        Logger.warn("sync", "cancelled_session_duplicate_preserved", {
+          centerId,
+          metadata: {
+            localSessionId: duplicate.id,
+            cancelledSessionId: sessionId,
+            groupId,
+            scheduleId: scheduleId || null,
+            sessionDate,
+          },
+        });
+        continue;
       }
-      try { db.runSync(`DELETE FROM sessions WHERE center_id = ? AND id = ?`, [centerId, duplicate.id]); } catch {}
+      const existingAlias: { canonicalSessionId: string } | null = db.getFirstSync(
+        `SELECT canonical_session_id as canonicalSessionId
+           FROM session_id_aliases
+          WHERE center_id = ? AND local_session_id = ?`,
+        [centerId, duplicate.id],
+      );
+      if (existingAlias && existingAlias.canonicalSessionId !== sessionId) {
+        throw new Error("A local session ID is already mapped to a different canonical session.");
+      }
+      db.runSync(
+        `INSERT OR IGNORE INTO session_id_aliases
+           (center_id, local_session_id, canonical_session_id, created_at)
+         VALUES (?, ?, ?, ?)`,
+        [centerId, duplicate.id, sessionId, new Date().toISOString()],
+      );
+      Logger.warn("sync", "session_alias_history_preserved", {
+        centerId,
+        metadata: {
+          localSessionId: duplicate.id,
+          canonicalSessionId: sessionId,
+          naturalKey: { groupId, scheduleId: scheduleId || null, sessionDate },
+        },
+      });
     }
   }
 
@@ -1559,6 +2956,10 @@ export class SyncEngine {
           createdAt: operation.createdAt,
           retryCount: operation.retryCount,
         }]);
+        SyncRepository.recordSessionMappings(
+          centerId,
+          response.sessionMappings || [],
+        );
 
         if (response.syncedOperationIds.includes(operationId)) {
           SyncRepository.markAsSynced(operationId, { resolveOnlyThisOperation: true });
@@ -1642,6 +3043,10 @@ export class SyncEngine {
           createdAt: operation.createdAt,
           retryCount: operation.retryCount,
         }]);
+        SyncRepository.recordSessionMappings(
+          centerId,
+          response.sessionMappings || [],
+        );
 
         if (response.syncedOperationIds.includes(operationId)) {
           SyncRepository.markAsSynced(operationId, { resolveOnlyThisOperation: true });
@@ -2004,8 +3409,65 @@ export class SyncEngine {
         SyncRepository.clearLocalOperationalDataInTransaction(db, centerId);
       }
 
+      SyncRepository.recordSessionMappingsInTransaction(
+        db,
+        centerId,
+        data.sessionAliases || [],
+      );
+      const sessionNaturalKeys = [...(data.sessionNaturalKeys || [])].sort(
+        (left, right) =>
+          String(left.groupId).localeCompare(String(right.groupId)) ||
+          String(left.scheduleKey || "").localeCompare(String(right.scheduleKey || "")) ||
+          String(left.sessionDate).localeCompare(String(right.sessionDate)) ||
+          String(left.canonicalSessionId).localeCompare(String(right.canonicalSessionId)),
+      );
+      for (const naturalKey of sessionNaturalKeys) {
+        if (
+          naturalKey.centerId &&
+          String(naturalKey.centerId) !== String(centerId)
+        ) {
+          throw new Error("The server returned a session identity for another center.");
+        }
+        if (
+          !naturalKey.groupId ||
+          !naturalKey.canonicalSessionId ||
+          !/^\d{4}-\d{2}-\d{2}$/.test(String(naturalKey.sessionDate || ""))
+        ) {
+          throw new Error("The server returned an incomplete session natural key.");
+        }
+        if (
+          (String(naturalKey.status || "").toLowerCase() === "cancelled" &&
+            naturalKey.hasNonCancelledDuplicate) ||
+          (String(naturalKey.status || "").toLowerCase() !== "cancelled" &&
+            naturalKey.hasCancelledDuplicate)
+        ) {
+          Logger.error("sync", "session_natural_key_status_conflict", new Error(
+            "A natural-key duplicate has mixed cancellation states; local session history was left unchanged.",
+          ), {
+            centerId,
+            metadata: {
+              groupId: naturalKey.groupId,
+              scheduleKey: naturalKey.scheduleKey,
+              sessionDate: naturalKey.sessionDate,
+              canonicalSessionId: naturalKey.canonicalSessionId,
+            },
+          });
+          continue;
+        }
+        SyncRepository.reconcileSessionNaturalKey(
+          db,
+          centerId,
+          naturalKey.canonicalSessionId,
+          naturalKey.groupId,
+          naturalKey.scheduleKey || null,
+          naturalKey.sessionDate,
+          naturalKey.status,
+        );
+      }
+
       if (Array.isArray(data.gradeExams)) {
-        for (const exam of data.gradeExams) {
+        for (const rawExam of data.gradeExams) {
+          const exam = rawExam;
           db.runSync(`INSERT INTO grade_exams (id, center_id, name, grade, group_id, session_id, max_score, status, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET name=excluded.name, grade=excluded.grade, group_id=excluded.group_id, session_id=excluded.session_id, max_score=excluded.max_score, status=excluded.status, updated_at=excluded.updated_at`,
@@ -2276,10 +3738,41 @@ export class SyncEngine {
       if (Array.isArray(data.sessions)) {
         for (const sess of data.sessions) {
           const sessionId = sess.id || sess.sessionId;
+          const sessionCenterId = sess.center_id || sess.centerId || centerId;
+          if (String(sessionCenterId) !== String(centerId)) {
+            throw new Error("Bootstrap returned a session outside the active center.");
+          }
           const groupId = sess.group_id || sess.groupId;
           const scheduleId = sess.schedule_id || sess.scheduleId || null;
           const sessionDate = sess.session_date || sess.sessionDate;
-          SyncRepository.reconcileSessionNaturalKey(db, centerId, sessionId, groupId, scheduleId, sessionDate);
+          const existingSession = db.getFirstSync<any>(
+            `SELECT center_id, status, updated_at, created_at
+               FROM sessions WHERE id = ?`,
+            [sessionId],
+          );
+          if (
+            existingSession &&
+            String(existingSession.center_id) !== String(centerId)
+          ) {
+            throw new Error("Bootstrap session ID is already owned by another center.");
+          }
+          const status = SyncRepository.resolvePulledSessionStatus(
+            existingSession?.status,
+            sess.status || "open",
+          );
+          const incomingUpdatedAt =
+            sess.updated_at || sess.updatedAt || existingSession?.updated_at || new Date().toISOString();
+          const updatedAt =
+            String(existingSession?.status || "").toLowerCase() === "cancelled"
+              ? existingSession.updated_at || incomingUpdatedAt
+              : incomingUpdatedAt;
+          const createdAt =
+            sess.started_at ||
+            sess.startedAt ||
+            sess.created_at ||
+            sess.createdAt ||
+            existingSession?.created_at ||
+            new Date().toISOString();
           db.runSync(
             `INSERT INTO sessions
                (id, center_id, group_id, session_date, start_time, end_time, status, schedule_id, subject_id, teacher_id, session_price, late_after_minutes, created_at, updated_at)
@@ -2289,47 +3782,57 @@ export class SyncEngine {
                session_date = excluded.session_date,
                start_time = excluded.start_time,
                end_time = excluded.end_time,
-               status = excluded.status,
                schedule_id = excluded.schedule_id,
                subject_id = excluded.subject_id,
                teacher_id = excluded.teacher_id,
                session_price = excluded.session_price,
                late_after_minutes = excluded.late_after_minutes,
-               updated_at = excluded.updated_at
-             ON CONFLICT(center_id, group_id, schedule_id, session_date) DO UPDATE SET
-               group_id = excluded.group_id,
-               session_date = excluded.session_date,
-               start_time = excluded.start_time,
-               end_time = excluded.end_time,
-               status = excluded.status,
-               schedule_id = excluded.schedule_id,
-               subject_id = excluded.subject_id,
-               teacher_id = excluded.teacher_id,
-               session_price = excluded.session_price,
-               late_after_minutes = excluded.late_after_minutes,
-               updated_at = excluded.updated_at
+               status = CASE
+                 WHEN sessions.status = 'cancelled' THEN 'cancelled'
+                 WHEN excluded.status = 'cancelled' THEN 'cancelled'
+                 WHEN sessions.status = 'closed' AND excluded.status NOT IN ('closed', 'cancelled')
+                   THEN 'closed'
+                 ELSE excluded.status
+               END,
+               created_at = CASE
+                 WHEN sessions.created_at IS NULL
+                   OR (
+                     julianday(excluded.created_at) IS NOT NULL
+                     AND (
+                       julianday(sessions.created_at) IS NULL
+                       OR julianday(excluded.created_at) < julianday(sessions.created_at)
+                     )
+                   )
+                   THEN excluded.created_at
+                 ELSE sessions.created_at
+               END,
+               updated_at = CASE
+                 WHEN sessions.status = 'cancelled' THEN sessions.updated_at
+                 ELSE excluded.updated_at
+               END
              `,
             [
               sess.id,
-              sess.center_id || centerId,
+              sessionCenterId,
               sess.group_id || sess.groupId,
               sess.session_date || sess.sessionDate,
               sess.start_time || sess.startTime,
               sess.end_time || sess.endTime,
-              sess.status || "open",
+              status,
               sess.schedule_id || sess.scheduleId || null,
               sess.subject_id || sess.subjectId || null,
               sess.teacher_id || sess.teacherId || null,
               Number(sess.session_price ?? sess.sessionPrice ?? 0),
               Number(sess.late_after_minutes ?? sess.lateAfterMinutes ?? 15),
-              sess.created_at || sess.createdAt || new Date().toISOString(),
-              sess.updated_at || sess.updatedAt || new Date().toISOString(),
+              createdAt,
+              updatedAt,
             ],
           );
         }
       }
       if (Array.isArray(data.sessionHomeworkEvaluations)) {
-        for (const evaluation of data.sessionHomeworkEvaluations) {
+        for (const rawEvaluation of data.sessionHomeworkEvaluations) {
+          const evaluation = rawEvaluation;
           db.runSync(`INSERT INTO session_homework_evaluations
               (id, center_id, student_id, session_id, status_id, created_at, updated_at, deleted_at, deleted_by)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -2340,12 +3843,45 @@ export class SyncEngine {
         }
       }
       if (Array.isArray(data.expectedStudents)) {
-        for (const expected of data.expectedStudents) {
-          db.runSync(`INSERT INTO session_expected_students (id, center_id, session_id, student_id, created_at)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET session_id=excluded.session_id, student_id=excluded.student_id
-            ON CONFLICT(session_id, student_id) DO UPDATE SET created_at=excluded.created_at`,
-            [expected.id, expected.center_id || centerId, expected.session_id || expected.sessionId, expected.student_id || expected.studentId, expected.created_at || new Date().toISOString()]);
+        for (const rawExpected of data.expectedStudents) {
+          const expected = rawExpected;
+          const expectedCenterId = expected.center_id || centerId;
+          const expectedSessionId = expected.session_id || expected.sessionId;
+          const expectedStudentId = expected.student_id || expected.studentId;
+          const existingExpected = db.getFirstSync<{ sessionId: string; studentId: string }>(
+            `SELECT session_id as sessionId, student_id as studentId
+               FROM session_expected_students
+              WHERE center_id = ? AND id = ?`,
+            [expectedCenterId, expected.id],
+          );
+          if (
+            existingExpected &&
+            (existingExpected.sessionId !== expectedSessionId ||
+              existingExpected.studentId !== expectedStudentId)
+          ) {
+            Logger.warn("sync", "session_expected_student_history_preserved", {
+              centerId: expectedCenterId,
+              metadata: {
+                expectedStudentId: expected.id,
+                localSessionId: existingExpected.sessionId,
+                remoteSessionId: expectedSessionId,
+                localStudentId: existingExpected.studentId,
+                remoteStudentId: expectedStudentId,
+              },
+            });
+          }
+          db.runSync(
+            `INSERT OR IGNORE INTO session_expected_students
+               (id, center_id, session_id, student_id, created_at)
+             VALUES (?, ?, ?, ?, ?)`,
+            [
+              expected.id,
+              expectedCenterId,
+              expectedSessionId,
+              expectedStudentId,
+              expected.created_at || new Date().toISOString(),
+            ],
+          );
         }
       }
 
@@ -2357,15 +3893,15 @@ export class SyncEngine {
       }
 
       if (Array.isArray(data.attendance)) {
-        for (const a of data.attendance) {
-          db.runSync(`INSERT INTO attendance (id, center_id, student_id, session_id, check_in_time, status, is_late, attendance_type, original_absence_id, operation_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET status=excluded.status, check_in_time=excluded.check_in_time, is_late=excluded.is_late, attendance_type=excluded.attendance_type, original_absence_id=excluded.original_absence_id
-            ON CONFLICT(session_id, student_id) DO UPDATE SET status=excluded.status, check_in_time=excluded.check_in_time, is_late=excluded.is_late, attendance_type=excluded.attendance_type, original_absence_id=excluded.original_absence_id`,
-            [a.id, a.center_id || centerId, a.student_id || a.studentId, a.session_id || a.sessionId, a.check_in_time || a.checkInTime || a.created_at || new Date().toISOString(), (a.is_late || a.isLate) ? "late" : (a.status || "present"), a.is_late || a.isLate ? 1 : 0, a.attendance_type || a.attendanceType || "present", a.original_absence_id || a.originalAbsenceId || null, a.operation_id || a.operationId || `bootstrap-attendance-${a.id}`]);
+        for (const attendance of data.attendance) {
+          SyncRepository.upsertPulledAttendance(db, centerId, attendance);
         }
         if (Array.isArray(data.absenceNotes)) {
-          for (const note of data.absenceNotes) {
+          for (const rawNote of data.absenceNotes) {
+            const note = SyncRepository.canonicalizeSessionReferences(
+              centerId,
+              rawNote,
+            );
             db.runSync(
               `INSERT INTO absence_notes
                 (id, center_id, session_id, student_id, note_text, created_at,
@@ -2391,11 +3927,15 @@ export class SyncEngine {
         }
       }
       if (Array.isArray(data.payments)) {
-        for (const p of data.payments) {
+        for (const rawPayment of data.payments) {
+          const p = SyncRepository.canonicalizeSessionReferences(
+            centerId,
+            rawPayment,
+          );
           db.runSync(`INSERT INTO payments (id, operation_id, center_id, student_id, amount, payment_type, payment_method, payment_date, notes, debt_cycle_id, session_id, subscription_id, is_reversed, created_at, user_id)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET amount=excluded.amount, payment_type=excluded.payment_type, payment_method=excluded.payment_method, payment_date=excluded.payment_date, notes=excluded.notes, debt_cycle_id=excluded.debt_cycle_id, session_id=excluded.session_id, subscription_id=excluded.subscription_id, is_reversed=excluded.is_reversed, updated_at=excluded.created_at
-            ON CONFLICT(operation_id) DO UPDATE SET amount=excluded.amount, payment_type=excluded.payment_type, payment_method=excluded.payment_method, payment_date=excluded.payment_date, notes=excluded.notes, debt_cycle_id=excluded.debt_cycle_id, session_id=excluded.session_id, subscription_id=excluded.subscription_id, is_reversed=excluded.is_reversed, updated_at=excluded.created_at`,
+            ON CONFLICT(id) DO UPDATE SET amount=excluded.amount, payment_type=excluded.payment_type, payment_method=excluded.payment_method, payment_date=excluded.payment_date, notes=excluded.notes, debt_cycle_id=excluded.debt_cycle_id, subscription_id=excluded.subscription_id, is_reversed=excluded.is_reversed, updated_at=excluded.created_at
+            ON CONFLICT(operation_id) DO UPDATE SET amount=excluded.amount, payment_type=excluded.payment_type, payment_method=excluded.payment_method, payment_date=excluded.payment_date, notes=excluded.notes, debt_cycle_id=excluded.debt_cycle_id, subscription_id=excluded.subscription_id, is_reversed=excluded.is_reversed, updated_at=excluded.created_at`,
             [p.id, p.operation_id || p.operationId || `bootstrap-payment-${p.id}`, p.center_id || centerId, p.student_id || p.studentId, Number(p.amount || 0), p.payment_type || p.paymentType || "session", p.payment_method || p.paymentMethod || "cash", p.payment_date || p.paymentDate || (p.created_at || p.createdAt || new Date().toISOString()).slice(0, 10), p.notes || null, p.debt_cycle_id || p.debtCycleId || null, p.session_id || p.sessionId || null, p.subscription_id || p.subscriptionId || null, p.is_reversed ? 1 : 0, p.created_at || p.createdAt || new Date().toISOString(), p.user_id || p.userId || "system"]);
         }
       }
@@ -2405,20 +3945,22 @@ export class SyncEngine {
           const paymentId = r.payment_id || r.paymentId;
           const payment = paymentById.get(paymentId) as any;
           const reversalOperationId = r.operation_id || r.operationId || `bootstrap-reversal-${r.id}`;
-          const localReversal = db.getFirstSync<{ operation_id: string }>(
-            "SELECT operation_id FROM payment_reversals WHERE center_id = ? AND payment_id = ?",
-            [centerId, paymentId],
-          );
-          if (localReversal && localReversal.operation_id !== reversalOperationId) {
+          if (
+            SyncRepository.upsertPulledPaymentReversal(
+              db,
+              centerId,
+              {
+                ...r,
+                student_id: r.student_id || r.studentId || payment?.student_id || "",
+              },
+              reversalOperationId,
+            )
+          ) {
             db.runSync(
-              "DELETE FROM payment_reversals WHERE center_id = ? AND payment_id = ?",
-              [centerId, paymentId],
+              "UPDATE payments SET is_reversed = 1, updated_at = ? WHERE id = ? AND center_id = ?",
+              [new Date().toISOString(), paymentId, centerId],
             );
           }
-          db.runSync(`INSERT INTO payment_reversals (id, operation_id, center_id, payment_id, student_id, reversed_amount, reason, reversed_by, reversed_at, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(operation_id) DO NOTHING`,
-            [r.id, reversalOperationId, r.center_id || centerId, paymentId, r.student_id || r.studentId || payment?.student_id || "", Number(r.reversed_amount || r.reversedAmount || 0), r.reason || "", r.reversed_by || r.reversedBy || r.user_id || "system", r.reversed_at || r.reversedAt || r.created_at || new Date().toISOString(), r.created_at || new Date().toISOString()]);
         }
       }
       if (Array.isArray(data.debtAdjustments)) {
@@ -2430,11 +3972,15 @@ export class SyncEngine {
         }
       }
       if (Array.isArray(data.advanceCoverages)) {
-        for (const c of data.advanceCoverages) {
-          db.runSync(`INSERT INTO advance_coverages (id, operation_id, center_id, student_id, advance_session_id, target_future_session_id, created_by, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET target_future_session_id=excluded.target_future_session_id`,
-            [c.id, c.operation_id || c.operationId || `bootstrap-coverage-${c.id}`, c.center_id || centerId, c.student_id || c.studentId, c.advance_session_id || c.advanceSessionId, c.target_future_session_id || c.targetFutureSessionId, c.created_by || c.createdBy || "system", c.created_at || new Date().toISOString()]);
+        for (const rawCoverage of data.advanceCoverages) {
+          SyncRepository.upsertPulledAdvanceCoverage(
+            db,
+            centerId,
+            SyncRepository.canonicalizeSessionReferences(
+              centerId,
+              rawCoverage,
+            ),
+          );
         }
       }
       if (Array.isArray(data.notificationTemplates)) {
@@ -2481,7 +4027,8 @@ export class SyncEngine {
         }
       }
       if (Array.isArray(data.notificationEvents)) {
-        for (const e of data.notificationEvents) {
+        for (const rawEvent of data.notificationEvents) {
+          const e = rawEvent;
           db.runSync(`INSERT INTO notification_events (id, operation_id, center_id, student_id, session_id, attendance_id, event_type, template_id, created_by, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET event_type=excluded.event_type, template_id=excluded.template_id`,
@@ -2497,7 +4044,11 @@ export class SyncEngine {
         }
       }
       if (Array.isArray(data.sessionClosings)) {
-        for (const c of data.sessionClosings) {
+        for (const rawClosing of data.sessionClosings) {
+          const c = SyncRepository.canonicalizeSessionReferences(
+            centerId,
+            rawClosing,
+          );
           db.runSync(`INSERT INTO session_closing_records (id, operation_id, center_id, session_id, action, reason, performed_by, performed_at, previous_status, new_status, total_attendance, total_session_payments, created_at)
             VALUES (?, ?, ?, ?, 'close', ?, ?, ?, 'open', 'closed', ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET new_status='closed', total_attendance=excluded.total_attendance, total_session_payments=excluded.total_session_payments`,
@@ -2538,6 +4089,48 @@ export class SyncEngine {
       SyncRepository.setResetGeneration(centerId, serverResetGeneration);
       SyncRepository.requeueEntitiesMissingFromServer(centerId, data);
       });
+      const arrivedSessionIds = new Set<string>();
+      const arrivedAttendanceIds = new Set<string>();
+      const arrivedEntityIds: EntityArrivalMap = new Map();
+      for (const student of data.students || []) {
+        addEntityArrival(arrivedEntityIds, "student", student.id || student.studentId);
+      }
+      for (const session of data.sessions || []) {
+        const sessionId = session.id || session.sessionId;
+        if (sessionId) {
+          arrivedSessionIds.add(String(sessionId));
+          addEntityArrival(arrivedEntityIds, "session", sessionId);
+        }
+      }
+      for (const mapping of data.sessionAliases || []) {
+        if (mapping.localSessionId) {
+          arrivedSessionIds.add(String(mapping.localSessionId));
+          addEntityArrival(arrivedEntityIds, "session", mapping.localSessionId);
+        }
+        if (mapping.canonicalSessionId) {
+          arrivedSessionIds.add(String(mapping.canonicalSessionId));
+          addEntityArrival(arrivedEntityIds, "session", mapping.canonicalSessionId);
+        }
+      }
+      for (const attendance of data.attendance || []) {
+        const attendanceId = attendance.id || attendance.attendanceId;
+        if (attendanceId) {
+          arrivedAttendanceIds.add(String(attendanceId));
+          addEntityArrival(arrivedEntityIds, "attendance", attendanceId);
+        }
+      }
+      for (const debtCycle of data.debtCycles || []) {
+        addEntityArrival(arrivedEntityIds, "debt_cycle", debtCycle.id || debtCycle.debtCycleId);
+      }
+      for (const event of data.notificationEvents || []) {
+        addEntityArrival(arrivedEntityIds, "notification_event", event.id || event.eventId);
+      }
+      SyncRepository.requeueResolvedAttendanceDependencies(
+        centerId,
+        arrivedSessionIds,
+        arrivedAttendanceIds,
+        arrivedEntityIds,
+      );
       this.queueLocalRecordsMissingFromSnapshot(centerId, data);
       
       // Update bootstrap timestamp
@@ -2567,14 +4160,80 @@ export class SyncEngine {
   /**
    * Applies server stream changes incrementally to local SQLite.
    */
-  static applyServerChanges(centerId: string, changes: any[]): void {
+  static applyServerChanges(
+    centerId: string,
+    changes: any[],
+    sessionMappings: Array<{ localSessionId: string; canonicalSessionId: string }> = [],
+  ): void {
     // Apply the complete pull batch atomically. The caller advances the
     // server cursor only after this transaction commits successfully.
+    const arrivedSessionIds = new Set<string>();
+    const arrivedAttendanceIds = new Set<string>();
+    const arrivedEntityIds: EntityArrivalMap = new Map();
+    for (const mapping of sessionMappings) {
+      if (mapping.localSessionId) {
+        arrivedSessionIds.add(String(mapping.localSessionId));
+        addEntityArrival(arrivedEntityIds, "session", mapping.localSessionId);
+      }
+      if (mapping.canonicalSessionId) {
+        arrivedSessionIds.add(String(mapping.canonicalSessionId));
+        addEntityArrival(arrivedEntityIds, "session", mapping.canonicalSessionId);
+      }
+    }
+    for (const change of changes) {
+      const entityType = canonicalEntityType(String(change.entityType || ""));
+      const rawData = change.data || {};
+      const payload =
+        rawData.session ||
+        rawData.student ||
+        rawData.attendance ||
+        rawData.coverage ||
+        rawData.payment ||
+        rawData.event ||
+        rawData.delivery ||
+        rawData.debtCycle ||
+        rawData;
+      const entityId =
+        payload.id ||
+        payload.eventId ||
+        payload.sessionId ||
+        payload.session_id ||
+        change.entityId;
+      if (entityId) addEntityArrival(arrivedEntityIds, entityType, entityId);
+      if (entityType === "session") {
+        for (const sessionId of [
+          change.entityId,
+          payload.id,
+          payload.session_id,
+          payload.sessionId,
+        ]) {
+          if (sessionId) {
+            arrivedSessionIds.add(String(sessionId));
+            addEntityArrival(arrivedEntityIds, "session", sessionId);
+          }
+        }
+      }
+      if (entityType === "attendance" || entityType === "makeup") {
+        const attendanceId = payload.id || change.entityId;
+        if (attendanceId) {
+          arrivedAttendanceIds.add(String(attendanceId));
+          addEntityArrival(arrivedEntityIds, "attendance", attendanceId);
+        }
+        const sessionId = payload.session_id || payload.sessionId;
+        if (sessionId) {
+          arrivedSessionIds.add(String(sessionId));
+          addEntityArrival(arrivedEntityIds, "session", sessionId);
+        }
+      }
+    }
     DatabaseService.runInTransaction((db) => {
       for (const change of changes) {
         try {
         const entityType = change.entityType;
-        const data = change.data || {};
+        const data = SyncRepository.canonicalizeSessionReferences(
+          centerId,
+          change.data || {},
+        );
 
         if (entityType === "student_color") {
           const studentId = String(data.studentId || data.student_id || change.entityId || "");
@@ -2839,10 +4498,49 @@ export class SyncEngine {
           }
         } else if (entityType === "session" || entityType === "session_created") {
           const session = data.session || data;
-          const sessionId = session.id || session.sessionId || change.entityId;
-          const existingSession = db.getFirstSync<any>(`SELECT group_id, session_date, start_time, end_time, schedule_id, subject_id, teacher_id, session_price, late_after_minutes, created_at FROM sessions WHERE center_id = ? AND id = ?`, [centerId, sessionId]);
+          const receivedSessionId = String(
+            session.id || session.sessionId || change.entityId || "",
+          );
+          const sessionId = SyncRepository.resolveSessionAlias(
+            centerId,
+            receivedSessionId,
+          );
+          const existingSession = db.getFirstSync<any>(
+            `SELECT center_id, group_id, session_date, start_time, end_time,
+                    schedule_id, subject_id, teacher_id, session_price,
+                    late_after_minutes, status, created_at, updated_at
+               FROM sessions WHERE id = ?`,
+            [sessionId],
+          );
+          if (
+            existingSession &&
+            String(existingSession.center_id) !== String(centerId)
+          ) {
+            throw new Error("Pulled session ID is already owned by another center.");
+          }
           const sessionAction = String(session.action || change.action || "").toLowerCase();
           const requestedSessionStatus = sessionAction === "close" ? "closed" : sessionAction === "reopen" ? "open" : (session.status || "open");
+          const effectiveSessionStatus = SyncRepository.resolvePulledSessionStatus(
+            existingSession?.status,
+            requestedSessionStatus,
+            sessionAction,
+          );
+          const incomingUpdatedAt =
+            session.updated_at ||
+            session.updatedAt ||
+            change.serverTimestamp ||
+            new Date().toISOString();
+          const effectiveUpdatedAt =
+            String(existingSession?.status || "").toLowerCase() === "cancelled"
+              ? existingSession.updated_at || incomingUpdatedAt
+              : incomingUpdatedAt;
+          const incomingSessionCreatedAt =
+            session.startedAt ||
+            session.started_at ||
+            session.created_at ||
+            session.createdAt ||
+            existingSession?.created_at ||
+            new Date().toISOString();
           SyncRepository.reconcileSessionNaturalKey(
             db,
             centerId,
@@ -2850,6 +4548,7 @@ export class SyncEngine {
             session.group_id || session.groupId || existingSession?.group_id || "",
             session.schedule_id || session.scheduleId || existingSession?.schedule_id || null,
             session.session_date || session.sessionDate || existingSession?.session_date || "",
+            effectiveSessionStatus,
           );
           db.runSync(
             `INSERT INTO sessions
@@ -2860,22 +4559,34 @@ export class SyncEngine {
                session_date = excluded.session_date,
                start_time = excluded.start_time,
                end_time = excluded.end_time,
-               status = excluded.status,
                schedule_id = excluded.schedule_id,
                subject_id = excluded.subject_id,
                teacher_id = excluded.teacher_id,
                session_price = excluded.session_price,
                late_after_minutes = excluded.late_after_minutes,
-               updated_at = excluded.updated_at
-             ON CONFLICT(center_id, group_id, schedule_id, session_date) DO UPDATE SET
-               start_time = excluded.start_time,
-               end_time = excluded.end_time,
-               status = excluded.status,
-               subject_id = excluded.subject_id,
-               teacher_id = excluded.teacher_id,
-               session_price = excluded.session_price,
-               late_after_minutes = excluded.late_after_minutes,
-               updated_at = excluded.updated_at`,
+               status = CASE
+                 WHEN sessions.status = 'cancelled' THEN 'cancelled'
+                 WHEN excluded.status = 'cancelled' THEN 'cancelled'
+                 WHEN sessions.status = 'closed' AND excluded.status NOT IN ('closed', 'cancelled')
+                   THEN 'closed'
+                 ELSE excluded.status
+               END,
+               created_at = CASE
+                 WHEN sessions.created_at IS NULL
+                   OR (
+                     julianday(excluded.created_at) IS NOT NULL
+                     AND (
+                       julianday(sessions.created_at) IS NULL
+                       OR julianday(excluded.created_at) < julianday(sessions.created_at)
+                     )
+                   )
+                   THEN excluded.created_at
+                 ELSE sessions.created_at
+               END,
+               updated_at = CASE
+                 WHEN sessions.status = 'cancelled' THEN sessions.updated_at
+                 ELSE excluded.updated_at
+               END`,
             [
               sessionId,
               centerId,
@@ -2883,14 +4594,14 @@ export class SyncEngine {
               session.session_date || session.sessionDate || existingSession?.session_date || new Date().toISOString().slice(0,10),
               session.start_time || session.startTime || existingSession?.start_time || "00:00",
               session.end_time || session.endTime || existingSession?.end_time || "00:00",
-              requestedSessionStatus,
+              effectiveSessionStatus,
               session.schedule_id || session.scheduleId || existingSession?.schedule_id || null,
               session.subject_id || session.subjectId || existingSession?.subject_id || null,
               session.teacher_id || session.teacherId || existingSession?.teacher_id || null,
               Number(session.session_price ?? session.sessionPrice ?? existingSession?.session_price ?? 0),
               Number(session.late_after_minutes ?? session.lateAfterMinutes ?? existingSession?.late_after_minutes ?? 15),
-              session.created_at || session.createdAt || existingSession?.created_at || new Date().toISOString(),
-              session.updated_at || session.updatedAt || new Date().toISOString(),
+              incomingSessionCreatedAt,
+              effectiveUpdatedAt,
             ],
           );
           if (Array.isArray(session.expectedStudentIds)) {
@@ -3155,24 +4866,14 @@ export class SyncEngine {
         ) {
           const att = data;
           const attId = att.id || change.entityId;
-          db.runSync(
-            `INSERT INTO attendance (id, center_id, student_id, session_id, check_in_time, status, is_late, attendance_type, original_absence_id, operation_id)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT(id) DO UPDATE SET status=excluded.status, check_in_time=excluded.check_in_time, is_late=excluded.is_late, attendance_type=excluded.attendance_type, original_absence_id=excluded.original_absence_id
-             ON CONFLICT(session_id, student_id) DO UPDATE SET status=excluded.status, check_in_time=excluded.check_in_time, is_late=excluded.is_late, attendance_type=excluded.attendance_type, original_absence_id=excluded.original_absence_id`,
-            [
-              attId,
-              centerId,
-              att.student_id || att.studentId,
-              att.session_id || att.sessionId,
-              att.check_in_time || att.checkInTime || new Date().toISOString(),
-              att.is_late || att.isLate ? "late" : (att.status || "present"),
-              att.is_late || att.isLate ? 1 : 0,
-              att.attendance_type || att.attendanceType || "present",
-              att.original_absence_id || att.originalAbsenceId || null,
-              change.operationId || `srv-op-${change.sequenceNumber || Date.now()}`,
-            ],
-          );
+          SyncRepository.upsertPulledAttendance(db, centerId, {
+            ...att,
+            id: attId,
+            operation_id:
+              att.operation_id ||
+              change.operationId ||
+              `srv-op-${change.sequenceNumber || Date.now()}`,
+          });
         } else if (entityType === "absence_note") {
           const note = data.note || data;
           db.runSync(
@@ -3202,8 +4903,8 @@ export class SyncEngine {
           db.runSync(
             `INSERT INTO payments (id, operation_id, center_id, student_id, amount, payment_type, payment_method, payment_date, notes, debt_cycle_id, session_id, subscription_id, is_reversed, created_at, user_id)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT(id) DO UPDATE SET amount=excluded.amount, payment_type=excluded.payment_type, payment_method=excluded.payment_method, payment_date=excluded.payment_date, notes=excluded.notes, debt_cycle_id=excluded.debt_cycle_id, session_id=excluded.session_id, subscription_id=excluded.subscription_id, is_reversed=excluded.is_reversed
-             ON CONFLICT(operation_id) DO UPDATE SET amount=excluded.amount, payment_type=excluded.payment_type, payment_method=excluded.payment_method, payment_date=excluded.payment_date, notes=excluded.notes, debt_cycle_id=excluded.debt_cycle_id, session_id=excluded.session_id, subscription_id=excluded.subscription_id, is_reversed=excluded.is_reversed`,
+             ON CONFLICT(id) DO UPDATE SET amount=excluded.amount, payment_type=excluded.payment_type, payment_method=excluded.payment_method, payment_date=excluded.payment_date, notes=excluded.notes, debt_cycle_id=excluded.debt_cycle_id, subscription_id=excluded.subscription_id, is_reversed=excluded.is_reversed
+             ON CONFLICT(operation_id) DO UPDATE SET amount=excluded.amount, payment_type=excluded.payment_type, payment_method=excluded.payment_method, payment_date=excluded.payment_date, notes=excluded.notes, debt_cycle_id=excluded.debt_cycle_id, subscription_id=excluded.subscription_id, is_reversed=excluded.is_reversed`,
             [
               payId,
               change.operationId || pay.operation_id || pay.operationId || `srv-pay-${payId}`,
@@ -3229,21 +4930,26 @@ export class SyncEngine {
           const rev = data.reversal || data;
           const paymentId = rev.payment_id || rev.paymentId;
           const reversalOperationId = change.operationId || `srv-reversal-${rev.id || change.entityId}`;
-          db.runSync(`UPDATE payments SET is_reversed = 1, updated_at = ? WHERE id = ? AND center_id = ?`, [new Date().toISOString(), paymentId, centerId]);
-          const localReversal = db.getFirstSync<{ operation_id: string }>(
-            "SELECT operation_id FROM payment_reversals WHERE center_id = ? AND payment_id = ?",
+          const payment = db.getFirstSync<{ id: string }>(
+            "SELECT id FROM payments WHERE center_id = ? AND id = ?",
             [centerId, paymentId],
           );
-          if (localReversal && localReversal.operation_id !== reversalOperationId) {
+          if (!payment) {
+            throw new Error("PAYMENT_REVERSAL_PAYMENT_NOT_FOUND: payment has not synchronized yet.");
+          }
+          if (
+            SyncRepository.upsertPulledPaymentReversal(
+              db,
+              centerId,
+              rev,
+              reversalOperationId,
+            )
+          ) {
             db.runSync(
-              "DELETE FROM payment_reversals WHERE center_id = ? AND payment_id = ?",
-              [centerId, paymentId],
+              "UPDATE payments SET is_reversed = 1, updated_at = ? WHERE id = ? AND center_id = ?",
+              [new Date().toISOString(), paymentId, centerId],
             );
           }
-          db.runSync(`INSERT INTO payment_reversals (id, operation_id, center_id, payment_id, student_id, reversed_amount, reason, reversed_by, reversed_at, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(operation_id) DO NOTHING`,
-            [rev.id || change.entityId, reversalOperationId, centerId, paymentId, rev.student_id || rev.studentId || "", Number(rev.reversed_amount ?? rev.reversedAmount ?? 0), rev.reason || "", rev.reversed_by || rev.reversedBy || "system", rev.reversed_at || rev.reversedAt || new Date().toISOString(), rev.created_at || new Date().toISOString()]);
         } else if (entityType === "debt_adjustment") {
           const a = data.adjustment || data;
           db.runSync(`INSERT INTO debt_adjustments (id, operation_id, center_id, student_id, enrollment_id, debt_cycle_id, amount_before, adjustment_amount, amount_after, reason, created_by, created_at)
@@ -3279,9 +4985,19 @@ export class SyncEngine {
            upsertLocalDebtCycle(db, { ...c, id: c.id || change.entityId }, centerId);
         } else if (entityType === "advance_coverage") {
           const c = data.coverage || data;
-          db.runSync(`INSERT INTO advance_coverages (id, operation_id, center_id, student_id, advance_session_id, target_future_session_id, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET target_future_session_id=excluded.target_future_session_id`,
-            [c.id || change.entityId, change.operationId || `srv-coverage-${c.id || change.entityId}`, centerId, c.student_id || c.studentId, c.advance_session_id || c.advanceSessionId, c.target_future_session_id || c.targetFutureSessionId, c.created_by || c.createdBy || "system", c.created_at || new Date().toISOString()]);
+          SyncRepository.upsertPulledAdvanceCoverage(
+            db,
+            centerId,
+            {
+              ...c,
+              id: c.id || change.entityId,
+              operation_id:
+                c.operation_id ||
+                c.operationId ||
+                change.operationId ||
+                `srv-coverage-${c.id || change.entityId}`,
+            },
+          );
         } else if (entityType === "homework_evaluation_status") {
           const status = data.status && typeof data.status === "object" ? data.status : data;
           if (status.name) {
@@ -3407,12 +5123,62 @@ export class SyncEngine {
             [t.id || t.templateId || change.entityId, centerId, t.event_type || t.eventType, t.channel, t.template_body || t.templateBody || "", t.is_default ? 1 : 0, t.created_by || t.createdBy || "system", t.updated_by || t.updatedBy || null, t.created_at || t.createdAt || new Date().toISOString(), t.updated_at || t.updatedAt || new Date().toISOString()]);
         } else if (entityType === "session_closing") {
           const c = data.closing || data;
-          const sessionId = c.session_id || c.sessionId || change.entityId;
-          const reopen = String(c.action || change.action || "").toLowerCase() === "reopen";
-          db.runSync(`UPDATE sessions SET status=?, updated_at=? WHERE id=? AND center_id=?`, [reopen ? "open" : "closed", new Date().toISOString(), sessionId, centerId]);
-          if (reopen) db.runSync(`DELETE FROM session_closing_records WHERE center_id=? AND session_id=?`, [centerId, sessionId]);
-          else db.runSync(`INSERT INTO session_closing_records (id, operation_id, center_id, session_id, action, reason, performed_by, performed_at, previous_status, new_status, total_attendance, total_session_payments, created_at) VALUES (?, ?, ?, ?, 'close', ?, ?, ?, 'open', 'closed', ?, ?, ?)
-            ON CONFLICT(operation_id) DO NOTHING`, [c.id || `close-${sessionId}`, change.operationId || `srv-close-${sessionId}`, centerId, sessionId, c.reason || null, c.performed_by || c.performedBy || "system", c.performed_at || c.performedAt || new Date().toISOString(), Number(c.total_attendance ?? c.totalAttendance ?? 0), Number(c.total_session_payments ?? c.totalSessionPayments ?? 0), new Date().toISOString()]);
+          const incomingSessionId = c.session_id || c.sessionId || change.entityId;
+          const sessionId = SyncRepository.resolveSessionAlias(
+            centerId,
+            String(incomingSessionId || ""),
+          );
+          const session = db.getFirstSync<{ status: string }>(
+            "SELECT status FROM sessions WHERE center_id = ? AND id = ?",
+            [centerId, sessionId],
+          );
+          if (!session) {
+            throw new Error("SESSION_CLOSING_TARGET_NOT_FOUND: session has not synchronized yet.");
+          }
+          const action = String(c.action || change.action || "close").toLowerCase();
+          const reopen = action === "reopen";
+          const eventAction = reopen ? "reopen" : "close";
+          const previousStatus = String(session.status || "open");
+          const newStatus = SyncRepository.resolvePulledSessionStatus(
+            previousStatus,
+            c.new_status || c.newStatus || (reopen ? "open" : "closed"),
+            eventAction,
+          );
+          if (newStatus !== previousStatus) {
+            db.runSync(
+              "UPDATE sessions SET status = ?, updated_at = ? WHERE id = ? AND center_id = ?",
+              [newStatus, new Date().toISOString(), sessionId, centerId],
+            );
+          }
+          const operationId = String(
+            change.operationId ||
+              c.operation_id ||
+              c.operationId ||
+              `srv-session-closing-${c.id || sessionId}`,
+          );
+          db.runSync(
+            `INSERT INTO session_closing_records
+               (id, operation_id, center_id, session_id, action, reason,
+                performed_by, performed_at, previous_status, new_status,
+                total_attendance, total_session_payments, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(operation_id) DO NOTHING`,
+            [
+              c.id || `closing-${operationId}`,
+              operationId,
+              centerId,
+              sessionId,
+              eventAction,
+              c.reason || null,
+              c.performed_by || c.performedBy || "system",
+              c.performed_at || c.performedAt || new Date().toISOString(),
+              previousStatus,
+              newStatus,
+              Number(c.total_attendance ?? c.totalAttendance ?? 0),
+              Number(c.total_session_payments ?? c.totalSessionPayments ?? 0),
+              new Date().toISOString(),
+            ],
+          );
         } else if (entityType === "daily_closing") {
           const c = data.closing || data;
           const dailyAction = String(c.action || change.action || "").toLowerCase();
@@ -3437,6 +5203,12 @@ export class SyncEngine {
         }
       }
     });
+    SyncRepository.requeueResolvedAttendanceDependencies(
+      centerId,
+      arrivedSessionIds,
+      arrivedAttendanceIds,
+      arrivedEntityIds,
+    );
   }
 
   /**
@@ -3616,8 +5388,26 @@ export class SyncEngine {
             hasMore = false;
             continue;
           }
+          SyncRepository.recordSessionMappings(
+            centerId,
+            pullResponse.sessionMappings || [],
+          );
           if (pullResponse.changes && pullResponse.changes.length > 0) {
-            this.applyServerChanges(centerId, pullResponse.changes);
+            this.applyServerChanges(
+              centerId,
+              pullResponse.changes,
+              pullResponse.sessionMappings || [],
+            );
+          } else {
+            const arrivedSessionIds = new Set<string>();
+            for (const mapping of pullResponse.sessionMappings || []) {
+              if (mapping.localSessionId) arrivedSessionIds.add(String(mapping.localSessionId));
+              if (mapping.canonicalSessionId) arrivedSessionIds.add(String(mapping.canonicalSessionId));
+            }
+            SyncRepository.requeueResolvedAttendanceDependencies(
+              centerId,
+              arrivedSessionIds,
+            );
           }
           const nextCursor = pullResponse.nextCursor || currentCursor;
           if (nextCursor === currentCursor && (pullResponse.hasMore || (pullResponse.changes?.length || 0) > 0)) {
@@ -3662,26 +5452,32 @@ export class SyncEngine {
           SyncRepository.markAsSyncing(op.operationId);
         }
 
-        const payloads: SyncOperationPayload[] = pendingOps.map((op) => ({
-          operationId: op.operationId,
-          centerId: op.centerId,
-          userId: op.userId,
-          deviceId: op.deviceId,
-          operationType: op.operationType,
-          entityType: op.entityType,
-          entityId: op.entityId,
-          payload:
-            typeof op.payload === "string"
-              ? JSON.parse(op.payload || "{}")
-              : op.payload,
-          createdAt: op.createdAt,
-          retryCount: op.retryCount,
-        }));
+        const payloads: SyncOperationPayload[] = pendingOps.map((op) =>
+          SyncRepository.prepareOperationForPush({
+            operationId: op.operationId,
+            centerId: op.centerId,
+            userId: op.userId,
+            deviceId: op.deviceId,
+            operationType: op.operationType,
+            entityType: op.entityType,
+            entityId: op.entityId,
+            payload:
+              typeof op.payload === "string"
+                ? JSON.parse(op.payload || "{}")
+                : op.payload,
+            createdAt: op.createdAt,
+            retryCount: op.retryCount,
+          }),
+        );
 
         try {
           const pushResponse = await this.adapter.pushOperations(
             centerId,
             payloads,
+          );
+          SyncRepository.recordSessionMappings(
+            centerId,
+            pushResponse.sessionMappings || [],
           );
 
           // Handle successfully synced operations
@@ -3730,6 +5526,62 @@ export class SyncEngine {
             );
             conflicts++;
           }
+          const arrivedSessionIds = new Set<string>();
+          const arrivedAttendanceIds = new Set<string>();
+          const arrivedEntityIds: EntityArrivalMap = new Map();
+          for (const mapping of pushResponse.sessionMappings || []) {
+            if (mapping.localSessionId) {
+              arrivedSessionIds.add(String(mapping.localSessionId));
+              addEntityArrival(arrivedEntityIds, "session", mapping.localSessionId);
+            }
+            if (mapping.canonicalSessionId) {
+              arrivedSessionIds.add(String(mapping.canonicalSessionId));
+              addEntityArrival(arrivedEntityIds, "session", mapping.canonicalSessionId);
+            }
+          }
+          for (const operation of pendingOps) {
+            if (!pushResponse.syncedOperationIds.includes(operation.operationId)) continue;
+            const pushedPayload = payloads.find(
+              (payload) => payload.operationId === operation.operationId,
+            )?.payload as any;
+            const entityType = canonicalEntityType(String(operation.entityType || ""));
+            const payloadEntityId =
+              pushedPayload?.id ||
+              pushedPayload?.eventId ||
+              pushedPayload?.sessionId ||
+              pushedPayload?.session_id ||
+              operation.entityId;
+            addEntityArrival(arrivedEntityIds, entityType, payloadEntityId);
+            if (entityType === "session") {
+              const sessionId =
+                pushedPayload?.id ||
+                pushedPayload?.sessionId ||
+                pushedPayload?.session_id ||
+                operation.entityId;
+              if (sessionId) {
+                arrivedSessionIds.add(String(sessionId));
+                addEntityArrival(arrivedEntityIds, "session", sessionId);
+              }
+            }
+            if (entityType === "attendance" || entityType === "makeup") {
+              const attendanceId = pushedPayload?.id || operation.entityId;
+              const sessionId = pushedPayload?.sessionId || pushedPayload?.session_id;
+              if (attendanceId) {
+                arrivedAttendanceIds.add(String(attendanceId));
+                addEntityArrival(arrivedEntityIds, "attendance", attendanceId);
+              }
+              if (sessionId) {
+                arrivedSessionIds.add(String(sessionId));
+                addEntityArrival(arrivedEntityIds, "session", sessionId);
+              }
+            }
+          }
+          SyncRepository.requeueResolvedAttendanceDependencies(
+            centerId,
+            arrivedSessionIds,
+            arrivedAttendanceIds,
+            arrivedEntityIds,
+          );
 
           // Push confirms the local operations were accepted by the server.
           // The local pull cursor must NOT be advanced from a Push response —

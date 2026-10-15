@@ -1,5 +1,6 @@
 import { Ionicons } from "@expo/vector-icons";
-import React, { useEffect, useMemo, useState } from "react";
+import { useFocusEffect } from "expo-router";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -25,6 +26,7 @@ import { Student, Group } from "../../shared/types";
 import { GroupRepository } from "../../features/groups/GroupRepository";
 import { GroupScheduleRepository } from "../../features/groups/GroupScheduleRepository";
 import { AttendanceSessionService } from "../../features/attendance/AttendanceSessionService";
+import { SessionDateService } from "../../features/sessions/SessionDateService";
 import {
   NotificationDelivery,
   NotificationEvent,
@@ -48,6 +50,7 @@ export default function NotificationsScreen() {
   const styles = useMemo(() => createStyles(), [colors]);
   const services = useServiceVisibility();
   const { currentUser, activeCenterId } = useAuthStore();
+  const notificationsEnabled = services.isEnabled("notifications");
   const [activeTab, setActiveTab] = useState<"history" | "templates" | "compose">("history");
 
   const [loading, setLoading] = useState(false);
@@ -66,13 +69,38 @@ export default function NotificationsScreen() {
   const [smsRecipient, setSmsRecipient] = useState<"parent" | "student">("parent");
   const [smsMessage, setSmsMessage] = useState("");
   const [sendingSms, setSendingSms] = useState(false);
+  const [currentSessionDate, setCurrentSessionDate] = useState<string | null>(null);
+  const [sessionDateError, setSessionDateError] = useState("");
 
   // Editing template modal state
   const [editingTemplate, setEditingTemplate] = useState<NotificationTemplate | null>(null);
   const [templateBodyInput, setTemplateBodyInput] = useState("");
 
-  if (!services.loaded) return <View style={styles.centered}><Text style={styles.loadingText}>جار تحميل حالة الخدمات...</Text></View>;
-  if (!services.isEnabled("notifications")) return <View style={styles.centered}><Text style={styles.loadingText}>خدمة الإشعارات غير مفعلة لهذا المركز.</Text></View>;
+  const refreshCenterSessionDate = useCallback((): string | null => {
+    if (!activeCenterId) {
+      setCurrentSessionDate(null);
+      setSessionDateError("يجب تحديد المركز لحساب قائمة الطلاب.");
+      return null;
+    }
+    try {
+      const sessionDate = SessionDateService.getCurrentSessionDate(activeCenterId);
+      setCurrentSessionDate(sessionDate);
+      setSessionDateError("");
+      return sessionDate;
+    } catch (error) {
+      console.warn("Failed to resolve center session date for SMS recipients:", error);
+      setCurrentSessionDate(null);
+      setSessionDateError("تعذر تحديد تاريخ المركز؛ تحقق من إعداد المنطقة الزمنية قبل تجهيز الرسائل.");
+      return null;
+    }
+  }, [activeCenterId]);
+
+  useFocusEffect(
+    useCallback(() => {
+      if (!services.loaded || !notificationsEnabled) return;
+      refreshCenterSessionDate();
+    }, [notificationsEnabled, refreshCenterSessionDate, services.loaded]),
+  );
 
   const loadData = () => {
     if (!activeCenterId) return;
@@ -123,8 +151,9 @@ export default function NotificationsScreen() {
   };
 
   useEffect(() => {
+    if (!services.loaded || !notificationsEnabled) return;
     loadData();
-  }, [activeCenterId, statsMonthA, statsMonthB]);
+  }, [activeCenterId, notificationsEnabled, services.loaded, statsMonthA, statsMonthB]);
 
   const handleSaveTemplate = () => {
     if (!editingTemplate) return;
@@ -156,13 +185,17 @@ export default function NotificationsScreen() {
     if (!smsMessage.trim()) return Alert.alert("تنبيه", "اكتب نص الرسالة أولًا.");
     const selectedGroup = groups.find((group) => group.id === smsGroupId);
     if (!selectedGroup) return Alert.alert("تنبيه", "المجموعة المختارة لم تعد متاحة.");
+    const sessionDate = refreshCenterSessionDate();
+    if (!sessionDate) {
+      return Alert.alert("تعذر تجهيز الرسائل", "تحقق من إعداد المنطقة الزمنية للمركز ثم أعد المحاولة.");
+    }
     // Use the same roster calculation as attendance: package subscribers are
     // expected in their selected group even when they have no ordinary
     // student_group_enrollments row.
     const expectedStudentIds = AttendanceSessionService.getExpectedStudentIdsForGroup(
       selectedGroup,
       selectedGroup.id,
-      getLocalDateOnly(),
+      sessionDate,
     );
     const targets = Array.from(new Set(expectedStudentIds))
       .map((studentId) => students.find((student) => student.id === studentId))
@@ -211,11 +244,20 @@ export default function NotificationsScreen() {
   }).slice(0, 30);
   const selectedSmsGroup = groups.find((group) => group.id === smsGroupId);
   const smsGroupMemberCount = useMemo(
-    () => selectedSmsGroup
-      ? AttendanceSessionService.getExpectedStudentIdsForGroup(selectedSmsGroup, selectedSmsGroup.id, getLocalDateOnly()).length
-      : 0,
-    [selectedSmsGroup, activeCenterId],
+    () => {
+      if (!selectedSmsGroup) return 0;
+      if (!currentSessionDate) return null;
+      return AttendanceSessionService.getExpectedStudentIdsForGroup(
+        selectedSmsGroup,
+        selectedSmsGroup.id,
+        currentSessionDate,
+      ).length;
+    },
+    [currentSessionDate, selectedSmsGroup],
   );
+
+  if (!services.loaded) return <View style={styles.centered}><Text style={styles.loadingText}>جار تحميل حالة الخدمات...</Text></View>;
+  if (!notificationsEnabled) return <View style={styles.centered}><Text style={styles.loadingText}>خدمة الإشعارات غير مفعلة لهذا المركز.</Text></View>;
 
   return (
     <View style={styles.container}>
@@ -269,9 +311,10 @@ export default function NotificationsScreen() {
             <Text style={styles.fieldLabel}>المجموعة</Text>
             <TextInput style={styles.composeInput} value={smsGroupSearch} onChangeText={setSmsGroupSearch} placeholder="ابحث باسم المجموعة أو المادة أو المدرس" placeholderTextColor={Colors.slate400} textAlign="right" />
             <ScrollView style={styles.studentPicker} nestedScrollEnabled>
-              {filteredSmsGroups.map((group) => <TouchableOpacity key={group.id} style={[styles.studentChoice, smsGroupId === group.id && styles.studentChoiceActive]} onPress={() => { setSmsGroupId(group.id); setSmsGroupSearch(group.name); }}><View style={{ flex: 1 }}><Text style={styles.studentChoiceName}>{group.name}</Text><Text style={styles.studentChoiceMeta}>{[group.subjectName, group.teacherName, group.grade].filter(Boolean).join(" · ")}</Text><Text style={styles.studentChoiceSchedule}>{groupScheduleLabel(group.id)}</Text><Text style={styles.studentChoiceMeta}>{smsGroupId === group.id ? `${smsGroupMemberCount} طالب` : "اضغط للاختيار"}</Text></View><Ionicons name={smsGroupId === group.id ? "checkmark-circle" : "ellipse-outline"} size={20} color={smsGroupId === group.id ? Colors.primary : Colors.slate400} /></TouchableOpacity>)}
+              {filteredSmsGroups.map((group) => <TouchableOpacity key={group.id} style={[styles.studentChoice, smsGroupId === group.id && styles.studentChoiceActive]} onPress={() => { setSmsGroupId(group.id); setSmsGroupSearch(group.name); }}><View style={{ flex: 1 }}><Text style={styles.studentChoiceName}>{group.name}</Text><Text style={styles.studentChoiceMeta}>{[group.subjectName, group.teacherName, group.grade].filter(Boolean).join(" · ")}</Text><Text style={styles.studentChoiceSchedule}>{groupScheduleLabel(group.id)}</Text><Text style={styles.studentChoiceMeta}>{smsGroupId === group.id ? `${smsGroupMemberCount ?? "—"} طالب` : "اضغط للاختيار"}</Text></View><Ionicons name={smsGroupId === group.id ? "checkmark-circle" : "ellipse-outline"} size={20} color={smsGroupId === group.id ? Colors.primary : Colors.slate400} /></TouchableOpacity>)}
             </ScrollView>
-            {selectedSmsGroup ? <Text style={styles.selectedGroupHint}>تم اختيار {selectedSmsGroup.name} · سيتم الإرسال إلى {smsGroupMemberCount} طالب</Text> : null}
+            {selectedSmsGroup ? <Text style={styles.selectedGroupHint}>{smsGroupMemberCount === null ? "تعذر حساب المستلمين قبل تحديد تاريخ المركز." : `تم اختيار ${selectedSmsGroup.name} · سيتم الإرسال إلى ${smsGroupMemberCount} طالب`}</Text> : null}
+            {sessionDateError ? <Text style={{ color: Colors.dangerText, textAlign: "right" }}>{sessionDateError}</Text> : null}
             <Text style={styles.fieldLabel}>إرسال إلى</Text>
             <View style={styles.recipientRow}>
               {(["parent", "student"] as const).map((recipient) => <TouchableOpacity key={recipient} style={[styles.recipientButton, smsRecipient === recipient && styles.recipientButtonActive]} onPress={() => setSmsRecipient(recipient)}><Ionicons name={recipient === "parent" ? "people-outline" : "person-outline"} size={18} color={smsRecipient === recipient ? Colors.primary : Colors.slate500} /><Text style={[styles.recipientTextButton, smsRecipient === recipient && styles.recipientTextButtonActive]}>{recipient === "parent" ? "ولي الأمر" : "الطالب"}</Text></TouchableOpacity>)}

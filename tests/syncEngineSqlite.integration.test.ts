@@ -10,7 +10,14 @@ import {
 } from "../src/core/api/contracts";
 import { ConnectivityService } from "../src/core/connectivity";
 import { DatabaseService, SqlDatabase } from "../src/core/database";
-import { SyncEngine, SyncRepository } from "../src/core/sync";
+import { isRetryableDependencyConflict, SyncEngine, SyncRepository } from "../src/core/sync";
+import { useAuthStore } from "../src/features/auth/useAuthStore";
+import { AttendanceSessionService } from "../src/features/attendance/AttendanceSessionService";
+import { ScannerService } from "../src/features/scanner/ScannerService";
+import { SessionGenerationService } from "../src/features/sessions/SessionGenerationService";
+import { SessionRepository } from "../src/features/sessions/SessionRepository";
+import { Permission, User } from "../src/shared/types";
+import { stableSessionId } from "../src/shared/utils/stableIds";
 
 jest.mock("expo-device", () => ({ modelName: null }));
 
@@ -225,6 +232,16 @@ class StaleTeacherUpdateAdapter extends SharedServerAdapter {
   }
 }
 
+class SnapshotBootstrapAdapter extends SharedServerAdapter {
+  constructor(private readonly snapshot: BootstrapResponse) {
+    super();
+  }
+
+  async bootstrapCenter(_centerId: string): Promise<BootstrapResponse> {
+    return this.snapshot;
+  }
+}
+
 describe("SyncEngine against independent persistent SQLite databases", () => {
   let tempDirectory: string;
   let originalDatabase: SqlDatabase;
@@ -235,6 +252,13 @@ describe("SyncEngine against independent persistent SQLite databases", () => {
     const database = new RealSqliteDatabase(path.join(tempDirectory, `${name}.sqlite`));
     openedDatabases.push(database);
     DatabaseService.runMigrations(database);
+    database.execSync(`
+      CREATE TABLE IF NOT EXISTS center_academic_stages (
+        center_id TEXT PRIMARY KEY,
+        stages_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+    `);
     database.runSync(
       `INSERT INTO teachers (id, center_id, name, status, created_at, updated_at)
        VALUES (?, ?, 'Local seed', 'active', ?, ?)`,
@@ -267,6 +291,56 @@ describe("SyncEngine against independent persistent SQLite databases", () => {
     });
   }
 
+  function insertSession(
+    database: RealSqliteDatabase,
+    id: string,
+    centerId: string,
+    status = "open",
+    sessionDate = "2026-10-15",
+  ): void {
+    const timestamp = new Date().toISOString();
+    database.runSync(
+      `INSERT INTO sessions
+         (id, center_id, group_id, session_date, start_time, end_time, status,
+          schedule_id, subject_id, teacher_id, session_price, late_after_minutes,
+          created_at, updated_at)
+       VALUES (?, ?, 'shared-group', ?, '10:00', '11:00', ?, 'shared-schedule',
+               'shared-subject', 'shared-teacher', 100, 15, ?, ?)`,
+      [id, centerId, sessionDate, status, timestamp, timestamp],
+    );
+  }
+
+  function insertStudent(
+    database: RealSqliteDatabase,
+    id: string,
+    centerId: string,
+  ): void {
+    database.runSync(
+      `INSERT INTO students
+         (id, center_id, full_name, card_code, phone, parent_phone, grade,
+          status, created_at)
+       VALUES (?, ?, 'Dependency student', ?, '', '', 'Grade 8', 'active', ?)`,
+      [id, centerId, `card-${id}`, new Date().toISOString()],
+    );
+  }
+
+  function insertDebtCycle(
+    database: RealSqliteDatabase,
+    id: string,
+    centerId: string,
+    studentId: string,
+  ): void {
+    const timestamp = new Date().toISOString();
+    database.runSync(
+      `INSERT INTO debt_cycles
+         (id, center_id, student_id, enrollment_id, group_id, cycle_number,
+          start_date, end_date, cycle_price, status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 'shared-group', 1, '2026-10-01', '2026-10-31',
+               100, 'open', ?, ?)`,
+      [id, centerId, studentId, `enrollment-${id}`, timestamp, timestamp],
+    );
+  }
+
   beforeAll(() => {
     DatabaseService.init();
     originalDatabase = DatabaseService.getDb();
@@ -285,6 +359,871 @@ describe("SyncEngine against independent persistent SQLite databases", () => {
   beforeEach(() => {
     ConnectivityService.setState("online");
     SyncEngine.clearRateLimitForTesting();
+  });
+
+  it("bootstraps explicit session identities without merging rows or moving historical references", async () => {
+    const centerId = `session-bootstrap-${Date.now()}`;
+    const database = createClientDatabase("session-bootstrap-device", centerId);
+    const timestamp = "2026-10-15T10:00:00.000Z";
+    const sessionStartedAt = "2026-10-15T09:59:00.000Z";
+    insertSession(database, "local-session-a", centerId, "open");
+    insertSession(database, "local-session-b", centerId, "open");
+    database.runSync(
+      `INSERT INTO attendance
+         (id, center_id, student_id, session_id, check_in_time, status, is_late,
+          attendance_type, operation_id)
+       VALUES ('history-attendance', ?, 'student-a', 'local-session-a', ?, 'present',
+               0, 'present', 'history-attendance-op')`,
+      [centerId, timestamp],
+    );
+    database.runSync(
+      `INSERT INTO payments
+         (id, operation_id, center_id, student_id, amount, payment_type,
+          payment_method, payment_date, notes, debt_cycle_id, session_id,
+          subscription_id, is_reversed, created_at, user_id)
+       VALUES ('history-payment', 'history-payment-op', ?, 'student-a', 100,
+               'session', 'cash', '2026-10-15', NULL, NULL, 'local-session-a',
+               NULL, 0, ?, 'test-user')`,
+      [centerId, timestamp],
+    );
+    SyncRepository.enqueueOperation({
+      operationId: "history-attendance-pending",
+      centerId,
+      userId: "test-user",
+      deviceId: "offline-device",
+      operationType: "create",
+      entityType: "attendance",
+      entityId: "history-attendance",
+      payload: {
+        id: "history-attendance",
+        sessionId: "local-session-a",
+        originalAbsenceId: "absence-record-a",
+        studentId: "student-a",
+        status: "present",
+      },
+    });
+
+    const snapshot = {
+      centerId,
+      students: [],
+      cards: [],
+      groups: [],
+      teachers: [],
+      subjects: [],
+      schedules: [],
+      sessions: [
+        {
+          id: "remote-duplicate-session",
+          center_id: centerId,
+          group_id: "shared-group",
+          schedule_id: "shared-schedule",
+          session_date: "2026-10-15",
+          start_time: "10:00",
+          end_time: "11:00",
+          status: "open",
+          created_at: timestamp,
+          updated_at: timestamp,
+        },
+        {
+          id: "remote-canonical-session",
+          center_id: centerId,
+          group_id: "shared-group",
+          schedule_id: "shared-schedule",
+          session_date: "2026-10-15",
+          start_time: "10:00",
+          end_time: "11:00",
+          status: "open",
+          started_at: sessionStartedAt,
+          created_at: timestamp,
+          updated_at: timestamp,
+        },
+      ],
+      sessionNaturalKeys: [{
+        centerId,
+        groupId: "shared-group",
+        scheduleKey: "shared-schedule",
+        sessionDate: "2026-10-15",
+        canonicalSessionId: "remote-canonical-session",
+        status: "open",
+        hasNonCancelledDuplicate: false,
+        hasCancelledDuplicate: false,
+      }],
+      sessionAliases: [{
+        localSessionId: "remote-duplicate-session",
+        canonicalSessionId: "remote-canonical-session",
+      }],
+      expectedStudents: [],
+      enrollments: [],
+      attendance: [{
+        id: "history-attendance",
+        center_id: centerId,
+        student_id: "student-a",
+        session_id: "remote-canonical-session",
+        check_in_time: timestamp,
+        status: "absent",
+        attendance_type: "present",
+        operation_id: "history-attendance-op",
+      }],
+      payments: [{
+        id: "history-payment",
+        operation_id: "history-payment-op",
+        center_id: centerId,
+        student_id: "student-a",
+        amount: 100,
+        payment_type: "session",
+        payment_method: "cash",
+        payment_date: "2026-10-15",
+        session_id: "remote-canonical-session",
+        created_at: timestamp,
+        user_id: "test-user",
+      }],
+      latestServerSeq: 150,
+      timestamp,
+    } as BootstrapResponse;
+    SyncEngine.setAdapter(new SnapshotBootstrapAdapter(snapshot));
+    DatabaseService.setMockDb(database);
+
+    await SyncEngine.bootstrapCenter(centerId);
+
+    expect(database.getAllSync<{ id: string }>(
+      `SELECT id FROM sessions
+        WHERE center_id = ? AND group_id = 'shared-group'
+          AND schedule_id = 'shared-schedule' AND session_date = '2026-10-15'`,
+      [centerId],
+    )).toHaveLength(4);
+    expect(database.getFirstSync<{ created_at: string }>(
+      "SELECT created_at FROM sessions WHERE center_id = ? AND id = 'remote-canonical-session'",
+      [centerId],
+    )?.created_at).toBe(sessionStartedAt);
+    expect(database.getFirstSync<{ canonical_session_id: string }>(
+      `SELECT canonical_session_id FROM session_id_aliases
+        WHERE center_id = ? AND local_session_id = 'remote-duplicate-session'`,
+      [centerId],
+    )?.canonical_session_id).toBe("remote-canonical-session");
+    expect(database.getFirstSync<{ canonical_session_id: string }>(
+      `SELECT canonical_session_id FROM session_id_aliases
+        WHERE center_id = ? AND local_session_id = 'local-session-a'`,
+      [centerId],
+    )?.canonical_session_id).toBe("remote-canonical-session");
+    expect(database.getFirstSync<{ session_id: string; status: string }>(
+      "SELECT session_id, status FROM attendance WHERE id = 'history-attendance'",
+    )).toEqual({ session_id: "local-session-a", status: "present" });
+    expect(database.getFirstSync<{ session_id: string }>(
+      "SELECT session_id FROM payments WHERE id = 'history-payment'",
+    )?.session_id).toBe("local-session-a");
+    const pendingPayload = database.getFirstSync<{ payload: string }>(
+      "SELECT payload FROM sync_operations WHERE operation_id = 'history-attendance-pending'",
+    )?.payload;
+    expect(JSON.parse(pendingPayload || "{}")).toMatchObject({
+      sessionId: "local-session-a",
+      originalAbsenceId: "absence-record-a",
+    });
+
+    const reversedDatabase = createClientDatabase(
+      "session-bootstrap-reversed",
+      centerId,
+    );
+    insertSession(reversedDatabase, "local-session-a", centerId, "open");
+    insertSession(reversedDatabase, "local-session-b", centerId, "open");
+    SyncEngine.setAdapter(new SnapshotBootstrapAdapter({
+      ...snapshot,
+      sessions: [...snapshot.sessions].reverse(),
+      sessionAliases: [...(snapshot.sessionAliases || [])].reverse(),
+    }));
+    DatabaseService.setMockDb(reversedDatabase);
+    await SyncEngine.bootstrapCenter(centerId);
+    expect(reversedDatabase.getAllSync<{
+      local_session_id: string;
+      canonical_session_id: string;
+    }>(
+      `SELECT local_session_id, canonical_session_id
+         FROM session_id_aliases
+        WHERE center_id = ?
+        ORDER BY local_session_id`,
+      [centerId],
+    )).toEqual([
+      {
+        local_session_id: "local-session-a",
+        canonical_session_id: "remote-canonical-session",
+      },
+      {
+        local_session_id: "local-session-b",
+        canonical_session_id: "remote-canonical-session",
+      },
+      {
+        local_session_id: "remote-duplicate-session",
+        canonical_session_id: "remote-canonical-session",
+      },
+    ]);
+  });
+
+  it("canonicalizes pulled session references and keeps present over absent in either pull order", () => {
+    const centerId = `session-pull-order-${Date.now()}`;
+    const firstDevice = createClientDatabase("session-pull-first", centerId);
+    const secondDevice = createClientDatabase("session-pull-second", centerId);
+    for (const database of [firstDevice, secondDevice]) {
+      DatabaseService.setMockDb(database);
+      insertSession(database, "shared-session", centerId);
+      SyncRepository.recordSessionMappings(centerId, [{
+        localSessionId: "device-session-alias",
+        canonicalSessionId: "shared-session",
+      }]);
+    }
+    const absentChange: ServerChangeRecord = {
+      sequenceNumber: 101,
+      operationId: "device-one-absence",
+      entityType: "attendance",
+      entityId: "device-one-attendance",
+      action: "create",
+      data: {
+        id: "device-one-attendance",
+        session_id: "device-session-alias",
+        student_id: "same-student",
+        check_in_time: "2026-10-15T10:10:00.000Z",
+        status: "absent",
+        attendance_type: "present",
+      },
+      serverTimestamp: "2026-10-15T10:11:00.000Z",
+    };
+    const presentChange: ServerChangeRecord = {
+      sequenceNumber: 102,
+      operationId: "device-two-presence",
+      entityType: "attendance",
+      entityId: "device-two-attendance",
+      action: "create",
+      data: {
+        id: "device-two-attendance",
+        session_id: "device-session-alias",
+        student_id: "same-student",
+        check_in_time: "2026-10-15T10:05:00.000Z",
+        status: "present",
+        attendance_type: "present",
+      },
+      serverTimestamp: "2026-10-15T10:12:00.000Z",
+    };
+
+    DatabaseService.setMockDb(firstDevice);
+    SyncEngine.applyServerChanges(centerId, [absentChange, presentChange]);
+    DatabaseService.setMockDb(secondDevice);
+    SyncEngine.applyServerChanges(centerId, [presentChange, absentChange]);
+
+    for (const database of [firstDevice, secondDevice]) {
+      expect(database.getAllSync<{ id: string; session_id: string; status: string }>(
+        `SELECT id, session_id, status FROM attendance
+          WHERE center_id = ? AND student_id = 'same-student'`,
+        [centerId],
+      )).toEqual([{
+        id: expect.any(String),
+        session_id: "shared-session",
+        status: "present",
+      }]);
+    }
+    const prepared = SyncRepository.prepareOperationForPush({
+      operationId: "makeup-reference-map",
+      centerId,
+      userId: "test-user",
+      deviceId: "test-device",
+      operationType: "create",
+      entityType: "attendance",
+      entityId: "makeup-attendance",
+      payload: {
+        sessionId: "device-session-alias",
+        originalAbsenceId: "device-session-alias",
+      },
+      createdAt: new Date().toISOString(),
+    });
+    expect(prepared.payload).toEqual({
+      sessionId: "shared-session",
+      originalAbsenceId: "shared-session",
+    });
+  });
+
+  it("retains the earliest server-approved session start time when Pull receives starts out of order", () => {
+    const centerId = `session-start-time-pull-${Date.now()}`;
+    const database = createClientDatabase("session-start-time-pull", centerId);
+    const earliestStartedAt = new Date(Date.now() - 2 * 60 * 1000).toISOString();
+    const laterStartedAt = new Date(Date.now() - 60 * 1000).toISOString();
+    const sessionChange = (
+      sequenceNumber: number,
+      operationId: string,
+      startedAt: string,
+    ): ServerChangeRecord => ({
+      sequenceNumber,
+      operationId,
+      entityType: "session",
+      entityId: "canonical-session",
+      action: "create",
+      data: {
+        id: "canonical-session",
+        groupId: "shared-group",
+        scheduleId: "shared-schedule",
+        sessionDate: "2026-10-15",
+        startTime: "10:00",
+        endTime: "11:00",
+        status: "open",
+        createdAt: startedAt,
+        startedAt,
+      },
+      serverTimestamp: startedAt,
+    });
+
+    SyncEngine.applyServerChanges(centerId, [
+      sessionChange(101, "later-session-start", laterStartedAt),
+      sessionChange(102, "earlier-session-start", earliestStartedAt),
+    ]);
+
+    expect(database.getAllSync<{
+      id: string;
+      created_at: string;
+      status: string;
+    }>(
+      "SELECT id, created_at, status FROM sessions WHERE center_id = ?",
+      [centerId],
+    )).toEqual([{
+      id: "canonical-session",
+      created_at: earliestStartedAt,
+      status: "open",
+    }]);
+  });
+
+  it("applies explicit server-approved attendance cancellation and keeps its revision on Pull", () => {
+    const centerId = `attendance-cancel-pull-${Date.now()}`;
+    const database = createClientDatabase("attendance-cancel-pull", centerId);
+    insertSession(database, "cancel-pull-session", centerId);
+    database.runSync(
+      `INSERT INTO attendance
+         (id, center_id, student_id, session_id, check_in_time, status,
+          is_late, attendance_type, operation_id)
+       VALUES ('cancel-pull-record', ?, 'student-a', 'cancel-pull-session',
+               '2026-10-15T10:00:00.000Z', 'present', 0, 'present',
+               'original-present-operation')`,
+      [centerId],
+    );
+    DatabaseService.setMockDb(database);
+
+    const applyAttendanceChange = (
+      operationId: string,
+      status: "present" | "absent",
+      action?: string,
+    ) => SyncEngine.applyServerChanges(centerId, [{
+      sequenceNumber: Number(operationId.endsWith("cancel") ? 106 : operationId.endsWith("present") ? 107 : 108),
+      operationId,
+      entityType: "attendance",
+      entityId: "cancel-pull-record",
+      action: "update",
+      data: {
+        id: "cancel-pull-record",
+        session_id: "cancel-pull-session",
+        student_id: "student-a",
+        status,
+        action,
+      },
+      serverTimestamp: "2026-10-15T12:00:00.000Z",
+    }]);
+
+    applyAttendanceChange("accepted-cancel", "absent", "attendance.cancel");
+    expect(database.getFirstSync<{
+      status: string;
+      operation_id: string;
+    }>(
+      "SELECT status, operation_id FROM attendance WHERE id = 'cancel-pull-record'",
+    )).toEqual({
+      status: "absent",
+      operation_id: "accepted-cancel",
+    });
+
+    applyAttendanceChange("newer-present", "present");
+    expect(database.getFirstSync<{
+      status: string;
+      operation_id: string;
+    }>(
+      "SELECT status, operation_id FROM attendance WHERE id = 'cancel-pull-record'",
+    )).toEqual({
+      status: "present",
+      operation_id: "newer-present",
+    });
+
+    applyAttendanceChange("stale-absence", "absent");
+    expect(database.getFirstSync<{
+      status: string;
+      operation_id: string;
+    }>(
+      "SELECT status, operation_id FROM attendance WHERE id = 'cancel-pull-record'",
+    )).toEqual({
+      status: "present",
+      operation_id: "newer-present",
+    });
+  });
+
+  it("applies a server-confirmed cancellation from Bootstrap without inferring an absence", async () => {
+    const centerId = `attendance-cancel-bootstrap-${Date.now()}`;
+    const database = createClientDatabase("attendance-cancel-bootstrap", centerId);
+    insertSession(database, "cancel-bootstrap-session", centerId);
+    database.runSync(
+      `INSERT INTO attendance
+         (id, center_id, student_id, session_id, check_in_time, status,
+          is_late, attendance_type, operation_id)
+       VALUES ('cancel-bootstrap-record', ?, 'student-a',
+               'cancel-bootstrap-session', '2026-10-15T10:00:00.000Z',
+               'present', 0, 'present', 'old-present-operation')`,
+      [centerId],
+    );
+    SyncEngine.setAdapter(new SnapshotBootstrapAdapter({
+      centerId,
+      students: [],
+      cards: [],
+      groups: [],
+      teachers: [],
+      subjects: [],
+      schedules: [],
+      sessions: [],
+      sessionNaturalKeys: [],
+      sessionAliases: [],
+      expectedStudents: [],
+      enrollments: [],
+      attendance: [{
+        id: "cancel-bootstrap-record",
+        center_id: centerId,
+        student_id: "student-a",
+        session_id: "cancel-bootstrap-session",
+        check_in_time: "2026-10-15T10:00:00.000Z",
+        status: "absent",
+        attendance_type: "present",
+        operation_id: "confirmed-cancel-operation",
+        last_operation_action: "attendance.cancel",
+      }],
+      payments: [],
+      latestServerSeq: 120,
+      timestamp: "2026-10-15T12:00:00.000Z",
+    } as BootstrapResponse));
+    DatabaseService.setMockDb(database);
+
+    await SyncEngine.bootstrapCenter(centerId);
+
+    expect(database.getFirstSync<{
+      status: string;
+      operation_id: string;
+    }>(
+      "SELECT status, operation_id FROM attendance WHERE id = 'cancel-bootstrap-record'",
+    )).toEqual({
+      status: "absent",
+      operation_id: "confirmed-cancel-operation",
+    });
+  });
+
+  it("does not let an older pulled session update reopen cancellation", () => {
+    const centerId = `cancelled-session-pull-${Date.now()}`;
+    const database = createClientDatabase("cancelled-session-pull", centerId);
+    const cancelledAt = "2026-10-15T12:00:00.000Z";
+    insertSession(database, "cancelled-session", centerId, "cancelled");
+    database.runSync(
+      "UPDATE sessions SET updated_at = ? WHERE center_id = ? AND id = ?",
+      [cancelledAt, centerId, "cancelled-session"],
+    );
+    DatabaseService.setMockDb(database);
+
+    SyncEngine.applyServerChanges(centerId, [{
+      sequenceNumber: 101,
+      operationId: "stale-session-open",
+      entityType: "session",
+      entityId: "cancelled-session",
+      action: "update",
+      data: {
+        id: "cancelled-session",
+        group_id: "shared-group",
+        schedule_id: "shared-schedule",
+        session_date: "2026-10-15",
+        start_time: "10:00",
+        end_time: "11:00",
+        status: "open",
+        updated_at: "2026-10-15T09:00:00.000Z",
+      },
+      serverTimestamp: "2026-10-15T09:01:00.000Z",
+    }]);
+
+    expect(database.getFirstSync<{ status: string; updated_at: string }>(
+      "SELECT status, updated_at FROM sessions WHERE center_id = ? AND id = ?",
+      [centerId, "cancelled-session"],
+    )).toEqual({ status: "cancelled", updated_at: cancelledAt });
+  });
+
+  it("keeps cancelled-session closing history when a delayed reopen arrives", () => {
+    const centerId = `cancelled-session-reopen-${Date.now()}`;
+    const database = createClientDatabase("cancelled-session-reopen", centerId);
+    const timestamp = "2026-10-15T12:00:00.000Z";
+    insertSession(database, "cancelled-session", centerId, "cancelled");
+    database.runSync(
+      `INSERT INTO session_closing_records
+         (id, operation_id, center_id, session_id, action, reason, performed_by,
+          performed_at, previous_status, new_status, total_attendance,
+          total_session_payments, created_at)
+       VALUES ('existing-close', 'existing-close-operation', ?, 'cancelled-session',
+               'close', 'close reason', 'test-user', ?, 'open', 'closed', 2,
+               50, ?)` ,
+      [centerId, timestamp, timestamp],
+    );
+    DatabaseService.setMockDb(database);
+
+    SyncEngine.applyServerChanges(centerId, [{
+      sequenceNumber: 102,
+      operationId: "delayed-reopen-operation",
+      entityType: "session_closing",
+      entityId: "cancelled-session",
+      action: "update",
+      data: {
+        id: "delayed-reopen",
+        session_id: "cancelled-session",
+        action: "reopen",
+        new_status: "open",
+        performed_at: "2026-10-15T09:00:00.000Z",
+      },
+      serverTimestamp: "2026-10-15T12:05:00.000Z",
+    }]);
+
+    expect(database.getFirstSync<{ status: string }>(
+      "SELECT status FROM sessions WHERE center_id = ? AND id = ?",
+      [centerId, "cancelled-session"],
+    )?.status).toBe("cancelled");
+    expect(database.getAllSync<{ id: string; action: string }>(
+      `SELECT id, action FROM session_closing_records
+        WHERE center_id = ? AND session_id = ? ORDER BY id`,
+      [centerId, "cancelled-session"],
+    )).toEqual([
+      { id: "delayed-reopen", action: "reopen" },
+      { id: "existing-close", action: "close" },
+    ]);
+  });
+
+  it("preserves a conflicting payment reversal and records a financial sync conflict", () => {
+    const centerId = `payment-reversal-conflict-${Date.now()}`;
+    const database = createClientDatabase("payment-reversal-conflict", centerId);
+    const timestamp = "2026-10-15T12:00:00.000Z";
+    database.runSync(
+      `INSERT INTO payments
+         (id, operation_id, center_id, student_id, amount, payment_type,
+          payment_method, payment_date, session_id, is_reversed, created_at, user_id)
+       VALUES ('payment-a', 'payment-operation-a', ?, 'student-a', 100,
+               'session', 'cash', '2026-10-15', 'shared-session', 1, ?, 'test-user')`,
+      [centerId, timestamp],
+    );
+    database.runSync(
+      `INSERT INTO payment_reversals
+         (id, operation_id, center_id, payment_id, student_id, reversed_amount,
+          reason, reversed_by, reversed_at, created_at)
+       VALUES ('historical-reversal', 'historical-reversal-operation', ?,
+               'payment-a', 'student-a', 100, 'original reason', 'test-user', ?, ?)`,
+      [centerId, timestamp, timestamp],
+    );
+    DatabaseService.setMockDb(database);
+
+    SyncEngine.applyServerChanges(centerId, [{
+      sequenceNumber: 103,
+      operationId: "conflicting-reversal-operation",
+      entityType: "payment_reversal",
+      entityId: "incoming-reversal",
+      action: "create",
+      data: {
+        id: "incoming-reversal",
+        payment_id: "payment-a",
+        student_id: "student-a",
+        reversed_amount: 100,
+        reason: "different reversal",
+        reversed_by: "other-user",
+        reversed_at: timestamp,
+        created_at: timestamp,
+      },
+      serverTimestamp: timestamp,
+    }]);
+
+    expect(database.getAllSync<{ id: string; operation_id: string }>(
+      "SELECT id, operation_id FROM payment_reversals WHERE center_id = ?",
+      [centerId],
+    )).toEqual([{
+      id: "historical-reversal",
+      operation_id: "historical-reversal-operation",
+    }]);
+    expect(database.getFirstSync<{ operation_id: string; resolved_at: string | null }>(
+      `SELECT operation_id, resolved_at FROM sync_conflicts
+        WHERE operation_id = 'conflicting-reversal-operation'`,
+    )).toEqual({
+      operation_id: "conflicting-reversal-operation",
+      resolved_at: null,
+    });
+    expect(database.getFirstSync<{ is_reversed: number }>(
+      "SELECT is_reversed FROM payments WHERE id = 'payment-a'",
+    )?.is_reversed).toBe(1);
+  });
+
+  it("canonicalizes pulled payment session aliases without rewriting historical absence references", () => {
+    const centerId = `session-reference-pull-${Date.now()}`;
+    const database = createClientDatabase("session-reference-pull", centerId);
+    insertSession(database, "canonical-session", centerId);
+    insertSession(database, "device-session-alias", centerId);
+    DatabaseService.setMockDb(database);
+    SyncRepository.recordSessionMappings(centerId, [{
+      localSessionId: "device-session-alias",
+      canonicalSessionId: "canonical-session",
+    }]);
+
+    SyncEngine.applyServerChanges(centerId, [
+      {
+        sequenceNumber: 104,
+        operationId: "pulled-session-payment",
+        entityType: "payment",
+        entityId: "pulled-payment",
+        action: "create",
+        data: {
+          id: "pulled-payment",
+          student_id: "student-a",
+          amount: 25,
+          payment_type: "session",
+          payment_method: "cash",
+          payment_date: "2026-10-15",
+          session_id: "device-session-alias",
+          created_at: "2026-10-15T12:00:00.000Z",
+          user_id: "test-user",
+        },
+        serverTimestamp: "2026-10-15T12:01:00.000Z",
+      },
+      {
+        sequenceNumber: 105,
+        operationId: "pulled-session-attendance",
+        entityType: "attendance",
+        entityId: "pulled-attendance",
+        action: "create",
+        data: {
+          id: "pulled-attendance",
+          session_id: "device-session-alias",
+          original_absence_id: "device-session-alias",
+          student_id: "student-a",
+          check_in_time: "2026-10-15T12:02:00.000Z",
+          status: "present",
+        },
+        serverTimestamp: "2026-10-15T12:03:00.000Z",
+      },
+    ]);
+
+    expect(database.getFirstSync<{ session_id: string }>(
+      "SELECT session_id FROM payments WHERE id = 'pulled-payment'",
+    )?.session_id).toBe("canonical-session");
+    expect(database.getFirstSync<{ session_id: string; original_absence_id: string }>(
+      "SELECT session_id, original_absence_id FROM attendance WHERE id = 'pulled-attendance'",
+    )).toEqual({
+      session_id: "canonical-session",
+      original_absence_id: "device-session-alias",
+    });
+  });
+
+  it("preserves multiple historical attendance rows instead of selecting an arbitrary alias match", () => {
+    const centerId = `session-reference-conflict-${Date.now()}`;
+    const database = createClientDatabase("session-reference-conflict", centerId);
+    insertSession(database, "canonical-session", centerId);
+    insertSession(database, "device-session-alias", centerId);
+    SyncRepository.recordSessionMappings(centerId, [{
+      localSessionId: "device-session-alias",
+      canonicalSessionId: "canonical-session",
+    }]);
+    database.runSync(
+      `INSERT INTO attendance
+         (id, center_id, student_id, session_id, check_in_time, status, is_late,
+          attendance_type, operation_id)
+       VALUES
+         ('canonical-history-attendance', ?, 'student-a', 'canonical-session',
+          '2026-10-15T10:00:00.000Z', 'present', 0, 'present',
+          'canonical-history-operation'),
+         ('alias-history-attendance', ?, 'student-a', 'device-session-alias',
+          '2026-10-15T10:01:00.000Z', 'absent', 0, 'present',
+          'alias-history-operation')`,
+      [centerId, centerId],
+    );
+    DatabaseService.setMockDb(database);
+
+    expect(() => SyncRepository.upsertPulledAttendance(database, centerId, {
+      id: "new-pulled-attendance",
+      center_id: centerId,
+      student_id: "student-a",
+      session_id: "device-session-alias",
+      check_in_time: "2026-10-15T10:02:00.000Z",
+      status: "present",
+      operation_id: "new-pulled-operation",
+    })).toThrow(/multiple historical rows/);
+    expect(database.getAllSync<{ id: string; session_id: string; status: string }>(
+      `SELECT id, session_id, status FROM attendance
+        WHERE center_id = ? AND student_id = 'student-a'
+        ORDER BY id`,
+      [centerId],
+    )).toEqual([
+      {
+        id: "alias-history-attendance",
+        session_id: "device-session-alias",
+        status: "absent",
+      },
+      {
+        id: "canonical-history-attendance",
+        session_id: "canonical-session",
+        status: "present",
+      },
+    ]);
+  });
+
+  it("retries the same activation operation after offline delivery and a lost acknowledgement", async () => {
+    const centerId = `activation-response-loss-${Date.now()}`;
+    createClientDatabase("activation-response-loss-device", centerId);
+    const server = new SharedServerAdapter();
+    SyncEngine.setAdapter(server);
+    const sessionId = `activation-session-${Date.now()}`;
+    const operationId = `op-session-activate-${sessionId}`;
+    SyncRepository.enqueueOperation({
+      operationId,
+      centerId,
+      userId: "activation-test-user",
+      deviceId: "activation-test-device",
+      operationType: "UPDATE",
+      entityType: "session",
+      entityId: sessionId,
+      payload: { action: "activate", status: "open" },
+    });
+
+    ConnectivityService.setState("offline");
+    SyncEngine.clearRateLimitForTesting();
+    expect((await SyncEngine.syncCenterNow(centerId)).state).toBe("offline");
+    expect(SyncRepository.getByOperationId(operationId)?.status).toBe("pending");
+
+    ConnectivityService.setState("online");
+    server.loseNextPushResponse = true;
+    SyncEngine.clearRateLimitForTesting();
+    expect((await SyncEngine.syncCenterNow(centerId)).state).toBe("error");
+    expect(SyncRepository.getByOperationId(operationId)?.status).toBe("failed");
+
+    await new Promise((resolve) => setTimeout(resolve, 1100));
+    SyncEngine.clearRateLimitForTesting();
+    expect((await SyncEngine.syncCenterNow(centerId)).syncedCount).toBe(1);
+    expect(server.changes.filter((change) => change.operationId === operationId)).toHaveLength(1);
+    expect(server.changes.find((change) => change.operationId === operationId)?.data)
+      .toMatchObject({ action: "activate", status: "open" });
+    expect(SyncRepository.getPendingOperations(centerId)).toHaveLength(0);
+  });
+
+  it("hides alias sessions from operational lists and scanner selection while retaining historical lookup", () => {
+    const centerId = `session-alias-visibility-${Date.now()}`;
+    const database = createClientDatabase("session-alias-visibility", centerId);
+    const date = "2035-06-01";
+    const timestamp = new Date().toISOString();
+    const groupId = `alias-group-${Date.now()}`;
+    const scheduleId = `alias-schedule-${Date.now()}`;
+    const studentId = `alias-student-${Date.now()}`;
+    const aliasId = stableSessionId(centerId, groupId, scheduleId, date);
+    const canonicalId = `canonical-${aliasId}`;
+    const teacherId = `alias-teacher-${groupId}`;
+    const subjectId = `alias-subject-${groupId}`;
+    const previousAuth = useAuthStore.getState();
+    const viewer: User = {
+      id: "session-alias-viewer",
+      fullName: "Session alias test",
+      phone: "",
+      role: "admin",
+      centerId,
+      centerIds: [centerId],
+      permissions: [
+        "sessions.view",
+        "sessions.generate",
+        "groups.view",
+        "groups.schedule.manage",
+        "groups.students.view",
+        "enrollments.view",
+        "students.view",
+        "attendance.create",
+      ] satisfies Permission[],
+    };
+
+    database.runSync(
+      `INSERT INTO teachers (id, center_id, name, status, created_at, updated_at)
+       VALUES (?, ?, 'Alias test teacher', 'active', ?, ?)`,
+      [teacherId, centerId, timestamp, timestamp],
+    );
+    database.runSync(
+      `INSERT INTO subjects (id, center_id, name, code, status, created_at, updated_at)
+       VALUES (?, ?, 'Alias test subject', 'ALIAS', 'active', ?, ?)`,
+      [subjectId, centerId, timestamp, timestamp],
+    );
+    database.runSync(
+      `INSERT INTO groups
+         (id, center_id, name, teacher_id, subject_id, grade, default_fee,
+          session_price, monthly_price, status, created_at, updated_at)
+       VALUES (?, ?, 'Alias test group', ?, ?, 'Grade 8', 0, 100, 0,
+               'active', ?, ?)`,
+      [groupId, centerId, teacherId, subjectId, timestamp, timestamp],
+    );
+    database.runSync(
+      `INSERT INTO group_schedules
+         (id, center_id, group_id, day_of_week, start_time, end_time,
+          status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, '10:00', '11:00', 'active', ?, ?)`,
+      [
+        scheduleId,
+        centerId,
+        groupId,
+        new Date(`${date}T12:00:00`).getDay(),
+        timestamp,
+        timestamp,
+      ],
+    );
+    for (const sessionId of [canonicalId, aliasId]) {
+      database.runSync(
+        `INSERT INTO sessions
+           (id, center_id, group_id, schedule_id, subject_id, teacher_id,
+            session_price, late_after_minutes, session_date, start_time,
+            end_time, status, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, 100, 15, ?, '10:00', '11:00', 'open', ?, ?)`,
+        [
+          sessionId,
+          centerId,
+          groupId,
+          scheduleId,
+          subjectId,
+          teacherId,
+          date,
+          timestamp,
+          timestamp,
+        ],
+      );
+    }
+    database.runSync(
+      `INSERT INTO session_id_aliases
+         (center_id, local_session_id, canonical_session_id, created_at)
+       VALUES (?, ?, ?, ?)`,
+      [centerId, aliasId, canonicalId, timestamp],
+    );
+    insertStudent(database, studentId, centerId);
+    for (const sessionId of [canonicalId, aliasId]) {
+      database.runSync(
+        `INSERT INTO session_expected_students
+           (id, center_id, session_id, student_id, created_at)
+         VALUES (?, ?, ?, ?, ?)`,
+        [`expected-${sessionId}`, centerId, sessionId, studentId, timestamp],
+      );
+    }
+
+    useAuthStore.setState({ activeCenterId: centerId, currentUser: viewer });
+    try {
+      expect(SessionRepository.getSessionsForDate(date).map(({ id }) => id)).toEqual([canonicalId]);
+      expect(SessionRepository.getSessionsForMonth(date.slice(0, 7)).map(({ id }) => id))
+        .toEqual([canonicalId]);
+      expect(SessionGenerationService.getSessionsForDate(date).map(({ id }) => id))
+        .toEqual([canonicalId]);
+      expect(AttendanceSessionService.getTodaySessions(date).map(({ id }) => id))
+        .toEqual([canonicalId]);
+      expect(ScannerService.getEligibleSessionsForStudent(studentId, date).map(({ id }) => id))
+        .toEqual([canonicalId]);
+      expect(AttendanceSessionService.ensureSessionForGroup(groupId, date, scheduleId).id)
+        .toBe(canonicalId);
+      expect(SessionRepository.findById(aliasId)?.id).toBe(aliasId);
+    } finally {
+      useAuthStore.setState({
+        activeCenterId: previousAuth.activeCenterId,
+        currentUser: previousAuth.currentUser,
+      });
+    }
   });
 
   it("runs four independent real SyncEngine clients through push, pull, retry, offline recovery, and restart", async () => {
@@ -379,6 +1318,527 @@ describe("SyncEngine against independent persistent SQLite databases", () => {
     const rateLimited = await SyncEngine.syncCenterNow(centerId);
     expect(rateLimited.state).toBe("online");
     expect(server.pullCalls).toBe(pullsBeforeRateLimit);
+  });
+
+  it("keeps local session IDs mapped for pending operations and prevents stale session resurrection", () => {
+    const centerId = `session-alias-center-${Date.now()}`;
+    const database = createClientDatabase("session-alias-device", centerId);
+    const oldSessionId = "legacy-local-session";
+    const canonicalSessionId = "server-canonical-session";
+    const timestamp = new Date().toISOString();
+    database.runSync(
+      `INSERT INTO sessions
+         (id, center_id, group_id, session_date, start_time, end_time, status, schedule_id, created_at)
+       VALUES (?, ?, 'sync-group', '2026-10-12', '10:00', '11:00', 'cancelled', NULL, ?)`,
+      [canonicalSessionId, centerId, timestamp],
+    );
+    const historicalDuplicateId = "historical-duplicate-session";
+    database.runSync(
+      `INSERT INTO sessions
+         (id, center_id, group_id, session_date, start_time, end_time, status, schedule_id, created_at)
+       VALUES (?, ?, 'sync-group', '2026-10-12', '10:00', '11:00', 'open', NULL, ?)`,
+      [historicalDuplicateId, centerId, timestamp],
+    );
+    database.runSync(
+      `INSERT INTO attendance
+         (id, center_id, student_id, session_id, check_in_time, status,
+          is_late, attendance_type, operation_id)
+       VALUES ('historical-attendance', ?, 'history-student', ?, ?, 'present', 0, 'present', 'historical-attendance-operation')`,
+      [centerId, historicalDuplicateId, timestamp],
+    );
+    database.runSync(
+      `INSERT INTO session_expected_students
+         (id, center_id, session_id, student_id, created_at)
+       VALUES ('historical-expected-student', ?, ?, 'history-student', ?)`,
+      [centerId, historicalDuplicateId, timestamp],
+    );
+    database.runSync(
+      `INSERT INTO payments
+         (id, operation_id, center_id, student_id, amount, payment_type, created_at, user_id)
+       VALUES ('historical-payment', 'historical-payment-operation', ?, 'history-student', 25, 'session', ?, 'history-user')`,
+      [centerId, timestamp],
+    );
+    database.runSync(
+      "UPDATE payments SET session_id = ? WHERE id = 'historical-payment'",
+      [historicalDuplicateId],
+    );
+    SyncRepository.recordSessionMappings(centerId, [{
+      localSessionId: oldSessionId,
+      canonicalSessionId,
+    }]);
+    SyncRepository.enqueueOperation({
+      operationId: "pending-legacy-session-attendance",
+      centerId,
+      userId: "sync-user",
+      deviceId: "sync-device",
+      operationType: "attendance.create",
+      entityType: "attendance",
+      entityId: "legacy-attendance",
+      payload: {
+        id: "legacy-attendance",
+        sessionId: oldSessionId,
+        studentId: "sync-student",
+      },
+    });
+
+    const pending = SyncRepository.getByOperationId("pending-legacy-session-attendance")!;
+    const prepared = SyncRepository.prepareOperationForPush({
+      operationId: pending.operationId,
+      centerId: pending.centerId,
+      userId: pending.userId,
+      deviceId: pending.deviceId,
+      operationType: pending.operationType,
+      entityType: pending.entityType,
+      entityId: pending.entityId,
+      payload: typeof pending.payload === "string" ? JSON.parse(pending.payload) : pending.payload,
+      createdAt: pending.createdAt,
+    });
+    expect(prepared.payload.sessionId).toBe(oldSessionId);
+    expect(database.getFirstSync<{ payload: string }>(
+      "SELECT payload FROM sync_operations WHERE operation_id = ?",
+      [pending.operationId],
+    )?.payload).toContain(oldSessionId);
+    expect(SyncRepository.resolveSessionAlias("different-center", oldSessionId)).toBe(oldSessionId);
+
+    SyncEngine.applyServerChanges(centerId, [{
+      sequenceNumber: 1,
+      entityType: "session",
+      entityId: canonicalSessionId,
+      action: "create",
+      data: {
+        id: canonicalSessionId,
+        groupId: "sync-group",
+        scheduleId: null,
+        sessionDate: "2026-10-12",
+        startTime: "10:00",
+        endTime: "11:00",
+        status: "open",
+      },
+      serverTimestamp: timestamp,
+    }]);
+    expect(database.getFirstSync<{ status: string }>(
+      "SELECT status FROM sessions WHERE center_id = ? AND id = ?",
+      [centerId, canonicalSessionId],
+    )?.status).toBe("cancelled");
+    expect(SyncRepository.resolveSessionAlias(centerId, historicalDuplicateId))
+      .toBe(historicalDuplicateId);
+    expect(database.getFirstSync<{ id: string }>(
+      "SELECT id FROM sessions WHERE center_id = ? AND id = ?",
+      [centerId, historicalDuplicateId],
+    )?.id).toBe(historicalDuplicateId);
+    expect(database.getFirstSync<{ sessionId: string }>(
+      "SELECT session_id as sessionId FROM attendance WHERE id = 'historical-attendance'",
+    )?.sessionId).toBe(historicalDuplicateId);
+    expect(database.getFirstSync<{ sessionId: string }>(
+      "SELECT session_id as sessionId FROM payments WHERE id = 'historical-payment'",
+    )?.sessionId).toBe(historicalDuplicateId);
+    expect(database.getFirstSync<{ sessionId: string }>(
+      "SELECT session_id as sessionId FROM session_expected_students WHERE id = 'historical-expected-student'",
+    )?.sessionId).toBe(historicalDuplicateId);
+  });
+
+  it("retries only missing attendance-session dependencies and leaves center mismatches permanent", () => {
+    expect(isRetryableDependencyConflict(
+      "ATTENDANCE_SESSION_NOT_FOUND: attendance session has not synchronized yet.",
+    )).toBe(true);
+    expect(isRetryableDependencyConflict(
+      "ATTENDANCE_TARGET_NOT_FOUND: legacy server could not find the session yet.",
+    )).toBe(true);
+    expect(isRetryableDependencyConflict(
+      "ATTENDANCE_SESSION_CENTER_MISMATCH: session is outside the authenticated center.",
+    )).toBe(false);
+    expect(isRetryableDependencyConflict(
+      "ATTENDANCE_STUDENT_NOT_FOUND: attendance student does not exist.",
+    )).toBe(false);
+    expect(isRetryableDependencyConflict(
+      'violates foreign key constraint "sessions_group_id_fkey"',
+    )).toBe(false);
+  });
+
+  it("requeues dependency conflicts only after the matching session or explicit absence arrives", () => {
+    const centerId = `dependency-arrival-${Date.now()}`;
+    const database = createClientDatabase("dependency-arrival-device", centerId);
+    insertSession(database, "dependency-target", centerId);
+    insertSession(database, "dependency-source", centerId, "open", "2026-10-08");
+    DatabaseService.setMockDb(database);
+
+    SyncRepository.enqueueOperation({
+      operationId: "waiting-present-attendance",
+      centerId,
+      userId: "dependency-user",
+      deviceId: "dependency-device",
+      operationType: "attendance.create",
+      entityType: "attendance",
+      entityId: "waiting-present-record",
+      payload: {
+        id: "waiting-present-record",
+        sessionId: "dependency-target",
+        studentId: "dependency-student",
+        status: "present",
+      },
+    });
+    database.runSync(
+      `UPDATE sync_operations
+          SET status = 'conflict',
+              last_error = 'ATTENDANCE_TARGET_NOT_FOUND: session has not synchronized yet.'
+        WHERE operation_id = 'waiting-present-attendance'`,
+    );
+    expect(SyncRepository.requeueResolvedAttendanceDependencies(centerId)).toBe(0);
+    expect(SyncRepository.requeueResolvedAttendanceDependencies(
+      centerId,
+      new Set(["dependency-target"]),
+    )).toBe(1);
+    expect(SyncRepository.getByOperationId("waiting-present-attendance")?.status)
+      .toBe("pending");
+
+    SyncRepository.enqueueOperation({
+      operationId: "waiting-makeup-attendance",
+      centerId,
+      userId: "dependency-user",
+      deviceId: "dependency-device",
+      operationType: "attendance.create",
+      entityType: "attendance",
+      entityId: "waiting-makeup-record",
+      payload: {
+        id: "waiting-makeup-record",
+        sessionId: "dependency-target",
+        studentId: "dependency-student",
+        status: "present",
+        attendanceType: "makeup",
+        originalAbsenceId: "dependency-source",
+      },
+    });
+    database.runSync(
+      `UPDATE sync_operations
+          SET status = 'conflict',
+              last_error = 'ATTENDANCE_TARGET_NOT_FOUND: dependency not synchronized yet.'
+        WHERE operation_id = 'waiting-makeup-attendance'`,
+    );
+    expect(SyncRepository.requeueResolvedAttendanceDependencies(
+      centerId,
+      new Set(["dependency-target"]),
+    )).toBe(0);
+
+    database.runSync(
+      `INSERT INTO attendance
+         (id, center_id, student_id, session_id, check_in_time, status,
+          attendance_type, operation_id)
+       VALUES ('dependency-source-absence', ?, 'dependency-student',
+               'dependency-source', '2026-10-08T10:00:00.000Z', 'absent',
+               'present', 'dependency-source-absence-operation')`,
+      [centerId],
+    );
+    expect(SyncRepository.requeueResolvedAttendanceDependencies(
+      centerId,
+      new Set(),
+      new Set(["dependency-source-absence"]),
+    )).toBe(1);
+    expect(SyncRepository.getByOperationId("waiting-makeup-attendance")?.status)
+      .toBe("pending");
+  });
+
+  it("requeues an attendance cancellation only after its attendance dependency arrives", () => {
+    const centerId = `cancel-dependency-arrival-${Date.now()}`;
+    const database = createClientDatabase("cancel-dependency-arrival", centerId);
+    insertSession(database, "cancel-dependency-session", centerId);
+    insertStudent(database, "cancel-dependency-student", centerId);
+    database.runSync(
+      `INSERT INTO attendance
+         (id, center_id, student_id, session_id, check_in_time, status,
+          attendance_type, operation_id)
+       VALUES ('cancel-dependency-record', ?, 'cancel-dependency-student',
+               'cancel-dependency-session', '2026-10-15T10:00:00.000Z',
+               'absent', 'present', 'cancel-dependency-create')`,
+      [centerId],
+    );
+    DatabaseService.setMockDb(database);
+
+    const payload = {
+      id: "cancel-dependency-record",
+      sessionId: "cancel-dependency-session",
+      studentId: "cancel-dependency-student",
+      status: "absent",
+      expectedOperationId: "cancel-dependency-create",
+      action: "attendance.cancel",
+    };
+    SyncRepository.enqueueOperation({
+      operationId: "waiting-attendance-cancel",
+      centerId,
+      userId: "dependency-user",
+      deviceId: "dependency-device",
+      operationType: "attendance.cancel",
+      entityType: "attendance",
+      entityId: payload.id,
+      payload,
+    });
+    database.runSync(
+      `UPDATE sync_operations
+          SET status = 'failed',
+              last_error = 'ATTENDANCE_CANCEL_TARGET_NOT_FOUND: attendance has not synchronized yet.'
+        WHERE operation_id = 'waiting-attendance-cancel'`,
+    );
+
+    expect(isRetryableDependencyConflict(
+      "ATTENDANCE_CANCEL_TARGET_NOT_FOUND: attendance has not synchronized yet.",
+    )).toBe(true);
+    expect(SyncRepository.requeueResolvedAttendanceDependencies(centerId)).toBe(0);
+    expect(SyncRepository.getByOperationId("waiting-attendance-cancel")?.status)
+      .toBe("failed");
+
+    expect(SyncRepository.requeueResolvedAttendanceDependencies(
+      centerId,
+      new Set(),
+      new Set(["cancel-dependency-record"]),
+    )).toBe(1);
+    const requeued = SyncRepository.getByOperationId("waiting-attendance-cancel");
+    expect(requeued?.status).toBe("pending");
+    expect(requeued?.payload).toBe(JSON.stringify(payload));
+  });
+
+  it("requeues coverage, absence notification, delivery, and payment dependencies after their parents arrive", () => {
+    const centerId = `mixed-dependency-arrival-${Date.now()}`;
+    const database = createClientDatabase("mixed-dependency-arrival", centerId);
+    insertSession(database, "retry-source-session", centerId, "open", "2026-10-08");
+    insertSession(database, "retry-target-session", centerId, "open", "2026-10-15");
+    insertStudent(database, "retry-student", centerId);
+    insertDebtCycle(database, "retry-debt-cycle", centerId, "retry-student");
+    database.runSync(
+      `INSERT INTO attendance
+         (id, center_id, student_id, session_id, check_in_time, status,
+          attendance_type, operation_id)
+       VALUES ('retry-explicit-absence', ?, 'retry-student',
+               'retry-source-session', '2026-10-08T10:00:00.000Z',
+               'absent', 'present', 'retry-explicit-absence-operation')`,
+      [centerId],
+    );
+    database.runSync(
+      `INSERT INTO notification_events
+         (id, operation_id, center_id, student_id, session_id, attendance_id,
+          event_type, created_by, created_at)
+       VALUES ('retry-absence-event', 'retry-absence-event-operation', ?,
+               'retry-student', 'retry-source-session',
+               'retry-explicit-absence', 'absence', 'test-user', ?)`,
+      [centerId, new Date().toISOString()],
+    );
+    DatabaseService.setMockDb(database);
+
+    const waitingOperations = [
+      {
+        operationId: "waiting-coverage",
+        entityType: "advance_coverage",
+        entityId: "waiting-coverage-row",
+        operationType: "advance_coverage.create",
+        payload: {
+          id: "waiting-coverage-row",
+          studentId: "retry-student",
+          advanceSessionId: "retry-source-session",
+          targetFutureSessionId: "retry-target-session",
+        },
+        lastError: "ADVANCE_COVERAGE_SESSION_NOT_FOUND: referenced session has not synchronized yet.",
+      },
+      {
+        operationId: "waiting-absence-event",
+        entityType: "notification_event",
+        entityId: "retry-absence-event",
+        operationType: "notification_event.create",
+        payload: {
+          id: "retry-absence-event",
+          event_type: "absence",
+          student_id: "retry-student",
+          session_id: "retry-source-session",
+          attendance_id: "retry-explicit-absence",
+        },
+        lastError: "ABSENCE_NOTIFICATION_TARGET_NOT_FOUND: attendance has not synchronized yet.",
+      },
+      {
+        operationId: "waiting-delivery",
+        entityType: "notification_delivery",
+        entityId: "retry-delivery",
+        operationType: "notification_delivery.create",
+        payload: {
+          id: "retry-delivery",
+          notificationEventId: "retry-absence-event",
+          channel: "sms",
+        },
+        lastError: "NOTIFICATION_EVENT_NOT_FOUND: delivery event has not synchronized yet.",
+      },
+      {
+        operationId: "waiting-payment",
+        entityType: "payment",
+        entityId: "retry-payment",
+        operationType: "payment.create",
+        payload: {
+          id: "retry-payment",
+          studentId: "retry-student",
+          debtCycleId: "retry-debt-cycle",
+          amount: 25,
+        },
+        lastError: "PAYMENT_DEBT_CYCLE_NOT_FOUND",
+      },
+    ];
+    for (const operation of waitingOperations) {
+      SyncRepository.enqueueOperation({
+        ...operation,
+        centerId,
+        userId: "dependency-user",
+        deviceId: "dependency-device",
+      });
+      database.runSync(
+        `UPDATE sync_operations
+            SET status = 'conflict', last_error = ?
+          WHERE operation_id = ?`,
+        [operation.lastError, operation.operationId],
+      );
+    }
+
+    expect(SyncRepository.requeueResolvedAttendanceDependencies(
+      centerId,
+      new Set(),
+      new Set(),
+      new Map([["student", new Set(["unrelated-student"])]]),
+    )).toBe(0);
+    const arrivedEntityIds = new Map([
+      ["session", new Set(["retry-source-session", "retry-target-session"])],
+      ["student", new Set(["retry-student"])],
+      ["attendance", new Set(["retry-explicit-absence"])],
+      ["debt_cycle", new Set(["retry-debt-cycle"])],
+      ["notification_event", new Set(["retry-absence-event"])],
+    ]);
+    expect(SyncRepository.requeueResolvedAttendanceDependencies(
+      centerId,
+      new Set(["retry-source-session", "retry-target-session"]),
+      new Set(["retry-explicit-absence"]),
+      arrivedEntityIds,
+    )).toBe(4);
+
+    for (const operation of waitingOperations) {
+      expect(SyncRepository.getByOperationId(operation.operationId)?.status)
+        .toBe("pending");
+      expect(SyncRepository.getByOperationId(operation.operationId)?.payload)
+        .toBe(JSON.stringify(operation.payload));
+    }
+  });
+
+  it("requeues a waiting notification delivery when its pulled event arrives", () => {
+    const centerId = `notification-event-arrival-${Date.now()}`;
+    const database = createClientDatabase("notification-event-arrival", centerId);
+    DatabaseService.setMockDb(database);
+    SyncRepository.enqueueOperation({
+      operationId: "notification-delivery-waits-for-event",
+      centerId,
+      userId: "dependency-user",
+      deviceId: "dependency-device",
+      operationType: "notification_delivery.create",
+      entityType: "notification_delivery",
+      entityId: "waiting-delivery",
+      payload: {
+        id: "waiting-delivery",
+        notificationEventId: "arriving-event",
+        channel: "sms",
+      },
+    });
+    database.runSync(
+      `UPDATE sync_operations
+          SET status = 'failed',
+              last_error = 'NOTIFICATION_EVENT_NOT_FOUND: delivery event has not synchronized yet.'
+        WHERE operation_id = 'notification-delivery-waits-for-event'`,
+    );
+
+    SyncEngine.applyServerChanges(centerId, [{
+      sequenceNumber: 202,
+      operationId: "arriving-event-operation",
+      entityType: "notification_event",
+      entityId: "arriving-event",
+      action: "create",
+      data: {
+        id: "arriving-event",
+        student_id: "event-student",
+        session_id: "event-session",
+        event_type: "attendance",
+        created_by: "test-user",
+        created_at: "2026-10-15T12:00:00.000Z",
+      },
+      serverTimestamp: "2026-10-15T12:01:00.000Z",
+    }]);
+
+    expect(database.getFirstSync<{ id: string }>(
+      "SELECT id FROM notification_events WHERE id = 'arriving-event'",
+    )?.id).toBe("arriving-event");
+    expect(SyncRepository.getByOperationId(
+      "notification-delivery-waits-for-event",
+    )?.status).toBe("pending");
+  });
+
+  it("keeps a missing-session attendance operation in the retry queue until the session arrives", async () => {
+    const centerId = `attendance-dependency-${Date.now()}`;
+    const database = createClientDatabase("attendance-dependency-device", centerId);
+    const adapter = new SpecificRetryAdapter();
+    SyncEngine.setAdapter(adapter);
+    SyncRepository.enqueueOperation({
+      operationId: "attendance-waits-for-session",
+      centerId,
+      userId: "dependency-user",
+      deviceId: "dependency-device",
+      operationType: "attendance.create",
+      entityType: "attendance",
+      entityId: "dependency-attendance",
+      payload: {
+        id: "dependency-attendance",
+        sessionId: "dependency-session",
+        studentId: "dependency-student",
+        status: "present",
+        attendanceType: "present",
+      },
+    });
+    adapter.response = {
+      success: true,
+      syncedOperationIds: [],
+      conflicts: [{
+        operationId: "attendance-waits-for-session",
+        entityType: "attendance",
+        entityId: "dependency-attendance",
+        reason: "ATTENDANCE_SESSION_NOT_FOUND: attendance session has not synchronized yet.",
+        resolution: "server_wins",
+      }],
+      serverCursor: "100",
+      processedAt: new Date().toISOString(),
+    };
+
+    DatabaseService.setMockDb(database);
+    const waiting = await SyncEngine.syncCenterNow(centerId);
+    expect(waiting.conflicts).toBe(0);
+    expect(SyncRepository.getByOperationId("attendance-waits-for-session")?.status).toBe("failed");
+
+    SyncRepository.enqueueOperation({
+      operationId: "create-dependent-session",
+      centerId,
+      userId: "dependency-user",
+      deviceId: "dependency-device",
+      operationType: "create",
+      entityType: "session",
+      entityId: "dependency-session",
+      payload: { id: "dependency-session", groupId: "dependency-group", sessionDate: "2026-10-13" },
+    });
+    database.runSync(
+      "UPDATE sync_operations SET next_retry_at = ? WHERE operation_id = ?",
+      ["2000-01-01T00:00:00.000Z", "attendance-waits-for-session"],
+    );
+    adapter.response = {
+      success: true,
+      syncedOperationIds: ["create-dependent-session", "attendance-waits-for-session"],
+      conflicts: [],
+      serverCursor: "100",
+      processedAt: new Date().toISOString(),
+    };
+
+    SyncEngine.clearRateLimitForTesting();
+    const retried = await SyncEngine.syncCenterNow(centerId);
+    expect(retried.syncedCount).toBe(2);
+    expect(database.getAllSync<{ operationId: string }>(
+      "SELECT operation_id as operationId FROM sync_operations WHERE operation_id = ?",
+      ["attendance-waits-for-session"],
+    )).toHaveLength(1);
+    expect(SyncRepository.getByOperationId("attendance-waits-for-session")?.status).toBe("synced");
   });
 
   it("synchronizes a teacher week-start change from one persistent device database to another", async () => {

@@ -30,7 +30,9 @@ async function query(text, params = [], retries = 2) {
         err.code === "ECONNRESET" ||
         err.code === "57P01")
     ) {
-      console.warn("Retrying database query after transient connection drop...");
+      console.warn(
+        "Retrying database query after transient connection drop...",
+      );
       return query(text, params, retries - 1);
     }
     throw err;
@@ -70,6 +72,9 @@ async function withTransaction(callback) {
  * Upgrade legacy Neon package tables before any sync request can use them.
  */
 async function ensureSchemaCompatibility() {
+  await pool.query(
+    "ALTER TABLE centers ADD COLUMN IF NOT EXISTS time_zone VARCHAR(64)",
+  );
   await pool.query(`
     CREATE TABLE IF NOT EXISTS card_ranges (
       id VARCHAR(64) PRIMARY KEY,
@@ -103,7 +108,9 @@ async function ensureSchemaCompatibility() {
       ON CONFLICT (center_id) DO NOTHING;
   `);
   await pool.query("ALTER TABLE students ALTER COLUMN card_code DROP NOT NULL");
-  await pool.query("ALTER TABLE students ADD COLUMN IF NOT EXISTS student_color VARCHAR(32)");
+  await pool.query(
+    "ALTER TABLE students ADD COLUMN IF NOT EXISTS student_color VARCHAR(32)",
+  );
   await pool.query(`
     ALTER TABLE teachers
       ADD COLUMN IF NOT EXISTS week_start_day SMALLINT NOT NULL DEFAULT 6;
@@ -219,7 +226,10 @@ async function ensureSchemaCompatibility() {
       ADD COLUMN IF NOT EXISTS subject_id VARCHAR(64),
       ADD COLUMN IF NOT EXISTS teacher_id VARCHAR(64),
       ADD COLUMN IF NOT EXISTS session_price NUMERIC(12, 2) NOT NULL DEFAULT 0,
-      ADD COLUMN IF NOT EXISTS late_after_minutes INTEGER NOT NULL DEFAULT 15;
+      ADD COLUMN IF NOT EXISTS late_after_minutes INTEGER NOT NULL DEFAULT 15,
+      ADD COLUMN IF NOT EXISTS started_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS device_started_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS server_received_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
     UPDATE sessions s
        SET subject_id = COALESCE(s.subject_id, g.subject_id),
            teacher_id = COALESCE(s.teacher_id, g.teacher_id),
@@ -229,24 +239,16 @@ async function ensureSchemaCompatibility() {
      WHERE g.center_id = s.center_id AND g.id = s.group_id;
   `);
 
-  // Enforce the same natural identities as the offline SQLite database.  Do
-  // not make an existing deployment fail just because old duplicate rows are
-  // present: keep a diagnostic non-unique index in that case and let the
-  // sync processor report the duplicate instead of inserting another row.
+  // Keep the relationship accelerator non-unique. A schedule/date key is only
+  // a lookup aid for the natural-key registry; it must not reject valid legacy
+  // duplicates or unscheduled sessions. The authoritative identity checks remain
+  // in the natural-key and alias logic.
   await pool.query(`
     DO $$
     BEGIN
-      IF NOT EXISTS (
-        SELECT 1 FROM sessions
-        GROUP BY center_id, group_id, COALESCE(schedule_id, ''), session_date
-        HAVING COUNT(*) > 1
-      ) THEN
-        CREATE UNIQUE INDEX IF NOT EXISTS uq_sessions_group_sched_date
-          ON sessions(center_id, group_id, COALESCE(schedule_id, ''), session_date);
-      ELSE
-        CREATE INDEX IF NOT EXISTS idx_sessions_group_sched_date
-          ON sessions(center_id, group_id, COALESCE(schedule_id, ''), session_date);
-      END IF;
+      DROP INDEX IF EXISTS uq_sessions_group_sched_date;
+      CREATE INDEX IF NOT EXISTS idx_sessions_group_sched_date
+        ON sessions(center_id, group_id, COALESCE(schedule_id, ''), session_date);
 
       IF NOT EXISTS (
         SELECT 1 FROM debt_cycles
@@ -262,6 +264,88 @@ async function ensureSchemaCompatibility() {
           ON debt_cycles(center_id, COALESCE(enrollment_id, package_subscription_id), cycle_number);
       END IF;
     END $$;
+  `);
+
+  // The identity registry enforces one logical session per scheduled lesson
+  // even on legacy databases whose sessions table still contains duplicates.
+  // Existing session rows remain intact; aliases route their IDs to one
+  // deterministic canonical row.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS session_natural_keys (
+      center_id VARCHAR(64) NOT NULL REFERENCES centers(id) ON DELETE CASCADE,
+      group_id VARCHAR(64) NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+      schedule_key VARCHAR(64) NOT NULL DEFAULT '',
+      session_date DATE NOT NULL,
+      session_id VARCHAR(64) NOT NULL REFERENCES sessions(id) ON DELETE RESTRICT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CONSTRAINT pk_session_natural_keys
+        PRIMARY KEY (center_id, group_id, schedule_key, session_date),
+      CONSTRAINT uq_session_natural_key_session
+        UNIQUE (center_id, session_id)
+    );
+    CREATE TABLE IF NOT EXISTS session_id_aliases (
+      center_id VARCHAR(64) NOT NULL REFERENCES centers(id) ON DELETE CASCADE,
+      local_session_id VARCHAR(64) NOT NULL,
+      canonical_session_id VARCHAR(64) NOT NULL REFERENCES sessions(id) ON DELETE RESTRICT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CONSTRAINT pk_session_id_aliases
+        PRIMARY KEY (center_id, local_session_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_session_id_aliases_canonical
+      ON session_id_aliases(center_id, canonical_session_id);
+    CREATE TABLE IF NOT EXISTS session_start_events (
+      center_id VARCHAR(64) NOT NULL REFERENCES centers(id) ON DELETE CASCADE,
+      session_id VARCHAR(64) NOT NULL REFERENCES sessions(id) ON DELETE RESTRICT,
+      operation_id VARCHAR(64) NOT NULL,
+      device_id VARCHAR(64),
+      device_started_at TIMESTAMPTZ NOT NULL,
+      accepted_started_at TIMESTAMPTZ NOT NULL,
+      server_received_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CONSTRAINT pk_session_start_events PRIMARY KEY (center_id, operation_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_session_start_events_session
+      ON session_start_events(center_id, session_id, accepted_started_at);
+    WITH ranked_sessions AS (
+      SELECT center_id, group_id, COALESCE(schedule_id, '') AS schedule_key,
+             session_date, id,
+             ROW_NUMBER() OVER (
+               PARTITION BY center_id, group_id, COALESCE(schedule_id, ''), session_date
+               ORDER BY CASE
+                 WHEN status = 'open' THEN 0
+                 WHEN status = 'scheduled' THEN 1
+                 WHEN status = 'closed' THEN 2
+                 WHEN status = 'cancelled' THEN 4
+                 ELSE 3
+               END, created_at ASC, id ASC
+             ) AS row_number
+        FROM sessions
+       WHERE schedule_id IS NOT NULL AND btrim(schedule_id) <> ''
+    )
+    INSERT INTO session_natural_keys
+      (center_id, group_id, schedule_key, session_date, session_id)
+    SELECT center_id, group_id, schedule_key, session_date, id
+      FROM ranked_sessions
+     WHERE row_number = 1
+    ON CONFLICT (center_id, group_id, schedule_key, session_date) DO NOTHING;
+
+INSERT INTO session_id_aliases
+  (center_id, local_session_id, canonical_session_id)
+SELECT s.center_id, s.id, snk.session_id
+  FROM sessions s
+  JOIN session_natural_keys snk
+    ON snk.center_id = s.center_id
+   AND snk.group_id = s.group_id
+   AND snk.schedule_key = COALESCE(s.schedule_id, '')
+   AND snk.session_date = s.session_date
+  JOIN sessions canonical
+    ON canonical.center_id = snk.center_id
+   AND canonical.id = snk.session_id
+ WHERE snk.schedule_key <> ''
+       AND s.schedule_id IS NOT NULL
+       AND canonical.schedule_id IS NOT NULL
+       AND NOT (canonical.status = 'cancelled' AND s.status <> 'cancelled')
+       AND NOT (s.status = 'cancelled' AND canonical.status <> 'cancelled')
+    ON CONFLICT (center_id, local_session_id) DO NOTHING;
   `);
 
   // The mobile app supports external students. Older Neon databases used a

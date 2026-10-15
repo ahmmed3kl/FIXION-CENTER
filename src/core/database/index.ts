@@ -1227,6 +1227,42 @@ export const MIGRATIONS: Migration[] = [
       }
     },
   },
+  {
+    version: 28,
+    name: "session_id_aliases",
+    up: (db: SqlDatabase) => {
+      db.execSync(`
+        CREATE TABLE IF NOT EXISTS session_id_aliases (
+          center_id TEXT NOT NULL,
+          local_session_id TEXT NOT NULL,
+          canonical_session_id TEXT NOT NULL,
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          PRIMARY KEY (center_id, local_session_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_local_session_alias_canonical
+          ON session_id_aliases(center_id, canonical_session_id);
+      `);
+    },
+  },
+  {
+    version: 29,
+    name: "preserve_duplicate_session_history",
+    up: (db: SqlDatabase) => {
+      db.execSync("DROP INDEX IF EXISTS uq_sessions_center_group_sched_date;");
+      db.execSync("DROP INDEX IF EXISTS uq_sessions_group_sched_date;");
+      db.execSync(
+        `CREATE INDEX IF NOT EXISTS idx_sessions_center_group_schedule_date
+           ON sessions(center_id, group_id, COALESCE(schedule_id, ''), session_date);`,
+      );
+    },
+  },
+  {
+    version: 30,
+    name: "center_session_time_zone",
+    up: (db: SqlDatabase) => {
+      db.execSync("ALTER TABLE centers ADD COLUMN time_zone TEXT;");
+    },
+  },
 ];
 
 // In-Memory SQLite Mock for Jest / Test environments
@@ -1248,6 +1284,7 @@ class InMemorySqliteMock implements SqlDatabase {
     this.tables.set("card_ranges", []);
     this.tables.set("student_group_enrollments", []);
     this.tables.set("sessions", []);
+    this.tables.set("session_id_aliases", []);
     this.tables.set("session_expected_students", []);
     this.tables.set("attendance", []);
     this.tables.set("absence_notes", []);
@@ -2040,12 +2077,29 @@ class InMemorySqliteMock implements SqlDatabase {
           }
         } else if (tableName === "debt_cycles") {
           const id = params[params.length - 1];
-          const row = list.find((r) => r.id === id);
+          const centerId = trimmed.toUpperCase().includes("WHERE CENTER_ID = ?")
+            ? params[params.length - 2]
+            : undefined;
+          const row = list.find(
+            (r) => r.id === id && (!centerId || r.center_id === centerId),
+          );
           if (row) {
             if (trimmed.includes("status = 'cancelled'")) {
               row.cycle_price = params[0];
               row.status = "cancelled";
               row.updated_at = params[1];
+            } else if (trimmed.includes("billing_mode = ?")) {
+              row.billing_mode = params[0];
+              if (trimmed.includes("cycle_type = CASE WHEN ? = 'per_session'")) {
+                if (params[1] === "per_session") {
+                  row.cycle_type = "per_session";
+                } else if (row.cycle_type === "per_session") {
+                  row.cycle_type = "monthly";
+                }
+              }
+              if (trimmed.includes("updated_at = ?")) {
+                row.updated_at = params[2];
+              }
             } else if (trimmed.includes("status = ?")) {
               row.status = params[0];
               if (trimmed.includes("updated_at = ?"))
@@ -2363,7 +2417,14 @@ class InMemorySqliteMock implements SqlDatabase {
     }
 
     if (trimmed.includes("FROM centers")) {
-      return (this.tables.get("centers") || []) as T[];
+      const centers = this.tables.get("centers") || [];
+      const selected = trimmed.includes("WHERE id = ?")
+        ? centers.filter((center) => center.id === params[0])
+        : centers;
+      return selected.map((center) => ({
+        ...center,
+        timeZone: center.time_zone ?? null,
+      })) as T[];
     }
 
     if (trimmed.includes("FROM card_ranges")) {
@@ -3571,6 +3632,62 @@ class InMemorySqliteMock implements SqlDatabase {
       return mapped as T[];
     }
 
+    if (
+      trimmed.includes("FROM payments") &&
+      trimmed.includes("COALESCE(SUM(amount), 0) as amount")
+    ) {
+      const payments = this.tables.get("payments") || [];
+      const debtCycles = this.tables.get("debt_cycles") || [];
+      const isPerSessionCycle = (cycleId: string | null | undefined) =>
+        debtCycles.some((cycle) =>
+          cycle.center_id === params[0] &&
+          cycle.id === cycleId &&
+          (cycle.billing_mode === "per_session" || cycle.cycle_type === "per_session"),
+        );
+      let matchingPayments = payments.filter(
+        (payment) =>
+          payment.center_id === params[0] &&
+          payment.student_id === params[1] &&
+          (!payment.is_reversed || payment.is_reversed === 0),
+      );
+
+      if (trimmed.includes("session_id = ?")) {
+        matchingPayments = matchingPayments.filter(
+          (payment) =>
+            payment.session_id === params[2] &&
+            (
+              payment.payment_type === "session" ||
+              !payment.debt_cycle_id ||
+              isPerSessionCycle(payment.debt_cycle_id)
+            ),
+        );
+      } else if (trimmed.includes("session_id IS NULL")) {
+        matchingPayments = matchingPayments.filter((payment) => {
+          if (payment.session_id) return false;
+          if (trimmed.includes("debt_cycle_id IS NOT NULL")) {
+            return Boolean(payment.debt_cycle_id && isPerSessionCycle(payment.debt_cycle_id));
+          }
+          return payment.payment_type !== "session" &&
+            (!payment.debt_cycle_id || !isPerSessionCycle(payment.debt_cycle_id)) &&
+            (Boolean(payment.debt_cycle_id) || ["monthly", "partial"].includes(payment.payment_type));
+        });
+      }
+
+      if (trimmed.includes("payment_date >= ?") && trimmed.includes("payment_date <= ?")) {
+        matchingPayments = matchingPayments.filter(
+          (payment) =>
+            payment.payment_date >= params[2] &&
+            payment.payment_date <= params[3],
+        );
+      }
+
+      const amount = matchingPayments.reduce(
+        (total, payment) => total + (Number(payment.amount) || 0),
+        0,
+      );
+      return [{ amount }] as T[];
+    }
+
     if (trimmed.includes("FROM debt_cycles")) {
       const list = this.tables.get("debt_cycles") || [];
       const groups = this.tables.get("groups") || [];
@@ -3614,6 +3731,26 @@ class InMemorySqliteMock implements SqlDatabase {
           billing_mode: r.billing_mode,
         };
       });
+      if (
+        params.length >= 5 &&
+        trimmed.includes("group_id = ?") &&
+        trimmed.includes("start_date <= ?") &&
+        trimmed.includes("end_date >= ?")
+      ) {
+        return mapped.filter((cycle) =>
+          cycle.centerId === params[0] &&
+          cycle.studentId === params[1] &&
+          cycle.groupId === params[2] &&
+          cycle.startDate <= params[3] &&
+          cycle.endDate >= params[4] &&
+          cycle.status !== "cancelled" &&
+          cycle.status !== "paid" &&
+          !cycle.packageSubscriptionId &&
+          cycle.cycleType !== "package" &&
+          cycle.billingMode !== "package" &&
+          (cycle.billingMode === "per_session" || cycle.cycleType === "per_session"),
+        ) as T[];
+      }
       if (trimmed.includes("dc.status IN ('open', 'partial', 'pending')")) {
         const groupId = params[1];
         return mapped.filter((cycle) => {

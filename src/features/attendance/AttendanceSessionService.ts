@@ -17,12 +17,13 @@ import {
 } from "./AttendanceCalculations";
 import { stableSessionId } from "../../shared/utils/stableIds";
 import { DEFAULT_TEACHER_WEEK_START_DAY, isTeacherMakeupCycleOpen } from "../../shared/utils/teacherWeeks";
-import { getLocalDateOnly } from "../../shared/utils/date";
+import { SessionDateService } from "../sessions/SessionDateService";
 
 export interface AttendanceSummary {
   total: number;
   present: number;
   absent: number;
+  unresolved: number;
   makeup: number;
 }
 
@@ -36,6 +37,10 @@ export interface MakeupEligibility {
 
 /** Single source of truth for the normal attendance session flow. */
 export class AttendanceSessionService {
+  static getCurrentSessionDate(now = new Date()): string {
+    return SessionDateService.getCurrentSessionDate(undefined, now);
+  }
+
   static getMakeupEligibility(sessionId: string, studentId: string): MakeupEligibility {
     const { activeCenterId } = useAuthStore.getState();
     if (!activeCenterId) return { eligible: false };
@@ -95,9 +100,23 @@ export class AttendanceSessionService {
                )
            )
          )
+         AND EXISTS (
+           SELECT 1 FROM attendance absent
+           WHERE absent.center_id = s.center_id
+             AND absent.session_id = s.id AND absent.student_id = ?
+             AND absent.status = 'absent'
+             AND COALESCE(absent.attendance_type, 'present') <> 'makeup'
+         )
          AND NOT EXISTS (
-           SELECT 1 FROM attendance a
-           WHERE a.center_id = s.center_id AND a.session_id = s.id AND a.student_id = ?
+           SELECT 1 FROM attendance present
+           WHERE present.center_id = s.center_id
+             AND present.session_id = s.id AND present.student_id = ?
+             AND present.status IN ('present', 'late')
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM advance_coverages coverage
+           WHERE coverage.center_id = s.center_id
+             AND coverage.student_id = ? AND coverage.target_future_session_id = s.id
          )
          AND NOT EXISTS (
            SELECT 1 FROM attendance makeup
@@ -106,7 +125,7 @@ export class AttendanceSessionService {
                   OR makeup.original_absence_id = ('absence-' || s.id || '-' || ?))
          )
        ORDER BY s.session_date DESC, s.start_time DESC LIMIT 1`,
-      [activeCenterId, session.sessionDate, session.sessionDate, session.startTime, session.teacherId, session.teacherName || "", session.groupId, session.subjectId, session.subjectName || "", studentId, studentId, studentId, studentId, studentId],
+      [activeCenterId, session.sessionDate, session.sessionDate, session.startTime, session.teacherId, session.teacherName || "", session.groupId, session.subjectId, session.subjectName || "", studentId, studentId, studentId, studentId, studentId, studentId, studentId],
     );
     if (
       source &&
@@ -114,7 +133,7 @@ export class AttendanceSessionService {
         source.originalSessionDate,
         session.sessionDate,
         source.weekStartDay ?? DEFAULT_TEACHER_WEEK_START_DAY,
-        getLocalDateOnly(),
+        this.localDate(),
       )
     ) {
       return {
@@ -200,21 +219,98 @@ export class AttendanceSessionService {
     groupId: string,
     date = AttendanceSessionService.localDate(),
     scheduleId?: string,
+    legacySessionId?: string,
   ): Session {
     const { activeCenterId, currentUser } = useAuthStore.getState();
     if (!activeCenterId || !currentUser) throw new ForbiddenError("يجب تسجيل الدخول أولاً.");
     const db = DatabaseService.getDb();
-    const stableId = stableSessionId(activeCenterId, groupId, scheduleId || "", date);
+    const group = GroupRepository.findById(groupId);
+    if (!group || group.status !== "active") throw new ConflictError("المجموعة غير موجودة أو غير مفعلة.");
+    const dayOfWeek = new Date(`${date}T12:00:00`).getDay();
+    const schedulesForDay = GroupScheduleRepository.getSchedulesForGroup(groupId)
+      .filter((item) => item.dayOfWeek === dayOfWeek);
+    if (scheduleId && legacySessionId) {
+      throw new ConflictError("اختر موعدًا مجدولًا أو جلسة قديمة بلا موعد، وليس الاثنين معًا.");
+    }
+    if (legacySessionId) {
+      const selectedLegacySession = SessionRepository.findById(legacySessionId);
+      if (
+        !selectedLegacySession ||
+        selectedLegacySession.centerId !== activeCenterId ||
+        selectedLegacySession.groupId !== groupId ||
+        selectedLegacySession.sessionDate !== date ||
+        selectedLegacySession.scheduleId
+      ) {
+        throw new ConflictError("الجلسة المحددة بلا موعد لا تطابق المركز أو المجموعة أو التاريخ الحالي.");
+      }
+      if (selectedLegacySession.status === "cancelled") {
+        throw new ConflictError("الجلسة ملغاة ولا يمكن إعادة تفعيلها.");
+      }
+      return selectedLegacySession;
+    }
+    if (!scheduleId) {
+      const unscheduledSessions = SessionRepository.getSessionsForDate(date)
+        .filter((session) =>
+          session.centerId === activeCenterId &&
+          session.groupId === groupId &&
+          session.sessionDate === date &&
+          !session.scheduleId,
+        );
+      if (unscheduledSessions.length > 0) {
+        throw new ConflictError("لا يمكن اختيار جلسة قديمة بلا موعد اعتمادًا على المجموعة والتاريخ فقط؛ حدّد معرّف الجلسة أو موعد الحصة.");
+      }
+    }
+    const matchingSchedule = scheduleId
+      ? schedulesForDay.find((item) => item.id === scheduleId)
+      : schedulesForDay.length === 1
+        ? schedulesForDay[0]
+        : null;
+    if (scheduleId && !matchingSchedule) {
+      throw new ConflictError("الموعد المحدد غير موجود أو لا يخص المجموعة في هذا اليوم.");
+    }
+    if (!scheduleId && schedulesForDay.length > 1) {
+      throw new ConflictError("للمجموعة أكثر من موعد اليوم؛ اختر موعد الحصة قبل بدء الحضور.");
+    }
+    const resolvedScheduleId = matchingSchedule?.id;
+    if (!resolvedScheduleId && schedulesForDay.length === 0) {
+      throw new ConflictError("لا يوجد موعد مجدول أو جلسة بلا موعد يمكن تحديدها لهذه المجموعة اليوم.");
+    }
+    if (!resolvedScheduleId) {
+      throw new ConflictError("تعذر تحديد هوية الحصة المجدولة بأمان.");
+    }
+    const stableId = stableSessionId(activeCenterId, groupId, resolvedScheduleId || "", date);
+    const canonicalStableId = SyncRepository.resolveSessionAlias(activeCenterId, stableId);
     const byStableId = db.getFirstSync<any>(
       "SELECT id, center_id as centerId, group_id as groupId, schedule_id as scheduleId, subject_id as subjectId, teacher_id as teacherId, session_price as sessionPrice, late_after_minutes as lateAfterMinutes, session_date as sessionDate, start_time as startTime, end_time as endTime, status, created_at as createdAt FROM sessions WHERE center_id = ? AND id = ?",
-      [activeCenterId, stableId],
+      [activeCenterId, canonicalStableId],
     );
-    if (byStableId) return byStableId as Session;
-    // A group has one attendance session per calendar day. Reuse the same
-    // record so reopening the scanner cannot duplicate attendance or payments.
-    const existing = SessionRepository.getSessionsForDate(date)
-      .filter((session) => session.groupId === groupId && session.status !== "cancelled" && (!scheduleId || session.scheduleId === scheduleId))
-      .sort((a, b) => String(a.createdAt || a.id).localeCompare(String(b.createdAt || b.id)))[0];
+    if (
+      byStableId &&
+      byStableId.groupId === groupId &&
+      byStableId.sessionDate === date &&
+      byStableId.scheduleId === resolvedScheduleId
+    ) {
+      if (byStableId.status === "cancelled") {
+        throw new ConflictError("الجلسة ملغاة ولا يمكن إعادة تفعيلها.");
+      }
+      return byStableId as Session;
+    }
+    const cancelledSlot = SessionRepository.getSessionsForDate(date)
+      .find((session) => session.groupId === groupId && session.scheduleId === resolvedScheduleId && session.status === "cancelled");
+    if (cancelledSlot) throw new ConflictError("الجلسة ملغاة ولا يمكن إعادة تفعيلها.");
+    // A timetable slot has its own attendance session; never reuse another
+    // slot from the same group's date.
+    const existingSessions = SessionRepository.getSessionsForDate(date)
+      .filter((session) =>
+        session.centerId === activeCenterId &&
+        session.groupId === groupId &&
+        session.sessionDate === date &&
+        session.scheduleId === resolvedScheduleId,
+      );
+    if (existingSessions.length > 1) {
+      throw new ConflictError("توجد جلسات مكررة لنفس الموعد والتاريخ؛ لم يتم اختيار واحدة تلقائيًا.");
+    }
+    const existing = existingSessions[0];
     if (existing) {
       // A session can have been generated before enrollments were synced (or
       // by an older build), leaving its expected-student snapshot empty. Do
@@ -227,8 +323,8 @@ export class AttendanceSessionService {
         // authoritative and must not be expanded on every activation.
         // Keep an open session's roster in sync with active enrollments. This
         // matters when a student is added while attendance is already running:
-        // the student must immediately become expected/absent instead of only
-        // appearing after a second session is created.
+        // the student must immediately become expected and unresolved instead
+        // of only appearing after a second session is created.
         const expectedStudentIds = this.getExpectedStudentIdsForGroup(
           { id: groupId, subjectId: existing.subjectId, teacherId: existing.teacherId } as Group,
           groupId,
@@ -246,19 +342,41 @@ export class AttendanceSessionService {
       }
       return existing;
     }
-    const group = GroupRepository.findById(groupId);
-    if (!group) throw new ConflictError("المجموعة غير موجودة.");
-    const schedule = GroupScheduleRepository.getSchedulesForGroup(groupId).find(
-      (item) =>
-        item.dayOfWeek === new Date(`${date}T12:00:00`).getDay() &&
-        (!scheduleId || item.id === scheduleId),
-    );
+    SessionDateService.getCenterTimeZone(activeCenterId);
+    const schedule = matchingSchedule;
     if (!schedule) throw new ConflictError("لا يوجد موعد للمجموعة اليوم.");
     const now = new Date().toISOString();
-    const sessionId = stableSessionId(activeCenterId, group.id, schedule.id, date);
+    let sessionId = stableSessionId(activeCenterId, group.id, schedule.id, date);
+    const stableIdOwner = db.getFirstSync<any>(
+      `SELECT group_id as groupId, schedule_id as scheduleId, session_date as sessionDate
+         FROM sessions WHERE center_id = ? AND id = ?`,
+      [activeCenterId, sessionId],
+    );
+    if (
+      stableIdOwner &&
+      (stableIdOwner.groupId !== group.id ||
+        stableIdOwner.scheduleId !== schedule.id ||
+        stableIdOwner.sessionDate !== date)
+    ) {
+      sessionId = stableSessionId(activeCenterId, group.id, `${schedule.id}:collision`, date);
+      const fallbackOwner = db.getFirstSync<any>(
+        `SELECT group_id as groupId, schedule_id as scheduleId, session_date as sessionDate
+           FROM sessions WHERE center_id = ? AND id = ?`,
+        [activeCenterId, sessionId],
+      );
+      if (
+        fallbackOwner &&
+        (fallbackOwner.groupId !== group.id ||
+          fallbackOwner.scheduleId !== schedule.id ||
+          fallbackOwner.sessionDate !== date)
+      ) {
+        throw new ConflictError("تعذر إنشاء معرّف آمن لهذه الجلسة بسبب تعارض معرّف موجود.");
+      }
+    }
     const expectedStudentIds = this.getExpectedStudentIdsForGroup(group, group.id, date);
     const deviceId = DeviceService.getDeviceIdSync();
-    const operationId = `op-session-att-${sessionId}`;
+    const operationDeviceKey = stableSessionId(deviceId, sessionId, "attendance-start", date);
+    const operationId = `op-session-att-${sessionId}-${operationDeviceKey.slice(-12)}`;
     try {
       DatabaseService.runInTransaction(() => {
         db.runSync(`INSERT INTO sessions (id, center_id, group_id, schedule_id, subject_id, teacher_id, session_price, late_after_minutes, session_date, start_time, end_time, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)`, [sessionId, activeCenterId, group.id, schedule.id, group.subjectId, group.teacherId, group.sessionPrice, group.lateAfterMinutes, date, schedule.startTime, schedule.endTime, now]);
@@ -268,12 +386,27 @@ export class AttendanceSessionService {
       });
     } catch (error) {
       if (!String((error as any)?.message || error).toLowerCase().includes("unique")) throw error;
-      const racedSession = SessionRepository.getSessionsForDate(date).find(
-        (item) => item.groupId === group.id && item.status !== "cancelled" && (!scheduleId || item.scheduleId === scheduleId),
+      const racedSessions = SessionRepository.getSessionsForDate(date).filter(
+        (item) =>
+          item.centerId === activeCenterId &&
+          item.groupId === group.id &&
+          item.sessionDate === date &&
+          item.status !== "cancelled" &&
+          item.scheduleId === resolvedScheduleId,
       );
-      if (racedSession) return racedSession;
+      if (racedSessions.length === 1) return racedSessions[0];
+      if (racedSessions.length > 1) {
+        throw new ConflictError("حدث تعارض بين جلسات مكررة للموعد نفسه؛ يلزم حل التعارض قبل المتابعة.");
+      }
       const inserted = db.getFirstSync<any>("SELECT id, center_id as centerId, group_id as groupId, schedule_id as scheduleId, subject_id as subjectId, teacher_id as teacherId, session_price as sessionPrice, late_after_minutes as lateAfterMinutes, session_date as sessionDate, start_time as startTime, end_time as endTime, status, created_at as createdAt FROM sessions WHERE center_id = ? AND id = ?", [activeCenterId, sessionId]);
-      if (inserted) return inserted as Session;
+      if (
+        inserted &&
+        inserted.groupId === group.id &&
+        inserted.scheduleId === schedule.id &&
+        inserted.sessionDate === date
+      ) {
+        return inserted as Session;
+      }
       throw error;
     }
     // A session is a dependency for every attendance record. Queue its sync
@@ -295,42 +428,57 @@ export class AttendanceSessionService {
   }
 
   private static localDate(date = new Date()): string {
-    const year = date.getFullYear();
-    const month = String(date.getMonth() + 1).padStart(2, "0");
-    const day = String(date.getDate()).padStart(2, "0");
-    return `${year}-${month}-${day}`;
+    return SessionDateService.getCurrentSessionDate(undefined, date);
   }
 
   static activate(sessionId: string): Session {
-    const { currentUser } = useAuthStore.getState();
-    if (!currentUser || !PermissionService.hasPermission(currentUser.permissions, "attendance.create")) {
+    const { activeCenterId, currentUser } = useAuthStore.getState();
+    if (!activeCenterId || !currentUser || !PermissionService.hasPermission(currentUser.permissions, "attendance.create")) {
       throw new ForbiddenError("ليس لديك صلاحية بدء جلسة الحضور.");
     }
-    const session = SessionRepository.findById(sessionId);
+    const canonicalSessionId = SyncRepository.resolveSessionAlias(activeCenterId, sessionId);
+    const session = SessionRepository.findById(canonicalSessionId);
     // A closed session is reopened only through the explicit reopen action.
     if (!session) throw new ConflictError("جلسة الحضور غير موجودة.");
-    if (session.status === "closed" || session.status === "cancelled") throw new ConflictError("لا يمكن بدء جلسة مغلقة أو ملغاة.");
+    if (session.status !== "scheduled" && session.status !== "open") {
+      throw new ConflictError("لا يمكن بدء جلسة مغلقة أو ملغاة.");
+    }
 
     const db = DatabaseService.getDb();
     let sessionWasActivated = false;
-    let activationOperationId: string | undefined;
+    const activationOperationId = `op-session-activate-${session.id}`;
     if (session.status === "scheduled") {
-      const operationId = `op-session-activate-${session.id}-${Date.now()}`;
-      activationOperationId = operationId;
       DatabaseService.runInTransaction(() => {
-        db.runSync("UPDATE sessions SET status = 'open', updated_at = ? WHERE center_id = ? AND id = ?", [new Date().toISOString(), session.centerId, session.id]);
-        AuditService.recordEvent({
-          operationId,
-          centerId: session.centerId,
-          userId: currentUser.id,
-          deviceId: DeviceService.getDeviceIdSync(),
-          entityType: "session",
-          entityId: session.id,
-          action: "session.activated",
-          payload: { groupId: session.groupId, scheduleId: session.scheduleId, sessionDate: session.sessionDate },
-        });
+        const currentSession = db.getFirstSync<{ status: string }>(
+          "SELECT status FROM sessions WHERE center_id = ? AND id = ?",
+          [session.centerId, session.id],
+        );
+        const currentStatus = String(currentSession?.status || "").toLowerCase();
+        if (!currentSession || currentStatus === "cancelled" || currentStatus === "closed") {
+          throw new ConflictError("لا يمكن بدء جلسة مغلقة أو ملغاة.");
+        }
+        if (currentStatus !== "scheduled" && currentStatus !== "open") {
+          throw new ConflictError("حالة الجلسة لا تسمح ببدء الحضور.");
+        }
+        if (currentStatus === "scheduled") {
+          const now = new Date().toISOString();
+          db.runSync(
+            "UPDATE sessions SET status = 'open', updated_at = ? WHERE center_id = ? AND id = ? AND status = 'scheduled'",
+            [now, session.centerId, session.id],
+          );
+          AuditService.recordEvent({
+            operationId: activationOperationId,
+            centerId: session.centerId,
+            userId: currentUser.id,
+            deviceId: DeviceService.getDeviceIdSync(),
+            entityType: "session",
+            entityId: session.id,
+            action: "session.activated",
+            payload: { groupId: session.groupId, scheduleId: session.scheduleId, sessionDate: session.sessionDate },
+          });
+          sessionWasActivated = true;
+        }
       });
-      sessionWasActivated = true;
     }
     // Always reconcile the expected snapshot before attendance starts. A
     // non-zero but stale snapshot must also receive students enrolled later.
@@ -347,11 +495,23 @@ export class AttendanceSessionService {
       for (const studentId of expectedStudentIds) {
         db.runSync(
           "INSERT OR IGNORE INTO session_expected_students (id, center_id, session_id, student_id, created_at) VALUES (?, ?, ?, ?, ?)",
-          [`exp-${sessionId}-${studentId}`, session.centerId, sessionId, studentId, now],
+          [`exp-${session.id}-${studentId}`, session.centerId, session.id, studentId, now],
         );
       }
     }
     const deviceId = DeviceService.getDeviceIdSync();
+    const activationWasAudited = Boolean(db.getFirstSync<{ id: string }>(
+      `SELECT id FROM audit_logs
+       WHERE center_id = ? AND entity_type = 'session' AND entity_id = ?
+         AND action = 'session.activated'
+       LIMIT 1`,
+      [session.centerId, session.id],
+    ));
+    const activationOperationExists = Boolean(
+      SyncRepository.getByOperationId(activationOperationId),
+    );
+    const shouldEnqueueActivation =
+      sessionWasActivated || activationWasAudited || activationOperationExists;
     const reconciliationUpdatedAt = sessionWasActivated
       ? new Date().toISOString()
       : undefined;
@@ -364,17 +524,18 @@ export class AttendanceSessionService {
       ? filterExpectedStudentIdsByEligibility(expectedRows, eligibleStudentIds)
       : eligibleStudentIds;
     SyncRepository.enqueueOperation({
-      operationId: activationOperationId,
+      operationId: shouldEnqueueActivation ? activationOperationId : undefined,
       centerId: session.centerId,
       userId: currentUser.id,
       deviceId,
-      operationType: sessionWasActivated ? "UPDATE" : "session.reconcile",
+      operationType: shouldEnqueueActivation ? "UPDATE" : "session.reconcile",
       entityType: "session",
       entityId: session.id,
       // Send a complete session representation. This safely repairs older
       // local sessions that were created before a failed sync and therefore
       // do not yet exist on the server.
       payload: {
+        ...(shouldEnqueueActivation ? { action: "activate" } : {}),
         groupId: session.groupId,
         scheduleId: session.scheduleId,
         subjectId: session.subjectId,
@@ -515,7 +676,7 @@ export class AttendanceSessionService {
        WHERE s.id = ?`,
       [sessionId],
     );
-    if (!session) return { total: 0, present: 0, absent: 0, makeup: 0 };
+    if (!session) return { total: 0, present: 0, absent: 0, unresolved: 0, makeup: 0 };
     const eligibleIds = SessionRepository.getEligibleStudentIdsForSession(sessionId);
     // A legacy expected snapshot can contain compensation visitors. Current
     // date-valid enrollment/package relationships are the roster authority;
@@ -621,7 +782,7 @@ export class AttendanceSessionService {
       normalizedAttendance,
       coveredInAdvance.map((row: any) => row.studentId ?? row.student_id).filter(Boolean),
     );
-    return { total: counts.expected, present: counts.present, absent: counts.absent, makeup: counts.makeup };
+    return { total: counts.expected, present: counts.present, absent: counts.absent, unresolved: counts.unresolved, makeup: counts.makeup };
   }
 
   /**

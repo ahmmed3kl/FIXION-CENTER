@@ -36,6 +36,10 @@ export interface SyncConflictItem {
 export interface PushSyncResponse {
   success: boolean;
   syncedOperationIds: string[];
+  sessionMappings?: Array<{
+    localSessionId: string;
+    canonicalSessionId: string;
+  }>;
   conflicts: SyncConflictItem[];
   serverCursor: string;
   processedAt: string;
@@ -60,6 +64,10 @@ export interface ServerChangeRecord {
 
 export interface PullSyncResponse {
   changes: ServerChangeRecord[];
+  sessionMappings?: Array<{
+    localSessionId: string;
+    canonicalSessionId: string;
+  }>;
   nextCursor: string;
   hasMore: boolean;
   cursorReset?: boolean;
@@ -83,6 +91,12 @@ export interface LoginResponse {
     role: string;
     centerIds: string[];
     permissions: string[];
+    centers?: Array<{
+      id: string;
+      name: string;
+      code: string;
+      timeZone?: string | null;
+    }>;
   };
   expiresAt?: string;
 }

@@ -16,6 +16,7 @@ import { GroupScheduleRepository } from "../groups/GroupScheduleRepository";
 import { StudentRepository } from "../students/StudentRepository";
 import { AttendanceSessionService } from "../attendance/AttendanceSessionService";
 import { stableSessionId } from "../../shared/utils/stableIds";
+import { SessionDateService } from "./SessionDateService";
 
 /** Parse a DATE at local noon so weekday calculations cannot cross a timezone boundary. */
 function parseLocalDateOnly(dateValue: string): Date {
@@ -101,7 +102,6 @@ export class SessionGenerationService {
         const existingSession = db.getFirstSync<Session>(
           `SELECT id FROM sessions
            WHERE center_id = ? AND group_id = ? AND schedule_id = ? AND session_date = ?
-             AND status <> 'cancelled'
            ORDER BY created_at ASC LIMIT 1`,
           [centerId, sched.groupId, sched.id, dateStr],
         );
@@ -111,6 +111,7 @@ export class SessionGenerationService {
           continue;
         }
 
+        SessionDateService.getCenterTimeZone(centerId);
         const sessionId = stableSessionId(centerId, group.id, sched.id, dateStr);
         const now = new Date().toISOString();
 
@@ -237,6 +238,11 @@ export class SessionGenerationService {
        LEFT JOIN teachers t ON s.teacher_id = t.id
        LEFT JOIN subjects subj ON s.subject_id = subj.id
        WHERE s.center_id = ? AND s.session_date = ?
+         AND NOT EXISTS (
+           SELECT 1 FROM session_id_aliases alias
+           WHERE alias.center_id = s.center_id
+             AND alias.local_session_id = s.id
+         )
        ORDER BY s.start_time ASC`,
       [centerId, dateStr],
     );

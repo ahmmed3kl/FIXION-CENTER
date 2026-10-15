@@ -10,10 +10,10 @@ import { MakeupService } from "../src/features/attendance/MakeupService";
 import { useAuthStore } from "../src/features/auth/useAuthStore";
 import { GradeBookRepository } from "../src/features/grades/GradeBookRepository";
 import { SessionRepository } from "../src/features/sessions/SessionRepository";
+import { SessionDateService } from "../src/features/sessions/SessionDateService";
 import { StudentRepository } from "../src/features/students/StudentRepository";
 import { getLocalDateOnly } from "../src/shared/utils/date";
 import { getTeacherWeekBounds } from "../src/shared/utils/teacherWeeks";
-import * as localDateUtils from "../src/shared/utils/date";
 import { TEACHER_MAKEUP_CYCLE_EXPIRED_ERROR } from "../src/shared/utils/teacherWeeks";
 
 describe("makeup attendance integration", () => {
@@ -21,6 +21,17 @@ describe("makeup attendance integration", () => {
     DatabaseService.init();
     await useAuthStore.getState().login("01000000001", "123456");
     await useAuthStore.getState().selectCenter("center-1");
+    const db = DatabaseService.getDb();
+    const center = db.getFirstSync<{ id: string; name: string; code: string }>(
+      "SELECT id, name, code FROM centers WHERE id = ?",
+      ["center-1"],
+    );
+    if (!center) throw new Error("The local makeup test center was not seeded.");
+    db.runSync(
+      `INSERT INTO centers (id, name, code, time_zone) VALUES (?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET time_zone = excluded.time_zone`,
+      [center.id, center.name, center.code, "Africa/Cairo"],
+    );
     CardRangeRepository.replaceCenterRanges("center-1", [
       { id: "test-card-range-makeup-integration", startCode: "000000", endCode: "999999" },
     ]);
@@ -60,6 +71,17 @@ describe("makeup attendance integration", () => {
        VALUES (?, ?, ?, ?, ?)`,
       ["makeup-source-expected-int", centerId, "makeup-source-int", makeupStudent.id, "2026-09-20"],
     );
+    expect(MakeupService.getNextEligibleSession(
+      makeupStudent.id,
+      "makeup-source-int",
+      "makeup-target-int",
+    )).toBeNull();
+    db.runSync(
+      `INSERT INTO attendance
+       (id, center_id, student_id, session_id, check_in_time, status, is_late, attendance_type, operation_id)
+       VALUES (?, ?, ?, ?, '2099-10-01T10:00:00.000Z', 'absent', 0, 'present', ?)`,
+      ["makeup-source-absence-int", centerId, makeupStudent.id, "makeup-source-int", "makeup-source-absence-op-int"],
+    );
     db.runSync(
       `INSERT INTO sessions
        (id, center_id, group_id, subject_id, teacher_id, session_date, start_time, end_time, status, created_at)
@@ -70,7 +92,8 @@ describe("makeup attendance integration", () => {
     expect(AttendanceSessionService.getSummary("makeup-target-int")).toEqual({
       total: examRosterBefore.length,
       present: 0,
-      absent: examRosterBefore.length,
+      absent: 0,
+      unresolved: examRosterBefore.length,
       makeup: 0,
     });
     expect(AttendanceSessionService.isExpected("makeup-target-int", makeupStudent.id)).toBe(false);
@@ -88,7 +111,8 @@ describe("makeup attendance integration", () => {
     expect(AttendanceSessionService.getSummary("makeup-target-int")).toEqual({
       total: examRosterBefore.length,
       present: 0,
-      absent: examRosterBefore.length,
+      absent: 0,
+      unresolved: examRosterBefore.length,
       makeup: 1,
     });
 
@@ -122,7 +146,8 @@ describe("makeup attendance integration", () => {
     expect(AttendanceSessionService.getSummary("makeup-target-int")).toEqual({
       total: examRosterBefore.length,
       present: 1,
-      absent: examRosterBefore.length - 1,
+      absent: 0,
+      unresolved: examRosterBefore.length - 1,
       makeup: 1,
     });
     expect(
@@ -170,6 +195,12 @@ describe("makeup attendance integration", () => {
       `INSERT INTO session_expected_students (id, center_id, session_id, student_id, created_at)
        VALUES (?, ?, ?, ?, '2026-10-13')`,
       [`exp-${sourceSessionId}-${visitor.id}`, centerId, sourceSessionId, visitor.id],
+    );
+    db.runSync(
+      `INSERT INTO attendance
+       (id, center_id, student_id, session_id, check_in_time, status, is_late, attendance_type, operation_id)
+       VALUES (?, ?, ?, ?, '2099-10-01T10:00:00.000Z', 'absent', 0, 'present', ?)`,
+      [`makeup-roster-absence-${visitor.id}`, centerId, visitor.id, sourceSessionId, `makeup-roster-absence-op-${visitor.id}`],
     );
     db.runSync(
       `INSERT INTO sessions
@@ -286,11 +317,12 @@ describe("makeup attendance integration", () => {
 
     const expectedStudents = SessionRepository.getExpectedStudents(currentSessionId);
     expect(expectedStudents.map((student) => student.id)).toEqual([realMember.id]);
-    expect(AbsenceService.getAbsenteesForSession(currentSessionId).map((student) => student.id)).toEqual([realMember.id]);
+    expect(AbsenceService.getAbsenteesForSession(currentSessionId)).toEqual([]);
     expect(AttendanceSessionService.getSummary(currentSessionId)).toEqual({
       total: 1,
       present: 0,
-      absent: 1,
+      absent: 0,
+      unresolved: 1,
       makeup: 0,
     });
     for (const visitor of visitors) {
@@ -308,7 +340,7 @@ describe("makeup attendance integration", () => {
       );
     }
     expect(SessionRepository.getExpectedStudents(currentSessionId).map((student) => student.id)).toEqual([realMember.id]);
-    expect(AttendanceSessionService.getSummary(currentSessionId).absent).toBe(1);
+    expect(AttendanceSessionService.getSummary(currentSessionId)).toMatchObject({ absent: 0, unresolved: 1 });
     expect(db.getAllSync<any>(
       `SELECT student_id as studentId, original_absence_id as originalAbsenceId
        FROM attendance WHERE center_id = ? AND session_id = ?`,
@@ -406,6 +438,11 @@ describe("makeup attendance integration", () => {
       parentPhone: "01111110005",
       grade: "الصف الثالث الثانوي",
     });
+    EnrollmentRepository.enrollStudent({
+      studentId: student.id,
+      groupId,
+      startDate: "2100-01-01",
+    });
     const insertSession = (id: string, date: string, start: string, status: string) => {
       db.runSync(
         `INSERT INTO sessions
@@ -422,9 +459,18 @@ describe("makeup attendance integration", () => {
         [`cycle-exp-${sessionId}-${expectedStudentId}`, centerId, sessionId, expectedStudentId, "2026-10-12"],
       );
     };
+    const recordAbsence = (sessionId: string, absentStudentId: string) => {
+      db.runSync(
+        `INSERT INTO attendance
+         (id, center_id, student_id, session_id, check_in_time, status, is_late, attendance_type, operation_id)
+         VALUES (?, ?, ?, ?, ?, 'absent', 0, 'present', ?)`,
+        [`cycle-absence-${sessionId}`, centerId, absentStudentId, sessionId, `${sessionId}-event`, `cycle-absence-op-${sessionId}`],
+      );
+    };
 
     insertSession("cycle-scheduled-source", "2100-10-02", "07:00", "closed");
     expectStudent("cycle-scheduled-source", student.id);
+    recordAbsence("cycle-scheduled-source", student.id);
     insertSession("cycle-scheduled-next", "2100-10-03", "08:00", "scheduled");
     expectStudent("cycle-scheduled-next", student.id);
     insertSession("cycle-scheduled-later", "2100-10-03", "09:00", "open");
@@ -434,11 +480,16 @@ describe("makeup attendance integration", () => {
 
     insertSession("cycle-intermediate-source", "2100-10-02", "10:00", "closed");
     expectStudent("cycle-intermediate-source", intermediateStudent.id);
+    recordAbsence("cycle-intermediate-source", intermediateStudent.id);
     insertSession("cycle-ineligible-intermediate", "2100-10-03", "10:30", "scheduled");
     expectStudent("cycle-ineligible-intermediate", otherStudent.id);
     insertSession("cycle-intermediate-target", "2100-10-03", "11:00", "open");
     expectStudent("cycle-intermediate-target", intermediateStudent.id);
-    expect(MakeupService.getNextEligibleSession(intermediateStudent.id, "cycle-intermediate-source")?.id)
+    expect(MakeupService.getNextEligibleSession(
+      intermediateStudent.id,
+      "cycle-intermediate-source",
+      "cycle-intermediate-target",
+    )?.id)
       .toBe("cycle-intermediate-target");
 
     const currentWeek = getTeacherWeekBounds(getLocalDateOnly());
@@ -447,6 +498,7 @@ describe("makeup attendance integration", () => {
     const expiredSourceDate = getLocalDateOnly(previousWeekEnd);
     insertSession("cycle-expired-source", expiredSourceDate, "10:00", "closed");
     expectStudent("cycle-expired-source", student.id);
+    recordAbsence("cycle-expired-source", student.id);
     insertSession("cycle-expired-target", currentWeek.startDate, "10:00", "open");
     expectStudent("cycle-expired-target", student.id);
     expect(MakeupService.getNextEligibleSession(student.id, "cycle-expired-source")).toBeNull();
@@ -505,6 +557,19 @@ describe("makeup attendance integration", () => {
        VALUES (?, ?, ?, ?, ?)`,
       [`makeup-cycle-${sessionId}-${expectedStudentId}`, centerId, sessionId, expectedStudentId, "2026-10-12"],
     );
+    const recordAbsence = (sessionId: string, absentStudentId: string) => db.runSync(
+      `INSERT INTO attendance
+       (id, center_id, student_id, session_id, check_in_time, status, is_late, attendance_type, operation_id)
+       VALUES (?, ?, ?, ?, ?, 'absent', 0, 'present', ?)`,
+      [
+        `makeup-cycle-absence-${sessionId}-${absentStudentId}`,
+        centerId,
+        absentStudentId,
+        sessionId,
+        `${sessionId}-event`,
+        `makeup-cycle-absence-op-${sessionId}-${absentStudentId}`,
+      ],
+    );
 
     const sourceSessionId = `makeup-cycle-source-${Date.now()}`;
     const intermediateSessionId = `makeup-cycle-intermediate-${Date.now()}`;
@@ -512,12 +577,14 @@ describe("makeup attendance integration", () => {
     insertSession(sourceSessionId, "grp-1", "2026-10-12", "10:00", "closed");
     expectStudent(sourceSessionId, student.id);
     expectStudent(sourceSessionId, lateStudent.id);
+    recordAbsence(sourceSessionId, student.id);
+    recordAbsence(sourceSessionId, lateStudent.id);
     insertSession(intermediateSessionId, "grp-1", "2026-10-13", "10:30", "scheduled");
     expectStudent(intermediateSessionId, unrelatedStudent.id);
     insertSession(targetSessionId, targetGroupId, "2026-10-14", "10:00", "open");
     expectStudent(targetSessionId, unrelatedStudent.id);
 
-    const today = jest.spyOn(localDateUtils, "getLocalDateOnly").mockReturnValue("2026-10-13");
+    const today = jest.spyOn(SessionDateService, "getCurrentSessionDate").mockReturnValue("2026-10-13");
     try {
       expect(AttendanceSessionService.isExpected(intermediateSessionId, student.id)).toBe(false);
       expect(MakeupService.getNextEligibleSession(student.id, sourceSessionId, targetSessionId)?.id)

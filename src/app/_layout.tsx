@@ -12,6 +12,7 @@ import { ServiceVisibilityProvider } from "../core/services/ServiceVisibilityCon
 import { SyncEngine, SyncRepository } from "../core/sync";
 import { registerBackgroundSync } from "../core/sync/backgroundTask";
 import { ThemeProvider, useTheme } from "../core/theme";
+import { createLastAuthorizedRoute, LastAuthorizedRouteStore } from "../features/auth/lastAuthorizedRoute";
 import { useAuthStore } from "../features/auth/useAuthStore";
 import { LoadingState } from "../shared/components";
 
@@ -22,14 +23,40 @@ initializeRTL();
 DatabaseService.init();
 
 function AuthGuard({ children }: { children: React.ReactNode }) {
-  const { isAuthenticated, activeCenterId, isLoading, restoreSession, refreshPermissions } =
-    useAuthStore();
+  const {
+    isAuthenticated,
+    activeCenterId,
+    currentUser,
+    isLoading,
+    restoreSession,
+    refreshPermissions,
+  } = useAuthStore();
   const segments = useSegments();
   const router = useRouter();
+  const lastSavedRouteRef = React.useRef<string | null>(null);
 
   useEffect(() => {
     restoreSession();
   }, []);
+
+  useEffect(() => {
+    if (isLoading || !isAuthenticated || !currentUser || !activeCenterId) {
+      lastSavedRouteRef.current = null;
+      return;
+    }
+
+    const route = createLastAuthorizedRoute(segments, currentUser, activeCenterId);
+    if (!route) return;
+
+    const routeKey = `${route.userId}:${route.centerId}:${route.routeName}`;
+    if (lastSavedRouteRef.current === routeKey) return;
+    lastSavedRouteRef.current = routeKey;
+
+    LastAuthorizedRouteStore.save(route).catch((error) => {
+      lastSavedRouteRef.current = null;
+      console.error("Could not save the last authorized route:", error);
+    });
+  }, [activeCenterId, currentUser, isAuthenticated, isLoading, segments]);
 
   // Automatic synchronization:
   // 1. On app open / authentication restored.

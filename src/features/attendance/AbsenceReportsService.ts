@@ -19,6 +19,7 @@ export interface AbsenceSessionSummary {
   total: number;
   present: number;
   absent: number;
+  unresolved: number;
   compensated: number;
 }
 
@@ -52,6 +53,7 @@ export interface AbsenceSessionReport {
   session: Session;
   expected: Student[];
   absent: Student[];
+  unresolved: Student[];
   present: Array<{ student: Student; attendance: Attendance }>;
   compensation: CompensationReportRow[];
   compensated: number;
@@ -62,7 +64,7 @@ export interface AbsenceSessionReport {
 export { calculateSessionAttendanceCounts } from "./AttendanceCalculations";
 export type { SessionAttendanceCounts } from "./AttendanceCalculations";
 
-/** Counts final student states once, never raw attendance rows. */
+/** Counts explicit final states separately from students whose state is unresolved. */
 export function calculateAbsenceReportCounts(
   expected: Student[],
   absent: Student[],
@@ -77,12 +79,31 @@ export function calculateAbsenceReportCounts(
       .map((item) => item.studentId),
   );
   const present = expected.filter((student) => presentIds.has(student.id) && !advancedIds.has(student.id));
-  // The expected snapshot is authoritative. AbsenceService is still queried
-  // by the report composition for eligibility, but raw attendance (including
-  // makeup attendance) cannot remove an expected student from this list.
-  const absentFinal = expected.filter((student) => !presentIds.has(student.id) && !advancedIds.has(student.id));
+  const explicitlyAbsentIds = new Set(
+    absent
+      .map((student) => student.id)
+      .filter((studentId) => expectedIds.has(studentId) && !presentIds.has(studentId) && !advancedIds.has(studentId)),
+  );
+  const makeupIds = new Set(
+    attendance
+      .filter((item) =>
+        item.attendanceType === "makeup" &&
+        (item.status === "present" || item.status === "late"),
+      )
+      .map((item) => item.studentId),
+  );
+  const absentFinal = expected.filter(
+    (student) => explicitlyAbsentIds.has(student.id) && !makeupIds.has(student.id),
+  );
+  const unresolved = expected.filter(
+    (student) =>
+      !presentIds.has(student.id) &&
+      !explicitlyAbsentIds.has(student.id) &&
+      !advancedIds.has(student.id) &&
+      !makeupIds.has(student.id),
+  );
   const makeupCount = new Set(attendance.filter((item) => item.attendanceType === "makeup").map((item) => item.studentId)).size;
-  return { total: expected.length, present, absent: absentFinal, compensated: makeupCount + advancedIds.size };
+  return { total: expected.length, present, absent: absentFinal, unresolved, compensated: makeupCount + advancedIds.size };
 }
 
 /** Read-only composition of the existing session, attendance, absence and makeup services. */
@@ -106,7 +127,7 @@ export class AbsenceReportsService {
       const report = this.getSessionReport(session.id);
       const sessionNumber = (counters.get(session.groupId) || 0) + 1;
       counters.set(session.groupId, sessionNumber);
-      return { session, sessionNumber, total: report.expected.length, present: report.present.length, absent: report.absent.length, compensated: report.compensated };
+      return { session, sessionNumber, total: report.expected.length, present: report.present.length, absent: report.absent.length, unresolved: report.unresolved.length, compensated: report.compensated };
     });
   }
 
@@ -345,6 +366,6 @@ export class AbsenceReportsService {
       if (opportunity) compensation.push({ student, kind: "eligible", opportunity });
     }
 
-    return { session, expected, absent: counts.absent, present, compensation, compensated: compensation.length, attendance, absenceNotes };
+    return { session, expected, absent: counts.absent, unresolved: counts.unresolved, present, compensation, compensated: compensation.length, attendance, absenceNotes };
   }
 }

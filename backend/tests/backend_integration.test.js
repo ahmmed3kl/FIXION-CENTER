@@ -1,12 +1,22 @@
 /**
  * FIXION Comprehensive Backend Integration Test Suite
- * Executes directly against live Neon PostgreSQL database.
+ * Runs against an explicitly configured, isolated local PostgreSQL database.
  * Asserts all 17 security, architecture, and tenant-isolation invariants.
  */
 
 const assert = require("assert");
-const app = require("../src/server");
-const db = require("../src/db");
+const {
+  assertPostgresTestDatabaseIdentity,
+  withPostgresTestDatabase,
+} = require("./postgres-test-database");
+const {
+  target: testDatabase,
+  resources: { app, db, config },
+} = withPostgresTestDatabase(process.env, () => ({
+  app: require("../src/server"),
+  db: require("../src/db"),
+  config: require("../src/config"),
+}));
 
 let server;
 let baseUrl;
@@ -50,15 +60,8 @@ async function request(path, options = {}) {
 async function runTests() {
   console.log("====================================================");
   console.log(" STARTING FIXION BACKEND INTEGRATION TEST SUITE");
-  console.log(" Target Database: Neon Serverless PostgreSQL");
+  console.log(" Target Database: isolated local PostgreSQL test database");
   console.log("====================================================\n");
-
-  // Start test server on random high port
-  await new Promise((resolve) => {
-    server = app.listen(0, "127.0.0.1", () => resolve());
-  });
-  const port = server.address().port;
-  baseUrl = `http://127.0.0.1:${port}`;
 
   let center1Token;
   let center2Token;
@@ -66,6 +69,14 @@ async function runTests() {
   let center1DeviceId = `dev-test-${Date.now()}`;
 
   try {
+    await assertPostgresTestDatabaseIdentity(db, config.databaseUrl, testDatabase);
+    // Start the local test server only after the database identity is verified.
+    await new Promise((resolve) => {
+      server = app.listen(0, "127.0.0.1", resolve);
+    });
+    const port = server.address().port;
+    baseUrl = `http://127.0.0.1:${port}`;
+
     // -------------------------------------------------------------
     // TEST 1: Health Endpoint (Safe, no table counts leaked)
     // -------------------------------------------------------------

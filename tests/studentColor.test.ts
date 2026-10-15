@@ -104,9 +104,21 @@ describe("persistent student colors", () => {
       [sessionId, CENTER_ID, "student-color-group", "2026-10-12", "09:00", "10:00"],
     );
     db.runSync(
+      `INSERT INTO student_group_enrollments
+       (id, center_id, student_id, group_id, start_date, status, created_at)
+       VALUES (?, ?, ?, ?, ?, 'active', ?)`,
+      [`enrollment-${sessionId}`, CENTER_ID, STUDENT_ID, "student-color-group", "2026-10-01", now],
+    );
+    db.runSync(
       `INSERT INTO session_expected_students (id, center_id, session_id, student_id, created_at)
        VALUES (?, ?, ?, ?, ?)`,
       [`expected-${sessionId}`, CENTER_ID, sessionId, STUDENT_ID, now],
+    );
+    db.runSync(
+      `INSERT INTO attendance
+       (id, center_id, student_id, session_id, check_in_time, status, is_late, attendance_type, operation_id)
+       VALUES (?, ?, ?, ?, ?, 'absent', 0, 'present', ?)`,
+      [`absence-${sessionId}`, CENTER_ID, STUDENT_ID, sessionId, now, `absence-op-${sessionId}`],
     );
 
     StudentColorRepository.setColor(STUDENT_ID, "lavender");

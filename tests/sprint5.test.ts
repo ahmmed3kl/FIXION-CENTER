@@ -14,12 +14,14 @@ import {
     NotificationTemplateRepository,
     renderTemplate,
 } from "../src/features/notifications/NotificationTemplateRepository";
+import { DebtCycleRepository } from "../src/features/payments/DebtCycleRepository";
 import { FinancialCalculationService } from "../src/features/payments/FinancialCalculationService";
 import { PaymentRepository } from "../src/features/payments/PaymentRepository";
 import { DailyClosingService } from "../src/features/reports/DailyClosingService";
 import { OperationalReportsService } from "../src/features/reports/OperationalReportsService";
 import { SessionClosingService } from "../src/features/sessions/SessionClosingService";
 import { SessionRepository } from "../src/features/sessions/SessionRepository";
+import { configureTestCenterTimeZones } from "./helpers/centerTimeZone";
 
 describe("Sprint 5 - FIXION Operational Layer Test Suite", () => {
   const today = new Date().toISOString().split("T")[0];
@@ -31,6 +33,7 @@ describe("Sprint 5 - FIXION Operational Layer Test Suite", () => {
     // 2. Authenticate as Admin on center-1
     await useAuthStore.getState().login("01000000001", "123456");
     await useAuthStore.getState().selectCenter("center-1");
+    configureTestCenterTimeZones();
   });
 
   // =========================================================================
@@ -215,14 +218,50 @@ describe("Sprint 5 - FIXION Operational Layer Test Suite", () => {
   // 4. Manual Absence Notifications
   // =========================================================================
   describe("4. Manual Absence Notifications", () => {
-    it("6. derives absent students dynamically without modifying attendance", () => {
+    function ensureExplicitAbsence(studentId: string) {
+      const db = DatabaseService.getDb();
+      const existing = db.getFirstSync<{ id: string; status: string }>(
+        `SELECT id, status FROM attendance
+         WHERE center_id = ? AND session_id = ? AND student_id = ?`,
+        ["center-1", "sess-1", studentId],
+      );
+      if (existing?.status === "absent") return;
+      if (existing) {
+        throw new Error(`Attendance for ${studentId} is not an explicit absence.`);
+      }
+
+      const id = `sprint5-absence-${studentId}`;
+      const now = new Date().toISOString();
+      db.runSync(
+        `INSERT INTO attendance
+           (id, operation_id, center_id, student_id, session_id, check_in_time,
+            status, is_late, attendance_type, original_absence_id, is_external)
+         VALUES (?, ?, 'center-1', ?, 'sess-1', ?, 'absent', 0, 'present', NULL, 0)`,
+        [id, `op-${id}`, studentId, now],
+      );
+    }
+
+    it("does not infer absence from missing attendance records", () => {
+      const db = DatabaseService.getDb();
+      const attendanceBefore = db.getAllSync<{ id: string }>(
+        `SELECT id FROM attendance
+         WHERE center_id = ? AND session_id = ?`,
+        ["center-1", "sess-1"],
+      ).length;
       const absentees = AbsenceService.getAbsenteesForSession("sess-1");
-      // sess-1 has std-1, std-2, std-3 expected; none has attended yet in fresh state (or only test records)
-      expect(Array.isArray(absentees)).toBe(true);
+      const attendanceAfter = db.getAllSync<{ id: string }>(
+        `SELECT id FROM attendance
+         WHERE center_id = ? AND session_id = ?`,
+        ["center-1", "sess-1"],
+      ).length;
+
+      expect(absentees).toEqual([]);
+      expect(attendanceAfter).toBe(attendanceBefore);
     });
 
     it("7. sends manual absence notifications only for selected students", () => {
       const absOpPrefix = "op-abs-manual-s5-test";
+      ensureExplicitAbsence("std-2");
       const events = NotificationService.notifyAbsentees({
         sessionId: "sess-1",
         selectedStudentIds: ["std-2"],
@@ -249,6 +288,7 @@ describe("Sprint 5 - FIXION Operational Layer Test Suite", () => {
 
     it("sends to only the confirmed selected students and reuses the same events on retry", async () => {
       const selectedStudentIds = ["std-1", "std-2", "std-3"];
+      selectedStudentIds.forEach(ensureExplicitAbsence);
       const operationPrefix = "op-abs-selection-confirmed-test";
       const events = NotificationService.notifyAbsentees({
         sessionId: "sess-1",
@@ -571,27 +611,30 @@ describe("Sprint 5 - FIXION Operational Layer Test Suite", () => {
       expect(op1.id).toBe(op2.id);
     });
 
-    it("30. Sprint 1-4 Regression: session payments never reduce group or package monthly debt", () => {
+    it("30. Sprint 1-4 Regression: rejects session payment without explicit per-session billing", async () => {
       const statusBefore =
         FinancialCalculationService.getStudentFinancialStatus("std-1");
       const groupDebtBefore = statusBefore.groupRemainingDebt;
       const packageDebtBefore = statusBefore.packageRemainingDebt;
+      const operationId = "op-session-payment-without-cycle-s5";
 
-      // Record standalone session payment
-      PaymentRepository.recordSessionPayment({
+      await expect(PaymentRepository.recordSessionPayment({
         studentId: "std-1",
         sessionId: "sess-1",
         amount: 200,
         notes: "حصة فردية مستقلة",
-      });
+        operationId,
+      })).rejects.toThrow("per_session");
 
       const statusAfter =
         FinancialCalculationService.getStudentFinancialStatus("std-1");
       expect(statusAfter.groupRemainingDebt).toBe(groupDebtBefore);
       expect(statusAfter.packageRemainingDebt).toBe(packageDebtBefore);
-      expect(statusAfter.sessionPaymentsTotal).toBe(
-        statusBefore.sessionPaymentsTotal + 200,
-      );
+      expect(statusAfter.sessionPaymentsTotal).toBe(statusBefore.sessionPaymentsTotal);
+      expect(DatabaseService.getDb().getFirstSync(
+        "SELECT id FROM payments WHERE center_id = ? AND operation_id = ?",
+        ["center-1", operationId],
+      )).toBeNull();
     });
   });
 
@@ -665,11 +708,48 @@ describe("Sprint 5 - FIXION Operational Layer Test Suite", () => {
       expect(deliveries.every((d) => d.status === "sent")).toBe(true);
     });
 
-    it("Point 3: Daily Closing Complete Lifecycle (open -> closed -> reopened -> financial changes -> closed again)", () => {
-      const testBusinessDate = "2026-09-25";
+    it("Point 3: Daily Closing Complete Lifecycle (open -> closed -> reopened -> financial changes -> closed again)", async () => {
+      const session = SessionRepository.findById("sess-1");
+      if (!session) throw new Error("The daily-closing test session was not seeded.");
+      const testBusinessDate = session.sessionDate;
+      const existingCycles = DebtCycleRepository.getCyclesForStudent("std-3");
+      let sessionCycle = existingCycles.find((cycle) =>
+        cycle.groupId === session.groupId &&
+        cycle.status !== "cancelled" &&
+        cycle.status !== "paid" &&
+        cycle.startDate <= session.sessionDate &&
+        cycle.endDate >= session.sessionDate,
+      );
+      if (!sessionCycle) {
+        const [year, month] = session.sessionDate.split("-").map(Number);
+        const periodStart = `${year}-${String(month).padStart(2, "0")}-01`;
+        const periodEnd = `${year}-${String(month).padStart(2, "0")}-${String(new Date(year, month, 0).getDate()).padStart(2, "0")}`;
+        const cycleNumber = Math.max(
+          0,
+          ...existingCycles.map((cycle) => Number(cycle.cycleNumber) || 0),
+        ) + 1;
+        sessionCycle = await DebtCycleRepository.createOpeningCycle({
+          studentId: "std-3",
+          enrollmentId: "enr-3",
+          groupId: session.groupId,
+          cycleType: "per_session",
+          cycleNumber,
+          periodStart,
+          periodEnd,
+          amountDue: Number(session.sessionPrice ?? 0),
+        });
+      } else if (
+        sessionCycle.billingMode !== "per_session" &&
+        sessionCycle.cycleType !== "per_session"
+      ) {
+        sessionCycle = DebtCycleRepository.setBillingMode(
+          sessionCycle.id,
+          "per_session",
+        );
+      }
 
       // 1. Record initial monthly payment of 400 EGP on testBusinessDate
-      PaymentRepository.recordPayment({
+      await PaymentRepository.recordPayment({
         studentId: "std-1",
         amount: 400,
         paymentType: "monthly",
@@ -697,17 +777,18 @@ describe("Sprint 5 - FIXION Operational Layer Test Suite", () => {
       expect(reopened.reopenReason).toBe("إعادة فتح لتسجيل إيصالات متأخرة");
 
       // 4. Financial changes: record new payments on that date
-      // - Standalone session payment of 150 EGP
-      PaymentRepository.recordSessionPayment({
-        studentId: "std-1",
-        sessionId: "sess-1",
+      // - Explicitly configured per-session payment of 150 EGP
+      await PaymentRepository.recordSessionPayment({
+        studentId: "std-3",
+        sessionId: session.id,
         amount: 150,
         paymentDate: testBusinessDate,
         notes: "حصة فردية",
+        operationId: "op-close-cycle-session-payment",
       });
 
       // - Partial payment of 250 EGP
-      PaymentRepository.recordPayment({
+      await PaymentRepository.recordPayment({
         studentId: "std-2",
         amount: 250,
         paymentType: "partial",

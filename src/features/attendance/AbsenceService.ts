@@ -4,7 +4,8 @@ import { PermissionService } from "../../core/permissions";
 import { Session, Student } from "../../shared/types";
 import { useAuthStore } from "../auth/useAuthStore";
 import { SessionRepository } from "../sessions/SessionRepository";
-import { getLocalDateOnly } from "../../shared/utils/date";
+import { SessionDateService } from "../sessions/SessionDateService";
+import { getDateOnlyInTimeZone } from "../../shared/utils/date";
 import { MakeupService } from "./MakeupService";
 
 export class AbsenceService {
@@ -16,10 +17,7 @@ export class AbsenceService {
     return { centerId: activeCenterId, user: currentUser };
   }
 
-  /**
-   * Dynamically derives absent students for a session.
-   * Absence = session_expected_students MINUS (present + makeup attendance + advance coverage).
-   */
+  /** Returns only students with an explicit absent attendance record. */
   static getAbsenteesForSession(sessionId: string): Student[] {
     const { centerId, user } = this.getActiveContext();
     if (!PermissionService.hasAnyPermission(user.permissions, ["attendance.view", "reports.attendance.view", "reports.view"])) {
@@ -28,25 +26,27 @@ export class AbsenceService {
     const db = DatabaseService.getDb();
     const expectedStudents = SessionRepository.getExpectedStudents(sessionId);
 
-    // 2. Filter out students with recorded attendance or advance coverage
-    const absentees: Student[] = [];
-    for (const student of expectedStudents) {
-      const isCovered = MakeupService.isSessionCoveredInAdvance(
-        student.id,
-        sessionId,
-      );
-      if (isCovered) continue;
-
-      const attended = db.getFirstSync<any>(
-        `SELECT id FROM attendance WHERE center_id = ? AND session_id = ? AND student_id = ?`,
-        [centerId, sessionId, student.id],
-      );
-      if (attended) continue;
-
-      absentees.push(student);
-    }
-
-    return absentees;
+    const absentRows = db.getAllSync<{ studentId: string }>(
+      `SELECT student_id as studentId FROM attendance
+       WHERE center_id = ? AND session_id = ? AND status = 'absent'
+         AND attendance_type <> 'makeup'
+         AND NOT EXISTS (
+           SELECT 1 FROM attendance resolved
+            WHERE resolved.center_id = attendance.center_id
+              AND resolved.session_id = attendance.session_id
+              AND resolved.student_id = attendance.student_id
+              AND resolved.status IN ('present', 'late')
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM advance_coverages coverage
+            WHERE coverage.center_id = attendance.center_id
+              AND coverage.student_id = attendance.student_id
+              AND coverage.target_future_session_id = attendance.session_id
+         )`,
+      [centerId, sessionId],
+    );
+    const absentIds = new Set(absentRows.map((row) => row.studentId));
+    return expectedStudents.filter((student) => absentIds.has(student.id));
   }
 
   /**
@@ -58,19 +58,26 @@ export class AbsenceService {
 
     if (!SessionRepository.getExpectedStudents(sessionId).some((student) => student.id === studentId)) return false;
 
-    const attended = db.getFirstSync<any>(
-      `SELECT id FROM attendance WHERE center_id = ? AND session_id = ? AND student_id = ?`,
+    const explicitAbsence = db.getFirstSync<any>(
+      `SELECT id FROM attendance
+       WHERE center_id = ? AND session_id = ? AND student_id = ?
+         AND status = 'absent' AND attendance_type <> 'makeup'
+         AND NOT EXISTS (
+           SELECT 1 FROM attendance resolved
+            WHERE resolved.center_id = attendance.center_id
+              AND resolved.session_id = attendance.session_id
+              AND resolved.student_id = attendance.student_id
+              AND resolved.status IN ('present', 'late')
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM advance_coverages coverage
+            WHERE coverage.center_id = attendance.center_id
+              AND coverage.student_id = attendance.student_id
+              AND coverage.target_future_session_id = attendance.session_id
+         )`,
       [centerId, sessionId, studentId],
     );
-    if (attended) return false;
-
-    const isCovered = MakeupService.isSessionCoveredInAdvance(
-      studentId,
-      sessionId,
-    );
-    if (isCovered) return false;
-
-    return true;
+    return Boolean(explicitAbsence);
   }
 
   /**
@@ -103,8 +110,15 @@ export class AbsenceService {
     for (const row of expectedRows) {
       if (this.isStudentAbsent(row.sessionId, studentId)) {
         const session = SessionRepository.findById(row.sessionId);
-        const today = getLocalDateOnly();
-        const nowTime = new Date().toTimeString().slice(0, 5);
+        const now = new Date();
+        const timeZone = SessionDateService.getCenterTimeZone(centerId);
+        const today = getDateOnlyInTimeZone(now, timeZone);
+        const nowTime = new Intl.DateTimeFormat("en-GB", {
+          timeZone,
+          hour: "2-digit",
+          minute: "2-digit",
+          hourCycle: "h23",
+        }).format(now);
         const sessionHasEnded = session && (
           session.sessionDate < today ||
           (session.sessionDate === today && String(session.endTime || "") <= nowTime)

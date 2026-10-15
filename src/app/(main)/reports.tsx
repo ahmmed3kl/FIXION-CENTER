@@ -15,6 +15,7 @@ import { useServiceVisibility } from "../../core/services/ServiceVisibilityConte
 import { useAuthStore } from "../../features/auth/useAuthStore";
 import { OperationalReportsService } from "../../features/reports/OperationalReportsService";
 import { TeacherSettlement, TeacherSettlementService } from "../../features/reports/TeacherSettlementService";
+import { SessionDateService } from "../../features/sessions/SessionDateService";
 import { StudentRepository } from "../../features/students/StudentRepository";
 import {
   DailyAttendanceReport,
@@ -53,7 +54,9 @@ function ReportsContent() {
   const [reportErrorKey, setReportErrorKey] = useState("");
   const [retryCount, setRetryCount] = useState(0);
   const [reportResultKey, setReportResultKey] = useState("");
-  const [selectedDate, setSelectedDate] = useState(() => getLocalDateOnly());
+  const [selectedDate, setSelectedDate] = useState("");
+  const [selectedDateCenterId, setSelectedDateCenterId] = useState<string | null>(null);
+  const [sessionDateError, setSessionDateError] = useState("");
   const [settlementPeriod, setSettlementPeriod] = useState<"day" | "month">("day");
 
   // Report A: Daily Attendance
@@ -81,6 +84,27 @@ function ReportsContent() {
     settlementGroupId,
     settlementPeriod,
   ].join(":");
+
+  useEffect(() => {
+    if (!activeCenterId) {
+      setSelectedDate("");
+      setSelectedDateCenterId(null);
+      setSessionDateError("");
+      return;
+    }
+
+    try {
+      setSelectedDate(SessionDateService.getCurrentSessionDate(activeCenterId));
+      setSessionDateError("");
+    } catch (error) {
+      console.warn("Failed to resolve center report date:", error);
+      setSelectedDate("");
+      setSessionDateError(
+        "تعذر تحديد تاريخ المركز. أدخل تاريخ التقرير يدويًا أو تحقق من إعداد المنطقة الزمنية.",
+      );
+    }
+    setSelectedDateCenterId(activeCenterId);
+  }, [activeCenterId]);
 
   useEffect(() => {
     if (
@@ -164,6 +188,17 @@ function ReportsContent() {
       setLoading(false);
       return;
     }
+    const dateRequired = activeReport !== "studentFin";
+    if (dateRequired && selectedDateCenterId !== activeCenterId) {
+      setLoading(false);
+      return;
+    }
+    if (dateRequired && !selectedDate) {
+      setLoading(false);
+      setReportError(sessionDateError || "يرجى إدخال تاريخ التقرير.");
+      setReportErrorKey(currentReportKey);
+      return;
+    }
     setLoading(true);
     let loaded = false;
     const readReport = <T,>(load: () => T): T => {
@@ -210,7 +245,7 @@ function ReportsContent() {
 
   useEffect(() => {
     loadReport();
-  }, [activeReport, selectedDate, selectedStudentId, settlementTeacherId, settlementGroupId, settlementPeriod, activeCenterId, retryCount]);
+  }, [activeReport, selectedDate, selectedDateCenterId, selectedStudentId, settlementTeacherId, settlementGroupId, settlementPeriod, activeCenterId, retryCount]);
 
   return (
     <View style={styles.container}>
@@ -335,6 +370,10 @@ function ReportsContent() {
                     {dailyAttReport.totals.totalAbsent}
                   </Text>
                 </View>
+                <View style={styles.kpiBox}>
+                  <Text style={styles.kpiLabel}>لم يحسم</Text>
+                  <Text style={styles.kpiValue}>{dailyAttReport.totals.totalUnresolved}</Text>
+                </View>
               </View>
 
               <Text style={styles.sectionHeader}>تفاصيل حصص يوم {selectedDate}</Text>
@@ -353,6 +392,7 @@ function ReportsContent() {
                     <Text style={[styles.statText, { color: Colors.warningText }]}>متأخر: {sess.lateCount}</Text>
                     <Text style={[styles.statText, { color: Colors.primary }]}>تعويض: {sess.makeupCount}</Text>
                     <Text style={[styles.statText, { color: Colors.dangerText }]}>غياب: {sess.absentCount}</Text>
+                    <Text style={styles.statText}>لم يحسم: {sess.unresolvedCount}</Text>
                   </View>
                 </View>
               ))}
@@ -383,6 +423,10 @@ function ReportsContent() {
                   <Text style={styles.kpiLabel}>نسبة الحضور</Text>
                   <Text style={styles.kpiValue}>{studentAttReport.totals.attendanceRate}%</Text>
                 </View>
+                <View style={styles.kpiBox}>
+                  <Text style={styles.kpiLabel}>لم يحسم</Text>
+                  <Text style={styles.kpiValue}>{studentAttReport.totals.unresolvedCount}</Text>
+                </View>
               </View>
 
               <Text style={styles.sectionHeader}>سجل حضور الطالب: {studentAttReport.studentName}</Text>
@@ -405,6 +449,8 @@ function ReportsContent() {
                               ? Colors.warningLight
                               : sess.status === "makeup"
                               ? Colors.primaryLight || "#EBF5FF"
+                              : sess.status === "unresolved"
+                              ? Colors.warningLight
                               : Colors.dangerLight,
                         },
                       ]}
@@ -420,6 +466,8 @@ function ReportsContent() {
                                 ? Colors.warningText
                                 : sess.status === "makeup"
                                 ? Colors.primary
+                                : sess.status === "unresolved"
+                                ? Colors.warningText
                                 : Colors.dangerText,
                           },
                         ]}
@@ -430,6 +478,8 @@ function ReportsContent() {
                           ? "متأخر"
                           : sess.status === "makeup"
                           ? "حضور تعويضي"
+                          : sess.status === "unresolved"
+                          ? "لم تُحسم الحالة"
                           : "غائب"}
                       </Text>
                     </View>

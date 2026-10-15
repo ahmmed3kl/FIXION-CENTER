@@ -2,8 +2,8 @@ import { PermissionService, resolveUserPermissions } from "../../core/permission
 import { ForbiddenError } from "../../core/errors";
 import { DatabaseService } from "../../core/database";
 import { PaymentEvent } from "../../shared/types";
-import { getLocalDateOnly } from "../../shared/utils/date";
 import { useAuthStore } from "../auth/useAuthStore";
+import { SessionDateService } from "../sessions/SessionDateService";
 import { DebtCycleRepository } from "./DebtCycleRepository";
 import { PaymentRepository } from "./PaymentRepository";
 
@@ -53,7 +53,7 @@ export class OpeningBalanceService {
           paymentType: paid >= due ? "monthly" : "partial",
           debtCycleId: cycle.id,
           subscriptionId: params.packageSubscriptionId,
-          paymentDate: getLocalDateOnly(),
+          paymentDate: SessionDateService.getCurrentSessionDate(),
           notes: params.notes ? `رصيد افتتاحي: ${params.notes}` : "دفعة سابقة قبل تشغيل النظام",
         });
       }

@@ -20,10 +20,12 @@ function logGroupScheduleUpdate(operation, phase, error) {
     entityType: "group_schedule",
     phase,
     serviceVersion: SERVICE_VERSION,
-    deployCommit: process.env.RENDER_GIT_COMMIT || process.env.GIT_COMMIT || null,
+    deployCommit:
+      process.env.RENDER_GIT_COMMIT || process.env.GIT_COMMIT || null,
   };
   if (error) {
-    entry.errorClass = error.code === "42703" ? "undefined_column" : "operation_failed";
+    entry.errorClass =
+      error.code === "42703" ? "undefined_column" : "operation_failed";
     entry.errorCode = error.code || null;
     entry.errorName = error.name || "Error";
   }
@@ -39,14 +41,17 @@ function normalizeTimestamp(value, dateHint) {
   if (!value) return new Date().toISOString();
   const raw = String(value).trim();
   if (/^\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?$/.test(raw)) {
-    const date = dateHint && /^\d{4}-\d{2}-\d{2}/.test(String(dateHint))
-      ? String(dateHint).slice(0, 10)
-      : new Date().toISOString().slice(0, 10);
+    const date =
+      dateHint && /^\d{4}-\d{2}-\d{2}/.test(String(dateHint))
+        ? String(dateHint).slice(0, 10)
+        : new Date().toISOString().slice(0, 10);
     const time = raw.length === 5 ? `${raw}:00` : raw;
     return `${date}T${time}Z`;
   }
   const parsed = new Date(raw);
-  return Number.isNaN(parsed.getTime()) ? new Date().toISOString() : parsed.toISOString();
+  return Number.isNaN(parsed.getTime())
+    ? new Date().toISOString()
+    : parsed.toISOString();
 }
 
 function normalizeDateOnly(value) {
@@ -54,22 +59,35 @@ function normalizeDateOnly(value) {
   const raw = String(value).trim();
   if (/^\d{4}-\d{2}-\d{2}/.test(raw)) return raw.slice(0, 10);
   const parsed = new Date(raw);
-  return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString().slice(0, 10);
+  return Number.isNaN(parsed.getTime())
+    ? null
+    : parsed.toISOString().slice(0, 10);
 }
 
 // Keep debt-cycle values compatible with the canonical PostgreSQL enum/check
 // constraint. Older mobile builds used names such as "group" and "session".
 function normalizeDebtCycleType(value, hasPackageSubscription) {
-  const raw = String(value || "").trim().toLowerCase().replace(/[-\s]/g, "_");
-  if (raw === "package" || raw === "pkg" || hasPackageSubscription) return "package";
-  if (["per_session", "persession", "session", "perclass", "per_class"].includes(raw)) {
+  const raw = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[-\s]/g, "_");
+  if (raw === "package" || raw === "pkg" || hasPackageSubscription)
+    return "package";
+  if (
+    ["per_session", "persession", "session", "perclass", "per_class"].includes(
+      raw,
+    )
+  ) {
     return "per_session";
   }
   return "monthly";
 }
 
 function normalizeDebtCycleStatus(value) {
-  const raw = String(value || "").trim().toLowerCase().replace(/[\s-]/g, "_");
+  const raw = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]/g, "_");
   const aliases = {
     open: "pending",
     active: "pending",
@@ -91,7 +109,9 @@ function normalizeDebtCycleStatus(value) {
 }
 
 function normalizePaymentType(value) {
-  const raw = String(value || "session").trim().toLowerCase();
+  const raw = String(value || "session")
+    .trim()
+    .toLowerCase();
   if (raw === "full") return "monthly";
   if (raw === "monthly" || raw === "partial" || raw === "session") return raw;
   return "session";
@@ -102,7 +122,9 @@ function normalizePaymentType(value) {
 // `absent`, `excused`, or `attended_elsewhere` in status. Normalize at the API
 // boundary so old queued operations remain retryable after a deployment.
 function normalizeAttendanceStatus(value, isLate) {
-  const raw = String(value || "present").trim().toLowerCase();
+  const raw = String(value || "present")
+    .trim()
+    .toLowerCase();
   if (raw === "late") return "present";
   if (["present", "absent", "excused", "attended_elsewhere"].includes(raw)) {
     return raw;
@@ -158,30 +180,45 @@ const SYNC_ENTITY_PRIORITY = {
 };
 
 function canonicalSyncEntity(value) {
-  const raw = String(value || "").toLowerCase().replace(/_created$|_updated$|_deleted$/g, "");
+  const raw = String(value || "")
+    .toLowerCase()
+    .replace(/_created$|_updated$|_deleted$/g, "");
   return SYNC_ENTITY_ALIASES[raw] || raw;
 }
 
 function syncPayload(value) {
   if (!value) return {};
   if (typeof value === "object") return value;
-  try { return JSON.parse(value); } catch { return {}; }
+  try {
+    return JSON.parse(value);
+  } catch {
+    return {};
+  }
 }
 
 function firstSyncValue(payload, ...keys) {
   for (const key of keys) {
-    if (payload[key] !== undefined && payload[key] !== null && payload[key] !== "") return payload[key];
+    if (
+      payload[key] !== undefined &&
+      payload[key] !== null &&
+      payload[key] !== ""
+    )
+      return payload[key];
   }
   return undefined;
 }
 
 function orderSyncOperations(operations) {
   const base = [...operations].sort((a, b) => {
-    const priorityA = SYNC_ENTITY_PRIORITY[canonicalSyncEntity(a.entityType)] ?? 500;
-    const priorityB = SYNC_ENTITY_PRIORITY[canonicalSyncEntity(b.entityType)] ?? 500;
+    const priorityA =
+      SYNC_ENTITY_PRIORITY[canonicalSyncEntity(a.entityType)] ?? 500;
+    const priorityB =
+      SYNC_ENTITY_PRIORITY[canonicalSyncEntity(b.entityType)] ?? 500;
     const priorityOrder = priorityA - priorityB;
     if (priorityOrder !== 0) return priorityOrder;
-    const createdAtOrder = String(a.createdAt || "").localeCompare(String(b.createdAt || ""));
+    const createdAtOrder = String(a.createdAt || "").localeCompare(
+      String(b.createdAt || ""),
+    );
     if (createdAtOrder !== 0) return createdAtOrder;
     if (
       canonicalSyncEntity(a.entityType) === "attendance" &&
@@ -192,47 +229,127 @@ function orderSyncOperations(operations) {
         const normalized = String(type || "").toLowerCase();
         return normalized === "create" || normalized === "attendance.create"
           ? 0
-          : normalized === "update" ? 1 : 2;
+          : normalized === "update"
+            ? 1
+            : 2;
       };
       return typeOrder(a.operationType) - typeOrder(b.operationType);
     }
     return 0;
   });
-  const byEntity = new Map(base.map((operation) => [
-    `${canonicalSyncEntity(operation.entityType)}:${String(operation.entityId || "")}`,
-    operation,
-  ]));
+  const byEntity = new Map(
+    base.map((operation) => [
+      `${canonicalSyncEntity(operation.entityType)}:${String(operation.entityId || "")}`,
+      operation,
+    ]),
+  );
   const dependencies = (operation) => {
     const entity = canonicalSyncEntity(operation.entityType);
     const payload = syncPayload(operation.payload);
     const value = (...keys) => firstSyncValue(payload, ...keys);
     const refs = [];
-    if (entity === "group") refs.push(["teacher", value("teacherId", "teacher_id")], ["subject", value("subjectId", "subject_id")]);
-    if (entity === "group_schedule") refs.push(["group", value("groupId", "group_id")]);
-    if (entity === "enrollment") refs.push(["student", value("studentId", "student_id")], ["group", value("groupId", "group_id")]);
+    if (entity === "group")
+      refs.push(
+        ["teacher", value("teacherId", "teacher_id")],
+        ["subject", value("subjectId", "subject_id")],
+      );
+    if (entity === "group_schedule")
+      refs.push(["group", value("groupId", "group_id")]);
+    if (entity === "enrollment")
+      refs.push(
+        ["student", value("studentId", "student_id")],
+        ["group", value("groupId", "group_id")],
+      );
     if (entity === "session") {
-      refs.push(["group", value("groupId", "group_id")], ["teacher", value("teacherId", "teacher_id")], ["subject", value("subjectId", "subject_id")]);
-      const students = payload.expectedStudentIds || payload.expected_student_ids;
-      if (Array.isArray(students)) students.forEach((id) => refs.push(["student", id]));
+      refs.push(
+        ["group", value("groupId", "group_id")],
+        ["teacher", value("teacherId", "teacher_id")],
+        ["subject", value("subjectId", "subject_id")],
+      );
+      const students =
+        payload.expectedStudentIds || payload.expected_student_ids;
+      if (Array.isArray(students))
+        students.forEach((id) => refs.push(["student", id]));
     }
-    if (entity === "attendance" || entity === "makeup" || entity === "advance_coverage") refs.push(["session", value("sessionId", "session_id", "advanceSessionId", "advance_session_id", "targetFutureSessionId", "target_future_session_id")], ["student", value("studentId", "student_id")]);
-    if (entity === "payment" || entity === "payment_reversal" || entity === "debt_adjustment") refs.push(["debt_cycle", value("debtCycleId", "debt_cycle_id")], ["session", value("sessionId", "session_id")], ["student", value("studentId", "student_id")]);
-    if (entity === "payment_reversal") refs.push(["payment", value("paymentId", "payment_id")]);
-    if (entity === "debt_cycle") refs.push(["enrollment", value("enrollmentId", "enrollment_id")], ["student", value("studentId", "student_id")], ["package_subscription", value("packageSubscriptionId", "package_subscription_id")]);
-    if (entity === "package_subscription") refs.push(["student", value("studentId", "student_id")], ["package", value("packageId", "package_id")]);
-    if (entity === "package_teacher_override") refs.push(["package_subscription", value("subscriptionId", "subscription_id")], ["teacher", value("teacherId", "teacher_id")], ["subject", value("subjectId", "subject_id")]);
-    if (entity === "session_homework_evaluation") refs.push(
-      ["student", value("studentId", "student_id")],
-      ["session", value("sessionId", "session_id")],
-      ["homework_evaluation_status", value("statusId", "status_id")],
-    );
-    return refs.filter(([, id]) => id !== undefined).map(([type, id]) => `${type}:${String(id)}`);
+    if (
+      entity === "attendance" ||
+      entity === "makeup" ||
+      entity === "advance_coverage"
+    )
+      refs.push(
+        [
+          "session",
+          value(
+            "sessionId",
+            "session_id",
+            "advanceSessionId",
+            "advance_session_id",
+            "targetFutureSessionId",
+            "target_future_session_id",
+          ),
+        ],
+        ["student", value("studentId", "student_id")],
+      );
+    if (
+      entity === "payment" ||
+      entity === "payment_reversal" ||
+      entity === "debt_adjustment"
+    )
+      refs.push(
+        ["debt_cycle", value("debtCycleId", "debt_cycle_id")],
+        ["session", value("sessionId", "session_id")],
+        ["student", value("studentId", "student_id")],
+      );
+    if (entity === "payment_reversal")
+      refs.push(["payment", value("paymentId", "payment_id")]);
+    if (entity === "debt_cycle")
+      refs.push(
+        ["enrollment", value("enrollmentId", "enrollment_id")],
+        ["student", value("studentId", "student_id")],
+        [
+          "package_subscription",
+          value("packageSubscriptionId", "package_subscription_id"),
+        ],
+      );
+    if (entity === "package_subscription")
+      refs.push(
+        ["student", value("studentId", "student_id")],
+        ["package", value("packageId", "package_id")],
+      );
+    if (entity === "package_teacher_override")
+      refs.push(
+        ["package_subscription", value("subscriptionId", "subscription_id")],
+        ["teacher", value("teacherId", "teacher_id")],
+        ["subject", value("subjectId", "subject_id")],
+      );
+    if (entity === "notification_delivery") {
+      const delivery = payload.delivery || payload;
+      refs.push([
+        "notification_event",
+        firstSyncValue(
+          delivery,
+          "notificationEventId",
+          "notification_event_id",
+        ),
+      ]);
+    }
+    if (entity === "session_homework_evaluation")
+      refs.push(
+        ["student", value("studentId", "student_id")],
+        ["session", value("sessionId", "session_id")],
+        ["homework_evaluation_status", value("statusId", "status_id")],
+      );
+    return refs
+      .filter(([, id]) => id !== undefined)
+      .map(([type, id]) => `${type}:${String(id)}`);
   };
   const visited = new Set();
   const visiting = new Set();
   const ordered = [];
   const visit = (operation) => {
-    const key = String(operation.operationId || `${operation.entityType}:${operation.entityId}`);
+    const key = String(
+      operation.operationId || `${operation.entityType}:${operation.entityId}`,
+    );
     if (visited.has(key) || visiting.has(key)) return;
     visiting.add(key);
     for (const dependency of dependencies(operation)) {
@@ -269,6 +386,583 @@ class SyncProcessor {
     );
   }
 
+  static async resolveSessionAlias(client, centerId, sessionId) {
+    if (!sessionId) return null;
+    let currentSessionId = String(sessionId);
+    let resolvedAlias = false;
+    const visited = new Set();
+    while (currentSessionId) {
+      if (visited.has(currentSessionId)) {
+        throw new Error(
+          "SESSION_ALIAS_CYCLE: session alias mappings contain a cycle.",
+        );
+      }
+      visited.add(currentSessionId);
+      const result = await client.query(
+        `SELECT aliases.canonical_session_id,
+                canonical.center_id AS canonical_center_id,
+                canonical.group_id AS canonical_group_id,
+                NULLIF(BTRIM(canonical.schedule_id), '') AS canonical_schedule_id,
+                canonical.session_date::text AS canonical_session_date,
+                canonical.status AS canonical_status,
+                source.center_id AS source_center_id,
+                source.group_id AS source_group_id,
+                NULLIF(BTRIM(source.schedule_id), '') AS source_schedule_id,
+                source.session_date::text AS source_session_date,
+                source.status AS source_status
+           FROM session_id_aliases aliases
+           LEFT JOIN sessions canonical
+             ON canonical.id = aliases.canonical_session_id
+           LEFT JOIN sessions source
+             ON source.id = aliases.local_session_id
+          WHERE aliases.center_id = $1
+            AND aliases.local_session_id = $2`,
+        [centerId, currentSessionId],
+      );
+      const alias = result.rows[0];
+      if (!alias) return resolvedAlias ? currentSessionId : null;
+      if (
+        !alias.canonical_session_id ||
+        String(alias.canonical_center_id || "") !== String(centerId)
+      ) {
+        throw new Error(
+          "SESSION_ALIAS_TARGET_NOT_FOUND: alias target is outside the authenticated center.",
+        );
+      }
+      if (!alias.canonical_schedule_id) {
+        throw new Error(
+          "SESSION_ALIAS_UNSCHEDULED_IDENTITY: an unscheduled session cannot be mapped by date alone.",
+        );
+      }
+      if (
+        alias.source_center_id &&
+        String(alias.source_center_id) !== String(centerId)
+      ) {
+        throw new Error(
+          "SESSION_ALIAS_CENTER_MISMATCH: source session belongs to another center.",
+        );
+      }
+      if (
+        alias.source_center_id &&
+        (!alias.source_schedule_id ||
+          String(alias.source_group_id) !== String(alias.canonical_group_id) ||
+          String(alias.source_schedule_id).trim() !==
+            String(alias.canonical_schedule_id).trim() ||
+          normalizeDateOnly(alias.source_session_date) !==
+            normalizeDateOnly(alias.canonical_session_date))
+      ) {
+        throw new Error(
+          "SESSION_ALIAS_IDENTITY_MISMATCH: sessions do not share a scheduled lesson identity.",
+        );
+      }
+      if (
+        (String(alias.canonical_status || "").toLowerCase() === "cancelled" &&
+          alias.source_status &&
+          String(alias.source_status).toLowerCase() !== "cancelled") ||
+        (String(alias.source_status || "").toLowerCase() === "cancelled" &&
+          alias.canonical_status &&
+          String(alias.canonical_status).toLowerCase() !== "cancelled")
+      ) {
+        throw new Error(
+          "SESSION_ALIAS_CANCELLED_STATUS_CONFLICT: incompatible session states cannot be aliased.",
+        );
+      }
+      const nextSessionId = String(alias.canonical_session_id);
+      if (nextSessionId === currentSessionId) {
+        return resolvedAlias ? currentSessionId : nextSessionId;
+      }
+      currentSessionId = nextSessionId;
+      resolvedAlias = true;
+    }
+    return resolvedAlias ? currentSessionId : null;
+  }
+
+  static async getSessionAliasMappings(client, centerId) {
+    const result = await client.query(
+      `SELECT mappings."localSessionId", mappings."canonicalSessionId",
+              mappings."sourceStatus", mappings."canonicalStatus"
+         FROM (
+           SELECT aliases.local_session_id AS "localSessionId",
+                  aliases.canonical_session_id AS "canonicalSessionId",
+                  source.status AS "sourceStatus",
+                  canonical.status AS "canonicalStatus"
+             FROM session_id_aliases aliases
+             LEFT JOIN sessions source
+               ON source.center_id = aliases.center_id
+              AND source.id = aliases.local_session_id
+             LEFT JOIN sessions canonical
+               ON canonical.center_id = aliases.center_id
+              AND canonical.id = aliases.canonical_session_id
+            WHERE aliases.center_id = $1
+              AND aliases.local_session_id <> aliases.canonical_session_id
+              AND NULLIF(BTRIM(canonical.schedule_id), '') IS NOT NULL
+              AND (
+                source.id IS NULL OR (
+                  NULLIF(BTRIM(source.schedule_id), '') IS NOT NULL
+                  AND source.group_id = canonical.group_id
+                  AND BTRIM(source.schedule_id) = BTRIM(canonical.schedule_id)
+                  AND source.session_date = canonical.session_date
+                )
+              )
+           UNION
+
+            SELECT s.id AS "localSessionId",
+                   snk.session_id AS "canonicalSessionId",
+                   s.status AS "sourceStatus",
+                   canonical.status AS "canonicalStatus"
+              FROM sessions s
+              JOIN session_natural_keys snk
+                ON snk.center_id = s.center_id
+               AND snk.group_id = s.group_id
+               AND snk.schedule_key = COALESCE(s.schedule_id, '')
+               AND snk.session_date = s.session_date
+              JOIN sessions canonical
+                ON canonical.center_id = snk.center_id
+               AND canonical.id = snk.session_id
+             WHERE s.center_id = $1
+               AND s.id <> snk.session_id
+               AND snk.schedule_key <> ''
+               AND NULLIF(BTRIM(s.schedule_id), '') IS NOT NULL
+               AND NULLIF(BTRIM(canonical.schedule_id), '') IS NOT NULL
+
+
+         ) mappings
+        ORDER BY mappings."localSessionId", mappings."canonicalSessionId"`,
+      [centerId],
+    );
+    const mappings = new Map();
+    for (const row of result.rows) {
+      const localSessionId = String(row.localSessionId || "");
+      const canonicalSessionId = String(row.canonicalSessionId || "");
+      if (!localSessionId || !canonicalSessionId) {
+        throw new Error(
+          "SESSION_ALIAS_INVALID: bootstrap returned an incomplete session mapping.",
+        );
+      }
+      const existingCanonicalId = mappings.get(localSessionId);
+      if (existingCanonicalId && existingCanonicalId !== canonicalSessionId) {
+        throw new Error(
+          "SESSION_ALIAS_CONFLICT: a session ID maps to multiple canonical sessions.",
+        );
+      }
+      if (
+        (String(row.canonicalStatus || "").toLowerCase() === "cancelled" &&
+          row.sourceStatus &&
+          String(row.sourceStatus).toLowerCase() !== "cancelled") ||
+        (String(row.sourceStatus || "").toLowerCase() === "cancelled" &&
+          row.canonicalStatus &&
+          String(row.canonicalStatus).toLowerCase() !== "cancelled")
+      ) {
+        continue;
+      }
+      mappings.set(localSessionId, canonicalSessionId);
+    }
+    const normalizedMappings = Array.from(
+      mappings,
+      ([localSessionId, canonicalSessionId]) => ({
+        localSessionId,
+        canonicalSessionId: SyncProcessor.resolveSessionAliasFromMap(
+          canonicalSessionId,
+          mappings,
+        ),
+      }),
+    );
+    return normalizedMappings;
+  }
+
+  static async getSessionNaturalKeys(client, centerId) {
+    const result = await client.query(
+      `SELECT snk.group_id AS "groupId",
+              snk.schedule_key AS "scheduleKey",
+              snk.session_date::text AS "sessionDate",
+              snk.session_id AS "canonicalSessionId",
+              canonical_session.status AS "status",
+              EXISTS (
+                SELECT 1
+                  FROM sessions sibling
+                 WHERE sibling.center_id = snk.center_id
+                   AND sibling.group_id = snk.group_id
+                   AND COALESCE(sibling.schedule_id, '') = snk.schedule_key
+                   AND sibling.session_date = snk.session_date
+                   AND sibling.id <> snk.session_id
+                   AND sibling.status <> 'cancelled'
+              ) AS "hasNonCancelledDuplicate",
+              EXISTS (
+                SELECT 1
+                  FROM sessions sibling
+                 WHERE sibling.center_id = snk.center_id
+                   AND sibling.group_id = snk.group_id
+                   AND COALESCE(sibling.schedule_id, '') = snk.schedule_key
+                   AND sibling.session_date = snk.session_date
+                   AND sibling.id <> snk.session_id
+                   AND sibling.status = 'cancelled'
+              ) AS "hasCancelledDuplicate"
+         FROM session_natural_keys snk
+         JOIN sessions canonical_session
+           ON canonical_session.center_id = snk.center_id
+          AND canonical_session.id = snk.session_id
+        WHERE snk.center_id = $1
+          AND snk.schedule_key <> ''
+        ORDER BY snk.group_id, snk.schedule_key, snk.session_date`,
+      [centerId],
+    );
+    return result.rows.map((row) => ({
+      centerId,
+      groupId: String(row.groupId),
+      scheduleKey: String(row.scheduleKey || ""),
+      sessionDate: String(row.sessionDate),
+      canonicalSessionId: String(row.canonicalSessionId),
+      status: String(row.status || ""),
+      hasNonCancelledDuplicate: Boolean(row.hasNonCancelledDuplicate),
+      hasCancelledDuplicate: Boolean(row.hasCancelledDuplicate),
+    }));
+  }
+
+  static resolveSessionAliasFromMap(sessionId, aliases) {
+    let canonicalId = String(sessionId || "");
+    const visited = new Set();
+    while (canonicalId) {
+      if (visited.has(canonicalId)) {
+        throw new Error(
+          "SESSION_ALIAS_CYCLE: session alias mappings contain a cycle.",
+        );
+      }
+      visited.add(canonicalId);
+      const nextId = aliases.get(canonicalId);
+      if (!nextId || String(nextId) === canonicalId) return canonicalId;
+      canonicalId = String(nextId);
+    }
+    return canonicalId;
+  }
+
+  static canonicalizePulledSessionReferences(value, aliases) {
+    const sessionReferenceKeys = new Set([
+      "session_id",
+      "sessionId",
+      "advance_session_id",
+      "advanceSessionId",
+      "target_future_session_id",
+      "targetFutureSessionId",
+    ]);
+    if (Array.isArray(value)) {
+      return value.map((item) =>
+        SyncProcessor.canonicalizePulledSessionReferences(item, aliases),
+      );
+    }
+    if (!value || typeof value !== "object") return value;
+    const normalized = {};
+    for (const [key, item] of Object.entries(value)) {
+      if (sessionReferenceKeys.has(key) && typeof item === "string" && item) {
+        normalized[key] = SyncProcessor.resolveSessionAliasFromMap(
+          item,
+          aliases,
+        );
+      } else {
+        normalized[key] = SyncProcessor.canonicalizePulledSessionReferences(
+          item,
+          aliases,
+        );
+      }
+    }
+    return normalized;
+  }
+
+  static resolveAttendanceStatus(existingStatus, incomingStatus) {
+    const existing = normalizeAttendanceStatus(existingStatus);
+    const incoming = normalizeAttendanceStatus(incomingStatus);
+    if (
+      (existing === "present" && incoming === "absent") ||
+      (existing === "absent" && incoming === "present")
+    ) {
+      return "present";
+    }
+    return existing === incoming ? incoming : null;
+  }
+
+  static async getCompatibleSessionIds(client, centerId, sessionId) {
+    const result = await client.query(
+      `WITH RECURSIVE session_ids(session_id) AS (
+         SELECT $2::varchar
+         UNION
+         SELECT aliases.local_session_id
+           FROM session_id_aliases aliases
+           JOIN session_ids resolved
+             ON aliases.canonical_session_id = resolved.session_id
+           JOIN sessions canonical
+             ON canonical.center_id = aliases.center_id
+            AND canonical.id = aliases.canonical_session_id
+           LEFT JOIN sessions source
+             ON source.center_id = aliases.center_id
+            AND source.id = aliases.local_session_id
+          WHERE aliases.center_id = $1
+            AND NULLIF(BTRIM(canonical.schedule_id), '') IS NOT NULL
+            AND (
+              source.id IS NULL OR (
+                NULLIF(BTRIM(source.schedule_id), '') IS NOT NULL
+                AND source.group_id = canonical.group_id
+                AND BTRIM(source.schedule_id) = BTRIM(canonical.schedule_id)
+                AND source.session_date = canonical.session_date
+              )
+            )
+            AND NOT (
+              (canonical.status = 'cancelled' AND source.status IS NOT NULL
+                AND source.status <> 'cancelled')
+              OR (source.status = 'cancelled' AND canonical.status <> 'cancelled')
+            )
+       )
+       SELECT session_id
+         FROM session_ids`,
+      [centerId, String(sessionId)],
+    );
+    return Array.from(
+      new Set(result.rows.map((row) => String(row.session_id))),
+    );
+  }
+
+  static async findAttendanceForSessionAliases(
+    client,
+    centerId,
+    sessionId,
+    studentId,
+  ) {
+    const sessionIds = await SyncProcessor.getCompatibleSessionIds(
+      client,
+      centerId,
+      sessionId,
+    );
+    const result = await client.query(
+      `SELECT a.id, a.session_id, a.operation_id, a.status, a.attendance_type,
+              a.original_absence_id, a.check_in_time, a.is_late
+         FROM attendance a
+         JOIN sessions s
+           ON s.center_id = a.center_id AND s.id = a.session_id
+         JOIN students st
+           ON st.center_id = a.center_id AND st.id = a.student_id
+        WHERE a.center_id = $1 AND a.student_id = $3
+          AND a.session_id = ANY($2::varchar[])
+          AND s.group_id IS NOT NULL AND st.deleted_at IS NULL
+        ORDER BY a.created_at ASC, a.id ASC
+        FOR UPDATE OF a`,
+      [centerId, sessionIds, String(studentId)],
+    );
+    return result.rows;
+  }
+
+  static cancelledSessionAttendanceConflict() {
+    const code = "ATTENDANCE_SESSION_CANCELLED_REQUIRES_REVIEW";
+    return {
+      code,
+      message: `${code}: event order cannot be established from device timestamps; attendance was retained for manual review.`,
+    };
+  }
+
+  static cancelledSessionAttendanceAuditOutcome(error) {
+    return (
+      String(error?.message || error || "").match(
+        /^ATTENDANCE_SESSION_CANCELLED_(LATE_EVENT|AFTER_CANCEL|REQUIRES_REVIEW):/,
+      )?.[1] || null
+    );
+  }
+
+  static acceptedSessionStartTime(deviceStartedAt, serverReceivedAt) {
+    const receivedMs = new Date(serverReceivedAt).getTime();
+    const deviceMs = new Date(deviceStartedAt).getTime();
+    const validReceivedMs = Number.isNaN(receivedMs) ? Date.now() : receivedMs;
+    const validDeviceMs = Number.isNaN(deviceMs) ? validReceivedMs : deviceMs;
+    const maximumClockSkewMs = 5 * 60 * 1000;
+    return new Date(
+      Math.min(
+        validReceivedMs,
+        Math.max(validDeviceMs, validReceivedMs - maximumClockSkewMs),
+      ),
+    ).toISOString();
+  }
+
+  static resolveSessionStatus(existingStatus, action, requestedStatus) {
+    const existing = String(existingStatus || "").toLowerCase();
+    const normalizedAction = String(action || "").toLowerCase();
+    const requested = String(requestedStatus || "").toLowerCase();
+    if (existing === "cancelled" || requested === "cancelled") {
+      return "cancelled";
+    }
+    if (normalizedAction === "close") return "closed";
+    if (normalizedAction === "reopen") return "open";
+    if (existing === "closed") return "closed";
+    if (
+      normalizedAction === "activate" &&
+      (existing === "scheduled" || existing === "open")
+    ) {
+      return "open";
+    }
+    return existing || requested;
+  }
+
+  static async findSessionByNaturalKey(
+    client,
+    centerId,
+    groupId,
+    scheduleId,
+    sessionDate,
+  ) {
+    const scheduleKey = String(scheduleId || "").trim();
+    if (!groupId || !sessionDate || !scheduleKey) return null;
+    const result = await client.query(
+      `SELECT session_id
+         FROM session_natural_keys
+        WHERE center_id = $1 AND group_id = $2
+          AND schedule_key = $3 AND session_date = $4`,
+      [centerId, groupId, scheduleKey, sessionDate],
+    );
+    const sessionId = result.rows[0]?.session_id;
+    if (!sessionId) return null;
+    return (
+      (await SyncProcessor.resolveSessionAlias(
+        client,
+        centerId,
+        String(sessionId),
+      )) || String(sessionId)
+    );
+  }
+
+  static async registerSessionAlias(
+    client,
+    centerId,
+    localSessionId,
+    canonicalSessionId,
+  ) {
+    if (!localSessionId || !canonicalSessionId) return;
+    if (String(localSessionId) === String(canonicalSessionId)) return;
+    const canonicalSession = await client.query(
+      `SELECT center_id, group_id, NULLIF(BTRIM(schedule_id), '') AS schedule_id,
+             session_date::text AS session_date, status
+        FROM sessions
+        WHERE center_id = $1 AND id = $2`,
+      [centerId, String(canonicalSessionId)],
+    );
+    if (!canonicalSession.rows[0]?.schedule_id) {
+      throw new Error(
+        "SESSION_ALIAS_UNSCHEDULED_IDENTITY: an unscheduled session cannot be mapped by date alone.",
+      );
+    }
+    const localIdOwner = await client.query(
+      `SELECT center_id, group_id, NULLIF(BTRIM(schedule_id), '') AS schedule_id,
+              session_date::text AS session_date, status
+         FROM sessions WHERE id = $1`,
+      [String(localSessionId)],
+    );
+    if (
+      localIdOwner.rows[0] &&
+      String(localIdOwner.rows[0].center_id) !== String(centerId)
+    ) {
+      throw new Error(
+        "SESSION_ALIAS_CENTER_MISMATCH: local session ID belongs to another center.",
+      );
+    }
+    if (
+      localIdOwner.rows[0] &&
+      (!localIdOwner.rows[0].schedule_id ||
+        String(localIdOwner.rows[0].group_id) !==
+          String(canonicalSession.rows[0].group_id) ||
+        String(localIdOwner.rows[0].schedule_id).trim() !==
+          String(canonicalSession.rows[0].schedule_id).trim() ||
+        normalizeDateOnly(localIdOwner.rows[0].session_date) !==
+          normalizeDateOnly(canonicalSession.rows[0].session_date))
+    ) {
+      throw new Error(
+        "SESSION_ALIAS_IDENTITY_MISMATCH: sessions do not share a scheduled lesson identity.",
+      );
+    }
+    if (
+      localIdOwner.rows[0] &&
+      ((String(canonicalSession.rows[0].status || "").toLowerCase() ===
+        "cancelled" &&
+        String(localIdOwner.rows[0].status || "").toLowerCase() !==
+          "cancelled") ||
+        (String(localIdOwner.rows[0].status || "").toLowerCase() ===
+          "cancelled" &&
+          String(canonicalSession.rows[0].status || "").toLowerCase() !==
+            "cancelled"))
+    ) {
+      throw new Error(
+        "SESSION_ALIAS_CANCELLED_STATUS_CONFLICT: incompatible session states cannot be aliased.",
+      );
+    }
+    const existing = await client.query(
+      `SELECT canonical_session_id
+         FROM session_id_aliases
+        WHERE center_id = $1 AND local_session_id = $2
+        FOR UPDATE`,
+      [centerId, String(localSessionId)],
+    );
+    if (
+      existing.rows[0] &&
+      String(existing.rows[0].canonical_session_id) !==
+        String(canonicalSessionId)
+    ) {
+      throw new Error(
+        "SESSION_ALIAS_CONFLICT: local session ID is already mapped to another canonical session.",
+      );
+    }
+    await client.query(
+      `INSERT INTO session_id_aliases
+         (center_id, local_session_id, canonical_session_id)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (center_id, local_session_id) DO NOTHING`,
+      [centerId, String(localSessionId), String(canonicalSessionId)],
+    );
+  }
+
+  static async canonicalizeSessionReferences(
+    client,
+    centerId,
+    value,
+    knownAliases,
+  ) {
+    const sessionReferenceKeys = new Set([
+      "session_id",
+      "sessionId",
+      "advance_session_id",
+      "advanceSessionId",
+      "target_future_session_id",
+      "targetFutureSessionId",
+    ]);
+    if (Array.isArray(value)) {
+      const normalized = [];
+      for (const item of value) {
+        normalized.push(
+          await SyncProcessor.canonicalizeSessionReferences(
+            client,
+            centerId,
+            item,
+            knownAliases,
+          ),
+        );
+      }
+      return normalized;
+    }
+    if (!value || typeof value !== "object") return value;
+    const normalized = {};
+    for (const [key, item] of Object.entries(value)) {
+      if (sessionReferenceKeys.has(key) && typeof item === "string" && item) {
+        const canonical =
+          knownAliases.get(item) ||
+          (await SyncProcessor.resolveSessionAlias(client, centerId, item));
+        if (canonical) {
+          knownAliases.set(item, String(canonical));
+          normalized[key] = String(canonical);
+          continue;
+        }
+      }
+      normalized[key] = await SyncProcessor.canonicalizeSessionReferences(
+        client,
+        centerId,
+        item,
+        knownAliases,
+      );
+    }
+    return normalized;
+  }
+
   static async resolveDebtCycleAlias(client, centerId, debtCycleId) {
     const canonicalCycle = await client.query(
       "SELECT id FROM debt_cycles WHERE center_id = $1 AND id = $2",
@@ -291,16 +985,19 @@ class SyncProcessor {
       : null;
   }
 
-  static async isStudentEligibleForSessionGroup(client, {
-    centerId,
-    groupId,
-    sessionDate,
-    subjectId,
-    teacherId,
-    groupGrade,
-    studentId,
-    allowSameTeacherCompensation = false,
-  }) {
+  static async isStudentEligibleForSessionGroup(
+    client,
+    {
+      centerId,
+      groupId,
+      sessionDate,
+      subjectId,
+      teacherId,
+      groupGrade,
+      studentId,
+      allowSameTeacherCompensation = false,
+    },
+  ) {
     const enrollment = await client.query(
       `SELECT 1
          FROM student_group_enrollments e
@@ -359,7 +1056,8 @@ class SyncProcessor {
     );
     if (packageSubscription.rows.length > 0) return true;
 
-    if (!allowSameTeacherCompensation || !teacherId || !groupGrade) return false;
+    if (!allowSameTeacherCompensation || !teacherId || !groupGrade)
+      return false;
 
     const sameLevelCompensation = await client.query(
       `SELECT 1
@@ -380,6 +1078,605 @@ class SyncProcessor {
     return sameLevelCompensation.rows.length > 0;
   }
 
+  static async validateExplicitAbsenceForNotification(
+    client,
+    { centerId, sessionId, studentId },
+  ) {
+    const normalizedSessionId = String(sessionId || "").trim();
+    const normalizedStudentId = String(studentId || "").trim();
+    if (!normalizedSessionId || !normalizedStudentId) {
+      throw new Error(
+        "ABSENCE_NOTIFICATION_TARGET_REQUIRED: absence notifications require a session and student.",
+      );
+    }
+
+    const sessionResult = await client.query(
+      `SELECT s.id, s.status, s.schedule_id, s.group_id,
+              s.session_date, g.id AS validated_group_id
+         FROM sessions s
+         LEFT JOIN groups g
+           ON g.center_id = s.center_id AND g.id = s.group_id
+        WHERE s.center_id = $1 AND s.id = $2
+        FOR UPDATE OF s`,
+      [centerId, normalizedSessionId],
+    );
+    const session = sessionResult.rows[0];
+    if (!session) {
+      const foreignSession = await client.query(
+        "SELECT center_id FROM sessions WHERE id = $1 LIMIT 1",
+        [normalizedSessionId],
+      );
+      if (
+        foreignSession.rows[0] &&
+        String(foreignSession.rows[0].center_id) !== String(centerId)
+      ) {
+        throw new Error(
+          "ABSENCE_NOTIFICATION_CENTER_MISMATCH: session belongs to another center.",
+        );
+      }
+      throw new Error(
+        "ABSENCE_NOTIFICATION_TARGET_NOT_FOUND: session has not synchronized yet.",
+      );
+    }
+    if (!session.validated_group_id) {
+      throw new Error(
+        "ABSENCE_NOTIFICATION_TARGET_INVALID: session has no valid group.",
+      );
+    }
+    if (String(session.status || "").toLowerCase() === "cancelled") {
+      throw new Error(
+        "ABSENCE_NOTIFICATION_NO_LONGER_ABSENT: session is cancelled.",
+      );
+    }
+
+    const studentResult = await client.query(
+      `SELECT center_id, deleted_at
+         FROM students
+        WHERE id = $1
+        LIMIT 1`,
+      [normalizedStudentId],
+    );
+    const student = studentResult.rows[0];
+    if (student && String(student.center_id) !== String(centerId)) {
+      throw new Error(
+        "ABSENCE_NOTIFICATION_CENTER_MISMATCH: student belongs to another center.",
+      );
+    }
+    if (!student) {
+      throw new Error(
+        "ABSENCE_NOTIFICATION_TARGET_NOT_FOUND: student has not synchronized yet.",
+      );
+    }
+    if (student.deleted_at) {
+      throw new Error(
+        "ABSENCE_NOTIFICATION_NO_LONGER_ABSENT: student is deleted.",
+      );
+    }
+
+    const aliasResult = await client.query(
+      `SELECT aliases.local_session_id
+         FROM session_id_aliases aliases
+         JOIN sessions canonical
+           ON canonical.center_id = aliases.center_id
+          AND canonical.id = aliases.canonical_session_id
+         LEFT JOIN sessions source
+           ON source.center_id = aliases.center_id
+          AND source.id = aliases.local_session_id
+        WHERE aliases.center_id = $1
+          AND aliases.canonical_session_id = $2
+          AND canonical.schedule_id IS NOT NULL
+          AND (
+            source.id IS NULL OR (
+              source.schedule_id IS NOT NULL
+              AND source.group_id = canonical.group_id
+              AND source.schedule_id = canonical.schedule_id
+              AND source.session_date = canonical.session_date
+            )
+          )
+          AND NOT (
+            (canonical.status = 'cancelled' AND source.status IS NOT NULL
+              AND source.status <> 'cancelled')
+            OR (source.status = 'cancelled' AND canonical.status IS NOT NULL
+              AND canonical.status <> 'cancelled')
+          )`,
+      [centerId, normalizedSessionId],
+    );
+    const logicalSessionIds = Array.from(
+      new Set([
+        normalizedSessionId,
+        ...aliasResult.rows.map((row) => String(row.local_session_id)),
+      ]),
+    );
+    const attendanceResult = await client.query(
+      `SELECT id, status, attendance_type
+         FROM attendance
+        WHERE center_id = $1 AND student_id = $2
+          AND session_id = ANY($3::varchar[])
+        FOR UPDATE`,
+      [centerId, normalizedStudentId, logicalSessionIds],
+    );
+    if (!attendanceResult.rows.length) {
+      throw new Error(
+        "ABSENCE_NOTIFICATION_TARGET_NOT_FOUND: attendance has not synchronized yet.",
+      );
+    }
+    if (
+      attendanceResult.rows.some((row) =>
+        ["present", "late"].includes(String(row.status || "").toLowerCase()),
+      )
+    ) {
+      throw new Error(
+        "ABSENCE_NOTIFICATION_NO_LONGER_ABSENT: student has explicit attendance.",
+      );
+    }
+    const explicitAbsence = attendanceResult.rows.find(
+      (row) =>
+        String(row.status || "").toLowerCase() === "absent" &&
+        String(row.attendance_type || "present").toLowerCase() !== "makeup",
+    );
+    if (!explicitAbsence) {
+      throw new Error(
+        "ABSENCE_NOTIFICATION_NO_LONGER_ABSENT: no valid explicit absence remains.",
+      );
+    }
+
+    const coverageResult = await client.query(
+      `SELECT id FROM advance_coverages
+        WHERE center_id = $1 AND student_id = $2
+          AND target_future_session_id = ANY($3::varchar[])
+        LIMIT 1`,
+      [centerId, normalizedStudentId, logicalSessionIds],
+    );
+    if (coverageResult.rows.length) {
+      throw new Error(
+        "ABSENCE_NOTIFICATION_NO_LONGER_ABSENT: session is covered by advance attendance.",
+      );
+    }
+    return { attendanceId: String(explicitAbsence.id) };
+  }
+
+  static normalizeOriginalAbsenceSessionId(value, studentId) {
+    const raw = String(value || "").trim();
+    const legacySuffix = `-${String(studentId || "")}`;
+    if (
+      raw.startsWith("absence-") &&
+      raw.endsWith(legacySuffix) &&
+      raw.length > "absence-".length + legacySuffix.length
+    ) {
+      return raw.slice("absence-".length, -legacySuffix.length);
+    }
+    return raw;
+  }
+
+  static async validateMakeupAttendance(
+    client,
+    { centerId, sourceSessionId, targetSession, targetSessionId, studentId },
+  ) {
+    const submittedSourceId = String(sourceSessionId || "").trim();
+    if (!submittedSourceId) {
+      throw new Error(
+        "MAKEUP_ORIGINAL_ABSENCE_REQUIRED: makeup attendance must reference an explicit absence session.",
+      );
+    }
+
+    const findSession = async (sessionId) => {
+      const result = await client.query(
+        `SELECT s.id, s.group_id, s.session_date::text AS session_date,
+                COALESCE(s.start_time::text, '') AS start_time,
+                s.status, g.id AS validated_group_id,
+                COALESCE(s.subject_id, g.subject_id) AS subject_id,
+                COALESCE(s.teacher_id, g.teacher_id) AS teacher_id
+           FROM sessions s
+           LEFT JOIN groups g
+             ON g.center_id = s.center_id AND g.id = s.group_id
+          WHERE s.center_id = $1 AND s.id = $2
+          FOR UPDATE OF s`,
+        [centerId, sessionId],
+      );
+      return result.rows[0] || null;
+    };
+
+    const normalizedSourceId = SyncProcessor.normalizeOriginalAbsenceSessionId(
+      submittedSourceId,
+      studentId,
+    );
+    const resolvedSourceId = await SyncProcessor.resolveSessionAlias(
+      client,
+      centerId,
+      normalizedSourceId,
+    );
+    let originalSessionId = String(resolvedSourceId || normalizedSourceId);
+    let sourceSession = await findSession(originalSessionId);
+    if (!sourceSession) {
+      const sourceCandidates = Array.from(
+        new Set([submittedSourceId, normalizedSourceId, originalSessionId]),
+      );
+      for (const candidateId of sourceCandidates) {
+        const foreignSource = await client.query(
+          "SELECT center_id FROM sessions WHERE id = $1 LIMIT 1",
+          [candidateId],
+        );
+        if (
+          foreignSource.rows[0] &&
+          String(foreignSource.rows[0].center_id) !== String(centerId)
+        ) {
+          throw new Error(
+            "MAKEUP_ORIGINAL_ABSENCE_CENTER_MISMATCH: source session belongs to another center.",
+          );
+        }
+      }
+    }
+    if (!sourceSession) {
+      throw new Error(
+        "ATTENDANCE_TARGET_NOT_FOUND: original absence session has not synchronized yet.",
+      );
+    }
+    if (!sourceSession.validated_group_id) {
+      throw new Error(
+        "MAKEUP_ORIGINAL_ABSENCE_INVALID: source session has no valid group.",
+      );
+    }
+    if (String(sourceSession.status || "").toLowerCase() === "cancelled") {
+      throw new Error(
+        "MAKEUP_ORIGINAL_ABSENCE_INVALID: a cancelled session cannot be the source absence.",
+      );
+    }
+    const targetSubjectId =
+      targetSession.subject_id || targetSession.group_subject_id;
+    const targetTeacherId =
+      targetSession.teacher_id || targetSession.group_teacher_id;
+    if (
+      !sourceSession.subject_id ||
+      !sourceSession.teacher_id ||
+      String(sourceSession.subject_id) !== String(targetSubjectId || "") ||
+      String(sourceSession.teacher_id) !== String(targetTeacherId || "")
+    ) {
+      throw new Error(
+        "MAKEUP_TARGET_INVALID: source and target sessions must share a subject and teacher.",
+      );
+    }
+    const sourceDate = String(sourceSession.session_date || "").slice(0, 10);
+    const targetDate = String(targetSession.session_date || "").slice(0, 10);
+    if (
+      !sourceDate ||
+      !targetDate ||
+      targetDate < sourceDate ||
+      (targetDate === sourceDate &&
+        String(targetSession.start_time || "") <=
+          String(sourceSession.start_time || ""))
+    ) {
+      throw new Error(
+        "MAKEUP_TARGET_INVALID: target session must occur after the source absence.",
+      );
+    }
+
+    const sourceAliases = await client.query(
+      `SELECT local_session_id
+         FROM session_id_aliases
+        WHERE center_id = $1 AND canonical_session_id = $2`,
+      [centerId, originalSessionId],
+    );
+    const sourceSessionIds = Array.from(
+      new Set([
+        originalSessionId,
+        ...sourceAliases.rows.map((row) => String(row.local_session_id)),
+      ]),
+    );
+    const sourceAttendance = await client.query(
+      `SELECT id, session_id, status, attendance_type
+         FROM attendance
+        WHERE center_id = $1 AND session_id = ANY($2::varchar[])
+          AND student_id = $3
+        FOR UPDATE`,
+      [centerId, sourceSessionIds, studentId],
+    );
+    const matchingAbsences = sourceAttendance.rows.filter(
+      (row) =>
+        String(row.status || "").toLowerCase() === "absent" &&
+        String(row.attendance_type || "present").toLowerCase() !== "makeup",
+    );
+    const hasConflictingAttendance = sourceAttendance.rows.some(
+      (row) =>
+        String(row.status || "").toLowerCase() !== "absent" ||
+        String(row.attendance_type || "present").toLowerCase() === "makeup",
+    );
+    const absence = matchingAbsences.length === 1 ? matchingAbsences[0] : null;
+    if (!sourceAttendance.rows.length) {
+      throw new Error(
+        "ATTENDANCE_TARGET_NOT_FOUND: original explicit absence has not synchronized yet.",
+      );
+    }
+    if (hasConflictingAttendance || matchingAbsences.length !== 1) {
+      throw new Error(
+        "MAKEUP_ORIGINAL_ABSENCE_INVALID: source session does not contain an explicit absence.",
+      );
+    }
+
+    const advanceCoverage = await client.query(
+      `SELECT id FROM advance_coverages
+        WHERE center_id = $1 AND student_id = $2
+          AND target_future_session_id = ANY($3::varchar[])
+        LIMIT 1`,
+      [centerId, studentId, sourceSessionIds],
+    );
+    if (advanceCoverage.rows.length) {
+      throw new Error(
+        "MAKEUP_ORIGINAL_ABSENCE_INVALID: source session is already covered by advance attendance.",
+      );
+    }
+
+    const sourceReferenceIds = sourceSessionIds;
+    const sourceReferences = Array.from(
+      new Set([
+        ...sourceReferenceIds,
+        ...sourceReferenceIds.map((id) => `absence-${id}-${studentId}`),
+      ]),
+    );
+    const existingMakeup = await client.query(
+      `SELECT id, session_id, original_absence_id
+         FROM attendance
+        WHERE center_id = $1 AND student_id = $2
+          AND attendance_type = 'makeup'
+          AND original_absence_id = ANY($3::varchar[])
+        FOR UPDATE`,
+      [centerId, studentId, sourceReferences],
+    );
+    for (const row of existingMakeup.rows) {
+      const existingTargetId = String(row.session_id);
+      if (existingTargetId === String(targetSessionId)) continue;
+      const canonicalExistingTarget = await SyncProcessor.resolveSessionAlias(
+        client,
+        centerId,
+        existingTargetId,
+      );
+      if (
+        String(canonicalExistingTarget || existingTargetId) ===
+        String(targetSessionId)
+      ) {
+        throw new Error(
+          "MAKEUP_TARGET_ALIAS_CONFLICT: an equivalent target session already has this makeup; historical attendance was left unchanged.",
+        );
+      }
+      throw new Error(
+        "MAKEUP_ORIGINAL_ABSENCE_ALREADY_USED: this explicit absence is already compensated in another session.",
+      );
+    }
+
+    return { originalSessionId, absenceId: String(absence.id) };
+  }
+
+  static async validateAdvanceCoverage(
+    client,
+    { centerId, coverage, entityId },
+  ) {
+    const coverageCenterId = coverage.center_id || coverage.centerId;
+    if (coverageCenterId && String(coverageCenterId) !== String(centerId)) {
+      throw new Error(
+        "ADVANCE_COVERAGE_CENTER_MISMATCH: coverage belongs to another center.",
+      );
+    }
+    const id = String(coverage.id || entityId || "").trim();
+    const studentId = String(
+      coverage.student_id || coverage.studentId || "",
+    ).trim();
+    const advanceSessionId = String(
+      coverage.advance_session_id || coverage.advanceSessionId || "",
+    ).trim();
+    const targetSessionId = String(
+      coverage.target_future_session_id || coverage.targetFutureSessionId || "",
+    ).trim();
+    if (!id || !studentId || !advanceSessionId || !targetSessionId) {
+      throw new Error(
+        "ADVANCE_COVERAGE_TARGET_REQUIRED: coverage requires an id, student, and both sessions.",
+      );
+    }
+
+    const existingById = await client.query(
+      `SELECT id, center_id, student_id, advance_session_id,
+              target_future_session_id
+         FROM advance_coverages
+        WHERE id = $1
+        FOR UPDATE`,
+      [id],
+    );
+    const existingId = existingById.rows[0];
+    if (existingId) {
+      if (String(existingId.center_id) !== String(centerId)) {
+        throw new Error(
+          "ADVANCE_COVERAGE_CENTER_MISMATCH: coverage ID belongs to another center.",
+        );
+      }
+      if (
+        String(existingId.student_id) !== studentId ||
+        String(existingId.advance_session_id) !== advanceSessionId ||
+        String(existingId.target_future_session_id) !== targetSessionId
+      ) {
+        throw new Error(
+          "ADVANCE_COVERAGE_ID_CONFLICT: immutable coverage references cannot be changed.",
+        );
+      }
+      return { existing: existingId };
+    }
+
+    const student = await client.query(
+      `SELECT center_id, deleted_at
+         FROM students
+        WHERE id = $1
+        LIMIT 1`,
+      [studentId],
+    );
+    if (
+      student.rows[0] &&
+      String(student.rows[0].center_id) !== String(centerId)
+    ) {
+      throw new Error(
+        "ADVANCE_COVERAGE_STUDENT_CENTER_MISMATCH: student belongs to another center.",
+      );
+    }
+    if (!student.rows[0] || student.rows[0].deleted_at) {
+      throw new Error(
+        "ADVANCE_COVERAGE_STUDENT_NOT_FOUND: student is missing or deleted.",
+      );
+    }
+
+    const findSession = async (sessionId) => {
+      const result = await client.query(
+        `SELECT s.id, s.group_id, s.session_date::text AS session_date,
+                COALESCE(s.start_time::text, '') AS start_time,
+                s.status,
+                g.id AS validated_group_id,
+                g.grade AS group_grade,
+                COALESCE(s.subject_id, g.subject_id) AS subject_id,
+                COALESCE(s.teacher_id, g.teacher_id) AS teacher_id
+           FROM sessions s
+           LEFT JOIN groups g
+             ON g.center_id = s.center_id AND g.id = s.group_id
+          WHERE s.center_id = $1 AND s.id = $2
+          FOR UPDATE OF s`,
+        [centerId, sessionId],
+      );
+      if (result.rows[0]) return result.rows[0];
+
+      const foreignSession = await client.query(
+        "SELECT center_id FROM sessions WHERE id = $1 LIMIT 1",
+        [sessionId],
+      );
+      if (
+        foreignSession.rows[0] &&
+        String(foreignSession.rows[0].center_id) !== String(centerId)
+      ) {
+        throw new Error(
+          "ADVANCE_COVERAGE_SESSION_CENTER_MISMATCH: referenced session belongs to another center.",
+        );
+      }
+      throw new Error(
+        "ADVANCE_COVERAGE_SESSION_NOT_FOUND: referenced session has not synchronized yet.",
+      );
+    };
+
+    const advanceSession = await findSession(advanceSessionId);
+    const targetSession = await findSession(targetSessionId);
+    if (
+      !advanceSession.validated_group_id ||
+      !targetSession.validated_group_id
+    ) {
+      throw new Error(
+        "ADVANCE_COVERAGE_SESSION_INVALID: referenced session has no valid group.",
+      );
+    }
+    if (String(advanceSession.status || "").toLowerCase() !== "open") {
+      throw new Error(
+        "ADVANCE_COVERAGE_SESSION_INVALID: advance session is not open.",
+      );
+    }
+    if (
+      !["open", "scheduled"].includes(
+        String(targetSession.status || "").toLowerCase(),
+      )
+    ) {
+      throw new Error(
+        "ADVANCE_COVERAGE_TARGET_INVALID: target session is closed, cancelled, or unavailable.",
+      );
+    }
+    if (
+      !advanceSession.subject_id ||
+      !advanceSession.teacher_id ||
+      String(advanceSession.subject_id) !==
+        String(targetSession.subject_id || "") ||
+      String(advanceSession.teacher_id) !==
+        String(targetSession.teacher_id || "")
+    ) {
+      throw new Error(
+        "ADVANCE_COVERAGE_TARGET_INVALID: sessions must share a subject and teacher.",
+      );
+    }
+    const advanceDate = String(advanceSession.session_date || "").slice(0, 10);
+    const targetDate = String(targetSession.session_date || "").slice(0, 10);
+    if (
+      !advanceDate ||
+      !targetDate ||
+      targetDate < advanceDate ||
+      (targetDate === advanceDate &&
+        String(targetSession.start_time || "") <=
+          String(advanceSession.start_time || ""))
+    ) {
+      throw new Error(
+        "ADVANCE_COVERAGE_TARGET_INVALID: target session must occur after the advance session.",
+      );
+    }
+
+    const expected = await client.query(
+      `SELECT 1 FROM session_expected_students
+        WHERE center_id = $1 AND session_id = $2 AND student_id = $3
+        LIMIT 1`,
+      [centerId, targetSessionId, studentId],
+    );
+    const snapshot = await client.query(
+      `SELECT 1 FROM session_expected_students
+        WHERE center_id = $1 AND session_id = $2
+        LIMIT 1`,
+      [centerId, targetSessionId],
+    );
+    const relationshipEligible =
+      await SyncProcessor.isStudentEligibleForSessionGroup(client, {
+        centerId,
+        groupId: targetSession.group_id,
+        sessionDate: targetSession.session_date,
+        subjectId: targetSession.subject_id,
+        teacherId: targetSession.teacher_id,
+        groupGrade: targetSession.group_grade,
+        studentId,
+      });
+    if (
+      expected.rows.length === 0 &&
+      (snapshot.rows.length > 0 || !relationshipEligible)
+    ) {
+      throw new Error(
+        "ADVANCE_COVERAGE_STUDENT_NOT_EXPECTED: student is not eligible for the target session.",
+      );
+    }
+
+    const existingTarget = await client.query(
+      `SELECT id, center_id, student_id, advance_session_id,
+              target_future_session_id
+         FROM advance_coverages
+        WHERE center_id = $1 AND student_id = $2
+          AND target_future_session_id = $3
+        FOR UPDATE`,
+      [centerId, studentId, targetSessionId],
+    );
+    if (existingTarget.rows[0]) {
+      const existing = existingTarget.rows[0];
+      if (String(existing.advance_session_id) === advanceSessionId) {
+        return { existing };
+      }
+      throw new Error(
+        "ADVANCE_COVERAGE_TARGET_ALREADY_USED: target session is covered by another advance session.",
+      );
+    }
+
+    const existingAdvance = await client.query(
+      `SELECT id, center_id, student_id, advance_session_id,
+              target_future_session_id
+         FROM advance_coverages
+        WHERE center_id = $1 AND student_id = $2
+          AND advance_session_id = $3
+        FOR UPDATE`,
+      [centerId, studentId, advanceSessionId],
+    );
+    if (existingAdvance.rows[0]) {
+      const existing = existingAdvance.rows[0];
+      if (String(existing.target_future_session_id) === targetSessionId) {
+        return { existing };
+      }
+      throw new Error(
+        "ADVANCE_COVERAGE_ADVANCE_ALREADY_USED: advance session already covers another target.",
+      );
+    }
+
+    return { id, studentId, advanceSessionId, targetSessionId };
+  }
+
   /**
    * Processes a batch of sync operations inside a true ACID transaction.
    */
@@ -389,9 +1686,10 @@ class SyncProcessor {
       const syncedOperationIds = [];
       const conflicts = [];
       // Older offline clients could generate a random session id for the same
-      // group/schedule/date. Keep a per-batch alias so dependent attendance
-      // and payment operations follow the canonical server session.
+      // group/schedule/date. Keep a cache for same-batch references while
+      // session_id_aliases handles retries and subsequent requests.
       const canonicalSessionIds = new Map();
+      const sessionMappings = new Map();
       const canonicalDebtCycleIds = new Map();
       let maxServerSeq = 0;
 
@@ -444,6 +1742,34 @@ class SyncProcessor {
             });
             continue;
           }
+          if (canonicalSyncEntity(entityType) === "session") {
+            const retryPayload =
+              typeof payload === "string"
+                ? JSON.parse(payload || "{}")
+                : payload || {};
+            const canonicalSessionId =
+              (await SyncProcessor.resolveSessionAlias(
+                client,
+                centerId,
+                entityId,
+              )) ||
+              (await SyncProcessor.findSessionByNaturalKey(
+                client,
+                centerId,
+                retryPayload.group_id || retryPayload.groupId,
+                retryPayload.schedule_id || retryPayload.scheduleId || null,
+                normalizeDateOnly(
+                  retryPayload.session_date || retryPayload.sessionDate,
+                ),
+              ));
+            if (
+              canonicalSessionId &&
+              entityId &&
+              String(entityId) !== String(canonicalSessionId)
+            ) {
+              sessionMappings.set(String(entityId), String(canonicalSessionId));
+            }
+          }
           logGroupScheduleUpdate(operationLogContext, "already_applied");
           syncedOperationIds.push(rawOperationId);
           const existingSeq = parseInt(existingOp.rows[0].server_seq, 10);
@@ -468,29 +1794,68 @@ class SyncProcessor {
         await client.query("SAVEPOINT op_savepoint");
         try {
           operationPhase = "payload_normalization";
-          const normalizedPayload = typeof payload === "string" ? JSON.parse(payload || "{}") : { ...(payload || {}) };
-          const referencedSessionId = normalizedPayload.session_id || normalizedPayload.sessionId;
-          const canonicalSessionId = referencedSessionId && canonicalSessionIds.get(String(referencedSessionId));
-          if (canonicalSessionId) {
-            normalizedPayload.session_id = canonicalSessionId;
-            normalizedPayload.sessionId = canonicalSessionId;
-          }
+          const payloadObject =
+            typeof payload === "string"
+              ? JSON.parse(payload || "{}")
+              : payload || {};
+          const normalizedPayload =
+            await SyncProcessor.canonicalizeSessionReferences(
+              client,
+              centerId,
+              payloadObject,
+              canonicalSessionIds,
+            );
           if (canonicalSyncEntity(entityType) === "payment") {
             const payment = normalizedPayload.payment || normalizedPayload;
-            const requestedDebtCycleId = payment.debt_cycle_id || payment.debtCycleId;
+            const requestedDebtCycleId =
+              payment.debt_cycle_id || payment.debtCycleId;
             if (requestedDebtCycleId) {
               const canonicalDebtCycleId =
                 canonicalDebtCycleIds.get(String(requestedDebtCycleId)) ||
-                await SyncProcessor.resolveDebtCycleAlias(client, centerId, String(requestedDebtCycleId));
+                (await SyncProcessor.resolveDebtCycleAlias(
+                  client,
+                  centerId,
+                  String(requestedDebtCycleId),
+                ));
               if (canonicalDebtCycleId) {
                 payment.debt_cycle_id = canonicalDebtCycleId;
                 payment.debtCycleId = canonicalDebtCycleId;
-                if (normalizedPayload.payment) normalizedPayload.payment = payment;
+                if (normalizedPayload.payment)
+                  normalizedPayload.payment = payment;
               }
             }
           }
           operationPhase = "freshness_check";
-          await SyncProcessor.assertFreshMutation(client, centerId, canonicalSyncEntity(entityType), entityId, normalizedPayload, operationType);
+          let freshnessEntityId = entityId;
+          if (canonicalSyncEntity(entityType) === "session") {
+            freshnessEntityId =
+              (await SyncProcessor.resolveSessionAlias(
+                client,
+                centerId,
+                entityId,
+              )) ||
+              (await SyncProcessor.findSessionByNaturalKey(
+                client,
+                centerId,
+                normalizedPayload.group_id || normalizedPayload.groupId,
+                normalizedPayload.schedule_id ||
+                  normalizedPayload.scheduleId ||
+                  null,
+                normalizeDateOnly(
+                  normalizedPayload.session_date ||
+                    normalizedPayload.sessionDate,
+                ),
+              )) ||
+              entityId;
+          }
+          await SyncProcessor.assertFreshMutation(
+            client,
+            centerId,
+            canonicalSyncEntity(entityType),
+            freshnessEntityId,
+            normalizedPayload,
+            operationType,
+          );
           // 3. Dispatch and apply domain mutation atomically
           operationPhase = "domain_mutation";
           const mutationContext = {
@@ -505,6 +1870,18 @@ class SyncProcessor {
             createdAt,
           };
           await SyncProcessor.applyDomainMutation(client, mutationContext);
+          if (canonicalSyncEntity(entityType) === "session") {
+            const canonicalSessionId = String(
+              mutationContext.canonicalEntityId || entityId,
+            );
+            canonicalSessionIds.set(String(entityId), canonicalSessionId);
+            if (
+              mutationContext.sessionIdentityType === "scheduled" &&
+              String(entityId) !== canonicalSessionId
+            ) {
+              sessionMappings.set(String(entityId), canonicalSessionId);
+            }
+          }
           operationPhase = "ledger_write";
           const ledgerEntityId = mutationContext.canonicalEntityId || entityId;
           if (
@@ -517,29 +1894,37 @@ class SyncProcessor {
             );
           }
 
-          if (canonicalSyncEntity(entityType) === "session") {
-            const session = normalizedPayload;
-            const natural = await client.query(
-              `SELECT id FROM sessions
-                 WHERE center_id = $1 AND group_id = $2
-                   AND COALESCE(schedule_id, '') = COALESCE($3, '')
-                   AND session_date = $4
-                 LIMIT 1`,
-              [centerId, session.group_id || session.groupId, session.schedule_id || session.scheduleId || null, normalizeDateOnly(session.session_date || session.sessionDate)],
-            );
-            if (natural.rows[0]?.id) canonicalSessionIds.set(String(entityId), String(natural.rows[0].id));
-          }
-
           // 4. Ingest operation into monotonic server ledger. For SMS
           // deliveries, publish the authoritative post-provider status so
           // clients converge on sent/failed state during the next pull.
-          let ledgerPayload = payload || {};
+          let ledgerPayload =
+            mutationContext.ledgerPayload || normalizedPayload || payload || {};
+          if (canonicalSyncEntity(entityType) === "session") {
+            const canonicalSessionId = String(
+              mutationContext.canonicalEntityId || entityId,
+            );
+            ledgerPayload = {
+              ...normalizedPayload,
+              id: canonicalSessionId,
+              sessionId: canonicalSessionId,
+              clientSessionId: String(entityId),
+              startedAt: mutationContext.sessionStartedAt || null,
+            };
+          }
           if (entityType === "notification_delivery") {
-            const deliveryState = await client.query("SELECT id, notification_event_id, provider, status, retry_count, provider_message_id FROM notification_deliveries WHERE center_id=$1 AND id=$2", [centerId, entityId]);
-            if (deliveryState.rows[0]) ledgerPayload = { delivery: { ...deliveryState.rows[0] } };
+            const deliveryState = await client.query(
+              "SELECT id, notification_event_id, provider, status, retry_count, provider_message_id FROM notification_deliveries WHERE center_id=$1 AND id=$2",
+              [centerId, entityId],
+            );
+            if (deliveryState.rows[0])
+              ledgerPayload = { delivery: { ...deliveryState.rows[0] } };
           }
           const canonicalEntity = canonicalSyncEntity(entityType);
-          if (["student", "teacher", "subject", "group", "package"].includes(canonicalEntity)) {
+          if (
+            ["student", "teacher", "subject", "group", "package"].includes(
+              canonicalEntity,
+            )
+          ) {
             const tableByType = {
               student: "students",
               teacher: "teachers",
@@ -560,7 +1945,13 @@ class SyncProcessor {
                 updatedAt,
                 updated_at: updatedAt,
                 ...(normalizedPayload?.[key]
-                  ? { [key]: { ...normalizedPayload[key], updatedAt, updated_at: updatedAt } }
+                  ? {
+                      [key]: {
+                        ...normalizedPayload[key],
+                        updatedAt,
+                        updated_at: updatedAt,
+                      },
+                    }
                   : {}),
               };
             }
@@ -590,20 +1981,32 @@ class SyncProcessor {
                   ...(normalizedPayload || {}),
                   serverRevision,
                   ...(normalizedPayload?.debtCycle
-                    ? { debtCycle: { ...normalizedPayload.debtCycle, serverRevision } }
+                    ? {
+                        debtCycle: {
+                          ...normalizedPayload.debtCycle,
+                          serverRevision,
+                        },
+                      }
                     : {}),
                 };
               }
             }
           } else if (canonicalEntity === "payment") {
-            const cycleId = normalizedPayload?.debt_cycle_id || normalizedPayload?.debtCycleId;
+            const cycleId =
+              normalizedPayload?.debt_cycle_id ||
+              normalizedPayload?.debtCycleId;
             if (cycleId) {
               const cycle = await client.query(
-                  `SELECT * FROM debt_cycles
+                `SELECT * FROM debt_cycles
                     WHERE center_id = $1 AND id = $2`,
-                  [centerId, cycleId],
+                [centerId, cycleId],
               );
-              if (cycle.rows[0]) ledgerPayload = { ...(normalizedPayload || {}), debtCycle: cycle.rows[0] };
+              if (cycle.rows[0]) {
+                ledgerPayload = {
+                  ...(mutationContext.ledgerPayload || normalizedPayload || {}),
+                  debtCycle: cycle.rows[0],
+                };
+              }
             }
           }
           const ingestRes = await client.query(
@@ -631,19 +2034,35 @@ class SyncProcessor {
 
           operationPhase = "audit_write";
           // 5. Record Server-Side Audit Trail
-          const studentAuditState = entityType === "student" ? (payload?.student || payload || {}) : {};
-          const hasStudentArchiveMutation = entityType === "student" && (
-            Object.prototype.hasOwnProperty.call(studentAuditState, "deleted_at") ||
-            Object.prototype.hasOwnProperty.call(studentAuditState, "deletedAt")
+          const studentAuditState =
+            entityType === "student" ? payload?.student || payload || {} : {};
+          const hasStudentArchiveMutation =
+            entityType === "student" &&
+            (Object.prototype.hasOwnProperty.call(
+              studentAuditState,
+              "deleted_at",
+            ) ||
+              Object.prototype.hasOwnProperty.call(
+                studentAuditState,
+                "deletedAt",
+              ));
+          const studentIsArchived = Boolean(
+            studentAuditState.deleted_at || studentAuditState.deletedAt,
           );
-          const studentIsArchived = Boolean(studentAuditState.deleted_at || studentAuditState.deletedAt);
-          const auditAction = entityType === "attendance" && payload?.action === "attendance.cancel"
-            ? "attendance.cancel"
-            : entityType === "student_color" && ["student.color.update", "student.color.reset"].includes(String(payload?.action || ""))
-            ? String(payload.action)
-            : hasStudentArchiveMutation
-            ? (studentIsArchived ? "student.delete" : "student.restore")
-            : `${entityType || "entity"}.${operationType || "mutate"}`;
+          const auditAction =
+            entityType === "attendance" &&
+            payload?.action === "attendance.cancel"
+              ? "attendance.cancel"
+              : entityType === "student_color" &&
+                  ["student.color.update", "student.color.reset"].includes(
+                    String(payload?.action || ""),
+                  )
+                ? String(payload.action)
+                : hasStudentArchiveMutation
+                  ? studentIsArchived
+                    ? "student.delete"
+                    : "student.restore"
+                  : `${entityType || "entity"}.${operationType || "mutate"}`;
           await client.query(
             `INSERT INTO audit_logs
              (id, operation_id, center_id, user_id, device_id, entity_type, entity_id, action, timestamp, payload)
@@ -667,9 +2086,48 @@ class SyncProcessor {
         } catch (opErr) {
           logGroupScheduleUpdate(operationLogContext, operationPhase, opErr);
           await client.query("ROLLBACK TO SAVEPOINT op_savepoint");
+          const cancellationOutcome =
+            SyncProcessor.cancelledSessionAttendanceAuditOutcome(opErr);
+          if (entityType === "attendance" && cancellationOutcome) {
+            const rejectedPayload =
+              typeof payload === "string"
+                ? JSON.parse(payload || "{}")
+                : payload || {};
+            const auditId = `aud-att-${crypto
+              .createHash("sha256")
+              .update(operationId)
+              .digest("hex")
+              .slice(0, 48)}`;
+            await client.query(
+              `INSERT INTO audit_logs
+                 (id, operation_id, center_id, user_id, device_id, entity_type,
+                  entity_id, action, timestamp, payload)
+               VALUES ($1, $2, $3, $4, $5, 'attendance', $6,
+                       'attendance.rejected_session_cancelled', NOW(), $7)
+               ON CONFLICT (id) DO NOTHING`,
+              [
+                auditId,
+                operationId,
+                centerId,
+                userId,
+                deviceId,
+                entityId || operationId,
+                JSON.stringify({
+                  outcome: cancellationOutcome,
+                  reason: String(opErr.message),
+                  submittedOperation: rejectedPayload,
+                }),
+              ],
+            );
+          }
           let serverState = null;
           try {
-            serverState = await SyncProcessor.readCurrentEntityState(client, centerId, entityType, entityId);
+            serverState = await SyncProcessor.readCurrentEntityState(
+              client,
+              centerId,
+              entityType,
+              entityId,
+            );
           } catch (_) {
             // Conflict review must never hide the original mutation error.
           }
@@ -697,13 +2155,22 @@ class SyncProcessor {
           checkpointId,
           centerId,
           deviceId,
-          normalizeOperationId(syncedOperationIds[syncedOperationIds.length - 1]) || null,
+          normalizeOperationId(
+            syncedOperationIds[syncedOperationIds.length - 1],
+          ) || null,
         ],
       );
 
       return {
         success: true,
         syncedOperationIds,
+        sessionMappings: Array.from(
+          sessionMappings,
+          ([localSessionId, canonicalSessionId]) => ({
+            localSessionId,
+            canonicalSessionId,
+          }),
+        ),
         conflicts,
         serverCursor: String(maxServerSeq),
         processedAt: new Date().toISOString(),
@@ -747,13 +2214,23 @@ class SyncProcessor {
     };
     const table = tableByType[entityType];
     if (!table) return null;
-    const result = await client.query(`SELECT * FROM ${table} WHERE center_id = $1 AND id = $2`, [centerId, entityId]);
+    const result = await client.query(
+      `SELECT * FROM ${table} WHERE center_id = $1 AND id = $2`,
+      [centerId, entityId],
+    );
     return result.rows[0] || null;
   }
 
   // Lightweight optimistic concurrency: a stale offline update must become a
   // reviewable conflict instead of overwriting a newer server edit.
-  static async assertFreshMutation(client, centerId, entityType, entityId, payload, operationType) {
+  static async assertFreshMutation(
+    client,
+    centerId,
+    entityType,
+    entityId,
+    payload,
+    operationType,
+  ) {
     // A server-reset repair intentionally restores the device's local
     // authoritative row. Its local timestamp can predate a server row that
     // was recreated after the reset, so optimistic stale-write protection does
@@ -767,13 +2244,19 @@ class SyncProcessor {
     // schedule edits cannot use timestamp-based stale-write validation.
     if (entityType === "group_schedule") return;
     const tableByType = {
-      student: "students", teacher: "teachers", subject: "subjects",
-      group: "groups", session: "sessions", enrollment: "student_group_enrollments",
-      package: "packages", debt_cycle: "debt_cycles",
+      student: "students",
+      teacher: "teachers",
+      subject: "subjects",
+      group: "groups",
+      session: "sessions",
+      enrollment: "student_group_enrollments",
+      package: "packages",
+      debt_cycle: "debt_cycles",
       package_subscription: "student_package_subscriptions",
       student_card: "student_cards",
       package_teacher_override: "package_subject_teacher_overrides",
-      grade_exam: "grade_exams", grade_score: "grade_scores",
+      grade_exam: "grade_exams",
+      grade_score: "grade_scores",
       homework_evaluation_status: "homework_evaluation_statuses",
       session_homework_evaluation: "session_homework_evaluations",
       notification_template: "notification_templates",
@@ -797,22 +2280,42 @@ class SyncProcessor {
         !Number.isSafeInteger(Number(expectedRevision)) ||
         Number(expectedRevision) < 0
       ) {
-        throw new Error("STALE_UPDATE: debt cycle update requires its server revision.");
+        throw new Error(
+          "STALE_UPDATE: debt cycle update requires its server revision.",
+        );
       }
-      if (Number(current.rows[0].server_revision) !== Number(expectedRevision)) {
-        throw new Error("STALE_UPDATE: debt cycle has a newer server revision.");
+      if (
+        Number(current.rows[0].server_revision) !== Number(expectedRevision)
+      ) {
+        throw new Error(
+          "STALE_UPDATE: debt cycle has a newer server revision.",
+        );
       }
       return;
     }
 
-    const versionedTypes = new Set(["student", "teacher", "subject", "group", "package"]);
+    const versionedTypes = new Set([
+      "student",
+      "teacher",
+      "subject",
+      "group",
+      "package",
+    ]);
     if (!versionedTypes.has(entityType)) {
       const incoming = payload && (payload.updatedAt || payload.updated_at);
       if (!incoming) return;
-      const result = await client.query(`SELECT updated_at FROM ${table} WHERE center_id = $1 AND id = $2`, [centerId, entityId]);
+      const result = await client.query(
+        `SELECT updated_at FROM ${table} WHERE center_id = $1 AND id = $2`,
+        [centerId, entityId],
+      );
       const serverUpdated = result.rows[0]?.updated_at;
-      if (serverUpdated && new Date(serverUpdated).getTime() > new Date(incoming).getTime()) {
-        throw new Error("STALE_UPDATE: server has a newer version of this record.");
+      if (
+        serverUpdated &&
+        new Date(serverUpdated).getTime() > new Date(incoming).getTime()
+      ) {
+        throw new Error(
+          "STALE_UPDATE: server has a newer version of this record.",
+        );
       }
       return;
     }
@@ -825,7 +2328,9 @@ class SyncProcessor {
     );
     if (!current.rows.length) return;
     if (!Object.prototype.hasOwnProperty.call(payload || {}, "baseUpdatedAt")) {
-      throw new Error("STALE_UPDATE: mutable record update requires its server updatedAt token.");
+      throw new Error(
+        "STALE_UPDATE: mutable record update requires its server updatedAt token.",
+      );
     }
     const matches = await client.query(
       `SELECT date_trunc('milliseconds', updated_at)
@@ -836,7 +2341,9 @@ class SyncProcessor {
       [centerId, entityId, payload.baseUpdatedAt],
     );
     if (!matches.rows[0]?.matches) {
-      throw new Error("STALE_UPDATE: server has a newer version of this record.");
+      throw new Error(
+        "STALE_UPDATE: server has a newer version of this record.",
+      );
     }
   }
 
@@ -844,25 +2351,55 @@ class SyncProcessor {
    * Applies specific entity domain logic in PostgreSQL.
    */
   static async applyDomainMutation(client, context) {
-    const { centerId, userId, operationId, operationType, entityType, payload } = context;
+    const {
+      centerId,
+      userId,
+      operationId,
+      operationType,
+      entityType,
+      payload,
+    } = context;
 
     switch (entityType) {
       case "student_color": {
-        const studentId = payload.studentId || payload.student_id || context.entityId;
+        const studentId =
+          payload.studentId || payload.student_id || context.entityId;
         const color = payload.studentColor ?? payload.student_color ?? null;
-        const allowedColors = new Set(["lavender", "sand", "slate", "rose", "aqua", "peach"]);
+        const allowedColors = new Set([
+          "lavender",
+          "sand",
+          "slate",
+          "rose",
+          "aqua",
+          "peach",
+        ]);
         if (color !== null && !allowedColors.has(String(color))) {
-          throw new AppError("INVALID_STUDENT_COLOR", "Invalid student color.", "لون الطالب المحدد غير صالح.", 400);
+          throw new AppError(
+            "INVALID_STUDENT_COLOR",
+            "Invalid student color.",
+            "لون الطالب المحدد غير صالح.",
+            400,
+          );
         }
         const owner = await client.query(
           `SELECT id, deleted_at FROM students WHERE center_id = $1 AND id = $2 FOR UPDATE`,
           [centerId, studentId],
         );
         if (!owner.rows[0]) {
-          throw new AppError("STUDENT_NOT_FOUND", "Student is outside the authenticated center.", "الطالب غير موجود في المركز الحالي.", 404);
+          throw new AppError(
+            "STUDENT_NOT_FOUND",
+            "Student is outside the authenticated center.",
+            "الطالب غير موجود في المركز الحالي.",
+            404,
+          );
         }
         if (owner.rows[0].deleted_at) {
-          throw new AppError("STUDENT_ARCHIVED", "Cannot change color for an archived student.", "لا يمكن تغيير لون طالب مؤرشف.", 409);
+          throw new AppError(
+            "STUDENT_ARCHIVED",
+            "Cannot change color for an archived student.",
+            "لا يمكن تغيير لون طالب مؤرشف.",
+            409,
+          );
         }
         await client.query(
           `UPDATE students SET student_color = $1 WHERE center_id = $2 AND id = $3`,
@@ -881,28 +2418,59 @@ class SyncProcessor {
         );
         const existingStudent = existingStudentRes.rows[0];
         if (existingStudent && existingStudent.center_id !== centerId) {
-          throw new AppError("STUDENT_BELONGS_TO_OTHER_CENTER", "Student belongs to another center.", "الطالب تابع لمركز آخر.", 403);
+          throw new AppError(
+            "STUDENT_BELONGS_TO_OTHER_CENTER",
+            "Student belongs to another center.",
+            "الطالب تابع لمركز آخر.",
+            403,
+          );
         }
-        const hasDeletedAt = Object.prototype.hasOwnProperty.call(student, "deleted_at") || Object.prototype.hasOwnProperty.call(student, "deletedAt");
-        const hasDeletedBy = Object.prototype.hasOwnProperty.call(student, "deleted_by") || Object.prototype.hasOwnProperty.call(student, "deletedBy");
-        const preserveArchive = String(operationType || "").toUpperCase() === "CREATE" && Boolean(existingStudent?.deleted_at);
-        const deletedAt = preserveArchive ? existingStudent.deleted_at : hasDeletedAt ? (student.deleted_at ?? student.deletedAt ?? null) : (existingStudent?.deleted_at ?? null);
-        const deletedBy = preserveArchive ? existingStudent.deleted_by : hasDeletedBy ? (student.deleted_by ?? student.deletedBy ?? null) : (existingStudent?.deleted_by ?? null);
-        const isCardCodeReplacement = payload.cardCodeChanged === true || payload.replaceCard === true;
-        const hasCardCode = Object.prototype.hasOwnProperty.call(student, "card_code") ||
+        const hasDeletedAt =
+          Object.prototype.hasOwnProperty.call(student, "deleted_at") ||
+          Object.prototype.hasOwnProperty.call(student, "deletedAt");
+        const hasDeletedBy =
+          Object.prototype.hasOwnProperty.call(student, "deleted_by") ||
+          Object.prototype.hasOwnProperty.call(student, "deletedBy");
+        const preserveArchive =
+          String(operationType || "").toUpperCase() === "CREATE" &&
+          Boolean(existingStudent?.deleted_at);
+        const deletedAt = preserveArchive
+          ? existingStudent.deleted_at
+          : hasDeletedAt
+            ? (student.deleted_at ?? student.deletedAt ?? null)
+            : (existingStudent?.deleted_at ?? null);
+        const deletedBy = preserveArchive
+          ? existingStudent.deleted_by
+          : hasDeletedBy
+            ? (student.deleted_by ?? student.deletedBy ?? null)
+            : (existingStudent?.deleted_by ?? null);
+        const isCardCodeReplacement =
+          payload.cardCodeChanged === true || payload.replaceCard === true;
+        const hasCardCode =
+          Object.prototype.hasOwnProperty.call(student, "card_code") ||
           Object.prototype.hasOwnProperty.call(student, "cardCode");
-        const suppliedCardCode = Object.prototype.hasOwnProperty.call(student, "card_code")
+        const suppliedCardCode = Object.prototype.hasOwnProperty.call(
+          student,
+          "card_code",
+        )
           ? student.card_code
           : student.cardCode;
         const cardCode = String(
           existingStudent && !isCardCodeReplacement
-            ? (existingStudent.card_code || "")
+            ? existingStudent.card_code || ""
             : hasCardCode
-            ? (suppliedCardCode ?? "")
-            : (student.student_code || student.studentCode || existingStudent?.card_code || existingStudent?.student_code || ""),
+              ? (suppliedCardCode ?? "")
+              : student.student_code ||
+                student.studentCode ||
+                existingStudent?.card_code ||
+                existingStudent?.student_code ||
+                "",
         ).trim();
         const studentCode = String(
-          student.student_code || student.studentCode || existingStudent?.student_code || cardCode,
+          student.student_code ||
+            student.studentCode ||
+            existingStudent?.student_code ||
+            cardCode,
         ).trim();
         const status = student.status || existingStudent?.status || "active";
         // Card lifecycle is owned by the dedicated student_card operation.
@@ -910,13 +2478,16 @@ class SyncProcessor {
         // bootstrap, but that payload can be retried long after the student
         // has received a replacement card. Replaying it must never
         // deactivate the current card and resurrect the old one.
-        const cardWasProvided = (!existingStudent && Boolean(payload.card || cardCode)) || isCardCodeReplacement;
+        const cardWasProvided =
+          (!existingStudent && Boolean(payload.card || cardCode)) ||
+          isCardCodeReplacement;
 
         if (!studentId || (!cardCode && !existingStudent)) {
           throw new Error("Card code / Student code is required.");
         }
 
-        if (cardCode && cardWasProvided) await validateCardCode(client, centerId, cardCode);
+        if (cardCode && cardWasProvided)
+          await validateCardCode(client, centerId, cardCode);
 
         // A student code is an identity key and can never be reassigned. A
         // physical card code is different: after a server reset an old
@@ -946,9 +2517,10 @@ class SyncProcessor {
               WHERE card_code = $1`,
             [cardCode],
           );
-          const otherOwner = cardOwner.rows.find((row) =>
-            row.owner_id !== studentId &&
-            !(row.center_id === centerId && row.owner_deleted_at),
+          const otherOwner = cardOwner.rows.find(
+            (row) =>
+              row.owner_id !== studentId &&
+              !(row.center_id === centerId && row.owner_deleted_at),
           );
           if (otherOwner) {
             if (operationType === "REPAIR_AFTER_SERVER_RESET") {
@@ -961,11 +2533,20 @@ class SyncProcessor {
           }
         }
         const persistedCardCode = cardConflictWithAnotherStudent
-          ? (existingStudent?.card_code || null)
-          : (cardCode || null);
+          ? existingStudent?.card_code || null
+          : cardCode || null;
 
-        const rawStudentType = student.student_type || student.studentType || existingStudent?.student_type || "registered";
-        const studentType = ["registered", "external", "guest", "scholarship"].includes(String(rawStudentType).toLowerCase())
+        const rawStudentType =
+          student.student_type ||
+          student.studentType ||
+          existingStudent?.student_type ||
+          "registered";
+        const studentType = [
+          "registered",
+          "external",
+          "guest",
+          "scholarship",
+        ].includes(String(rawStudentType).toLowerCase())
           ? String(rawStudentType).toLowerCase()
           : "registered";
 
@@ -990,13 +2571,21 @@ class SyncProcessor {
             studentId,
             centerId,
             studentCode,
-            student.full_name || student.fullName || existingStudent?.full_name || "",
+            student.full_name ||
+              student.fullName ||
+              existingStudent?.full_name ||
+              "",
             persistedCardCode,
             student.phone || existingStudent?.phone || "",
-            student.parent_phone || student.parentPhone || existingStudent?.parent_phone || "",
+            student.parent_phone ||
+              student.parentPhone ||
+              existingStudent?.parent_phone ||
+              "",
             student.grade || existingStudent?.grade || "",
             studentType,
-            student.notes !== undefined ? student.notes : (existingStudent?.notes || null),
+            student.notes !== undefined
+              ? student.notes
+              : existingStudent?.notes || null,
             status,
             deletedAt,
             deletedBy,
@@ -1027,7 +2616,12 @@ class SyncProcessor {
                 `UPDATE student_cards
                     SET student_id = $1, status = $2, issued_at = NOW(), deactivated_at = NULL
                   WHERE center_id = $3 AND id = $4`,
-                [studentId, status === "active" ? "active" : "deactivated", centerId, reusableCard.rows[0].id],
+                [
+                  studentId,
+                  status === "active" ? "active" : "deactivated",
+                  centerId,
+                  reusableCard.rows[0].id,
+                ],
               );
             } else {
               await client.query(
@@ -1037,15 +2631,26 @@ class SyncProcessor {
                    card_code = EXCLUDED.card_code,
                    status = EXCLUDED.status,
                    deactivated_at = CASE WHEN EXCLUDED.status = 'active' THEN NULL ELSE student_cards.deactivated_at END;`,
-                [cardId, centerId, studentId, persistedCardCode, status === "active" ? "active" : "deactivated"],
+                [
+                  cardId,
+                  centerId,
+                  studentId,
+                  persistedCardCode,
+                  status === "active" ? "active" : "deactivated",
+                ],
               );
             }
           } catch (cardErr) {
             // A server-reset repair must not fail the student upload merely
             // because its historical physical card is now owned by another
             // student. Keep the student row and leave that card untouched.
-            const cardErrText = String(cardErr?.constraint || cardErr?.message || "");
-            if (operationType !== "REPAIR_AFTER_SERVER_RESET" || !cardErrText.includes("uq_center_card_code")) {
+            const cardErrText = String(
+              cardErr?.constraint || cardErr?.message || "",
+            );
+            if (
+              operationType !== "REPAIR_AFTER_SERVER_RESET" ||
+              !cardErrText.includes("uq_center_card_code")
+            ) {
               throw cardErr;
             }
             await client.query(
@@ -1085,6 +2690,9 @@ class SyncProcessor {
         const att = payload;
         const attendanceSessionId = att.session_id || att.sessionId;
         const attendanceStudentId = att.student_id || att.studentId;
+        const attendanceType = String(
+          att.attendance_type || att.attendanceType || "present",
+        ).toLowerCase();
         if (
           String(operationType || "").toUpperCase() === "UPDATE" &&
           String(att.action || "").toLowerCase() === "attendance.cancel"
@@ -1093,54 +2701,225 @@ class SyncProcessor {
           if (!attendanceId || !attendanceSessionId || !attendanceStudentId) {
             throw new Error("ATTENDANCE_CANCEL_TARGET_REQUIRED");
           }
-          const target = await client.query(
-            `SELECT a.id, a.status
-               FROM attendance a
-               JOIN sessions s ON s.center_id = a.center_id AND s.id = a.session_id
-               JOIN students st ON st.center_id = a.center_id AND st.id = a.student_id
-              WHERE a.center_id = $1 AND a.id = $2
-                AND a.session_id = $3 AND a.student_id = $4
-                AND s.group_id IS NOT NULL AND st.deleted_at IS NULL
-              FOR UPDATE OF a`,
-            [centerId, attendanceId, attendanceSessionId, attendanceStudentId],
-          );
-          if (!target.rows[0]) {
-            throw new Error("ATTENDANCE_CANCEL_TARGET_NOT_FOUND: attendance is outside the authenticated center or does not match the requested session and student.");
+          const targetRows =
+            await SyncProcessor.findAttendanceForSessionAliases(
+              client,
+              centerId,
+              attendanceSessionId,
+              attendanceStudentId,
+            );
+          if (targetRows.length > 1) {
+            throw new Error(
+              "ATTENDANCE_ALIAS_RECORD_CONFLICT: multiple historical attendance rows share this session identity; all rows were preserved for manual review.",
+            );
           }
-          if (target.rows[0].status !== "absent") {
+          const target = targetRows.find(
+            (row) => String(row.id) === String(attendanceId),
+          );
+          if (!target) {
+            const existingTarget = await client.query(
+              `SELECT center_id, session_id, student_id
+                 FROM attendance
+                WHERE id = $1
+                LIMIT 1`,
+              [attendanceId],
+            );
+            const existing = existingTarget.rows[0];
+            if (!existing) {
+              throw new Error(
+                "ATTENDANCE_CANCEL_TARGET_NOT_FOUND: attendance has not synchronized yet.",
+              );
+            }
+            if (String(existing.center_id) !== String(centerId)) {
+              throw new Error(
+                "ATTENDANCE_CANCEL_CENTER_MISMATCH: attendance belongs to another center.",
+              );
+            }
+            throw new Error(
+              "ATTENDANCE_CANCEL_TARGET_MISMATCH: attendance does not match the requested session and student.",
+            );
+          }
+          if (String(target.status || "").toLowerCase() !== "absent") {
+            const expectedOperationId = String(
+              att.expected_operation_id || att.expectedOperationId || "",
+            ).trim();
+            if (!expectedOperationId) {
+              throw new Error(
+                "ATTENDANCE_CANCEL_REVISION_REQUIRED: attendance cancellation requires the revision observed by the device.",
+              );
+            }
+            if (expectedOperationId !== String(target.operation_id || "")) {
+              throw new Error(
+                "ATTENDANCE_CANCEL_STALE_REVISION: attendance changed after the cancellation was created.",
+              );
+            }
+            const latestAttendanceOperation = await client.query(
+              `SELECT operation_id
+                 FROM server_sync_operations
+                WHERE center_id = $1
+                  AND entity_type IN ('attendance', 'attendance_marked')
+                  AND (
+                    entity_id = $2
+                    OR payload->>'id' = $2
+                    OR (
+                      COALESCE(payload->>'session_id', payload->>'sessionId')
+                        = ANY($3::varchar[])
+                      AND COALESCE(payload->>'student_id', payload->>'studentId') = $4
+                    )
+                  )
+                ORDER BY server_seq DESC
+                LIMIT 1`,
+              [
+                centerId,
+                attendanceId,
+                await SyncProcessor.getCompatibleSessionIds(
+                  client,
+                  centerId,
+                  attendanceSessionId,
+                ),
+                attendanceStudentId,
+              ],
+            );
+            if (
+              latestAttendanceOperation.rows[0]?.operation_id !==
+              expectedOperationId
+            ) {
+              throw new Error(
+                "ATTENDANCE_CANCEL_STALE_REVISION: a newer attendance operation exists; manual review is required.",
+              );
+            }
             const update = await client.query(
               `UPDATE attendance
-                  SET status = 'absent', is_late = FALSE
+                  SET status = 'absent', is_late = FALSE, operation_id = $6
                 WHERE center_id = $1 AND id = $2 AND session_id = $3
-                  AND student_id = $4 AND status <> 'absent'`,
-              [centerId, attendanceId, attendanceSessionId, attendanceStudentId],
+                  AND student_id = $4 AND operation_id = $5
+                  AND status <> 'absent'`,
+              [
+                centerId,
+                attendanceId,
+                target.session_id,
+                attendanceStudentId,
+                expectedOperationId,
+                operationId,
+              ],
             );
             if (update.rowCount !== 1) {
-              throw new Error("ATTENDANCE_CANCEL_CONFLICT: attendance changed before cancellation.");
+              throw new Error(
+                "ATTENDANCE_CANCEL_CONFLICT: attendance changed before cancellation.",
+              );
             }
+          } else if (
+            String(target.operation_id || "") !== String(operationId || "")
+          ) {
+            await client.query(
+              `UPDATE attendance
+                  SET operation_id = $5
+                WHERE center_id = $1 AND id = $2 AND session_id = $3
+                  AND student_id = $4 AND status = 'absent'`,
+              [
+                centerId,
+                attendanceId,
+                target.session_id,
+                attendanceStudentId,
+                operationId,
+              ],
+            );
           }
+          context.ledgerPayload = {
+            ...att,
+            id: attendanceId,
+            session_id: target.session_id,
+            student_id: attendanceStudentId,
+            status: "absent",
+            is_late: false,
+            operation_id: operationId,
+            action: "attendance.cancel",
+          };
           break;
         }
         const sessionDateRes = await client.query(
-          `SELECT s.session_date, s.group_id, s.subject_id, s.teacher_id,
+          `SELECT s.id, s.session_date::text AS session_date,
+                  COALESCE(s.start_time::text, '') AS start_time,
+                  s.group_id, s.subject_id, s.teacher_id,
+                  s.status, s.updated_at,
+                  g.id AS validated_group_id,
                   g.grade AS group_grade,
                   g.subject_id AS group_subject_id, g.teacher_id AS group_teacher_id
              FROM sessions s
-             JOIN groups g ON g.center_id = s.center_id AND g.id = s.group_id
-             JOIN students st ON st.center_id = s.center_id
-                              AND st.id = $3 AND st.deleted_at IS NULL
+             LEFT JOIN groups g ON g.center_id = s.center_id AND g.id = s.group_id
             WHERE s.center_id = $1::varchar AND s.id = $2::varchar`,
-          [centerId, attendanceSessionId, attendanceStudentId],
+          [centerId, attendanceSessionId],
         );
         const attendanceSession = sessionDateRes.rows[0];
         if (!attendanceSession) {
-          throw new Error("ATTENDANCE_TARGET_NOT_FOUND: session or student is outside the authenticated center.");
+          const sessionExists = await client.query(
+            "SELECT center_id FROM sessions WHERE id = $1::varchar LIMIT 1",
+            [attendanceSessionId],
+          );
+          if (sessionExists.rows[0]) {
+            throw new Error(
+              "ATTENDANCE_SESSION_CENTER_MISMATCH: session is outside the authenticated center.",
+            );
+          }
+          throw new Error(
+            attendanceType === "makeup"
+              ? "ATTENDANCE_TARGET_NOT_FOUND: makeup target session has not synchronized yet."
+              : "ATTENDANCE_SESSION_NOT_FOUND: attendance session has not synchronized yet.",
+          );
+        }
+        const checkInTime = normalizeTimestamp(
+          att.check_in_time || att.checkInTime,
+          attendanceSession.session_date,
+        );
+        if (
+          String(attendanceSession.status || "").toLowerCase() === "cancelled"
+        ) {
+          const rejection = SyncProcessor.cancelledSessionAttendanceConflict(
+            checkInTime,
+            attendanceSession.updated_at,
+          );
+          throw new Error(rejection.message);
+        }
+        if (!attendanceSession.validated_group_id) {
+          throw new Error(
+            "ATTENDANCE_GROUP_NOT_FOUND: attendance session group is invalid.",
+          );
+        }
+        const studentResult = await client.query(
+          `SELECT center_id FROM students
+            WHERE center_id = $1::varchar AND id = $2::varchar
+              AND deleted_at IS NULL
+            LIMIT 1`,
+          [centerId, attendanceStudentId],
+        );
+        if (!studentResult.rows[0]) {
+          const studentExists = await client.query(
+            "SELECT center_id, deleted_at FROM students WHERE id = $1::varchar LIMIT 1",
+            [attendanceStudentId],
+          );
+          if (
+            studentExists.rows[0] &&
+            String(studentExists.rows[0].center_id) !== String(centerId)
+          ) {
+            throw new Error(
+              "ATTENDANCE_STUDENT_CENTER_MISMATCH: student is outside the authenticated center.",
+            );
+          }
+          throw new Error(
+            "ATTENDANCE_STUDENT_NOT_FOUND: attendance student does not exist or is deleted.",
+          );
         }
 
-        const attendanceType = String(
-          att.attendance_type || att.attendanceType || "present",
-        ).toLowerCase();
         const isExternal = Boolean(att.is_external ?? att.isExternal);
+        if (attendanceType === "makeup") {
+          await SyncProcessor.validateMakeupAttendance(client, {
+            centerId,
+            sourceSessionId: att.original_absence_id || att.originalAbsenceId,
+            targetSession: attendanceSession,
+            targetSessionId: attendanceSessionId,
+            studentId: attendanceStudentId,
+          });
+        }
         if (!isExternal && attendanceType !== "makeup") {
           const expected = await client.query(
             `SELECT 1 FROM session_expected_students
@@ -1178,48 +2957,166 @@ class SyncProcessor {
           }
         }
 
-        const checkInTime = normalizeTimestamp(
-          att.check_in_time || att.checkInTime,
-          attendanceSession.session_date,
-        );
         const rawAttendanceStatus = att.status;
         const normalizedAttendanceStatus = normalizeAttendanceStatus(
           rawAttendanceStatus,
           att.is_late,
         );
-        const isLate = Boolean(att.is_late) || String(rawAttendanceStatus || "").toLowerCase() === "late";
-        // Enforce deduplication via UNIQUE(session_id, student_id)
-        await client.query(
-          `INSERT INTO attendance
-           (id, center_id, session_id, student_id, check_in_time, status, is_late, attendance_type, original_absence_id, operation_id, created_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
-           ON CONFLICT (session_id, student_id) DO NOTHING;`,
-          [
-            att.id,
+        const isLate =
+          Boolean(att.is_late) ||
+          String(rawAttendanceStatus || "").toLowerCase() === "late";
+        let matchingAttendances =
+          await SyncProcessor.findAttendanceForSessionAliases(
+            client,
             centerId,
-            att.session_id || att.sessionId,
-            att.student_id || att.studentId,
-            checkInTime,
-            normalizedAttendanceStatus,
-            isLate,
-            attendanceType,
-            att.original_absence_id || att.originalAbsenceId || null,
-            operationId,
-          ],
-        );
+            attendanceSessionId,
+            attendanceStudentId,
+          );
+        if (matchingAttendances.length > 1) {
+          throw new Error(
+            "ATTENDANCE_ALIAS_RECORD_CONFLICT: multiple historical attendance rows share this session identity; all rows were preserved for manual review.",
+          );
+        }
+        if (matchingAttendances.length === 0) {
+          await client.query(
+            `INSERT INTO attendance
+             (id, center_id, session_id, student_id, check_in_time, status, is_late, attendance_type, original_absence_id, operation_id, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
+             ON CONFLICT (session_id, student_id) DO NOTHING;`,
+            [
+              att.id,
+              centerId,
+              attendanceSessionId,
+              attendanceStudentId,
+              checkInTime,
+              normalizedAttendanceStatus,
+              isLate,
+              attendanceType,
+              att.original_absence_id || att.originalAbsenceId || null,
+              operationId,
+            ],
+          );
+          matchingAttendances =
+            await SyncProcessor.findAttendanceForSessionAliases(
+              client,
+              centerId,
+              attendanceSessionId,
+              attendanceStudentId,
+            );
+        }
+        if (matchingAttendances.length > 1) {
+          throw new Error(
+            "ATTENDANCE_ALIAS_RECORD_CONFLICT: multiple historical attendance rows share this session identity; all rows were preserved for manual review.",
+          );
+        }
         // A second offline device may have recorded the same student in the
         // same session.  The unique constraint keeps the first attendance,
         // but silently marking the second operation as applied hides a real
-        // business conflict from the operator.  Replay of the same operation
+        // business conflict from the operator. Replay of the same operation
         // is already handled by the operation ledger before this point.
-        const existingAttendance = await client.query(
-          `SELECT operation_id FROM attendance
-             WHERE center_id = $1 AND session_id = $2 AND student_id = $3`,
-          [centerId, att.session_id || att.sessionId, att.student_id || att.studentId],
-        );
-        if (existingAttendance.rows[0] && existingAttendance.rows[0].operation_id !== operationId) {
-          throw new Error("ATTENDANCE_ALREADY_RECORDED: student already has attendance for this session.");
+        const existingRecord = matchingAttendances[0];
+        if (existingRecord && existingRecord.operation_id !== operationId) {
+          let sameOriginalAbsence =
+            String(existingRecord.original_absence_id || "") ===
+            String(att.original_absence_id || att.originalAbsenceId || "");
+          if (
+            !sameOriginalAbsence &&
+            attendanceType === "makeup" &&
+            String(existingRecord.attendance_type) === "makeup"
+          ) {
+            const existingSourceId =
+              SyncProcessor.normalizeOriginalAbsenceSessionId(
+                existingRecord.original_absence_id,
+                attendanceStudentId,
+              );
+            const incomingSourceId =
+              SyncProcessor.normalizeOriginalAbsenceSessionId(
+                att.original_absence_id || att.originalAbsenceId,
+                attendanceStudentId,
+              );
+            const existingCanonicalId = await SyncProcessor.resolveSessionAlias(
+              client,
+              centerId,
+              existingSourceId,
+            );
+            const incomingCanonicalId = await SyncProcessor.resolveSessionAlias(
+              client,
+              centerId,
+              incomingSourceId,
+            );
+            sameOriginalAbsence =
+              String(existingCanonicalId || existingSourceId) ===
+              String(incomingCanonicalId || incomingSourceId);
+          }
+          if (
+            String(existingRecord.attendance_type) !== attendanceType ||
+            !sameOriginalAbsence
+          ) {
+            throw new Error(
+              "ATTENDANCE_ALREADY_RECORDED: student already has a different attendance type for this session.",
+            );
+          }
+          const effectiveStatus = SyncProcessor.resolveAttendanceStatus(
+            existingRecord.status,
+            normalizedAttendanceStatus,
+          );
+          if (!effectiveStatus) {
+            throw new Error(
+              "ATTENDANCE_STATUS_CONFLICT: conflicting attendance statuses require manual review.",
+            );
+          }
+          if (effectiveStatus !== existingRecord.status) {
+            // Explicit evidence of presence wins regardless of arrival order.
+            await client.query(
+              `UPDATE attendance
+                  SET status = $3, is_late = $4, operation_id = $5
+                WHERE center_id = $1 AND id = $2`,
+              [
+                centerId,
+                existingRecord.id,
+                effectiveStatus,
+                existingRecord.status === "present" &&
+                normalizedAttendanceStatus === "absent"
+                  ? existingRecord.is_late
+                  : isLate,
+                operationId,
+              ],
+            );
+          } else {
+            await client.query(
+              `UPDATE attendance
+                  SET operation_id = $3
+                WHERE center_id = $1 AND id = $2`,
+              [centerId, existingRecord.id, operationId],
+            );
+          }
         }
+        const finalAttendanceResult = await client.query(
+          `SELECT id, session_id, student_id, check_in_time, status, is_late,
+                  attendance_type, original_absence_id, operation_id
+             FROM attendance
+            WHERE center_id = $1 AND id = $2`,
+          [centerId, existingRecord?.id || att.id],
+        );
+        const finalAttendance = finalAttendanceResult.rows[0];
+        if (!finalAttendance) {
+          throw new Error(
+            "ATTENDANCE_WRITE_FAILED: attendance was not persisted.",
+          );
+        }
+        context.ledgerPayload = {
+          ...att,
+          id: finalAttendance.id,
+          session_id: finalAttendance.session_id,
+          student_id: finalAttendance.student_id,
+          check_in_time: finalAttendance.check_in_time,
+          status: finalAttendance.status,
+          is_late: Boolean(finalAttendance.is_late),
+          attendance_type: finalAttendance.attendance_type,
+          original_absence_id: finalAttendance.original_absence_id,
+          operation_id: finalAttendance.operation_id,
+          submitted_status: normalizedAttendanceStatus,
+        };
         break;
       }
 
@@ -1246,8 +3143,13 @@ class SyncProcessor {
             FOR UPDATE OF s`,
           [centerId, noteSessionId, noteStudentId],
         );
-        if (!session.rows[0] || !["open", "closed"].includes(session.rows[0].status)) {
-          throw new Error("ABSENCE_NOTE_TARGET_NOT_FOUND: session or student is outside the authenticated center or session roster.");
+        if (
+          !session.rows[0] ||
+          !["open", "closed"].includes(session.rows[0].status)
+        ) {
+          throw new Error(
+            "ABSENCE_NOTE_TARGET_NOT_FOUND: session or student is outside the authenticated center or session roster.",
+          );
         }
 
         const attendance = await client.query(
@@ -1260,9 +3162,13 @@ class SyncProcessor {
         if (
           attendance.rows[0] &&
           attendance.rows[0].attendance_type !== "makeup" &&
-          ["present", "late"].includes(String(attendance.rows[0].status).toLowerCase())
+          ["present", "late"].includes(
+            String(attendance.rows[0].status).toLowerCase(),
+          )
         ) {
-          throw new Error("ABSENCE_NOTE_STUDENT_PRESENT: a note cannot be saved for a student marked present.");
+          throw new Error(
+            "ABSENCE_NOTE_STUDENT_PRESENT: a note cannot be saved for a student marked present.",
+          );
         }
         const advanceCoverage = await client.query(
           `SELECT 1 FROM advance_coverages
@@ -1272,7 +3178,9 @@ class SyncProcessor {
           [centerId, noteStudentId, noteSessionId],
         );
         if (advanceCoverage.rows.length) {
-          throw new Error("ABSENCE_NOTE_ADVANCE_COVERAGE: the student is covered for this session.");
+          throw new Error(
+            "ABSENCE_NOTE_ADVANCE_COVERAGE: the student is covered for this session.",
+          );
         }
 
         await client.query(
@@ -1305,7 +3213,8 @@ class SyncProcessor {
       case "payment_collected": {
         const pay = payload;
         const paymentStudentId = pay.student_id || pay.studentId;
-        const requestedDebtCycleId = pay.debt_cycle_id || pay.debtCycleId || null;
+        const requestedDebtCycleId =
+          pay.debt_cycle_id || pay.debtCycleId || null;
         const requestedSessionId = pay.session_id || pay.sessionId || null;
         const debtCycleExists = requestedDebtCycleId
           ? await client.query(
@@ -1329,10 +3238,16 @@ class SyncProcessor {
         if (requestedSessionId && !sessionExists.rows.length) {
           throw new Error("PAYMENT_SESSION_NOT_FOUND");
         }
-        const debtCycleId = debtCycleExists.rows.length ? requestedDebtCycleId : null;
+        const debtCycleId = debtCycleExists.rows.length
+          ? requestedDebtCycleId
+          : null;
         const sessionId = sessionExists.rows.length ? requestedSessionId : null;
-        const paymentType = normalizePaymentType(pay.payment_type || pay.paymentType);
-        const paymentDate = normalizeDateOnly(pay.payment_date || pay.paymentDate) || new Date().toISOString().slice(0, 10);
+        const paymentType = normalizePaymentType(
+          pay.payment_type || pay.paymentType,
+        );
+        const paymentDate =
+          normalizeDateOnly(pay.payment_date || pay.paymentDate) ||
+          new Date().toISOString().slice(0, 10);
         // A cancellation may reach the server before a payment that was
         // collected earlier on another offline device. Keep that historical
         // payment valid, but reject payments dated after the enrollment ended.
@@ -1363,7 +3278,10 @@ class SyncProcessor {
               );
               boundaryDate = subscriptionState.rows[0]?.end_date || null;
             }
-            if (boundaryDate && paymentDate > String(boundaryDate).slice(0, 10)) {
+            if (
+              boundaryDate &&
+              paymentDate > String(boundaryDate).slice(0, 10)
+            ) {
               throw new Error("PAYMENT_AFTER_ENROLLMENT_END");
             }
             await client.query(
@@ -1412,9 +3330,14 @@ class SyncProcessor {
           [paymentId, centerId],
         );
         const payment = paymentResult.rows[0];
-        if (!payment) throw new Error("PAYMENT_NOT_FOUND: payment does not exist in this center.");
+        if (!payment)
+          throw new Error(
+            "PAYMENT_NOT_FOUND: payment does not exist in this center.",
+          );
         if (payment.is_reversed) {
-          throw new Error("PAYMENT_ALREADY_REVERSED: this payment already has a reversal.");
+          throw new Error(
+            "PAYMENT_ALREADY_REVERSED: this payment already has a reversal.",
+          );
         }
         await client.query(
           `INSERT INTO payment_reversals
@@ -1437,21 +3360,35 @@ class SyncProcessor {
           [paymentId, centerId],
         );
         if (reversed.rowCount !== 1) {
-          throw new Error("PAYMENT_ALREADY_REVERSED: this payment was reversed concurrently.");
+          throw new Error(
+            "PAYMENT_ALREADY_REVERSED: this payment was reversed concurrently.",
+          );
         }
         break;
       }
 
       case "debt_adjustment": {
         const adj = payload;
-        const rawAmount = Number(adj.adjustment_amount ?? adj.adjustmentAmount ?? adj.amount ?? 0);
+        const rawAmount = Number(
+          adj.adjustment_amount ?? adj.adjustmentAmount ?? adj.amount ?? 0,
+        );
         if (!Number.isFinite(rawAmount) || rawAmount === 0) {
           throw new Error("Debt adjustment requires a non-zero amount.");
         }
-        const adjustmentType = adj.adjustment_type || adj.adjustmentType || (rawAmount < 0 ? "discount" : "penalty");
-        const normalizedType = ["discount", "waiver", "penalty", "correction"].includes(adjustmentType)
+        const adjustmentType =
+          adj.adjustment_type ||
+          adj.adjustmentType ||
+          (rawAmount < 0 ? "discount" : "penalty");
+        const normalizedType = [
+          "discount",
+          "waiver",
+          "penalty",
+          "correction",
+        ].includes(adjustmentType)
           ? adjustmentType
-          : (rawAmount < 0 ? "discount" : "penalty");
+          : rawAmount < 0
+            ? "discount"
+            : "penalty";
         await client.query(
           `INSERT INTO debt_adjustments
            (id, operation_id, center_id, debt_cycle_id, adjustment_type, amount, reason, created_at, user_id)
@@ -1474,28 +3411,107 @@ class SyncProcessor {
       case "session":
       case "session_created": {
         const sess = payload;
-        let sessionId = sess.id || context.entityId;
+        const localSessionId = String(sess.id || context.entityId || "");
+        const resolvedSessionAlias = await SyncProcessor.resolveSessionAlias(
+          client,
+          centerId,
+          localSessionId,
+        );
+        let sessionId = resolvedSessionAlias || localSessionId;
+        const idOwner = await client.query(
+          "SELECT center_id FROM sessions WHERE id = $1",
+          [sessionId],
+        );
+        if (
+          idOwner.rows[0] &&
+          String(idOwner.rows[0].center_id) !== String(centerId)
+        ) {
+          throw new Error(
+            "SESSION_ID_BELONGS_TO_ANOTHER_CENTER: session ID is already owned by another center.",
+          );
+        }
         const existingSessionRes = await client.query(
-          `SELECT group_id, schedule_id, subject_id, teacher_id, session_price,
+          `SELECT center_id, group_id, schedule_id, subject_id, teacher_id, session_price,
                   late_after_minutes, session_date, start_time, end_time, status
            FROM sessions WHERE center_id = $1::varchar AND id = $2::varchar`,
           [centerId, sessionId],
         );
         let existingSession = existingSessionRes.rows[0];
-        const groupId = sess.group_id || sess.groupId || existingSession?.group_id;
-        const scheduleId = sess.schedule_id || sess.scheduleId || existingSession?.schedule_id || null;
-        const subjectId = sess.subject_id || sess.subjectId || existingSession?.subject_id || null;
-        const teacherId = sess.teacher_id || sess.teacherId || existingSession?.teacher_id || null;
-        const sessionPrice = Number(sess.session_price ?? sess.sessionPrice ?? existingSession?.session_price ?? 0);
-        const lateAfterMinutes = Number(sess.late_after_minutes ?? sess.lateAfterMinutes ?? existingSession?.late_after_minutes ?? 15);
-        const sessionDate = normalizeDateOnly(sess.session_date || sess.sessionDate || existingSession?.session_date);
-        const startTime = sess.start_time || sess.startTime || existingSession?.start_time;
-        const endTime = sess.end_time || sess.endTime || existingSession?.end_time;
-        const action = String(sess.action || context.operationType || "").toLowerCase();
+        const groupId =
+          sess.group_id || sess.groupId || existingSession?.group_id;
+        const scheduleCandidate =
+          sess.schedule_id ??
+          sess.scheduleId ??
+          existingSession?.schedule_id ??
+          null;
+        const scheduleId =
+          scheduleCandidate == null || !String(scheduleCandidate).trim()
+            ? null
+            : String(scheduleCandidate).trim();
+        const subjectId =
+          sess.subject_id ||
+          sess.subjectId ||
+          existingSession?.subject_id ||
+          null;
+        const teacherId =
+          sess.teacher_id ||
+          sess.teacherId ||
+          existingSession?.teacher_id ||
+          null;
+        const sessionPrice = Number(
+          sess.session_price ??
+            sess.sessionPrice ??
+            existingSession?.session_price ??
+            0,
+        );
+        const lateAfterMinutes = Number(
+          sess.late_after_minutes ??
+            sess.lateAfterMinutes ??
+            existingSession?.late_after_minutes ??
+            15,
+        );
+        const sessionDate = normalizeDateOnly(
+          sess.session_date ||
+            sess.sessionDate ||
+            existingSession?.session_date,
+        );
+        const startTime =
+          sess.start_time || sess.startTime || existingSession?.start_time;
+        const endTime =
+          sess.end_time || sess.endTime || existingSession?.end_time;
+        const action = String(
+          sess.action || context.operationType || "",
+        ).toLowerCase();
         const isReconcile = action === "session.reconcile";
-        const status = action === "close" ? "closed" : action === "reopen" ? "open" : (sess.status || existingSession?.status || "open");
+        const hasScheduledIdentity = Boolean(
+          scheduleId && String(scheduleId).trim(),
+        );
+        if (!hasScheduledIdentity && sessionId !== localSessionId) {
+          throw new Error(
+            "SESSION_UNSCHEDULED_IDENTITY_AMBIGUOUS: an unscheduled session cannot be merged through a date-only alias.",
+          );
+        }
+        if (existingSession?.status === "cancelled" && action === "reopen") {
+          throw new Error(
+            "SESSION_CANCELLED: a cancelled session cannot be reopened.",
+          );
+        }
+        const deviceStartedAt = normalizeTimestamp(
+          sess.deviceStartedAt ||
+            sess.startedAt ||
+            sess.createdAt ||
+            context.createdAt,
+          sessionDate,
+        );
+        const serverReceivedAt = new Date().toISOString();
+        const acceptedStartedAt = SyncProcessor.acceptedSessionStartTime(
+          deviceStartedAt,
+          serverReceivedAt,
+        );
         if (!sessionId || !groupId || !sessionDate || !startTime || !endTime) {
-          throw new Error("Session requires group, date, start time, and end time.");
+          throw new Error(
+            "Session requires group, date, start time, and end time.",
+          );
         }
         const sessionGroupRes = await client.query(
           `SELECT id, subject_id, teacher_id, grade
@@ -1509,28 +3525,51 @@ class SyncProcessor {
             "SESSION_GROUP_NOT_FOUND: group is outside the authenticated center.",
           );
         }
-        const rosterSubjectId =
-          existingSession?.subject_id || sessionGroup.subject_id;
-        const rosterTeacherId =
-          existingSession?.teacher_id || sessionGroup.teacher_id;
-        // Older APKs generated random session ids. If that row already exists
-        // under the same natural schedule/date key, reconcile it to the
-        // canonical server row instead of tripping the unique index.
-        await client.query(
-          "SELECT pg_advisory_xact_lock(hashtext($1))",
-          [`session:${centerId}:${groupId}:${scheduleId || ""}:${sessionDate}`],
-        );
-        const naturalSessionRes = await client.query(
-          `SELECT id FROM sessions
-           WHERE center_id = $1 AND group_id = $2
-             AND COALESCE(schedule_id, '') = COALESCE($3, '')
-             AND session_date = $4
-           LIMIT 1`,
-          [centerId, groupId, scheduleId, sessionDate],
-        );
-        const naturalSessionId = naturalSessionRes.rows[0]?.id;
-        if (naturalSessionId && naturalSessionId !== sessionId) {
-          sessionId = naturalSessionId;
+        // Scheduled lessons share a natural key. Legacy unscheduled sessions
+        // have only their persisted ID as identity and must never be merged by
+        // the empty schedule sentinel.
+        await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [
+          hasScheduledIdentity
+            ? `scheduled-session:${centerId}:${groupId}:${scheduleId}:${sessionDate}`
+            : `unclassified-session:${centerId}:${localSessionId}`,
+        ]);
+        let naturalSessionId = hasScheduledIdentity
+          ? await SyncProcessor.findSessionByNaturalKey(
+              client,
+              centerId,
+              groupId,
+              scheduleId,
+              sessionDate,
+            )
+          : null;
+        if (hasScheduledIdentity && !naturalSessionId) {
+          const legacyNaturalSession = await client.query(
+            `SELECT id
+               FROM sessions
+              WHERE center_id = $1 AND group_id = $2
+                AND COALESCE(schedule_id, '') = COALESCE($3, '')
+                AND session_date = $4
+              ORDER BY CASE
+                WHEN status = 'open' THEN 0
+                WHEN status = 'scheduled' THEN 1
+                WHEN status = 'closed' THEN 2
+                WHEN status = 'cancelled' THEN 4
+                ELSE 3
+              END, created_at ASC, id ASC
+              LIMIT 1`,
+            [centerId, groupId, scheduleId, sessionDate],
+          );
+          naturalSessionId = legacyNaturalSession.rows[0]?.id || null;
+        }
+        if (naturalSessionId) {
+          sessionId = String(naturalSessionId);
+          await client.query(
+            `INSERT INTO session_natural_keys
+               (center_id, group_id, schedule_key, session_date, session_id)
+             VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (center_id, group_id, schedule_key, session_date) DO NOTHING`,
+            [centerId, groupId, scheduleId || "", sessionDate, sessionId],
+          );
           const canonicalSessionRes = await client.query(
             `SELECT group_id, schedule_id, subject_id, teacher_id, session_price,
                     late_after_minutes, session_date, start_time, end_time, status
@@ -1538,6 +3577,73 @@ class SyncProcessor {
             [centerId, sessionId],
           );
           existingSession = canonicalSessionRes.rows[0] || existingSession;
+        }
+        const rosterSubjectId =
+          existingSession?.subject_id || sessionGroup.subject_id;
+        const rosterTeacherId =
+          existingSession?.teacher_id || sessionGroup.teacher_id;
+        const requestedStatus =
+          action === "close"
+            ? "closed"
+            : action === "reopen"
+              ? "open"
+              : action === "activate"
+                ? "open"
+                : String(sess.status || "open");
+        if (action === "activate") {
+          const existingStatus = String(
+            existingSession?.status || "",
+          ).toLowerCase();
+          if (!existingSession) {
+            throw new Error(
+              "SESSION_ACTIVATION_TARGET_NOT_FOUND: session must synchronize before activation.",
+            );
+          }
+          if (existingStatus === "cancelled") {
+            throw new Error(
+              "SESSION_CANCELLED: a cancelled session cannot be activated.",
+            );
+          }
+          if (existingStatus !== "scheduled" && existingStatus !== "open") {
+            throw new Error(
+              "SESSION_ACTIVATION_INVALID_STATE: only a scheduled or already-open session can be activated.",
+            );
+          }
+        }
+        if (
+          existingSession?.status === "cancelled" &&
+          String(localSessionId) !== String(sessionId) &&
+          requestedStatus !== "cancelled"
+        ) {
+          throw new Error(
+            "SESSION_NATURAL_KEY_CANCELLED_CONFLICT: a non-cancelled local session maps to a cancelled canonical session.",
+          );
+        }
+        const status = SyncProcessor.resolveSessionStatus(
+          existingSession?.status,
+          action,
+          requestedStatus,
+        );
+        if (!naturalSessionId && existingSession && hasScheduledIdentity) {
+          const naturalOwner = await SyncProcessor.findSessionByNaturalKey(
+            client,
+            centerId,
+            groupId,
+            scheduleId,
+            sessionDate,
+          );
+          if (naturalOwner && String(naturalOwner) !== String(sessionId)) {
+            throw new Error(
+              "SESSION_NATURAL_KEY_CONFLICT: another session owns this scheduled lesson.",
+            );
+          }
+          await client.query(
+            `INSERT INTO session_natural_keys
+               (center_id, group_id, schedule_key, session_date, session_id)
+             VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (center_id, group_id, schedule_key, session_date) DO NOTHING`,
+            [centerId, groupId, scheduleId || "", sessionDate, sessionId],
+          );
         }
         // Reconciliation is used to repair a local session after an offline
         // start. If the server already has that session, keep the server's
@@ -1548,9 +3654,11 @@ class SyncProcessor {
           await client.query(
             `INSERT INTO sessions
              (id, center_id, group_id, schedule_id, subject_id, teacher_id, session_price,
-              late_after_minutes, session_date, start_time, end_time, status, created_at, updated_at)
+              late_after_minutes, session_date, start_time, end_time, status, created_at, updated_at,
+              started_at, device_started_at, server_received_at)
              VALUES ($1::varchar, $2::varchar, $3::varchar, $4::varchar, $5::varchar, $6::varchar,
-                     $7::numeric, $8::integer, $9::date, $10::varchar, $11::varchar, $12::varchar, NOW(), NOW())
+                     $7::numeric, $8::integer, $9::date, $10::varchar, $11::varchar, $12::varchar,
+                     NOW(), NOW(), $13::timestamptz, $14::timestamptz, $15::timestamptz)
              ON CONFLICT (id) DO UPDATE SET
                group_id = EXCLUDED.group_id,
                schedule_id = EXCLUDED.schedule_id,
@@ -1561,8 +3669,19 @@ class SyncProcessor {
                session_date = EXCLUDED.session_date,
                start_time = EXCLUDED.start_time,
                end_time = EXCLUDED.end_time,
-               status = EXCLUDED.status,
-               updated_at = NOW();`,
+               status = CASE
+                 WHEN sessions.status = 'cancelled' AND EXCLUDED.status <> 'cancelled'
+                   THEN sessions.status
+                 WHEN sessions.status = 'closed' AND EXCLUDED.status NOT IN ('closed', 'cancelled')
+                   THEN sessions.status
+                 ELSE EXCLUDED.status
+               END,
+               started_at = LEAST(sessions.started_at, EXCLUDED.started_at),
+               device_started_at = LEAST(sessions.device_started_at, EXCLUDED.device_started_at),
+               updated_at = CASE
+                 WHEN sessions.status = 'cancelled' THEN sessions.updated_at
+                 ELSE NOW()
+               END;`,
             [
               sessionId,
               centerId,
@@ -1576,6 +3695,9 @@ class SyncProcessor {
               startTime,
               endTime,
               status,
+              acceptedStartedAt,
+              deviceStartedAt,
+              serverReceivedAt,
             ],
           );
         } else if (existingSession) {
@@ -1592,9 +3714,88 @@ class SyncProcessor {
                     session_date = $9::date,
                     start_time = $10::varchar,
                     end_time = $11::varchar,
-                    updated_at = NOW()
+                    updated_at = CASE
+                      WHEN status = 'cancelled' THEN updated_at
+                      ELSE NOW()
+                    END
               WHERE center_id = $2::varchar AND id = $1::varchar`,
-            [sessionId, centerId, groupId, scheduleId, subjectId, teacherId, sessionPrice, lateAfterMinutes, sessionDate, startTime, endTime],
+            [
+              sessionId,
+              centerId,
+              groupId,
+              scheduleId,
+              subjectId,
+              teacherId,
+              sessionPrice,
+              lateAfterMinutes,
+              sessionDate,
+              startTime,
+              endTime,
+            ],
+          );
+        }
+        const canonicalKeySession = hasScheduledIdentity
+          ? await SyncProcessor.findSessionByNaturalKey(
+              client,
+              centerId,
+              groupId,
+              scheduleId,
+              sessionDate,
+            )
+          : null;
+        if (hasScheduledIdentity && !canonicalKeySession) {
+          await client.query(
+            `INSERT INTO session_natural_keys
+               (center_id, group_id, schedule_key, session_date, session_id)
+             VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (center_id, group_id, schedule_key, session_date) DO NOTHING`,
+            [centerId, groupId, scheduleId || "", sessionDate, sessionId],
+          );
+        }
+        const canonicalId = String(canonicalKeySession || sessionId);
+        const shouldRecordStartEvent =
+          status === "open" &&
+          action !== "reopen" &&
+          (action === "activate"
+            ? String(existingSession?.status || "").toLowerCase() ===
+              "scheduled"
+            : !isReconcile || !existingSession);
+        if (hasScheduledIdentity) {
+          await SyncProcessor.registerSessionAlias(
+            client,
+            centerId,
+            localSessionId,
+            canonicalId,
+          );
+        }
+        context.canonicalEntityId = canonicalId;
+        context.sessionIdentityType = hasScheduledIdentity
+          ? "scheduled"
+          : "id-only";
+        if (shouldRecordStartEvent) {
+          context.sessionStartedAt = acceptedStartedAt;
+          await client.query(
+            `INSERT INTO session_start_events
+               (center_id, session_id, operation_id, device_id, device_started_at,
+                accepted_started_at, server_received_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
+             ON CONFLICT (center_id, operation_id) DO NOTHING`,
+            [
+              centerId,
+              canonicalId,
+              context.operationId,
+              context.deviceId || null,
+              deviceStartedAt,
+              acceptedStartedAt,
+              serverReceivedAt,
+            ],
+          );
+          await client.query(
+            `UPDATE sessions
+                SET started_at = LEAST(started_at, $3::timestamptz),
+                    device_started_at = LEAST(device_started_at, $4::timestamptz)
+              WHERE center_id = $1 AND id = $2`,
+            [centerId, canonicalId, acceptedStartedAt, deviceStartedAt],
           );
         }
         // Expected students are a historical manifest snapshot. Only create
@@ -1629,8 +3830,38 @@ class SyncProcessor {
           }
         }
         if (action === "close") {
-          const expected = await client.query("SELECT COUNT(*)::int AS count FROM session_expected_students WHERE center_id = $1 AND session_id = $2", [centerId, sessionId]);
-          const attendance = await client.query("SELECT COUNT(*)::int AS count FROM attendance WHERE center_id = $1 AND session_id = $2 AND status = 'present'", [centerId, sessionId]);
+          const expected = await client.query(
+            "SELECT COUNT(*)::int AS count FROM session_expected_students WHERE center_id = $1 AND session_id = $2",
+            [centerId, sessionId],
+          );
+          const attendance = await client.query(
+            "SELECT COUNT(*)::int AS count FROM attendance WHERE center_id = $1 AND session_id = $2 AND status = 'present'",
+            [centerId, sessionId],
+          );
+          const absent = await client.query(
+            `SELECT COUNT(DISTINCT a.student_id)::int AS count
+               FROM attendance a
+               JOIN session_expected_students expected
+                 ON expected.center_id = a.center_id
+                AND expected.session_id = a.session_id
+                AND expected.student_id = a.student_id
+              WHERE a.center_id = $1 AND a.session_id = $2
+                AND a.status = 'absent' AND a.attendance_type <> 'makeup'
+                AND NOT EXISTS (
+                  SELECT 1 FROM attendance resolved
+                   WHERE resolved.center_id = a.center_id
+                     AND resolved.session_id = a.session_id
+                     AND resolved.student_id = a.student_id
+                     AND resolved.status = 'present'
+                )
+                AND NOT EXISTS (
+                  SELECT 1 FROM advance_coverages coverage
+                   WHERE coverage.center_id = a.center_id
+                     AND coverage.student_id = a.student_id
+                     AND coverage.target_future_session_id = a.session_id
+                )`,
+            [centerId, sessionId],
+          );
           await client.query(
             `INSERT INTO session_closing_records
              (id, center_id, session_id, closed_by, total_expected, total_present, total_absent, total_collected, discrepancy_notes, closed_at)
@@ -1639,18 +3870,19 @@ class SyncProcessor {
                closed_by = EXCLUDED.closed_by, total_expected = EXCLUDED.total_expected,
                total_present = EXCLUDED.total_present, total_absent = EXCLUDED.total_absent,
                total_collected = EXCLUDED.total_collected, discrepancy_notes = EXCLUDED.discrepancy_notes,
-               closed_at = NOW()` ,
+               closed_at = NOW()`,
             [
-              `close-${operationId}`, centerId, sessionId,
+              `close-${operationId}`,
+              centerId,
+              sessionId,
               sess.performedBy || userId,
               Number(sess.totalExpected ?? expected.rows[0]?.count ?? 0),
               Number(sess.totalAttendance ?? attendance.rows[0]?.count ?? 0),
-              Number(sess.totalAbsent ?? Math.max(0, Number(expected.rows[0]?.count || 0) - Number(attendance.rows[0]?.count || 0))),
-              Number(sess.totalSessionPayments ?? 0), sess.reason || null,
+              Number(absent.rows[0]?.count ?? 0),
+              Number(sess.totalSessionPayments ?? 0),
+              sess.reason || null,
             ],
           );
-        } else if (action === "reopen") {
-          await client.query("DELETE FROM session_closing_records WHERE center_id = $1 AND session_id = $2", [centerId, sessionId]);
         }
         break;
       }
@@ -1719,11 +3951,18 @@ class SyncProcessor {
         const tsId =
           ts.id ||
           `ts-${centerId}-${ts.teacherId || ts.teacher_id}-${ts.subjectId || ts.subject_id}`;
-        if (String(context.operationType || "").toUpperCase() === "DELETE" || ts.status === "inactive") {
+        if (
+          String(context.operationType || "").toUpperCase() === "DELETE" ||
+          ts.status === "inactive"
+        ) {
           await client.query(
             `DELETE FROM teacher_subjects
              WHERE center_id = $1 AND teacher_id = $2 AND subject_id = $3`,
-            [centerId, ts.teacherId || ts.teacher_id, ts.subjectId || ts.subject_id],
+            [
+              centerId,
+              ts.teacherId || ts.teacher_id,
+              ts.subjectId || ts.subject_id,
+            ],
           );
         } else {
           await client.query(
@@ -1747,9 +3986,16 @@ class SyncProcessor {
         let studentId = card.student_id || card.studentId;
         const cardCode = String(card.card_code || card.cardCode || "").trim();
         const operation = String(context.operationType || "").toUpperCase();
-        const isDeactivation = operation === "DELETE" || card.status === "deactivated" || card.status === "inactive" || card.status === "lost";
+        const isDeactivation =
+          operation === "DELETE" ||
+          card.status === "deactivated" ||
+          card.status === "inactive" ||
+          card.status === "lost";
         if (!studentId && isDeactivation) {
-          const ownerResult = await client.query("SELECT student_id FROM student_cards WHERE id = $1 AND center_id = $2", [cardId, centerId]);
+          const ownerResult = await client.query(
+            "SELECT student_id FROM student_cards WHERE id = $1 AND center_id = $2",
+            [cardId, centerId],
+          );
           studentId = ownerResult.rows[0]?.student_id;
         }
         if (!studentId) {
@@ -1763,10 +4009,17 @@ class SyncProcessor {
           [studentId, centerId],
         );
         if (owner.rows.length === 0) {
-          throw new Error("Student card owner is outside the authenticated center.");
+          throw new Error(
+            "Student card owner is outside the authenticated center.",
+          );
         }
         if (!isDeactivation && owner.rows[0].deleted_at) {
-          throw new AppError("STUDENT_ARCHIVED", "Cannot activate a card for an archived student.", "لا يمكن تفعيل بطاقة لطالب مؤرشف.", 409);
+          throw new AppError(
+            "STUDENT_ARCHIVED",
+            "Cannot activate a card for an archived student.",
+            "لا يمكن تفعيل بطاقة لطالب مؤرشف.",
+            409,
+          );
         }
         if (isDeactivation) {
           await client.query(
@@ -1776,8 +4029,17 @@ class SyncProcessor {
           );
         } else {
           await validateCardCode(client, centerId, cardCode);
-          const globalOwner = await client.query("SELECT center_id FROM student_cards WHERE card_code = $1 AND status = 'active' LIMIT 1", [cardCode]);
-          if (globalOwner.rows[0] && globalOwner.rows[0].center_id !== centerId) throw new AppError("CARD_BELONGS_TO_OTHER_CENTER", "Card belongs to another center.", "الكارت تابع لمركز آخر.", 403);
+          const globalOwner = await client.query(
+            "SELECT center_id FROM student_cards WHERE card_code = $1 AND status = 'active' LIMIT 1",
+            [cardCode],
+          );
+          if (globalOwner.rows[0] && globalOwner.rows[0].center_id !== centerId)
+            throw new AppError(
+              "CARD_BELONGS_TO_OTHER_CENTER",
+              "Card belongs to another center.",
+              "الكارت تابع لمركز آخر.",
+              403,
+            );
           await client.query(
             `UPDATE student_cards
              SET status = 'deactivated', deactivated_at = NOW()
@@ -1793,8 +4055,16 @@ class SyncProcessor {
             // Student creation already persists this card. A follow-up
             // student_card operation for the same student is duplicate
             // delivery and must be idempotent, not a conflict.
-            if (existingByCode.rows[0].status === "active" && existingByCode.rows[0].student_id !== studentId) {
-              throw new AppError("CARD_ALREADY_ASSIGNED", "Card is already assigned.", "الكارت مرتبط بطالب بالفعل ولا يمكن نقله.", 409);
+            if (
+              existingByCode.rows[0].status === "active" &&
+              existingByCode.rows[0].student_id !== studentId
+            ) {
+              throw new AppError(
+                "CARD_ALREADY_ASSIGNED",
+                "Card is already assigned.",
+                "الكارت مرتبط بطالب بالفعل ولا يمكن نقله.",
+                409,
+              );
             }
             await client.query(
               `UPDATE student_cards
@@ -1819,7 +4089,12 @@ class SyncProcessor {
               // as idempotent when the winning row belongs to this student;
               // otherwise return a stable domain conflict instead of exposing
               // a raw PostgreSQL constraint error.
-              if (cardErr?.code !== "23505" || !String(cardErr?.constraint || cardErr?.message || "").includes("uq_center_card_code")) {
+              if (
+                cardErr?.code !== "23505" ||
+                !String(cardErr?.constraint || cardErr?.message || "").includes(
+                  "uq_center_card_code",
+                )
+              ) {
                 throw cardErr;
               }
               const winner = await client.query(
@@ -1827,7 +4102,12 @@ class SyncProcessor {
                 [centerId, cardCode],
               );
               if (winner.rows[0]?.student_id !== studentId) {
-                throw new AppError("CARD_ALREADY_ASSIGNED", "Card is already assigned.", "الكارت مرتبط بطالب آخر.", 409);
+                throw new AppError(
+                  "CARD_ALREADY_ASSIGNED",
+                  "Card is already assigned.",
+                  "الكارت مرتبط بطالب آخر.",
+                  409,
+                );
               }
             }
           }
@@ -1845,27 +4125,48 @@ class SyncProcessor {
           [centerId, enrollmentId],
         );
         const previous = existing.rows[0];
-        const studentId = enrollment.student_id || enrollment.studentId || previous?.student_id;
-        const groupId = enrollment.group_id || enrollment.groupId || previous?.group_id;
+        const studentId =
+          enrollment.student_id || enrollment.studentId || previous?.student_id;
+        const groupId =
+          enrollment.group_id || enrollment.groupId || previous?.group_id;
         if (!studentId || !groupId) {
           throw new Error("Enrollment requires studentId and groupId.");
         }
         // The local app calls an ended enrollment `ended`; PostgreSQL's
         // canonical status is `withdrawn` (history is still preserved).
-        const requestedStatus = enrollment.status || previous?.status || "active";
-        const status = requestedStatus === "ended" ? "withdrawn" : requestedStatus;
-        const priceOverride = enrollment.price_override ?? enrollment.priceOverride ?? enrollment.specialMonthlyPrice ?? previous?.price_override ?? null;
-        const joinedAt = enrollment.start_date || enrollment.startDate || enrollment.joined_at || enrollment.joinedAt || previous?.joined_at || null;
-        const endedAt = enrollment.end_date || enrollment.endDate || enrollment.ended_at || enrollment.endedAt || (status === "withdrawn" ? new Date().toISOString() : previous?.ended_at || null);
+        const requestedStatus =
+          enrollment.status || previous?.status || "active";
+        const status =
+          requestedStatus === "ended" ? "withdrawn" : requestedStatus;
+        const priceOverride =
+          enrollment.price_override ??
+          enrollment.priceOverride ??
+          enrollment.specialMonthlyPrice ??
+          previous?.price_override ??
+          null;
+        const joinedAt =
+          enrollment.start_date ||
+          enrollment.startDate ||
+          enrollment.joined_at ||
+          enrollment.joinedAt ||
+          previous?.joined_at ||
+          null;
+        const endedAt =
+          enrollment.end_date ||
+          enrollment.endDate ||
+          enrollment.ended_at ||
+          enrollment.endedAt ||
+          (status === "withdrawn"
+            ? new Date().toISOString()
+            : previous?.ended_at || null);
 
         // A server-reset repair can carry the same student/group enrollment
         // under a new local id. PostgreSQL enforces the natural key
         // (center_id, student_id, group_id), so reconcile that row instead of
         // turning an otherwise valid repair into a permanent conflict.
-        await client.query(
-          "SELECT pg_advisory_xact_lock(hashtext($1))",
-          [`enrollment:${centerId}:${studentId}:${groupId}`],
-        );
+        await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [
+          `enrollment:${centerId}:${studentId}:${groupId}`,
+        ]);
         const naturalRes = await client.query(
           `SELECT id FROM student_group_enrollments
            WHERE center_id = $1 AND student_id = $2 AND group_id = $3
@@ -1921,7 +4222,8 @@ class SyncProcessor {
       case "center_academic_stage":
       case "center_academic_stages": {
         const stages = payload.stages || payload.stages_json || payload;
-        const stagesJson = typeof stages === "string" ? stages : JSON.stringify(stages);
+        const stagesJson =
+          typeof stages === "string" ? stages : JSON.stringify(stages);
         await client.query(
           `INSERT INTO center_academic_stages (center_id, stages_json, updated_at)
            VALUES ($1, $2::jsonb, NOW())
@@ -1979,7 +4281,11 @@ class SyncProcessor {
               `UPDATE debt_cycles
                   SET amount_due = $3, status = 'cancelled', updated_at = NOW()
                 WHERE center_id = $1 AND id = $2`,
-              [centerId, cycle.id, Math.max(0, Number(paid.rows[0]?.amount || 0))],
+              [
+                centerId,
+                cycle.id,
+                Math.max(0, Number(paid.rows[0]?.amount || 0)),
+              ],
             );
           }
           await client.query(
@@ -1995,7 +4301,10 @@ class SyncProcessor {
           );
           break;
         }
-        const groupStatus = (grp.status || "active") === "inactive" ? "archived" : (grp.status || "active");
+        const groupStatus =
+          (grp.status || "active") === "inactive"
+            ? "archived"
+            : grp.status || "active";
         const deletionTombstone = await client.query(
           `SELECT 1 AS deleted FROM server_sync_operations
             WHERE center_id = $1 AND entity_type = 'group' AND entity_id = $2
@@ -2012,11 +4321,38 @@ class SyncProcessor {
           [centerId, groupId],
         );
         const previous = existingGroup.rows[0] || {};
-        const defaultFee = Number(grp.default_fee ?? grp.defaultFee ?? grp.session_price ?? grp.sessionPrice ?? previous.default_fee ?? 0);
-        const sessionPrice = Number(grp.session_price ?? grp.sessionPrice ?? previous.session_price ?? defaultFee);
-        const monthlyPrice = Number(grp.monthly_price ?? grp.monthlyPrice ?? previous.monthly_price ?? defaultFee * 4);
-        const duration = Number(grp.session_duration_minutes ?? grp.sessionDurationMinutes ?? previous.session_duration_minutes ?? 120);
-        const lateAfter = Number(grp.late_after_minutes ?? grp.lateAfterMinutes ?? previous.late_after_minutes ?? 15);
+        const defaultFee = Number(
+          grp.default_fee ??
+            grp.defaultFee ??
+            grp.session_price ??
+            grp.sessionPrice ??
+            previous.default_fee ??
+            0,
+        );
+        const sessionPrice = Number(
+          grp.session_price ??
+            grp.sessionPrice ??
+            previous.session_price ??
+            defaultFee,
+        );
+        const monthlyPrice = Number(
+          grp.monthly_price ??
+            grp.monthlyPrice ??
+            previous.monthly_price ??
+            defaultFee * 4,
+        );
+        const duration = Number(
+          grp.session_duration_minutes ??
+            grp.sessionDurationMinutes ??
+            previous.session_duration_minutes ??
+            120,
+        );
+        const lateAfter = Number(
+          grp.late_after_minutes ??
+            grp.lateAfterMinutes ??
+            previous.late_after_minutes ??
+            15,
+        );
         const groupWrite = await client.query(
           `INSERT INTO groups
              (id, center_id, name, teacher_id, subject_id, grade, default_fee, session_price,
@@ -2051,7 +4387,12 @@ class SyncProcessor {
           ],
         );
         if (groupWrite.rowCount === 0) {
-          throw new AppError("GROUP_BELONGS_TO_OTHER_CENTER", "Group belongs to another center.", "المجموعة تابعة لمركز آخر.", 403);
+          throw new AppError(
+            "GROUP_BELONGS_TO_OTHER_CENTER",
+            "Group belongs to another center.",
+            "المجموعة تابعة لمركز آخر.",
+            403,
+          );
         }
         break;
       }
@@ -2067,7 +4408,10 @@ class SyncProcessor {
         }
         const schedId = context.entityId || sched.id || `sched-${Date.now()}`;
         const operation = String(context.operationType || "").toUpperCase();
-        if (["DELETE", "REMOVE"].includes(operation) || sched.status === "inactive") {
+        if (
+          ["DELETE", "REMOVE"].includes(operation) ||
+          sched.status === "inactive"
+        ) {
           await client.query(
             `DELETE FROM group_schedules WHERE id = $1 AND center_id = $2`,
             [schedId, centerId],
@@ -2080,13 +4424,24 @@ class SyncProcessor {
         );
         // Status-only updates (activate/deactivate) must not overwrite the
         // schedule with null day/time values from a compact offline payload.
-        if (existing.rows[0] && (!sched.groupId && !sched.group_id && sched.status === "active")) {
+        if (
+          existing.rows[0] &&
+          !sched.groupId &&
+          !sched.group_id &&
+          sched.status === "active"
+        ) {
           break;
         }
-        const groupId = sched.group_id || sched.groupId || existing.rows[0]?.group_id;
-        const dayOfWeek = parseInt(sched.day_of_week ?? sched.dayOfWeek ?? existing.rows[0]?.day_of_week, 10);
-        const startTime = sched.start_time || sched.startTime || existing.rows[0]?.start_time;
-        const endTime = sched.end_time || sched.endTime || existing.rows[0]?.end_time;
+        const groupId =
+          sched.group_id || sched.groupId || existing.rows[0]?.group_id;
+        const dayOfWeek = parseInt(
+          sched.day_of_week ?? sched.dayOfWeek ?? existing.rows[0]?.day_of_week,
+          10,
+        );
+        const startTime =
+          sched.start_time || sched.startTime || existing.rows[0]?.start_time;
+        const endTime =
+          sched.end_time || sched.endTime || existing.rows[0]?.end_time;
         const groupRes = await client.query(
           `SELECT teacher_id FROM groups WHERE center_id = $1 AND id = $2 AND status = 'active'`,
           [centerId, groupId],
@@ -2094,7 +4449,9 @@ class SyncProcessor {
         if (!groupRes.rows[0]) throw new Error("GROUP_NOT_FOUND_OR_INACTIVE");
         // Serialize schedule writes and reject any overlap for the same
         // teacher, including partial overlaps (15:00-17:00 vs 16:00-18:00).
-        await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`schedule:${centerId}:${groupRes.rows[0].teacher_id}:${dayOfWeek}`]);
+        await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [
+          `schedule:${centerId}:${groupRes.rows[0].teacher_id}:${dayOfWeek}`,
+        ]);
         const conflict = await client.query(
           `SELECT gs.id AS schedule_id, gs.group_id, gs.day_of_week,
                   gs.start_time, gs.end_time, g.name AS group_name
@@ -2104,7 +4461,14 @@ class SyncProcessor {
              AND g.teacher_id = $4
              AND NOT ($5::varchar <= gs.start_time OR $6::varchar >= gs.end_time)
            LIMIT 1`,
-          [centerId, schedId, dayOfWeek, groupRes.rows[0].teacher_id, endTime, startTime],
+          [
+            centerId,
+            schedId,
+            dayOfWeek,
+            groupRes.rows[0].teacher_id,
+            endTime,
+            startTime,
+          ],
         );
         if (conflict.rows[0]) {
           const existingSchedule = conflict.rows[0];
@@ -2121,14 +4485,7 @@ class SyncProcessor {
              start_time = EXCLUDED.start_time,
              end_time = EXCLUDED.end_time
            WHERE group_schedules.center_id = EXCLUDED.center_id;`,
-          [
-            schedId,
-            centerId,
-            groupId,
-            dayOfWeek,
-            startTime,
-            endTime,
-          ],
+          [schedId, centerId, groupId, dayOfWeek, startTime, endTime],
         );
         if (scheduleWrite.rowCount === 0) {
           throw new AppError(
@@ -2144,41 +4501,113 @@ class SyncProcessor {
       case "package": {
         const pkg = payload.package || payload;
         const packageId = pkg.id || pkg.packageId || context.entityId;
-        const existing = await client.query("SELECT name, grade, total_price, max_selections, billing_cycle, status FROM packages WHERE center_id = $1 AND id = $2", [centerId, packageId]);
+        const existing = await client.query(
+          "SELECT name, grade, total_price, max_selections, billing_cycle, status FROM packages WHERE center_id = $1 AND id = $2",
+          [centerId, packageId],
+        );
         const prev = existing.rows[0] || {};
-        const packageStatus = pkg.status === "canceled" ? "inactive" : (pkg.status ?? prev.status ?? "active");
+        const packageStatus =
+          pkg.status === "canceled"
+            ? "inactive"
+            : (pkg.status ?? prev.status ?? "active");
         await client.query(
           `INSERT INTO packages (id, center_id, name, grade, total_price, max_selections, billing_cycle, status, created_at, updated_at)
            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW(),NOW())
            ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name, grade=EXCLUDED.grade,
              total_price=EXCLUDED.total_price, max_selections=EXCLUDED.max_selections, billing_cycle=EXCLUDED.billing_cycle,
-             status=EXCLUDED.status, updated_at=NOW()` ,
-          [packageId, centerId, pkg.name ?? prev.name, pkg.grade ?? prev.grade ?? "all", Number(pkg.total_price ?? pkg.totalPrice ?? pkg.price ?? prev.total_price ?? 0), Math.max(1, Number(pkg.max_selections ?? pkg.maxSelections ?? prev.max_selections ?? 1)), pkg.billing_cycle ?? pkg.billingCycle ?? prev.billing_cycle ?? "monthly", packageStatus],
+             status=EXCLUDED.status, updated_at=NOW()`,
+          [
+            packageId,
+            centerId,
+            pkg.name ?? prev.name,
+            pkg.grade ?? prev.grade ?? "all",
+            Number(
+              pkg.total_price ??
+                pkg.totalPrice ??
+                pkg.price ??
+                prev.total_price ??
+                0,
+            ),
+            Math.max(
+              1,
+              Number(
+                pkg.max_selections ??
+                  pkg.maxSelections ??
+                  prev.max_selections ??
+                  1,
+              ),
+            ),
+            pkg.billing_cycle ??
+              pkg.billingCycle ??
+              prev.billing_cycle ??
+              "monthly",
+            packageStatus,
+          ],
         );
         break;
       }
 
       case "package_subject": {
         const link = payload.packageSubject || payload;
-        const removeOperation = String(context.operationType || "").toUpperCase();
-        const remove = ["DELETE", "REMOVE"].includes(removeOperation) || removeOperation.includes("REMOVE") || link.status === "inactive";
+        const removeOperation = String(
+          context.operationType || "",
+        ).toUpperCase();
+        const remove =
+          ["DELETE", "REMOVE"].includes(removeOperation) ||
+          removeOperation.includes("REMOVE") ||
+          link.status === "inactive";
         if (remove) {
           if (link.id) {
-            await client.query("DELETE FROM package_subjects WHERE center_id = $1 AND id = $2", [centerId, link.id]);
-          } else if (link.default_teacher_id || link.defaultTeacherId || link.teacher_id || link.teacherId) {
+            await client.query(
+              "DELETE FROM package_subjects WHERE center_id = $1 AND id = $2",
+              [centerId, link.id],
+            );
+          } else if (
+            link.default_teacher_id ||
+            link.defaultTeacherId ||
+            link.teacher_id ||
+            link.teacherId
+          ) {
             await client.query(
               "DELETE FROM package_subjects WHERE center_id = $1 AND package_id = $2 AND subject_id = $3 AND default_teacher_id = $4",
-              [centerId, link.package_id || link.packageId, link.subject_id || link.subjectId, link.default_teacher_id || link.defaultTeacherId || link.teacher_id || link.teacherId],
+              [
+                centerId,
+                link.package_id || link.packageId,
+                link.subject_id || link.subjectId,
+                link.default_teacher_id ||
+                  link.defaultTeacherId ||
+                  link.teacher_id ||
+                  link.teacherId,
+              ],
             );
           } else {
-            await client.query("DELETE FROM package_subjects WHERE center_id = $1 AND package_id = $2 AND subject_id = $3", [centerId, link.package_id || link.packageId, link.subject_id || link.subjectId]);
+            await client.query(
+              "DELETE FROM package_subjects WHERE center_id = $1 AND package_id = $2 AND subject_id = $3",
+              [
+                centerId,
+                link.package_id || link.packageId,
+                link.subject_id || link.subjectId,
+              ],
+            );
           }
         } else {
           await client.query(
             `INSERT INTO package_subjects (id, center_id, package_id, subject_id, default_teacher_id, group_id, created_at)
              VALUES ($1,$2,$3,$4,$5,$6,NOW())
              ON CONFLICT (center_id, package_id, subject_id, default_teacher_id) DO NOTHING`,
-            [link.id || context.entityId || `pkg-sub-${centerId}-${link.package_id || link.packageId}-${link.subject_id || link.subjectId}`, centerId, link.package_id || link.packageId, link.subject_id || link.subjectId, link.default_teacher_id || link.defaultTeacherId || link.teacher_id || link.teacherId, link.group_id || link.groupId || null],
+            [
+              link.id ||
+                context.entityId ||
+                `pkg-sub-${centerId}-${link.package_id || link.packageId}-${link.subject_id || link.subjectId}`,
+              centerId,
+              link.package_id || link.packageId,
+              link.subject_id || link.subjectId,
+              link.default_teacher_id ||
+                link.defaultTeacherId ||
+                link.teacher_id ||
+                link.teacherId,
+              link.group_id || link.groupId || null,
+            ],
           );
         }
         break;
@@ -2187,30 +4616,73 @@ class SyncProcessor {
       case "package_subscription": {
         const sub = payload.subscription || payload;
         const id = sub.id || sub.subscriptionId || context.entityId;
-        const existing = await client.query("SELECT student_id, package_id, price_override, status, start_date, end_date FROM student_package_subscriptions WHERE center_id=$1 AND id=$2", [centerId, id]);
+        const existing = await client.query(
+          "SELECT student_id, package_id, price_override, status, start_date, end_date FROM student_package_subscriptions WHERE center_id=$1 AND id=$2",
+          [centerId, id],
+        );
         const prev = existing.rows[0] || {};
-        const requestedStatus = sub.status || (sub.cancellationDate || sub.cancellation_date ? "cancelled" : prev.status || "active");
-        const status = requestedStatus === "ended" ? "completed" : requestedStatus === "canceled" ? "cancelled" : requestedStatus;
+        const requestedStatus =
+          sub.status ||
+          (sub.cancellationDate || sub.cancellation_date
+            ? "cancelled"
+            : prev.status || "active");
+        const status =
+          requestedStatus === "ended"
+            ? "completed"
+            : requestedStatus === "canceled"
+              ? "cancelled"
+              : requestedStatus;
         await client.query(
           `INSERT INTO student_package_subscriptions (id, center_id, student_id, package_id, price_override, status, start_date, end_date, created_at, updated_at)
            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW(),NOW())
            ON CONFLICT (id) DO UPDATE SET student_id=EXCLUDED.student_id, package_id=EXCLUDED.package_id,
              price_override=EXCLUDED.price_override, status=EXCLUDED.status, start_date=EXCLUDED.start_date,
              end_date=EXCLUDED.end_date, updated_at=NOW()`,
-          [id, centerId, sub.student_id || sub.studentId || prev.student_id, sub.package_id || sub.packageId || prev.package_id, sub.price_override ?? sub.priceOverride ?? prev.price_override ?? null, status, sub.start_date || sub.startDate || prev.start_date || new Date().toISOString().slice(0,10), sub.end_date || sub.endDate || prev.end_date || null],
+          [
+            id,
+            centerId,
+            sub.student_id || sub.studentId || prev.student_id,
+            sub.package_id || sub.packageId || prev.package_id,
+            sub.price_override ??
+              sub.priceOverride ??
+              prev.price_override ??
+              null,
+            status,
+            sub.start_date ||
+              sub.startDate ||
+              prev.start_date ||
+              new Date().toISOString().slice(0, 10),
+            sub.end_date || sub.endDate || prev.end_date || null,
+          ],
         );
         break;
       }
 
       case "package_teacher_override": {
         const override = payload.override || payload;
-        const removeOperation = String(context.operationType || "").toUpperCase();
-        const remove = ["DELETE", "REMOVE"].includes(removeOperation) || removeOperation.includes("REMOVE") || override.status === "inactive";
+        const removeOperation = String(
+          context.operationType || "",
+        ).toUpperCase();
+        const remove =
+          ["DELETE", "REMOVE"].includes(removeOperation) ||
+          removeOperation.includes("REMOVE") ||
+          override.status === "inactive";
         if (remove) {
-          await client.query("DELETE FROM package_subject_teacher_overrides WHERE center_id=$1 AND subscription_id=$2 AND subject_id=$3", [centerId, override.subscription_id || override.subscriptionId, override.subject_id || override.subjectId]);
+          await client.query(
+            "DELETE FROM package_subject_teacher_overrides WHERE center_id=$1 AND subscription_id=$2 AND subject_id=$3",
+            [
+              centerId,
+              override.subscription_id || override.subscriptionId,
+              override.subject_id || override.subjectId,
+            ],
+          );
         } else {
-          const overrideId = override.id || context.entityId || `pkg-override-${centerId}-${override.subscription_id || override.subscriptionId}-${override.subject_id || override.subjectId}`;
-          const subscriptionId = override.subscription_id || override.subscriptionId;
+          const overrideId =
+            override.id ||
+            context.entityId ||
+            `pkg-override-${centerId}-${override.subscription_id || override.subscriptionId}-${override.subject_id || override.subjectId}`;
+          const subscriptionId =
+            override.subscription_id || override.subscriptionId;
           const subjectId = override.subject_id || override.subjectId;
           const teacherId = override.teacher_id || override.teacherId;
           const groupId = override.group_id || override.groupId || null;
@@ -2231,7 +4703,14 @@ class SyncProcessor {
                 (id, center_id, subscription_id, subject_id, teacher_id, group_id, created_at)
                VALUES ($1,$2,$3,$4,$5,$6,NOW())
                ON CONFLICT (id) DO UPDATE SET teacher_id=EXCLUDED.teacher_id, group_id=EXCLUDED.group_id`,
-              [overrideId, centerId, subscriptionId, subjectId, teacherId, groupId],
+              [
+                overrideId,
+                centerId,
+                subscriptionId,
+                subjectId,
+                teacherId,
+                groupId,
+              ],
             );
           }
         }
@@ -2242,14 +4721,17 @@ class SyncProcessor {
         const cycle = payload.debtCycle || payload;
         const id = cycle.id || cycle.debtCycleId || context.entityId;
         const studentId = cycle.student_id || cycle.studentId;
-        const requestedEnrollmentId = cycle.enrollment_id || cycle.enrollmentId || null;
+        const requestedEnrollmentId =
+          cycle.enrollment_id || cycle.enrollmentId || null;
         if (!studentId) throw new Error("Debt cycle requires studentId.");
         const studentExists = await client.query(
           "SELECT 1 FROM students WHERE center_id = $1 AND id = $2",
           [centerId, studentId],
         );
         if (studentExists.rows.length === 0) {
-          throw new Error("Debt cycle student is not present in this center yet.");
+          throw new Error(
+            "Debt cycle student is not present in this center yet.",
+          );
         }
         // Package cycles historically used the subscription id in
         // enrollmentId. The server FK points to the enrollment table, so
@@ -2268,27 +4750,47 @@ class SyncProcessor {
         const targetId = id;
         const groupId = cycle.group_id || cycle.groupId || null;
         const packageId = cycle.package_id || cycle.packageId || null;
-        const cycleNumber = Number(cycle.cycle_number ?? cycle.cycleNumber ?? 1);
-        const packageSubscriptionId = cycle.package_subscription_id || cycle.packageSubscriptionId || null;
+        const cycleNumber = Number(
+          cycle.cycle_number ?? cycle.cycleNumber ?? 1,
+        );
+        const packageSubscriptionId =
+          cycle.package_subscription_id || cycle.packageSubscriptionId || null;
         const cycleType = normalizeDebtCycleType(
           cycle.cycle_type || cycle.cycleType,
           Boolean(packageSubscriptionId),
         );
-        const rawBillingMode = String(cycle.billing_mode || cycle.billingMode || "").trim().toLowerCase().replace(/[\s-]/g, "_");
-        const billingMode = cycleType === "package"
-          ? "package"
-          : ["per_session", "session", "perclass", "per_class"].includes(rawBillingMode) || cycleType === "per_session"
-            ? "per_session"
-            : rawBillingMode === "pending" ? "pending" : "monthly";
+        const rawBillingMode = String(
+          cycle.billing_mode || cycle.billingMode || "",
+        )
+          .trim()
+          .toLowerCase()
+          .replace(/[\s-]/g, "_");
+        const billingMode =
+          cycleType === "package"
+            ? "package"
+            : ["per_session", "session", "perclass", "per_class"].includes(
+                  rawBillingMode,
+                ) || cycleType === "per_session"
+              ? "per_session"
+              : rawBillingMode === "pending"
+                ? "pending"
+                : "monthly";
         const normalizedCycleStatus = normalizeDebtCycleStatus(cycle.status);
         const requestedCycleAmount = Number(
-          cycle.cycle_price ?? cycle.cyclePrice ?? cycle.amount_due ?? cycle.amountDue ?? 0,
+          cycle.cycle_price ??
+            cycle.cyclePrice ??
+            cycle.amount_due ??
+            cycle.amountDue ??
+            0,
         );
         // A cancellation arriving after another offline device's payment must
         // waive only the unpaid remainder. Never overwrite the cycle amount
         // with zero when the server already has an immutable payment ledger.
         const amountForCycle = async (cycleId) => {
-          if (!cycleId || !["cancelled", "waived"].includes(normalizedCycleStatus)) {
+          if (
+            !cycleId ||
+            !["cancelled", "waived"].includes(normalizedCycleStatus)
+          ) {
             return requestedCycleAmount;
           }
           const paid = await client.query(
@@ -2298,7 +4800,10 @@ class SyncProcessor {
                 AND (is_reversed = FALSE OR is_reversed IS NULL)`,
             [centerId, cycleId],
           );
-          return Math.max(requestedCycleAmount, Number(paid.rows[0]?.paid || 0));
+          return Math.max(
+            requestedCycleAmount,
+            Number(paid.rows[0]?.paid || 0),
+          );
         };
         // Reconcile by business identity as well as operation id. A reset
         // repair may contain a locally-created duplicate ID for a cycle that
@@ -2318,7 +4823,8 @@ class SyncProcessor {
           const naturalId = naturalCycle?.id;
           if (naturalId && naturalId !== targetId) {
             if (
-              String(operationType || "").toUpperCase() === "REPAIR_AFTER_SERVER_RESET" &&
+              String(operationType || "").toUpperCase() ===
+                "REPAIR_AFTER_SERVER_RESET" &&
               String(naturalCycle.student_id) === String(studentId)
             ) {
               context.canonicalEntityId = String(naturalId);
@@ -2330,11 +4836,14 @@ class SyncProcessor {
               }
               break;
             }
-            throw new Error("DEBT_CYCLE_NATURAL_KEY_CONFLICT: this billing cycle already exists under another id.");
+            throw new Error(
+              "DEBT_CYCLE_NATURAL_KEY_CONFLICT: this billing cycle already exists under another id.",
+            );
           }
         }
         const effectiveAmount = await amountForCycle(targetId);
-        await client.query(`INSERT INTO debt_cycles
+        await client.query(
+          `INSERT INTO debt_cycles
           (id, center_id, student_id, enrollment_id, group_id, package_subscription_id, package_id, cycle_number, cycle_type, billing_mode, period_start, period_end, amount_due, status, notes, created_at, updated_at, server_revision)
           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,NOW(),NOW(),0)
           ON CONFLICT (id) DO UPDATE SET student_id=EXCLUDED.student_id, enrollment_id=EXCLUDED.enrollment_id,
@@ -2343,40 +4852,135 @@ class SyncProcessor {
             billing_mode=EXCLUDED.billing_mode, period_start=EXCLUDED.period_start, period_end=EXCLUDED.period_end, amount_due=EXCLUDED.amount_due,
             status=EXCLUDED.status, notes=EXCLUDED.notes, updated_at=NOW(),
             server_revision=debt_cycles.server_revision + 1`,
-          [targetId, centerId, studentId, enrollmentId, groupId, packageSubscriptionId, packageId, cycleNumber, cycleType, billingMode, cycle.start_date || cycle.startDate || cycle.period_start, cycle.end_date || cycle.endDate || cycle.period_end, effectiveAmount, normalizedCycleStatus, cycle.notes || null]);
+          [
+            targetId,
+            centerId,
+            studentId,
+            enrollmentId,
+            groupId,
+            packageSubscriptionId,
+            packageId,
+            cycleNumber,
+            cycleType,
+            billingMode,
+            cycle.start_date || cycle.startDate || cycle.period_start,
+            cycle.end_date || cycle.endDate || cycle.period_end,
+            effectiveAmount,
+            normalizedCycleStatus,
+            cycle.notes || null,
+          ],
+        );
         break;
       }
 
       case "advance_coverage": {
         const coverage = payload.coverage || payload;
-        await client.query(`INSERT INTO advance_coverages (id, center_id, student_id, advance_session_id, target_future_session_id, created_at)
-          VALUES ($1,$2,$3,$4,$5,NOW()) ON CONFLICT (id) DO UPDATE SET target_future_session_id=EXCLUDED.target_future_session_id`,
-          [coverage.id || context.entityId, centerId, coverage.student_id || coverage.studentId, coverage.advance_session_id || coverage.advanceSessionId, coverage.target_future_session_id || coverage.targetFutureSessionId]);
+        const validated = await SyncProcessor.validateAdvanceCoverage(client, {
+          centerId,
+          coverage,
+          entityId: context.entityId,
+        });
+        if (validated.existing) {
+          context.canonicalEntityId = String(validated.existing.id);
+          context.ledgerPayload = {
+            coverage: { ...validated.existing },
+          };
+          break;
+        }
+        await client.query(
+          `INSERT INTO advance_coverages
+             (id, center_id, student_id, advance_session_id,
+              target_future_session_id, created_at)
+           VALUES ($1, $2, $3, $4, $5, NOW())
+           ON CONFLICT DO NOTHING`,
+          [
+            validated.id,
+            centerId,
+            validated.studentId,
+            validated.advanceSessionId,
+            validated.targetSessionId,
+          ],
+        );
+        const saved = await client.query(
+          `SELECT id, center_id, student_id, advance_session_id,
+                  target_future_session_id, created_at
+             FROM advance_coverages
+            WHERE id = $1`,
+          [validated.id],
+        );
+        const savedRow = saved.rows[0];
+        if (!savedRow) {
+          throw new Error(
+            "ADVANCE_COVERAGE_WRITE_FAILED: coverage was not persisted.",
+          );
+        }
+        if (
+          String(savedRow.center_id) !== String(centerId) ||
+          String(savedRow.student_id) !== String(validated.studentId) ||
+          String(savedRow.advance_session_id) !==
+            String(validated.advanceSessionId) ||
+          String(savedRow.target_future_session_id) !==
+            String(validated.targetSessionId)
+        ) {
+          throw new Error(
+            "ADVANCE_COVERAGE_ID_CONFLICT: stored coverage references differ from the submitted references.",
+          );
+        }
+        context.ledgerPayload = {
+          coverage: {
+            ...savedRow,
+            operationId,
+          },
+        };
         break;
       }
 
       case "homework_evaluation_status": {
-        const statusObj = payload.status && typeof payload.status === "object" ? payload.status : payload;
+        const statusObj =
+          payload.status && typeof payload.status === "object"
+            ? payload.status
+            : payload;
         const id = statusObj.id || context.entityId;
         if (!id) throw new Error("Homework evaluation status requires an id.");
         const name = String(statusObj.name || payload.name || "").trim();
-        const statusVal = typeof payload.status === "string" ? payload.status : (statusObj.status || "active");
-        const isDelete = operationType.toLowerCase().includes("delete") || statusVal === "deleted" || statusVal === "inactive";
+        const statusVal =
+          typeof payload.status === "string"
+            ? payload.status
+            : statusObj.status || "active";
+        const isDelete =
+          operationType.toLowerCase().includes("delete") ||
+          statusVal === "deleted" ||
+          statusVal === "inactive";
         if (name && !isDelete) {
           await client.query(
             `INSERT INTO homework_evaluation_statuses (id, center_id, name, status, created_at, updated_at)
              VALUES ($1,$2,$3,$4,COALESCE($5,NOW()),COALESCE($6,NOW()))
              ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name, status=EXCLUDED.status, updated_at=EXCLUDED.updated_at
              WHERE homework_evaluation_statuses.center_id = EXCLUDED.center_id`,
-            [id, centerId, name, statusVal, statusObj.created_at || statusObj.createdAt || null, statusObj.updated_at || statusObj.updatedAt || null],
+            [
+              id,
+              centerId,
+              name,
+              statusVal,
+              statusObj.created_at || statusObj.createdAt || null,
+              statusObj.updated_at || statusObj.updatedAt || null,
+            ],
           );
         } else {
           const updated = await client.query(
             `UPDATE homework_evaluation_statuses SET status = $1, updated_at = COALESCE($2,NOW())
              WHERE center_id = $3 AND id = $4`,
-            [statusVal || "deleted", statusObj.updated_at || statusObj.updatedAt || null, centerId, id],
+            [
+              statusVal || "deleted",
+              statusObj.updated_at || statusObj.updatedAt || null,
+              centerId,
+              id,
+            ],
           );
-          if (!updated.rowCount) throw new Error("Homework evaluation status does not belong to the authenticated center.");
+          if (!updated.rowCount)
+            throw new Error(
+              "Homework evaluation status does not belong to the authenticated center.",
+            );
         }
         break;
       }
@@ -2387,18 +4991,29 @@ class SyncProcessor {
         const studentId = evaluation.student_id || evaluation.studentId;
         const sessionId = evaluation.session_id || evaluation.sessionId;
         const statusId = evaluation.status_id || evaluation.statusId || null;
-        if (!id || !studentId || !sessionId) throw new Error("Homework evaluation requires student and session.");
-        const [student, session] = await Promise.all([
-          client.query("SELECT id FROM students WHERE center_id = $1 AND id = $2", [centerId, studentId]),
-          client.query("SELECT id FROM sessions WHERE center_id = $1 AND id = $2", [centerId, sessionId]),
-        ]);
-        if (!student.rows[0] || !session.rows[0]) throw new Error("Homework evaluation student/session must belong to the authenticated center.");
+        if (!id || !studentId || !sessionId)
+          throw new Error("Homework evaluation requires student and session.");
+        const student = await client.query(
+          "SELECT id FROM students WHERE center_id = $1 AND id = $2",
+          [centerId, studentId],
+        );
+        const session = await client.query(
+          "SELECT id FROM sessions WHERE center_id = $1 AND id = $2",
+          [centerId, sessionId],
+        );
+        if (!student.rows[0] || !session.rows[0])
+          throw new Error(
+            "Homework evaluation student/session must belong to the authenticated center.",
+          );
         if (statusId) {
           const status = await client.query(
             "SELECT id FROM homework_evaluation_statuses WHERE center_id = $1 AND id = $2 AND status = 'active'",
             [centerId, statusId],
           );
-          if (!status.rows[0]) throw new Error("Homework evaluation status must be active in the authenticated center.");
+          if (!status.rows[0])
+            throw new Error(
+              "Homework evaluation status must be active in the authenticated center.",
+            );
           await client.query(
             `INSERT INTO session_homework_evaluations
               (id, center_id, student_id, session_id, status_id, created_at, updated_at, deleted_at, deleted_by)
@@ -2406,14 +5021,28 @@ class SyncProcessor {
              ON CONFLICT (center_id, student_id, session_id) DO UPDATE SET
                status_id=EXCLUDED.status_id, updated_at=EXCLUDED.updated_at,
                deleted_at=NULL, deleted_by=NULL`,
-            [id, centerId, studentId, sessionId, statusId, evaluation.created_at || evaluation.createdAt || null, evaluation.updated_at || evaluation.updatedAt || null],
+            [
+              id,
+              centerId,
+              studentId,
+              sessionId,
+              statusId,
+              evaluation.created_at || evaluation.createdAt || null,
+              evaluation.updated_at || evaluation.updatedAt || null,
+            ],
           );
         } else {
           await client.query(
             `UPDATE session_homework_evaluations
                 SET deleted_at = COALESCE($1,NOW()), deleted_by = $2, updated_at = COALESCE($3,NOW())
               WHERE center_id = $4 AND id = $5`,
-            [evaluation.deleted_at || evaluation.deletedAt || null, evaluation.deleted_by || evaluation.deletedBy || userId, evaluation.updated_at || evaluation.updatedAt || null, centerId, id],
+            [
+              evaluation.deleted_at || evaluation.deletedAt || null,
+              evaluation.deleted_by || evaluation.deletedBy || userId,
+              evaluation.updated_at || evaluation.updatedAt || null,
+              centerId,
+              id,
+            ],
           );
         }
         break;
@@ -2422,13 +5051,26 @@ class SyncProcessor {
       case "grade_exam": {
         const exam = payload.exam || payload;
         const id = exam.id || context.entityId;
-        if (!id || !exam.name || !exam.grade) throw new Error("Grade exam requires name and grade.");
-        await client.query(`INSERT INTO grade_exams (id, center_id, name, grade, group_id, session_id, max_score, status, created_at, updated_at)
+        if (!id || !exam.name || !exam.grade)
+          throw new Error("Grade exam requires name and grade.");
+        await client.query(
+          `INSERT INTO grade_exams (id, center_id, name, grade, group_id, session_id, max_score, status, created_at, updated_at)
           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,COALESCE($9,NOW()),NOW())
           ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name, grade=EXCLUDED.grade,
             group_id=EXCLUDED.group_id, session_id=EXCLUDED.session_id,
             max_score=EXCLUDED.max_score, status=EXCLUDED.status, updated_at=NOW()`,
-          [id, centerId, exam.name, exam.grade, exam.group_id || exam.groupId || null, exam.session_id || exam.sessionId || null, Number(exam.max_score ?? exam.maxScore ?? 100), exam.status || "active", exam.created_at || exam.createdAt || null]);
+          [
+            id,
+            centerId,
+            exam.name,
+            exam.grade,
+            exam.group_id || exam.groupId || null,
+            exam.session_id || exam.sessionId || null,
+            Number(exam.max_score ?? exam.maxScore ?? 100),
+            exam.status || "active",
+            exam.created_at || exam.createdAt || null,
+          ],
+        );
         break;
       }
 
@@ -2437,11 +5079,21 @@ class SyncProcessor {
         const id = score.id || context.entityId;
         const examId = score.exam_id || score.examId;
         const studentId = score.student_id || score.studentId;
-        if (!id || !examId || !studentId) throw new Error("Grade score requires exam and student.");
-        await client.query(`INSERT INTO grade_scores (id, center_id, exam_id, student_id, score, created_at, updated_at)
+        if (!id || !examId || !studentId)
+          throw new Error("Grade score requires exam and student.");
+        await client.query(
+          `INSERT INTO grade_scores (id, center_id, exam_id, student_id, score, created_at, updated_at)
           VALUES ($1,$2,$3,$4,$5,COALESCE($6,NOW()),NOW())
           ON CONFLICT (center_id, exam_id, student_id) DO UPDATE SET score=EXCLUDED.score, updated_at=NOW()`,
-          [id, centerId, examId, studentId, score.score === "" ? null : (score.score ?? null), score.created_at || score.createdAt || null]);
+          [
+            id,
+            centerId,
+            examId,
+            studentId,
+            score.score === "" ? null : (score.score ?? null),
+            score.created_at || score.createdAt || null,
+          ],
+        );
         break;
       }
 
@@ -2449,18 +5101,66 @@ class SyncProcessor {
         const event = payload.event || payload;
         const id = event.id || event.eventId || context.entityId;
         const studentId = event.student_id || event.studentId;
-        const phone = event.recipient_phone || event.recipientPhone || (await client.query("SELECT phone, parent_phone FROM students WHERE center_id=$1 AND id=$2", [centerId, studentId])).rows[0]?.parent_phone || (await client.query("SELECT phone FROM students WHERE center_id=$1 AND id=$2", [centerId, studentId])).rows[0]?.phone || "";
-        await client.query(`INSERT INTO notification_events (id, center_id, student_id, session_id, event_type, recipient_phone, channel, status, payload, created_at)
+        const eventType = event.event_type || event.eventType || "attendance";
+        const sessionId = event.session_id || event.sessionId || null;
+        let validatedEvent = event;
+        if (eventType === "absence") {
+          const absence =
+            await SyncProcessor.validateExplicitAbsenceForNotification(client, {
+              centerId,
+              sessionId,
+              studentId,
+            });
+          validatedEvent = {
+            ...event,
+            attendanceId: absence.attendanceId,
+          };
+        }
+        const phone =
+          event.recipient_phone ||
+          event.recipientPhone ||
+          (
+            await client.query(
+              "SELECT phone, parent_phone FROM students WHERE center_id=$1 AND id=$2",
+              [centerId, studentId],
+            )
+          ).rows[0]?.parent_phone ||
+          (
+            await client.query(
+              "SELECT phone FROM students WHERE center_id=$1 AND id=$2",
+              [centerId, studentId],
+            )
+          ).rows[0]?.phone ||
+          "";
+        await client.query(
+          `INSERT INTO notification_events (id, center_id, student_id, session_id, event_type, recipient_phone, channel, status, payload, created_at)
           VALUES ($1,$2,$3,$4,$5,$6,$7,'pending',$8,NOW()) ON CONFLICT (id) DO UPDATE SET status=EXCLUDED.status, payload=EXCLUDED.payload`,
-          [id, centerId, studentId, event.session_id || event.sessionId || null, event.event_type || event.eventType || "attendance", phone, event.channel || "push", JSON.stringify(event)]);
+          [
+            id,
+            centerId,
+            studentId,
+            sessionId,
+            eventType,
+            phone,
+            event.channel || "push",
+            JSON.stringify(validatedEvent),
+          ],
+        );
         break;
       }
 
       case "notification_template": {
         const template = payload.template || payload;
-        const templateId = template.id || template.templateId || context.entityId;
-        if (!templateId || !template.event_type && !template.eventType || !template.channel) {
-          throw new Error("Notification template requires id, event type, and channel.");
+        const templateId =
+          template.id || template.templateId || context.entityId;
+        if (
+          !templateId ||
+          (!template.event_type && !template.eventType) ||
+          !template.channel
+        ) {
+          throw new Error(
+            "Notification template requires id, event type, and channel.",
+          );
         }
         // Updates created by older mobile builds did not include isDefault.
         // Resolve the existing row by primary key first so those queued
@@ -2497,7 +5197,7 @@ class SyncProcessor {
            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW(),NOW())
            ON CONFLICT (center_id, event_type, channel, is_default) DO UPDATE SET
              template_body=EXCLUDED.template_body,
-             updated_by=EXCLUDED.updated_by, updated_at=NOW()` ,
+             updated_by=EXCLUDED.updated_by, updated_at=NOW()`,
           [
             templateId,
             centerId,
@@ -2516,35 +5216,113 @@ class SyncProcessor {
         const delivery = payload.delivery || payload;
         const id = delivery.id || delivery.deliveryId || context.entityId;
         const channel = delivery.channel || delivery.provider || "push";
-        await client.query(`INSERT INTO notification_deliveries
+        const notificationEventId =
+          delivery.notification_event_id || delivery.notificationEventId;
+        const eventResult = await client.query(
+          `SELECT id, event_type, student_id, session_id
+             FROM notification_events
+            WHERE center_id = $1 AND id = $2
+            FOR UPDATE`,
+          [centerId, notificationEventId],
+        );
+        const notificationEvent = eventResult.rows[0];
+        if (!notificationEvent) {
+          throw new Error(
+            "NOTIFICATION_EVENT_NOT_FOUND: delivery event has not synchronized yet.",
+          );
+        }
+        if (String(notificationEvent.event_type) === "absence") {
+          await SyncProcessor.validateExplicitAbsenceForNotification(client, {
+            centerId,
+            sessionId: notificationEvent.session_id,
+            studentId: notificationEvent.student_id,
+          });
+        }
+        await client.query(
+          `INSERT INTO notification_deliveries
           (id, center_id, notification_event_id, provider, status, retry_count, response_payload, created_at)
           VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())
           ON CONFLICT (id) DO UPDATE SET provider=EXCLUDED.provider, status=EXCLUDED.status,
             retry_count=EXCLUDED.retry_count, response_payload=EXCLUDED.response_payload`,
-          [id, centerId, delivery.notification_event_id || delivery.notificationEventId, channel, delivery.status === "pending" ? "queued" : (delivery.status || "queued"), Number(delivery.retry_count || 0), JSON.stringify(delivery.response_payload || delivery.responsePayload || {})]);
+          [
+            id,
+            centerId,
+            notificationEventId,
+            channel,
+            delivery.status === "pending"
+              ? "queued"
+              : delivery.status || "queued",
+            Number(delivery.retry_count || 0),
+            JSON.stringify(
+              delivery.response_payload || delivery.responsePayload || {},
+            ),
+          ],
+        );
         if (channel === "sms") {
-          const serviceState = await client.query("SELECT enabled FROM center_services WHERE center_id=$1 AND service_key='sms'", [centerId]);
-          if ((serviceState.rows[0] && serviceState.rows[0].enabled === false) || !zadxSmsProvider.isConfigured()) {
-            await client.query(`UPDATE notification_deliveries SET status='failed', response_payload=$1 WHERE id=$2 AND center_id=$3`, [JSON.stringify({ category: "sms_disabled" }), id, centerId]);
+          const serviceState = await client.query(
+            "SELECT enabled FROM center_services WHERE center_id=$1 AND service_key='sms'",
+            [centerId],
+          );
+          if (
+            (serviceState.rows[0] && serviceState.rows[0].enabled === false) ||
+            !zadxSmsProvider.isConfigured()
+          ) {
+            await client.query(
+              `UPDATE notification_deliveries SET status='failed', response_payload=$1 WHERE id=$2 AND center_id=$3`,
+              [JSON.stringify({ category: "sms_disabled" }), id, centerId],
+            );
             break;
           }
           try {
             const result = await zadxSmsProvider.send({
               to: delivery.recipient || delivery.recipientPhone,
-              message: delivery.rendered_message || delivery.renderedMessage || "",
+              message:
+                delivery.rendered_message || delivery.renderedMessage || "",
               idempotencyKey: `fixion-sms-${id}`,
             });
-            await client.query(`UPDATE notification_deliveries
+            await client.query(
+              `UPDATE notification_deliveries
               SET status='sent', provider_message_id=$1, response_payload=$2
               WHERE id=$3 AND center_id=$4`,
-              [result.providerMessageId, JSON.stringify({ httpStatus: result.httpStatus, providerMessageId: result.providerMessageId }), id, centerId]);
-            console.info("SMS delivery accepted", { deliveryId: id, centerId, provider: "zadx", httpStatus: result.httpStatus, providerMessageId: result.providerMessageId || null });
+              [
+                result.providerMessageId,
+                JSON.stringify({
+                  httpStatus: result.httpStatus,
+                  providerMessageId: result.providerMessageId,
+                }),
+                id,
+                centerId,
+              ],
+            );
+            console.info("SMS delivery accepted", {
+              deliveryId: id,
+              centerId,
+              provider: "zadx",
+              httpStatus: result.httpStatus,
+              providerMessageId: result.providerMessageId || null,
+            });
           } catch (error) {
-            await client.query(`UPDATE notification_deliveries
+            await client.query(
+              `UPDATE notification_deliveries
               SET status='failed', retry_count=retry_count+1, response_payload=$1
               WHERE id=$2 AND center_id=$3`,
-              [JSON.stringify({ category: error.category || "provider_error", httpStatus: error.httpStatus || null, retryable: Boolean(error.retryable) }), id, centerId]);
-            console.warn("SMS delivery failed", { deliveryId: id, centerId, provider: "zadx", category: error.category || "provider_error", httpStatus: error.httpStatus || null });
+              [
+                JSON.stringify({
+                  category: error.category || "provider_error",
+                  httpStatus: error.httpStatus || null,
+                  retryable: Boolean(error.retryable),
+                }),
+                id,
+                centerId,
+              ],
+            );
+            console.warn("SMS delivery failed", {
+              deliveryId: id,
+              centerId,
+              provider: "zadx",
+              category: error.category || "provider_error",
+              httpStatus: error.httpStatus || null,
+            });
           }
         }
         break;
@@ -2553,15 +5331,39 @@ class SyncProcessor {
       case "daily_closing": {
         const close = payload.closing || payload;
         const date = close.business_date || close.businessDate;
-        const closeAction = String(close.action || context.operationType || "").toLowerCase();
-        const reopen = closeAction === "reopen" || Boolean(close.reopenedBy || close.reopened_by);
-        await client.query(`INSERT INTO daily_closing_summaries (id, center_id, business_date, closed_by, total_sessions, total_attendees, total_revenue, cash_in_drawer, status, notes, closed_at)
+        const closeAction = String(
+          close.action || context.operationType || "",
+        ).toLowerCase();
+        const reopen =
+          closeAction === "reopen" ||
+          Boolean(close.reopenedBy || close.reopened_by);
+        await client.query(
+          `INSERT INTO daily_closing_summaries (id, center_id, business_date, closed_by, total_sessions, total_attendees, total_revenue, cash_in_drawer, status, notes, closed_at)
           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,${reopen ? "NULL" : "NOW()"})
           ON CONFLICT (center_id, business_date) DO UPDATE SET closed_by=EXCLUDED.closed_by,
             total_sessions=EXCLUDED.total_sessions, total_attendees=EXCLUDED.total_attendees,
             total_revenue=EXCLUDED.total_revenue, cash_in_drawer=EXCLUDED.cash_in_drawer,
             status=EXCLUDED.status, notes=EXCLUDED.notes, closed_at=EXCLUDED.closed_at`,
-          [close.id || context.entityId || `daily-${centerId}-${date}`, centerId, date, close.closed_by || close.closedBy || close.reopenedBy || userId, Number(close.total_sessions || 0), Number(close.total_attendees || 0), Number(close.total_revenue ?? close.totalRevenue ?? close.totalCash ?? 0), Number(close.cash_in_drawer ?? close.cashInDrawer ?? close.totalCash ?? 0), reopen ? "reopened" : "closed", close.reason || close.notes || null]);
+          [
+            close.id || context.entityId || `daily-${centerId}-${date}`,
+            centerId,
+            date,
+            close.closed_by || close.closedBy || close.reopenedBy || userId,
+            Number(close.total_sessions || 0),
+            Number(close.total_attendees || 0),
+            Number(
+              close.total_revenue ?? close.totalRevenue ?? close.totalCash ?? 0,
+            ),
+            Number(
+              close.cash_in_drawer ??
+                close.cashInDrawer ??
+                close.totalCash ??
+                0,
+            ),
+            reopen ? "reopened" : "closed",
+            close.reason || close.notes || null,
+          ],
+        );
         break;
       }
 

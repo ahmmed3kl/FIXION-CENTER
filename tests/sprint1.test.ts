@@ -9,6 +9,7 @@ import { DashboardService } from "../src/features/dashboard/DashboardService";
 import { PaymentRepository } from "../src/features/payments/PaymentRepository";
 import { ScannerService } from "../src/features/scanner/ScannerService";
 import { StudentRepository } from "../src/features/students/StudentRepository";
+import { configureTestCenterTimeZones } from "./helpers/centerTimeZone";
 
 describe("Sprint 1 - FIXION Mobile App Foundation & Complete Working Flow", () => {
   beforeAll(async () => {
@@ -21,6 +22,7 @@ describe("Sprint 1 - FIXION Mobile App Foundation & Complete Working Flow", () =
     // Login as Demo Admin for test setup
     await useAuthStore.getState().login("01000000001", "123456");
     await useAuthStore.getState().selectCenter("center-1");
+    configureTestCenterTimeZones();
   });
 
   describe("1. Card Code Normalization", () => {
@@ -267,8 +269,9 @@ describe("Sprint 1 - FIXION Mobile App Foundation & Complete Working Flow", () =
       // std-2 (present) and std-3 (makeup) attended
       expect(summary.presentCount + summary.lateCount).toBe(2);
 
-      // Absent count = 3 - 2 = 1 (std-1 hasn't attended yet)
-      expect(summary.absentCount).toBe(1);
+      // Missing attendance is unresolved; it is not an explicit absence.
+      expect(summary.absentCount).toBe(0);
+      expect(summary.unresolvedCount).toBe(1);
 
       // Today's collections include seed 250 + new 100 = 350
       expect(summary.todayCollections).toBeGreaterThanOrEqual(100);

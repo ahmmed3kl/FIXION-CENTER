@@ -8,6 +8,33 @@ import {
 describe("session attendance roster", () => {
   const sessionId = "destination-session";
 
+  it("counts only an explicit absent row as absent and leaves missing attendance unresolved", () => {
+    expect(calculateSessionAttendanceCounts(
+      ["absent", "present", "pending"],
+      [
+        { studentId: "absent", status: "absent", attendanceType: "present" },
+        { studentId: "present", status: "present", attendanceType: "present" },
+      ],
+    )).toEqual({
+      expected: 3,
+      present: 1,
+      absent: 1,
+      unresolved: 1,
+      late: 0,
+      makeup: 0,
+    });
+  });
+
+  it("lets explicit attendance from another device override an earlier absent row", () => {
+    expect(calculateSessionAttendanceCounts(
+      ["student"],
+      [
+        { studentId: "student", status: "absent", attendanceType: "present" },
+        { studentId: "student", status: "present", attendanceType: "present" },
+      ],
+    )).toMatchObject({ present: 1, absent: 0, unresolved: 0 });
+  });
+
   it("does not count a compensation-only visitor as an expected student or absent", () => {
     const expectedIds = getSessionExpectedStudentIds(sessionId, [
       { id: `exp-${sessionId}-member-1`, studentId: "member-1" },
@@ -31,7 +58,8 @@ describe("session attendance roster", () => {
     expect(calculateSessionAttendanceCounts(eligibleExpectedIds, attendance)).toEqual({
       expected: 2,
       present: 0,
-      absent: 2,
+      absent: 0,
+      unresolved: 2,
       late: 0,
       makeup: 1,
     });
@@ -118,6 +146,7 @@ describe("session attendance roster", () => {
       expected: 0,
       present: 0,
       absent: 0,
+      unresolved: 0,
       late: 0,
       makeup: 0,
     });
@@ -132,7 +161,8 @@ describe("session attendance roster", () => {
     expect(filtered).toEqual(["member"]);
     expect(calculateSessionAttendanceCounts(filtered, [])).toMatchObject({
       expected: 1,
-      absent: 1,
+      absent: 0,
+      unresolved: 1,
     });
   });
 

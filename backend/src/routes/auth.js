@@ -36,7 +36,7 @@ router.post("/login", async (req, res, next) => {
     // Lookup user by email or phone
     const userRes = await db.query(
       `SELECT u.id, u.center_id, u.full_name, u.email, u.phone, u.password_hash, u.role, u.permissions, u.status as user_status,
-              c.name as center_name, c.code as center_code, c.status as center_status
+              c.name as center_name, c.code as center_code, c.time_zone as center_time_zone, c.status as center_status
        FROM users u
        JOIN centers c ON c.id = u.center_id
        WHERE LOWER(u.email) = $1 OR u.phone = $1`,
@@ -95,7 +95,7 @@ router.post("/login", async (req, res, next) => {
     }
 
     const centerMemberships = await db.query(
-      `SELECT uc.center_id, c.name, c.code
+      `SELECT uc.center_id, c.name, c.code, c.time_zone AS "timeZone"
        FROM user_centers uc
        JOIN centers c ON c.id = uc.center_id
        WHERE uc.user_id = $1 AND c.status = 'active'
@@ -105,14 +105,14 @@ router.post("/login", async (req, res, next) => {
     // The legacy users.center_id is also a valid membership. Older accounts
     // may have a user_centers row for only some of their centers, which used
     // to make the primary center disappear from the switcher.
-    const membershipCenters = centerMemberships.rows.map((row) => ({ id: row.center_id, name: row.name, code: row.code }));
+    const membershipCenters = centerMemberships.rows.map((row) => ({ id: row.center_id, name: row.name, code: row.code, timeZone: row.timeZone }));
     if (!membershipCenters.some((center) => center.id === user.center_id)) {
-      membershipCenters.unshift({ id: user.center_id, name: user.center_name, code: user.center_code });
+      membershipCenters.unshift({ id: user.center_id, name: user.center_name, code: user.center_code, timeZone: user.center_time_zone || null });
     }
     let centerIds = membershipCenters.map((center) => center.id);
     let centers = membershipCenters;
     if (user.role === "admin" || user.role === "owner") {
-      const allCenters = await db.query("SELECT id, name, code FROM centers WHERE status = 'active' ORDER BY name ASC");
+      const allCenters = await db.query('SELECT id, name, code, time_zone AS "timeZone" FROM centers WHERE status = \'active\' ORDER BY name ASC');
       centers = allCenters.rows;
       centerIds = centers.map((center) => center.id);
     }
@@ -159,7 +159,7 @@ router.post("/login", async (req, res, next) => {
 router.get("/me", authMiddleware, async (req, res, next) => {
   try {
     const centersResult = await db.query(
-      "SELECT id, name, code FROM centers WHERE id = ANY($1::text[]) AND status = 'active' ORDER BY name ASC",
+      'SELECT id, name, code, time_zone AS "timeZone" FROM centers WHERE id = ANY($1::text[]) AND status = \'active\' ORDER BY name ASC',
       [req.user.centerIds || []],
     );
     const selected = centersResult.rows.find((center) => center.id === req.centerId) || centersResult.rows[0];

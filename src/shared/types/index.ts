@@ -94,6 +94,7 @@ export interface Center {
   code: string;
   phone?: string;
   address?: string;
+  timeZone?: string | null;
 }
 
 export interface StudentCard {
@@ -277,7 +278,7 @@ export interface Attendance {
   studentId: string;
   sessionId: string;
   checkInTime: string;
-  status: "present" | "late";
+  status: "present" | "late" | "absent";
   isLate: boolean;
   attendanceType: AttendanceType;
   originalAbsenceId?: string;
@@ -297,6 +298,7 @@ export interface StudentGroupAttendanceSummary {
   expectedSessions: number;
   presentCount: number;
   absentCount: number;
+  unresolvedCount: number;
   makeupCount: number;
 }
 
@@ -424,9 +426,8 @@ export interface DebtCycle {
   // canonical server values.
   cycleType?: "monthly" | "group" | "per_session" | "package";
   /**
-   * How this billing period is actually settled.  New group periods start
-   * as pending because the student's first payment determines whether the
-   * centre is charging the discounted monthly price or attended classes.
+   * How this billing period is actually settled. New group periods remain
+   * pending until the billing mode is explicitly selected.
    */
   billingMode?: "pending" | "monthly" | "per_session" | "package";
   cycleNumber: number;
@@ -685,6 +686,7 @@ export interface DailyAttendanceReport {
     expectedCount: number;
     presentCount: number;
     absentCount: number;
+    unresolvedCount: number;
     lateCount: number;
     makeupCount: number;
     attendanceRate: number;
@@ -694,6 +696,7 @@ export interface DailyAttendanceReport {
     totalExpected: number;
     totalPresent: number;
     totalAbsent: number;
+    totalUnresolved: number;
     attendanceRate: number;
   };
 }
@@ -709,7 +712,7 @@ export interface StudentAttendanceReport {
     sessionDate: string;
     groupName: string;
     subjectName: string;
-    status: "present" | "late" | "absent" | "makeup" | "not_expected";
+    status: "present" | "late" | "absent" | "makeup" | "unresolved" | "not_expected";
     checkInTime?: string;
     isExternal?: boolean;
   }[];
@@ -718,6 +721,7 @@ export interface StudentAttendanceReport {
     presentCount: number;
     lateCount: number;
     absentCount: number;
+    unresolvedCount: number;
     makeupCount: number;
     attendanceRate: number;
   };

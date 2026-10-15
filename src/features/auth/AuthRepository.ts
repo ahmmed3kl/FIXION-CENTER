@@ -3,13 +3,24 @@ import { env } from "../../config/env";
 import { ApiClient } from "../../core/api";
 import { DatabaseService } from "../../core/database";
 import { DeviceService } from "../../core/device";
-import { UnauthorizedError } from "../../core/errors";
+import { ConflictError, UnauthorizedError } from "../../core/errors";
 import {
     RolePermissions,
     resolveUserPermissions,
 } from "../../core/permissions";
 import { SecureStorageService } from "../../core/storage";
 import { Center, User } from "../../shared/types";
+import { LastAuthorizedRouteStore } from "./lastAuthorizedRoute";
+
+export class CenterTimeZoneMismatchError extends ConflictError {
+  constructor(centerId: string) {
+    super(
+      `Configured time zone changed for center ${centerId}; refusing to replace the local identity setting.`,
+      "المنطقة الزمنية للمركز تختلف عن الإعداد المحلي المثبت؛ يلزم فحص الإعداد يدويًا.",
+    );
+    this.name = "CenterTimeZoneMismatchError";
+  }
+}
 
 export const DEMO_USERS: User[] = [
   {
@@ -127,15 +138,13 @@ export class AuthRepository {
 
         // Cache every center membership locally so the switcher can show all
         // centers, not only the center selected during login.
-        try {
-          const db = DatabaseService.getDb();
-          const centers = data.user.centers?.length
-            ? data.user.centers
-            : [{ id: data.user.centerId, name: data.user.centerName || "المركز التعليمي", code: data.user.centerId }];
-          for (const center of centers) {
-            db.runSync(`INSERT OR REPLACE INTO centers (id, name, code) VALUES (?, ?, ?);`, [center.id, center.name || "المركز التعليمي", center.code || center.id]);
-          }
-        } catch {}
+        const db = DatabaseService.getDb();
+        const centers = data.user.centers?.length
+          ? data.user.centers
+          : [{ id: data.user.centerId, name: data.user.centerName || "المركز التعليمي", code: data.user.centerId }];
+        for (const center of centers) {
+          this.persistCenterMetadata(db, center);
+        }
 
         // Auto-register device with live backend
         try {
@@ -162,6 +171,10 @@ export class AuthRepository {
 
         return { user, token: data.token };
       } catch (apiErr: any) {
+        if (apiErr instanceof CenterTimeZoneMismatchError) {
+          await SecureStorageService.clearSession();
+          throw apiErr;
+        }
         // If server returns invalid credentials, throw directly
         if (
           apiErr?.statusCode === 401 ||
@@ -283,13 +296,14 @@ export class AuthRepository {
       };
       const db = DatabaseService.getDb();
       for (const center of data.centers || []) {
-        db.runSync("INSERT OR REPLACE INTO centers (id, name, code) VALUES (?, ?, ?)", [center.id, center.name, center.code]);
+        this.persistCenterMetadata(db, center);
       }
       if (options.persist !== false) {
         await SecureStorageService.setItem("user_session", JSON.stringify(user));
       }
       return user;
-    } catch {
+    } catch (error) {
+      if (error instanceof CenterTimeZoneMismatchError) throw error;
       // Offline startup must continue using the cached session and centers.
       return null;
     }
@@ -297,12 +311,13 @@ export class AuthRepository {
 
   static async logout(): Promise<void> {
     await SecureStorageService.clearSession();
+    await LastAuthorizedRouteStore.clear();
   }
 
   static getCentersForUser(centerIds: string[]): Center[] {
     try {
       const db = DatabaseService.getDb();
-      const all = db.getAllSync<Center>("SELECT id, name, code FROM centers");
+      const all = db.getAllSync<Center>("SELECT id, name, code, time_zone as timeZone FROM centers");
       const known = new Map(all.map((center) => [center.id, center]));
       return centerIds.map((id) => known.get(id) || {
         id,
@@ -319,5 +334,28 @@ export class AuthRepository {
           : "الفرع الرئيسي - مصر الجديدة",
       code: id,
     }));
+  }
+
+  private static persistCenterMetadata(
+    db: ReturnType<typeof DatabaseService.getDb>,
+    center: Center,
+  ): void {
+    const existing = db.getFirstSync<{ timeZone?: string | null }>(
+      "SELECT time_zone as timeZone FROM centers WHERE id = ?",
+      [center.id],
+    );
+    const localTimeZone = existing?.timeZone?.trim();
+    const serverTimeZone = center.timeZone?.trim();
+    if (localTimeZone && serverTimeZone && localTimeZone !== serverTimeZone) {
+      throw new CenterTimeZoneMismatchError(center.id);
+    }
+    db.runSync(
+      `INSERT INTO centers (id, name, code, time_zone) VALUES (?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         name = excluded.name,
+         code = excluded.code,
+         time_zone = excluded.time_zone`,
+      [center.id, center.name || "المركز التعليمي", center.code || center.id, localTimeZone || serverTimeZone || null],
+    );
   }
 }

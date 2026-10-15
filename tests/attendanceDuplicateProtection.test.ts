@@ -16,6 +16,16 @@ describe("attendance duplicate protection", () => {
     await useAuthStore.getState().selectCenter("center-1");
 
     const db = DatabaseService.getDb();
+    const center = db.getFirstSync<{ id: string; name: string; code: string }>(
+      "SELECT id, name, code FROM centers WHERE id = ?",
+      ["center-1"],
+    );
+    if (!center) throw new Error("The local attendance test center was not seeded.");
+    db.runSync(
+      `INSERT INTO centers (id, name, code, time_zone) VALUES (?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET time_zone = excluded.time_zone`,
+      [center.id, center.name, center.code, "Africa/Cairo"],
+    );
     db.runSync(
       `INSERT INTO sessions
        (id, center_id, group_id, subject_id, teacher_id, session_date, start_time, end_time, status, created_at)
@@ -292,6 +302,7 @@ describe("attendance duplicate protection", () => {
       sessionId,
       studentId: "std-1",
       previousStatus: "late",
+      expectedOperationId: attendance.operationId,
     });
     const orderedAttendanceOps = SyncRepository.getPendingOperations("center-1")
       .filter((operation) => operation.entityType === "attendance" && operation.entityId === attendance.id)
