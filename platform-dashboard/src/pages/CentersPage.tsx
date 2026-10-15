@@ -12,7 +12,67 @@ export function CentersPage() {
   return <section><div className="page-heading"><div><p className="eyebrow">إدارة المنصة</p><h2>المراكز</h2><p className="muted">إدارة ومتابعة مراكز FIXION من مكان واحد.</p></div><button className="primary-button compact" onClick={() => setShowForm(true)}>+ إضافة مركز</button></div><div className="toolbar"><input placeholder="البحث باسم المركز أو الكود" value={search} onChange={event => setSearch(event.target.value)} /><select value={status} onChange={event => setStatus(event.target.value)}><option value="">كل الحالات</option><option value="active">نشط</option><option value="suspended">موقوف</option></select><button className="secondary-button" onClick={() => void load(pagination.page)} disabled={loading}>تحديث</button></div>{error && <div className="alert error page-alert">{error}</div>}{loading ? <div className="panel loading-state">جارٍ تحميل المراكز...</div> : items.length === 0 ? <div className="panel empty-state">لا يوجد مراكز مطابقة للبحث</div> : <div className="panel table-wrap"><table><thead><tr><th>اسم المركز</th><th>الحالة</th><th>الطلاب</th><th>الأجهزة النشطة</th><th>عمليات معلقة</th><th>عمليات فاشلة</th><th>تاريخ الإنشاء</th><th /></tr></thead><tbody>{items.map(center => <tr key={center.id}><td><Link to={`/centers/${center.id}`}>{center.name}</Link><small>{center.code}</small></td><td><StatusBadge status={center.status} /></td><td>{center.student_count ?? 0}</td><td>{center.active_device_count ?? 0}</td><td>{center.pending_operations ?? 0}</td><td>{center.failed_operations ?? 0}</td><td>{new Date(center.created_at).toLocaleDateString("ar-EG")}</td><td><Link className="text-link" to={`/centers/${center.id}`}>التفاصيل</Link></td></tr>)}</tbody></table></div>}<div className="pagination"><span className="muted">{pagination.total} مركز</span><button className="secondary-button" disabled={pagination.page <= 1 || loading} onClick={() => void load(pagination.page - 1)}>السابق</button><span>صفحة {pagination.page} من {Math.max(1, pagination.totalPages)}</span><button className="secondary-button" disabled={pagination.page >= pagination.totalPages || loading} onClick={() => void load(pagination.page + 1)}>التالي</button></div>{showForm && <CenterForm onClose={() => setShowForm(false)} onSaved={() => { setShowForm(false); void load(1); }} />}</section>;
 }
 
-function CenterForm({ onClose, onSaved }: { onClose: () => void; onSaved: () => void }) { const [name, setName] = useState(""); const [code, setCode] = useState(""); const [error, setError] = useState(""); const [saving, setSaving] = useState(false); async function submit(event: FormEvent) { event.preventDefault(); if (name.trim().length < 2 || !code.trim()) { setError("اسم المركز والكود مطلوبان."); return; } setSaving(true); try { await platformApi.createCenter({ name: name.trim(), code: code.trim() }); onSaved(); } catch (err) { setError(err instanceof ApiError ? err.message : "تعذر إنشاء المركز."); } finally { setSaving(false); } } return <div className="modal-backdrop"><form className="modal-card" onSubmit={submit}><h3>إضافة مركز</h3><label>اسم المركز<input value={name} onChange={event => setName(event.target.value)} maxLength={255} required /></label><label>كود المركز<input value={code} onChange={event => setCode(event.target.value)} maxLength={64} required /></label>{error && <div className="alert error">{error}</div>}<div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>إلغاء</button><button className="primary-button" disabled={saving}>{saving ? "جارٍ الحفظ..." : "حفظ"}</button></div></form></div>; }
+function CenterForm({ onClose, onSaved }: { onClose: () => void; onSaved: () => void }) {
+  const [name, setName] = useState("");
+  const [code, setCode] = useState("");
+  const [timeZone, setTimeZone] = useState("");
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    if (name.trim().length < 2 || !code.trim() || !timeZone.trim()) {
+      setError("اسم المركز والكود والمنطقة الزمنية مطلوبة.");
+      return;
+    }
+    setSaving(true);
+    try {
+      await platformApi.createCenter({
+        name: name.trim(),
+        code: code.trim(),
+        timeZone: timeZone.trim(),
+      });
+      onSaved();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "تعذر إنشاء المركز.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="modal-backdrop">
+      <form className="modal-card" onSubmit={submit}>
+        <h3>إضافة مركز</h3>
+        <label>
+          اسم المركز
+          <input value={name} onChange={(event) => setName(event.target.value)} maxLength={255} required />
+        </label>
+        <label>
+          كود المركز
+          <input value={code} onChange={(event) => setCode(event.target.value)} maxLength={64} required />
+        </label>
+        <label>
+          المنطقة الزمنية (IANA)
+          <input
+            value={timeZone}
+            onChange={(event) => setTimeZone(event.target.value)}
+            placeholder="مثال: Africa/Cairo"
+            autoCapitalize="none"
+            autoCorrect="off"
+            maxLength={64}
+            required
+          />
+        </label>
+        {error && <div className="alert error">{error}</div>}
+        <div className="modal-actions">
+          <button type="button" className="secondary-button" onClick={onClose}>إلغاء</button>
+          <button className="primary-button" disabled={saving}>{saving ? "جارٍ الحفظ..." : "حفظ"}</button>
+        </div>
+      </form>
+    </div>
+  );
+}
 
 function CenterTimeZoneForm({
   center,

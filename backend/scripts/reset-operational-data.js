@@ -4,11 +4,12 @@
  * Preserves the database schema and platform_admins, removes all tenant/
  * operational rows, then creates exactly two centers and one admin user.
  * Run only against the intended PostgreSQL database:
- *   $env:DATABASE_URL='...'; $env:RESET_ADMIN_PASSWORD='...'; node scripts/reset-operational-data.js
+ *   $env:DATABASE_URL='...'; $env:RESET_ADMIN_PASSWORD='...'; $env:RESET_CENTER_TIME_ZONE='Africa/Cairo'; node scripts/reset-operational-data.js
  */
 const bcrypt = require("bcryptjs");
 const crypto = require("crypto");
 const db = require("../src/db");
+const { normalizeIanaTimeZone } = require("../src/utils/timeZone");
 
 const centers = [
   { id: "center-reset-1", name: "مركز النور 4821", code: "NOOR-4821" },
@@ -23,6 +24,10 @@ const account = {
 async function main() {
   if (!process.env.DATABASE_URL) {
     throw new Error("DATABASE_URL is required; no data was changed.");
+  }
+  const centerTimeZone = normalizeIanaTimeZone(process.env.RESET_CENTER_TIME_ZONE);
+  if (!centerTimeZone) {
+    throw new Error("RESET_CENTER_TIME_ZONE must be a valid IANA time zone; no data was changed.");
   }
   const password = process.env.RESET_ADMIN_PASSWORD;
   if (!password) {
@@ -54,9 +59,9 @@ async function main() {
 
   for (const center of centers) {
       await client.query(
-        `INSERT INTO centers (id, name, code, status)
-         VALUES ($1, $2, $3, 'active')`,
-      [center.id, center.name, center.code],
+        `INSERT INTO centers (id, name, code, time_zone, status)
+         VALUES ($1, $2, $3, $4, 'active')`,
+      [center.id, center.name, center.code, centerTimeZone],
     );
     await client.query(
       `INSERT INTO center_data_state (center_id, reset_generation, updated_at)
@@ -80,7 +85,10 @@ async function main() {
     );
   });
 
-  console.log(JSON.stringify({ centers, account: { ...account, password: "(provided via RESET_ADMIN_PASSWORD)" } }, null, 2));
+  console.log(JSON.stringify({
+    centers: centers.map((center) => ({ ...center, timeZone: centerTimeZone })),
+    account: { ...account, password: "(provided via RESET_ADMIN_PASSWORD)" },
+  }, null, 2));
 }
 
 main().catch((error) => {

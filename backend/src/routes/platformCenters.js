@@ -50,9 +50,8 @@ router.post("/", async (req, res, next) => {
     const name = String(req.body.name || "").trim();
     const code = String(req.body.code || "").trim();
     if (name.length < 2 || name.length > 255 || !code || code.length > 64) throw new AppError("VALIDATION_ERROR", "Valid center name and code are required.", "اسم المركز والكود مطلوبان.", 400);
-    const hasTimeZone = Object.prototype.hasOwnProperty.call(req.body, "timeZone");
-    const timeZone = hasTimeZone ? normalizeIanaTimeZone(req.body.timeZone) : null;
-    if (hasTimeZone && !timeZone) throw new AppError("VALIDATION_ERROR", "A valid IANA time zone is required.", "أدخل منطقة زمنية صالحة بصيغة IANA.", 400);
+    const timeZone = normalizeIanaTimeZone(req.body.timeZone);
+    if (!timeZone) throw new AppError("VALIDATION_ERROR", "A valid IANA time zone is required to create a center.", "أدخل المنطقة الزمنية الصحيحة للمركز بصيغة IANA.", 400);
     const id = `center-${crypto.randomUUID()}`;
     const result = await db.query("INSERT INTO centers (id, name, code, phone, address, time_zone, status) VALUES ($1, $2, $3, $4, $5, $6, 'active') RETURNING id, name, code, phone, address, time_zone, status, created_at, updated_at", [id, name, code, req.body.phone || null, req.body.address || null, timeZone]);
     await record({ actor: req.platformAdmin, centerId: id, action: "center.created", entityType: "center", entityId: id, after: { name, code, phone: req.body.phone || null, address: req.body.address || null, time_zone: timeZone, status: "active" } });

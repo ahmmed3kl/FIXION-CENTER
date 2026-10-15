@@ -698,10 +698,10 @@ CREATE INDEX IF NOT EXISTS idx_audit_center_time ON audit_logs(center_id, timest
 -- ------------------------------------------------------------------------------
 
 -- Seed Demo Centers
-INSERT INTO centers (id, name, code, phone, address, status)
+INSERT INTO centers (id, name, code, phone, address, time_zone, status)
 VALUES 
-  ('center-1', 'سنتر النخبة التعليمي - الفرع الرئيسي', 'ELITE-01', '01000000000', 'القاهرة - مدينة نصر', 'active'),
-  ('center-2', 'سنتر التفوق - فرع الدقي', 'TAFAWOQ-02', '01100000000', 'الجيزة - الدقي', 'active')
+  ('center-1', 'سنتر النخبة التعليمي - الفرع الرئيسي', 'ELITE-01', '01000000000', 'القاهرة - مدينة نصر', 'Africa/Cairo', 'active'),
+  ('center-2', 'سنتر التفوق - فرع الدقي', 'TAFAWOQ-02', '01100000000', 'الجيزة - الدقي', 'Africa/Cairo', 'active')
 ON CONFLICT (id) DO NOTHING;
 
 -- Seed Demo Users (Password: 123456 -> BCrypt / SHA256 hashed placeholder)

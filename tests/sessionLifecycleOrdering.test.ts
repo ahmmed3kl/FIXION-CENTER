@@ -6,7 +6,10 @@ import { AbsenceReportsService } from "../src/features/attendance/AbsenceReports
 import { useAuthStore } from "../src/features/auth/useAuthStore";
 import { DashboardService } from "../src/features/dashboard/DashboardService";
 import { SessionRepository } from "../src/features/sessions/SessionRepository";
-import { SessionDateService } from "../src/features/sessions/SessionDateService";
+import {
+  CenterTimeZoneConfigurationError,
+  SessionDateService,
+} from "../src/features/sessions/SessionDateService";
 import { SessionGenerationService } from "../src/features/sessions/SessionGenerationService";
 import { ScannerService } from "../src/features/scanner/ScannerService";
 import { sortSessionsByActivation } from "../src/features/sessions/sessionOrdering";
@@ -97,11 +100,27 @@ describe("attendance session lifecycle and ordering", () => {
     setCenterTimeZone(null);
     expect(() => AttendanceSessionService.ensureSessionForGroup("grp-1", date, scheduleId))
       .toThrow("has no configured IANA time zone");
+    let missingTimeZoneError: unknown;
+    try {
+      SessionDateService.getCenterTimeZone("center-1");
+    } catch (error) {
+      missingTimeZoneError = error;
+    }
+    expect(missingTimeZoneError).toBeInstanceOf(CenterTimeZoneConfigurationError);
+    expect(missingTimeZoneError).toMatchObject({ issue: "missing" });
     expect(() => SessionGenerationService.generateSessionsForRange(date, date))
       .toThrow("has no configured IANA time zone");
     setCenterTimeZone("Invalid/Zone");
     expect(() => AttendanceSessionService.ensureSessionForGroup("grp-1", date, scheduleId))
       .toThrow("invalid IANA time zone");
+    let invalidTimeZoneError: unknown;
+    try {
+      SessionDateService.getCenterTimeZone("center-1");
+    } catch (error) {
+      invalidTimeZoneError = error;
+    }
+    expect(invalidTimeZoneError).toBeInstanceOf(CenterTimeZoneConfigurationError);
+    expect(invalidTimeZoneError).toMatchObject({ issue: "invalid" });
     expect(db.getFirstSync(
       "SELECT id FROM sessions WHERE center_id = ? AND id = ?",
       ["center-1", stableSessionId("center-1", "grp-1", scheduleId, date)],

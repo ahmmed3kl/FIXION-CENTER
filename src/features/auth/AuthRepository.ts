@@ -2,6 +2,7 @@ import { Platform } from "react-native";
 import { env } from "../../config/env";
 import { ApiClient } from "../../core/api";
 import { DatabaseService } from "../../core/database";
+import { LocalDataEvents } from "../../core/database/localDataEvents";
 import { DeviceService } from "../../core/device";
 import { ConflictError, UnauthorizedError } from "../../core/errors";
 import {
@@ -349,13 +350,22 @@ export class AuthRepository {
     if (localTimeZone && serverTimeZone && localTimeZone !== serverTimeZone) {
       throw new CenterTimeZoneMismatchError(center.id);
     }
+    const nextTimeZone = localTimeZone || serverTimeZone || null;
+    const timeZoneChanged = (existing?.timeZone || null) !== nextTimeZone;
     db.runSync(
       `INSERT INTO centers (id, name, code, time_zone) VALUES (?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET
          name = excluded.name,
          code = excluded.code,
          time_zone = excluded.time_zone`,
-      [center.id, center.name || "المركز التعليمي", center.code || center.id, localTimeZone || serverTimeZone || null],
+      [center.id, center.name || "المركز التعليمي", center.code || center.id, nextTimeZone],
     );
+    if (timeZoneChanged) {
+      LocalDataEvents.emit({
+        centerId: center.id,
+        entityType: "center",
+        entityId: center.id,
+      });
+    }
   }
 }

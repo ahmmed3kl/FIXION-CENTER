@@ -5269,15 +5269,17 @@ export class DatabaseService {
     const todayDayOfWeek = new Date().getDay();
 
     // 1. Centers
-    db.runSync("INSERT INTO centers (id, name, code) VALUES (?, ?, ?)", [
+    db.runSync("INSERT INTO centers (id, name, code, time_zone) VALUES (?, ?, ?, ?)", [
       "center-1",
       "مركز النور التعليمي",
       "NOOR",
+      "Africa/Cairo",
     ]);
-    db.runSync("INSERT INTO centers (id, name, code) VALUES (?, ?, ?)", [
+    db.runSync("INSERT INTO centers (id, name, code, time_zone) VALUES (?, ?, ?, ?)", [
       "center-2",
       "مركز الأمل التعليمي",
       "AMAL",
+      "Africa/Cairo",
     ]);
 
     // 2. Teachers

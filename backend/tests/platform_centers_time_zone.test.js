@@ -27,11 +27,45 @@ stubModule("../src/services/auditService", {
 });
 
 const router = require("../src/routes/platformCenters");
+const createLayer = router.stack.find(
+  (layer) => layer.route?.path === "/" && layer.route.methods.post,
+);
+assert.ok(createLayer, "platform centers router exposes a POST center route");
+const createHandler = createLayer.route.stack[0].handle;
 const patchLayer = router.stack.find(
   (layer) => layer.route?.path === "/:centerId" && layer.route.methods.patch,
 );
 assert.ok(patchLayer, "platform centers router exposes a PATCH center route");
 const patchHandler = patchLayer.route.stack[0].handle;
+
+async function invokeCreate(body) {
+  let nextError = null;
+  let responseBody = null;
+  let responseStatus = null;
+  const response = {
+    status(status) {
+      responseStatus = status;
+      return this;
+    },
+    json(value) {
+      responseBody = value;
+      return this;
+    },
+  };
+
+  await createHandler(
+    {
+      body,
+      platformAdmin: { id: "admin-test" },
+    },
+    response,
+    (error) => {
+      nextError = error;
+    },
+  );
+
+  return { nextError, responseBody, responseStatus };
+}
 
 async function invokePatch(body) {
   let nextError = null;
@@ -57,6 +91,51 @@ async function invokePatch(body) {
 
   return { nextError, responseBody };
 }
+
+test("requires a valid IANA time zone before creating a center", async () => {
+  let queryCount = 0;
+  queryImplementation = async () => {
+    queryCount += 1;
+    return { rows: [] };
+  };
+
+  const { nextError } = await invokeCreate({
+    name: "Test Center",
+    code: "TEST",
+  });
+
+  assert.equal(nextError?.code, "VALIDATION_ERROR");
+  assert.equal(nextError?.statusCode, 400);
+  assert.equal(queryCount, 0);
+});
+
+test("persists the validated IANA time zone during center creation", async () => {
+  let call;
+  queryImplementation = async (sql, params) => {
+    call = { sql, params };
+    return {
+      rows: [{
+        id: "center-test",
+        name: "Test Center",
+        code: "TEST",
+        time_zone: "Africa/Cairo",
+        status: "active",
+      }],
+    };
+  };
+
+  const { nextError, responseBody, responseStatus } = await invokeCreate({
+    name: "Test Center",
+    code: "TEST",
+    timeZone: "Africa/Cairo",
+  });
+
+  assert.equal(nextError, null);
+  assert.equal(responseStatus, 201);
+  assert.equal(responseBody.center.time_zone, "Africa/Cairo");
+  assert.match(call.sql, /INSERT INTO centers .*time_zone/);
+  assert.equal(call.params[5], "Africa/Cairo");
+});
 
 test("rejects invalid IANA time zones before querying the database", async () => {
   let queryCount = 0;

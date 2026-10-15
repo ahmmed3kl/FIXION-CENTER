@@ -31,6 +31,7 @@ import {
     DashboardService,
     DashboardSummary,
 } from "../../features/dashboard/DashboardService";
+import { CenterTimeZoneConfigurationError } from "../../features/sessions/SessionDateService";
 import { AppCard } from "../../shared/components";
 import { ConnectivityState } from "../../shared/types";
 
@@ -60,6 +61,7 @@ export default function DashboardScreen() {
   const hasInitialLoadedRef = useRef(false);
 
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
+  const [summaryError, setSummaryError] = useState<string | null>(null);
   const [syncStats, setSyncStats] = useState({ pending: 0, syncing: 0, synced: 0, failed: 0, conflict: 0, total: 0 });
   const [connectivity, setConnectivity] =
     useState<ConnectivityState>("offline");
@@ -71,18 +73,34 @@ export default function DashboardScreen() {
     // hydrated. Use the id as the readiness signal so the dashboard does not
     // render a false all-zero snapshot during app startup.
     if (!activeCenterId) return;
-    try {
-      setSummary(
-        canViewAttendance || canViewFinance || canViewSessions
-          ? DashboardService.getTodaySummary()
-          : null,
-      );
+    if (canViewAttendance || canViewFinance || canViewSessions) {
+      try {
+        setSummary(DashboardService.getTodaySummary());
+        setSummaryError(null);
+      } catch (error) {
+        setSummary(null);
+        if (error instanceof CenterTimeZoneConfigurationError) {
+          setSummaryError(
+            error.issue === "missing"
+              ? "المنطقة الزمنية للمركز غير مضبوطة. اطلب من مسؤول المنصة تحديد منطقة IANA الصحيحة من صفحة تفاصيل المركز، مثل Africa/Cairo. لن يستخدم التطبيق توقيت الجهاز بدلًا منها."
+              : "المنطقة الزمنية المسجلة للمركز غير صالحة. اطلب من مسؤول المنصة تصحيحها من صفحة تفاصيل المركز.",
+          );
+        } else {
+          console.error("Error loading dashboard summary:", error);
+          setSummaryError("تعذر تحميل ملخص اليوم. اسحب للتحديث أو تحقق من قاعدة البيانات المحلية.");
+        }
+      }
+    } else {
+      setSummary(null);
+      setSummaryError(null);
+    }
 
+    try {
       const stats = SyncRepository.getStats(activeCenterId);
       setSyncStats(stats);
       setConnectivity(ConnectivityService.getState());
-    } catch (e) {
-      console.error("Error loading dashboard data:", e);
+    } catch (error) {
+      console.error("Error loading dashboard sync data:", error);
     }
   }, [activeCenterId, canViewAttendance, canViewFinance, canViewSessions]);
 
@@ -209,6 +227,18 @@ export default function DashboardScreen() {
           </View>
         </View>
 
+        {summaryError ? (
+          <View style={styles.warningBanner}>
+            <View style={styles.warningContent}>
+              <Ionicons name="warning-outline" size={24} color="#F59E0B" />
+              <View style={styles.warningTextWrapper}>
+                <Text style={styles.warningTitle}>ملخص اليوم غير متاح</Text>
+                <Text style={styles.warningText}>{summaryError}</Text>
+              </View>
+            </View>
+          </View>
+        ) : null}
+
         {canCreateAttendance ? <TouchableOpacity
           activeOpacity={0.85}
           onPress={() => router.push("/(main)/scanner")}
@@ -261,7 +291,7 @@ export default function DashboardScreen() {
         )}
 
         {/* TODAY SUMMARY CARD */}
-        {canViewAttendance ? <>
+        {canViewAttendance && summary ? <>
         <AppCard style={styles.summaryCard}>
           <View style={styles.sectionHeadingRow}>
             <View style={styles.sectionTitleGroup}>
@@ -275,7 +305,7 @@ export default function DashboardScreen() {
               styles={styles}
               icon="calendar"
               label={Strings.expectedAttendance}
-              value={formatNumber(summary?.expectedCount || 0)}
+              value={formatNumber(summary.expectedCount)}
               color={Colors.primary}
               textColor={Colors.primaryDark}
               backgroundColor={Colors.primaryMuted}
@@ -284,7 +314,7 @@ export default function DashboardScreen() {
               styles={styles}
               icon="people"
               label={Strings.presentAttendance}
-              value={formatNumber(summary?.presentCount || 0)}
+              value={formatNumber(summary.presentCount)}
               color={Colors.success}
               textColor={Colors.successText}
               backgroundColor={Colors.successLight}
@@ -293,7 +323,7 @@ export default function DashboardScreen() {
               styles={styles}
               icon="time"
               label={Strings.lateAttendance}
-              value={formatNumber(summary?.lateCount || 0)}
+              value={formatNumber(summary.lateCount)}
               color={Colors.warning}
               textColor={Colors.warningText}
               backgroundColor={Colors.warningLight}
@@ -302,7 +332,7 @@ export default function DashboardScreen() {
               styles={styles}
               icon="close-circle"
               label={Strings.absentAttendance}
-              value={formatNumber(summary?.absentCount || 0)}
+              value={formatNumber(summary.absentCount)}
               color={Colors.danger}
               textColor={Colors.dangerText}
               backgroundColor={Colors.dangerLight}
@@ -311,7 +341,7 @@ export default function DashboardScreen() {
               styles={styles}
               icon="repeat"
               label="لم تُحسم"
-              value={formatNumber(summary?.unresolvedCount || 0)}
+              value={formatNumber(summary.unresolvedCount)}
               color={Colors.primary}
               textColor={Colors.primaryDark}
               backgroundColor={Colors.primaryMuted}
@@ -320,7 +350,7 @@ export default function DashboardScreen() {
               styles={styles}
               icon="repeat"
               label="تعويض"
-              value={formatNumber(summary?.makeupCount || 0)}
+              value={formatNumber(summary.makeupCount)}
               color={Colors.warning}
               textColor={Colors.warningText}
               backgroundColor={Colors.warningLight}
@@ -343,7 +373,7 @@ export default function DashboardScreen() {
               </View>
             </View>
             <Text numberOfLines={1} adjustsFontSizeToFit style={styles.financialAmount}>
-              {formatCurrency(summary?.todayCollections || 0)}
+              {summary ? formatCurrency(summary.todayCollections) : "—"}
             </Text>
           </AppCard> : null}
 
@@ -357,12 +387,12 @@ export default function DashboardScreen() {
             </View>
             <View style={styles.sessionStatusRow}>
               <View style={styles.sessionCountBlock}>
-                <Text style={styles.sessionCount}>{formatNumber(summary?.openSessions || 0)}</Text>
+                <Text style={styles.sessionCount}>{summary ? formatNumber(summary.openSessions) : "—"}</Text>
                 <Text style={styles.sessionCountLabel}>{Strings.openSessions}</Text>
               </View>
               <View style={styles.sessionCountDivider} />
               <View style={styles.sessionCountBlock}>
-                <Text style={styles.sessionCountMuted}>{formatNumber(summary?.closedSessions || 0)}</Text>
+                <Text style={styles.sessionCountMuted}>{summary ? formatNumber(summary.closedSessions) : "—"}</Text>
                 <Text style={styles.sessionCountLabel}>{Strings.closedSessions}</Text>
               </View>
             </View>
