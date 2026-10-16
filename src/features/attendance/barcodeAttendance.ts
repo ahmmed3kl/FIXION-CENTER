@@ -1,3 +1,16 @@
+import { Student } from "../../shared/types";
+import { StudentRepository } from "../students/StudentRepository";
+
+export function findAttendanceStudentByNormalizedCode(
+  normalizedCode: string,
+): Student | null {
+  if (!normalizedCode) return null;
+  return (
+    StudentRepository.findByCardCode(normalizedCode) ||
+    StudentRepository.findByStudentCode(normalizedCode)
+  );
+}
+
 export function shouldAutomaticallyRecordScannedAttendance(params: {
   isBarcodeScan: boolean;
   isExpectedInSession: boolean;

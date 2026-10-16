@@ -1,5 +1,4 @@
 import { Attendance, MakeupOpportunity, Session, Student } from "../../shared/types";
-import { AbsenceService } from "./AbsenceService";
 import { AttendanceRepository } from "./AttendanceRepository";
 import { AbsenceNoteRepository } from "./AbsenceNoteRepository";
 import { DatabaseService } from "../../core/database";
@@ -21,7 +20,6 @@ export interface AbsenceSessionSummary {
   total: number;
   present: number;
   absent: number;
-  unresolved: number;
   compensated: number;
 }
 
@@ -31,6 +29,7 @@ export interface CompensationReportRow {
   attendance?: Attendance;
   opportunity?: MakeupOpportunity;
   originalSession?: Session;
+  targetSession?: Session;
 }
 
 export interface MonthlyNeverAttendedRow {
@@ -55,7 +54,6 @@ export interface AbsenceSessionReport {
   session: Session;
   expected: Student[];
   absent: Student[];
-  unresolved: Student[];
   present: Array<{ student: Student; attendance: Attendance }>;
   compensation: CompensationReportRow[];
   compensated: number;
@@ -66,12 +64,12 @@ export interface AbsenceSessionReport {
 export { calculateSessionAttendanceCounts } from "./AttendanceCalculations";
 export type { SessionAttendanceCounts } from "./AttendanceCalculations";
 
-/** Counts explicit final states separately from students whose state is unresolved. */
+/** A started report session treats students without a presence outcome as absent. */
 export function calculateAbsenceReportCounts(
   expected: Student[],
-  absent: Student[],
   attendance: Attendance[],
   advancedStudentIds: string[],
+  sessionStarted = true,
 ) {
   const expectedIds = new Set(expected.map((student) => student.id));
   const advancedIds = new Set(advancedStudentIds);
@@ -81,11 +79,6 @@ export function calculateAbsenceReportCounts(
       .map((item) => item.studentId),
   );
   const present = expected.filter((student) => presentIds.has(student.id) && !advancedIds.has(student.id));
-  const explicitlyAbsentIds = new Set(
-    absent
-      .map((student) => student.id)
-      .filter((studentId) => expectedIds.has(studentId) && !presentIds.has(studentId) && !advancedIds.has(studentId)),
-  );
   const makeupIds = new Set(
     attendance
       .filter((item) =>
@@ -94,18 +87,26 @@ export function calculateAbsenceReportCounts(
       )
       .map((item) => item.studentId),
   );
-  const absentFinal = expected.filter(
-    (student) => explicitlyAbsentIds.has(student.id) && !makeupIds.has(student.id),
-  );
-  const unresolved = expected.filter(
-    (student) =>
-      !presentIds.has(student.id) &&
-      !explicitlyAbsentIds.has(student.id) &&
-      !advancedIds.has(student.id) &&
-      !makeupIds.has(student.id),
-  );
+  const absentFinal = sessionStarted
+    ? expected.filter(
+        (student) =>
+          !presentIds.has(student.id) &&
+          !advancedIds.has(student.id) &&
+          !makeupIds.has(student.id),
+      )
+    : expected.filter((student) =>
+        attendance.some(
+          (item) =>
+            item.studentId === student.id &&
+            item.status === "absent" &&
+            item.attendanceType !== "makeup",
+        ) &&
+        !presentIds.has(student.id) &&
+        !advancedIds.has(student.id) &&
+        !makeupIds.has(student.id),
+      );
   const makeupCount = new Set(attendance.filter((item) => item.attendanceType === "makeup").map((item) => item.studentId)).size;
-  return { total: expected.length, present, absent: absentFinal, unresolved, compensated: makeupCount + advancedIds.size };
+  return { total: expected.length, present, absent: absentFinal, compensated: makeupCount + advancedIds.size };
 }
 
 /** Read-only composition of the existing session, attendance, absence and makeup services. */
@@ -129,7 +130,7 @@ export class AbsenceReportsService {
       const report = this.getSessionReport(session.id);
       const sessionNumber = (counters.get(session.groupId) || 0) + 1;
       counters.set(session.groupId, sessionNumber);
-      return { session, sessionNumber, total: report.expected.length, present: report.present.length, absent: report.absent.length, unresolved: report.unresolved.length, compensated: report.compensated };
+      return { session, sessionNumber, total: report.expected.length, present: report.present.length, absent: report.absent.length, compensated: report.compensated };
     });
   }
 
@@ -226,7 +227,10 @@ export class AbsenceReportsService {
             ) ||
             !SessionRepository.getExpectedStudents(sourceSession.id)
               .some((student) => student.id === record.studentId) ||
-            AttendanceRepository.getStudentAttendanceInSession(sourceSession.id, record.studentId)
+            (() => {
+              const sourceAtt = AttendanceRepository.getStudentAttendanceInSession(sourceSession.id, record.studentId);
+              return Boolean(sourceAtt && (sourceAtt.status === "present" || sourceAtt.status === "late"));
+            })()
           ) continue;
           attended.add(record.studentId);
         }
@@ -303,7 +307,10 @@ export class AbsenceReportsService {
           originalSession.subjectId !== targetSession.subjectId ||
           !SessionRepository.getExpectedStudents(originalSession.id)
             .some((student) => student.id === attendance.studentId) ||
-          AttendanceRepository.getStudentAttendanceInSession(originalSession.id, attendance.studentId)
+          (() => {
+            const origAtt = AttendanceRepository.getStudentAttendanceInSession(originalSession.id, attendance.studentId);
+            return Boolean(origAtt && (origAtt.status === "present" || origAtt.status === "late"));
+          })()
         ) continue;
         const student = StudentRepository.findByIdForAttendanceReport(attendance.studentId);
         if (student) rows.push({ student, attendance, originalSession, targetSession });
@@ -333,11 +340,15 @@ export class AbsenceReportsService {
     const expected = SessionRepository.getExpectedStudents(sessionId);
     const attendance = AttendanceRepository.getSessionAttendance(sessionId);
     const byStudent = new Map(expected.map((student) => [student.id, student]));
-    const absentFromService = AbsenceService.getAbsenteesForSession(sessionId);
     const advancedStudentIds = expected
       .filter((student) => MakeupService.isSessionCoveredInAdvance(student.id, sessionId))
       .map((student) => student.id);
-    const counts = calculateAbsenceReportCounts(expected, absentFromService, attendance, advancedStudentIds);
+    const counts = calculateAbsenceReportCounts(
+      expected,
+      attendance,
+      advancedStudentIds,
+      session.status === "open" || session.status === "closed",
+    );
     const presentAttendance = new Map(
       attendance
         .filter((item) => item.attendanceType !== "makeup" && (item.status === "present" || item.status === "late") && byStudent.has(item.studentId))
@@ -354,17 +365,69 @@ export class AbsenceReportsService {
       )
       .flatMap((item) => {
         const originalSession = SessionRepository.findById(item.originalAbsenceId!);
+        const origAtt = AttendanceRepository.getStudentAttendanceInSession(item.originalAbsenceId!, item.studentId);
         if (
           !originalSession ||
           !SessionRepository.getExpectedStudents(originalSession.id)
             .some((student) => student.id === item.studentId) ||
-          AttendanceRepository.getStudentAttendanceInSession(originalSession.id, item.studentId)
+          (origAtt && (origAtt.status === "present" || origAtt.status === "late"))
         ) return [];
         const student = byStudent.get(item.studentId) || StudentRepository.findByIdForAttendanceReport(item.studentId);
         return student
           ? [{ student, kind: "completed" as const, attendance: item, originalSession }]
           : [];
       });
+
+    // Also surface students expected in this session who completed makeup in another group
+    try {
+      const db = DatabaseService.getDb();
+      const compensatedElsewhereRows = db.getAllSync<any>(
+        `SELECT a.id, a.center_id as centerId, a.student_id as studentId,
+                a.session_id as targetSessionId, a.check_in_time as checkInTime,
+                a.status, a.is_late as isLate, a.attendance_type as attendanceType,
+                a.original_absence_id as originalAbsenceId
+         FROM attendance a
+         WHERE a.center_id = ?
+           AND a.attendance_type = 'makeup'
+           AND (a.status = 'present' OR a.status = 'late')
+           AND a.session_id <> ?
+           AND (
+             a.original_absence_id = ?
+             OR a.original_absence_id = ('absence-' || ? || '-' || a.student_id)
+           )`,
+        [session.centerId, sessionId, sessionId, sessionId],
+      );
+      for (const row of compensatedElsewhereRows) {
+        if (!compensation.some((c) => c.student.id === row.studentId && c.kind === "completed")) {
+          const compStudent = byStudent.get(row.studentId) || StudentRepository.findByIdForAttendanceReport(row.studentId);
+          const origAtt = AttendanceRepository.getStudentAttendanceInSession(sessionId, row.studentId);
+          const isPresentInOrig = origAtt && (origAtt.status === "present" || origAtt.status === "late");
+          if (compStudent && !isPresentInOrig) {
+            const targetSession = SessionRepository.findById(row.targetSessionId);
+            compensation.push({
+              student: compStudent,
+              kind: "completed",
+              attendance: {
+                id: row.id,
+                centerId: row.centerId,
+                studentId: row.studentId,
+                sessionId: row.targetSessionId,
+                checkInTime: row.checkInTime,
+                status: row.status,
+                isLate: Boolean(row.isLate),
+                attendanceType: "makeup",
+                originalAbsenceId: sessionId,
+                operationId: "",
+              },
+              originalSession: session,
+              targetSession: targetSession || undefined,
+            } as any);
+          }
+        }
+      }
+    } catch {
+      // In-memory or partial test mocks
+    }
     const absenceNotes = Object.fromEntries(
       AbsenceNoteRepository.getForSession(sessionId).map((note) => [note.studentId, note.text]),
     );
@@ -379,6 +442,6 @@ export class AbsenceReportsService {
       if (opportunity) compensation.push({ student, kind: "eligible", opportunity });
     }
 
-    return { session, expected, absent: counts.absent, unresolved: counts.unresolved, present, compensation, compensated: compensation.length, attendance, absenceNotes };
+    return { session, expected, absent: counts.absent, present, compensation, compensated: compensation.length, attendance, absenceNotes };
   }
 }

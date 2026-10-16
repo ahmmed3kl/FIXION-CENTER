@@ -322,7 +322,8 @@ export class MakeupService {
               COALESCE(s.subject_id, g.subject_id) as subjectId,
               COALESCE(s.teacher_id, g.teacher_id) as teacherId, s.session_price as sessionPrice,
               s.late_after_minutes as lateAfterMinutes, s.session_date as sessionDate,
-              s.start_time as startTime, s.end_time as endTime, s.status
+              s.start_time as startTime, s.end_time as endTime, s.status,
+              g.grade as groupGrade
        FROM sessions s
        JOIN groups g ON g.center_id = s.center_id AND g.id = s.group_id
        WHERE s.center_id = ? AND s.id != ?
@@ -339,6 +340,13 @@ export class MakeupService {
         s.subjectId !== originalSession.subjectId ||
         s.teacherId !== originalSession.teacherId ||
         s.id === originalAbsenceSessionId
+      ) {
+        return false;
+      }
+      if (
+        s.groupGrade &&
+        originalSession.groupGrade &&
+        s.groupGrade.trim().toLowerCase() !== originalSession.groupGrade.trim().toLowerCase()
       ) {
         return false;
       }
@@ -374,10 +382,14 @@ export class MakeupService {
         true,
       );
       const attended = db.getFirstSync<any>(
-        `SELECT id FROM attendance WHERE center_id = ? AND session_id = ? AND student_id = ?`,
+        `SELECT id, status, attendance_type as attendanceType,
+                original_absence_id as originalAbsenceId
+         FROM attendance WHERE center_id = ? AND session_id = ? AND student_id = ?`,
         [centerId, candidate.id, studentId],
       );
-      if (attended) {
+      const hasRecordedAttendance =
+        attended && !AttendanceRepository.isSessionStartAbsenceRecord(attended);
+      if (hasRecordedAttendance) {
         // Once the next session the student was expected in has been attended,
         // the original absence has no remaining makeup opportunity.
         // Legacy sessions have no snapshot, so an attended row is likewise the
@@ -411,7 +423,7 @@ export class MakeupService {
               s.start_time as startTime, s.status,
               COALESCE(s.subject_id, g.subject_id) as subjectId,
               COALESCE(s.teacher_id, g.teacher_id) as teacherId,
-              t.name as teacherName
+              t.name as teacherName, g.grade as groupGrade
        FROM sessions s
        JOIN groups g ON g.center_id = s.center_id AND g.id = s.group_id
        LEFT JOIN teachers t ON t.center_id = s.center_id
@@ -436,13 +448,13 @@ export class MakeupService {
       return { eligible: false };
     }
 
-    const sessions = db.getAllSync<Session>(
+    const sessions = db.getAllSync<Session & { groupGrade?: string }>(
       `SELECT s.id, s.center_id as centerId, s.group_id as groupId,
              s.session_date as sessionDate,
               COALESCE(s.subject_id, g.subject_id) as subjectId,
               COALESCE(s.teacher_id, g.teacher_id) as teacherId,
               s.session_date as sessionDate, s.start_time as startTime,
-              s.status, g.name as groupName
+              s.status, g.name as groupName, g.grade as groupGrade
        FROM sessions s
        JOIN groups g ON g.center_id = s.center_id AND g.id = s.group_id
        WHERE s.center_id = ? AND s.group_id <> ? AND s.status <> 'cancelled'
@@ -480,6 +492,7 @@ export class MakeupService {
           source.centerId !== centerId || source.id === sessionId ||
           source.groupId === host.groupId || source.status === "cancelled" ||
           source.subjectId !== host.subjectId || source.teacherId !== host.teacherId ||
+          (host.groupGrade && source.groupGrade && host.groupGrade.trim() !== source.groupGrade.trim()) ||
           !isBeforeHost ||
           !isTeacherMakeupCycleOpen(
             source.sessionDate,
@@ -615,7 +628,10 @@ export class MakeupService {
       params.sessionId,
       params.studentId,
     );
-    if (existingAttendance) {
+    if (
+      existingAttendance &&
+      !AttendanceRepository.isSessionStartAbsenceRecord(existingAttendance)
+    ) {
       throw new ConflictError(
         existingAttendance.attendanceType === "makeup"
           ? "تم تسجيل حضور الطالب كتعويض مسبقًا."
@@ -632,11 +648,15 @@ export class MakeupService {
       params.sessionId,
       params.studentId,
     );
-    const nextEligible = sharedEligibility.eligible
-      ? { id: params.sessionId }
-      : this.getNextEligibleSession(params.studentId, params.originalAbsenceId, params.sessionId);
-    if (!nextEligible || nextEligible.id !== params.sessionId ||
-        (sharedEligibility.eligible && sharedEligibility.originalAbsenceId !== params.originalAbsenceId)) {
+    const strictEligibility = this.getEligibilityForSession(
+      params.sessionId,
+      params.studentId,
+    );
+    const nextEligible =
+      (sharedEligibility.eligible && sharedEligibility.originalAbsenceId === params.originalAbsenceId) ||
+      (strictEligibility.eligible && strictEligibility.originalAbsenceId === params.originalAbsenceId) ||
+      this.getNextEligibleSession(params.studentId, params.originalAbsenceId, params.sessionId)?.id === params.sessionId;
+    if (!nextEligible) {
       throw new ValidationError(
         "الحصة المحددة ليست الحصة التالية المؤهلة للتعويض أو انتهت صلاحية فرصة التعويض.",
       );

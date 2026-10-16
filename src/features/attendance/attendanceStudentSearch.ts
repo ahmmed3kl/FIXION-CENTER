@@ -1,5 +1,5 @@
 import { Student } from "../../shared/types";
-import { smartSearch } from "../../shared/utils/smartSearch";
+import { normalizeArabicForSearch, smartSearch } from "../../shared/utils/smartSearch";
 
 export function searchAttendanceStudents(
   students: Student[],
@@ -7,7 +7,7 @@ export function searchAttendanceStudents(
   groupGrade: string | null | undefined,
   centerId: string | null | undefined,
 ): Student[] {
-  const normalizedGroupGrade = groupGrade?.trim().toLocaleLowerCase();
+  const normalizedGroupGrade = normalizeArabicForSearch(groupGrade);
   if (!normalizedGroupGrade || !centerId) return [];
 
   const matches = smartSearch(students, query, [
@@ -21,6 +21,6 @@ export function searchAttendanceStudents(
     (student) =>
       student.centerId === centerId &&
       typeof student.grade === "string" &&
-      student.grade.trim().toLocaleLowerCase() === normalizedGroupGrade,
+      normalizeArabicForSearch(student.grade) === normalizedGroupGrade,
   );
 }

@@ -56,7 +56,20 @@ export class AttendanceRepository {
    * Strictly scopes query to the active authenticated center.
    */
   static isAlreadyAttended(sessionId: string, studentId: string): boolean {
-    return this.getStudentAttendanceInSession(sessionId, studentId) !== null;
+    const attendance = this.getStudentAttendanceInSession(sessionId, studentId);
+    return Boolean(attendance && !this.isSessionStartAbsenceRecord(attendance));
+  }
+
+  static isSessionStartAbsenceRecord(
+    attendance: Pick<Attendance, "id" | "status" | "attendanceType" | "originalAbsenceId"> | null | undefined,
+  ): boolean {
+    return Boolean(
+      attendance &&
+      attendance.id.startsWith("att-default-") &&
+      attendance.status === "absent" &&
+      attendance.attendanceType !== "makeup" &&
+      !attendance.originalAbsenceId,
+    );
   }
 
   static getStudentAttendanceInSession(sessionId: string, studentId: string): Attendance | null {
@@ -135,7 +148,7 @@ export class AttendanceRepository {
     // Check session status
     const session = db.getFirstSync<any>(
       `SELECT s.id, s.status, s.group_id as groupId,
-              g.session_price as sessionPrice,
+              g.session_price as sessionPrice, g.grade as groupGrade,
               COALESCE(s.subject_id, g.subject_id) as subjectId,
               COALESCE(s.teacher_id, g.teacher_id) as teacherId,
               s.session_date as sessionDate, s.start_time as startTime
@@ -176,6 +189,7 @@ export class AttendanceRepository {
         `SELECT s.id, s.status, s.group_id as groupId,
                 COALESCE(s.subject_id, g.subject_id) as subjectId,
                 COALESCE(s.teacher_id, g.teacher_id) as teacherId,
+                g.grade as groupGrade,
                 s.session_date as sessionDate, s.start_time as startTime
          FROM sessions s
          JOIN groups g ON g.center_id = s.center_id AND g.id = s.group_id
@@ -191,8 +205,10 @@ export class AttendanceRepository {
           session.sessionDate > source.sessionDate ||
           (session.sessionDate === source.sessionDate &&
             session.startTime > source.startTime);
-        if (!isAfter || session.subjectId !== source.subjectId || session.teacherId !== source.teacherId) {
-          throw new ConflictError("التعويض يجب أن يكون في الحصة التالية لنفس المادة والمدرس.");
+        const gradesMatch = !session.groupGrade || !source.groupGrade ||
+          session.groupGrade.trim().toLowerCase() === source.groupGrade.trim().toLowerCase();
+        if (!isAfter || session.subjectId !== source.subjectId || session.teacherId !== source.teacherId || !gradesMatch) {
+          throw new ConflictError("التعويض يجب أن يكون في الحصة التالية لنفس المادة والمدرس ونفس المرحلة الدراسية.");
         }
         const teacherWeek = db.getFirstSync<{ weekStartDay?: number | null }>(
           "SELECT week_start_day as weekStartDay FROM teachers WHERE center_id = ? AND id = ?",
@@ -221,7 +237,8 @@ export class AttendanceRepository {
         );
         const legacyEnrollment = db.getFirstSync<any>(
           `SELECT 1 FROM student_group_enrollments
-           WHERE center_id = ? AND group_id = ? AND student_id = ? AND status = 'active'
+           WHERE center_id = ? AND group_id = ? AND student_id = ?
+             AND status IN ('active', 'ended')
              AND start_date <= ? AND (end_date IS NULL OR end_date >= ?)
            LIMIT 1`,
           [centerId, source.groupId, params.studentId, source.sessionDate, source.sessionDate],
@@ -300,12 +317,18 @@ export class AttendanceRepository {
       throw new ConflictError("الطالب غير متوقع في المجموعة/الحصة الحالية.");
     }
 
-    // Check duplicate
-    if (this.isAlreadyAttended(params.sessionId, params.studentId)) {
+    const existingAttendance = this.getStudentAttendanceInSession(
+      params.sessionId,
+      params.studentId,
+    );
+    if (
+      existingAttendance &&
+      !this.isSessionStartAbsenceRecord(existingAttendance)
+    ) {
       throw new DuplicateAttendanceError();
     }
 
-    const attendanceId = `att-${generateUUID()}`;
+    const attendanceId = existingAttendance?.id || `att-${generateUUID()}`;
     const operationId = `op-att-${generateUUID()}`;
     const deviceId = await DeviceService.getDeviceId();
 
@@ -328,16 +351,18 @@ export class AttendanceRepository {
     let attendanceRecord!: Attendance;
     DatabaseService.runInTransaction(() => {
 
-    // 1. Save to SQLite immediately (with UNIQUE constraint safety)
-    try {
-      db.runSync(
-        `INSERT INTO attendance (id, center_id, student_id, session_id, check_in_time, status, is_late, attendance_type, original_absence_id, is_external, operation_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    // 1. Save to SQLite immediately, promoting only a marked session-start
+    // absence in place so the unique session/student row remains idempotent.
+    if (existingAttendance) {
+      const updated = db.runSync(
+        `UPDATE attendance
+            SET check_in_time = ?, status = ?, is_late = ?,
+                attendance_type = ?, original_absence_id = ?,
+                is_external = ?, operation_id = ?
+          WHERE center_id = ? AND id = ? AND session_id = ? AND student_id = ?
+            AND status = 'absent' AND attendance_type = 'present'
+            AND original_absence_id IS NULL AND operation_id = ?`,
         [
-          attendanceId,
-          centerId,
-          params.studentId,
-          params.sessionId,
           checkInTime,
           params.status,
           isLateInt,
@@ -345,13 +370,41 @@ export class AttendanceRepository {
           canonicalOriginalAbsenceId || null,
           isExternalInt,
           operationId,
+          centerId,
+          attendanceId,
+          params.sessionId,
+          params.studentId,
+          existingAttendance.operationId,
         ],
       );
-    } catch (err: any) {
-      if (err?.message?.includes("UNIQUE")) {
+      if (Number(updated.changes) !== 1) {
         throw new DuplicateAttendanceError();
       }
-      throw err;
+    } else {
+      try {
+        db.runSync(
+          `INSERT INTO attendance (id, center_id, student_id, session_id, check_in_time, status, is_late, attendance_type, original_absence_id, is_external, operation_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            attendanceId,
+            centerId,
+            params.studentId,
+            params.sessionId,
+            checkInTime,
+            params.status,
+            isLateInt,
+            attendanceType,
+            canonicalOriginalAbsenceId || null,
+            isExternalInt,
+            operationId,
+          ],
+        );
+      } catch (err: any) {
+        if (err?.message?.includes("UNIQUE")) {
+          throw new DuplicateAttendanceError();
+        }
+        throw err;
+      }
     }
 
     // 2. If external makeup/attendance, record cash session payment (NO monthly debt)
@@ -447,7 +500,7 @@ export class AttendanceRepository {
       centerId,
       userId: user.id,
       deviceId,
-      operationType: "attendance.create",
+      operationType: existingAttendance ? "UPDATE" : "attendance.create",
       entityType: "attendance",
       entityId: attendanceId,
       // PostgreSQL does not accept `late` as a status; lateness is carried by
@@ -457,6 +510,12 @@ export class AttendanceRepository {
       payload: {
         ...attendanceRecord,
         status: attendanceRecord.isLate ? "present" : attendanceRecord.status,
+        ...(existingAttendance
+          ? {
+              action: "attendance.promote_default_absence",
+              expectedOperationId: existingAttendance.operationId,
+            }
+          : {}),
       },
       operationId,
     });
@@ -476,6 +535,7 @@ export class AttendanceRepository {
         isLate: params.isLate,
         attendanceType,
         isExternal: Boolean(params.isExternal),
+        replacedSessionStartAbsence: Boolean(existingAttendance),
         actorName: user.fullName,
       },
     });
@@ -765,7 +825,7 @@ export class AttendanceRepository {
   }
 
   /**
-   * Returns explicit attendance outcomes and unresolved expected sessions per
+   * Returns attendance outcomes and not-yet-started expected sessions per
    * group. Makeup attendance stays with the group where it was recorded.
    */
   static getStudentGroupAttendanceSummaries(
@@ -779,6 +839,7 @@ export class AttendanceRepository {
     const today = AttendanceSessionService.getCurrentSessionDate();
     const expectedRows = db.getAllSync<any>(
       `SELECT DISTINCT ss.id as sessionId, ss.group_id as groupId,
+              ss.status as sessionStatus,
               g.name as groupName, subj.name as subjectName, t.name as teacherName
        FROM sessions ss
        LEFT JOIN session_expected_students ses
@@ -835,7 +896,7 @@ export class AttendanceRepository {
           expectedSessions: 0,
           presentCount: 0,
           absentCount: 0,
-          unresolvedCount: 0,
+          notStartedCount: 0,
           makeupCount: 0,
         };
         summaries.set(row.groupId, summary);
@@ -863,7 +924,13 @@ export class AttendanceRepository {
          WHERE center_id = ? AND student_id = ? AND target_future_session_id = ? LIMIT 1`,
         [centerId, studentId, row.sessionId],
       );
-      if (!covered) summary.unresolvedCount += 1;
+      if (!covered) {
+        if (row.sessionStatus === "open" || row.sessionStatus === "closed") {
+          summary.absentCount += 1;
+        } else {
+          summary.notStartedCount += 1;
+        }
+      }
     }
 
     // A makeup session is normally not in the student's expected snapshot.

@@ -92,8 +92,8 @@ describe("makeup attendance integration", () => {
     expect(AttendanceSessionService.getSummary("makeup-target-int")).toEqual({
       total: examRosterBefore.length,
       present: 0,
-      absent: 0,
-      unresolved: examRosterBefore.length,
+      absent: examRosterBefore.length,
+      notStarted: 0,
       makeup: 0,
     });
     expect(AttendanceSessionService.isExpected("makeup-target-int", makeupStudent.id)).toBe(false);
@@ -117,8 +117,8 @@ describe("makeup attendance integration", () => {
     expect(AttendanceSessionService.getSummary("makeup-target-int")).toEqual({
       total: examRosterBefore.length,
       present: 0,
-      absent: 0,
-      unresolved: examRosterBefore.length,
+      absent: examRosterBefore.length,
+      notStarted: 0,
       makeup: 1,
     });
 
@@ -152,8 +152,8 @@ describe("makeup attendance integration", () => {
     expect(AttendanceSessionService.getSummary("makeup-target-int")).toEqual({
       total: examRosterBefore.length,
       present: 1,
-      absent: 0,
-      unresolved: examRosterBefore.length - 1,
+      absent: examRosterBefore.length - 1,
+      notStarted: 0,
       makeup: 1,
     });
     expect(
@@ -323,12 +323,13 @@ describe("makeup attendance integration", () => {
 
     const expectedStudents = SessionRepository.getExpectedStudents(currentSessionId);
     expect(expectedStudents.map((student) => student.id)).toEqual([realMember.id]);
-    expect(AbsenceService.getAbsenteesForSession(currentSessionId)).toEqual([]);
+    expect(AbsenceService.getAbsenteesForSession(currentSessionId).map((student) => student.id))
+      .toEqual([realMember.id]);
     expect(AttendanceSessionService.getSummary(currentSessionId)).toEqual({
       total: 1,
       present: 0,
-      absent: 0,
-      unresolved: 1,
+      absent: 1,
+      notStarted: 0,
       makeup: 0,
     });
     for (const visitor of visitors) {
@@ -346,7 +347,10 @@ describe("makeup attendance integration", () => {
       );
     }
     expect(SessionRepository.getExpectedStudents(currentSessionId).map((student) => student.id)).toEqual([realMember.id]);
-    expect(AttendanceSessionService.getSummary(currentSessionId)).toMatchObject({ absent: 0, unresolved: 1 });
+    expect(AttendanceSessionService.getSummary(currentSessionId)).toMatchObject({
+      absent: 1,
+      notStarted: 0,
+    });
     expect(db.getAllSync<any>(
       `SELECT student_id as studentId, original_absence_id as originalAbsenceId
        FROM attendance WHERE center_id = ? AND session_id = ?`,

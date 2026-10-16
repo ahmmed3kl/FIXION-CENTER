@@ -56,6 +56,11 @@ export class StudentRepository {
     return { centerId: activeCenterId, user };
   }
 
+  private static isActiveStudentStatus(status: unknown): boolean {
+    const normalizedStatus = String(status ?? "").trim().toLowerCase();
+    return normalizedStatus === "active" || normalizedStatus === "1" || status === true;
+  }
+
   static findByCardCode(normalizedCardCode: string): Student | null {
     const { centerId } = this.getActiveContext();
     const db = DatabaseService.getDb();
@@ -74,12 +79,14 @@ export class StudentRepository {
     // The current student.card_code is the source of truth for scans. This
     // compatibility path is only for legacy records without a card-history row.
     const currentStudent = db.getFirstSync<any>(
-      `SELECT id FROM students
-       WHERE center_id = ? AND card_code = ? AND status = 'active' AND deleted_at IS NULL
+      `SELECT id, status FROM students
+       WHERE center_id = ? AND card_code = ? AND deleted_at IS NULL
        LIMIT 1`,
       [centerId, normalizedCardCode],
     );
-    if (currentStudent) return this.findByIdInternal(currentStudent.id, false);
+    if (currentStudent && this.isActiveStudentStatus(currentStudent.status)) {
+      return this.findByIdInternal(currentStudent.id, false);
+    }
 
     return null;
   }
@@ -276,13 +283,7 @@ export class StudentRepository {
 
     const filtered = includeInactive || includeDeleted
       ? rows
-      : rows.filter((r) => {
-          // Legacy/synced databases may store status with different casing
-          // (or as SQLite's integer boolean). Treat all active variants as
-          // active so valid students are not silently omitted from the list.
-          const status = String(r.status ?? "").trim().toLowerCase();
-          return status === "active" || status === "1" || r.status === true;
-        });
+      : rows.filter((r) => this.isActiveStudentStatus(r.status));
     return filtered.map((row) => ({ ...row, cardCode: this.resolveCardCode(centerId, row) }));
   }
 
@@ -299,10 +300,12 @@ export class StudentRepository {
               card_code as cardCode, phone, parent_phone as parentPhone, grade, status,
               student_type as studentType, student_color as studentColor, notes,
               created_at as createdAt, updated_at as updatedAt
-       FROM students WHERE center_id = ? AND status = 'active' AND deleted_at IS NULL
+       FROM students WHERE center_id = ? AND deleted_at IS NULL
        ORDER BY full_name ASC`, [centerId],
     );
-    return rows.map((row) => ({ ...row, cardCode: this.resolveCardCode(centerId, row) || "" }));
+    return rows
+      .filter((row) => this.isActiveStudentStatus(row.status))
+      .map((row) => ({ ...row, cardCode: this.resolveCardCode(centerId, row) || "" }));
   }
 
   /** Loads a student selected in an attendance flow without requiring student-list access. */

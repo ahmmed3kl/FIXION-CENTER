@@ -1232,6 +1232,30 @@ class SyncProcessor {
         "ABSENCE_NOTIFICATION_NO_LONGER_ABSENT: session is covered by advance attendance.",
       );
     }
+
+    const makeupResult = await client.query(
+      `SELECT id, original_absence_id
+         FROM attendance
+        WHERE center_id = $1 AND student_id = $2
+          AND attendance_type = 'makeup'
+          AND status IN ('present', 'late', 'attended_elsewhere')
+          AND original_absence_id IS NOT NULL`,
+      [centerId, normalizedStudentId],
+    );
+    const hasCompensated = makeupResult.rows.some((row) => {
+      const orig = String(row.original_absence_id || "").trim();
+      if (logicalSessionIds.includes(orig)) return true;
+      for (const sid of logicalSessionIds) {
+        if (orig === `absence-${sid}-${normalizedStudentId}`) return true;
+      }
+      return false;
+    });
+    if (hasCompensated) {
+      throw new Error(
+        "ABSENCE_NOTIFICATION_NO_LONGER_ABSENT: session is compensated by makeup attendance.",
+      );
+    }
+
     return { attendanceId: String(explicitAbsence.id) };
   }
 
@@ -1264,6 +1288,7 @@ class SyncProcessor {
         `SELECT s.id, s.group_id, s.session_date::text AS session_date,
                 COALESCE(s.start_time::text, '') AS start_time,
                 s.status, g.id AS validated_group_id,
+                g.grade AS group_grade,
                 COALESCE(s.subject_id, g.subject_id) AS subject_id,
                 COALESCE(s.teacher_id, g.teacher_id) AS teacher_id
            FROM sessions s
@@ -1333,6 +1358,21 @@ class SyncProcessor {
     ) {
       throw new Error(
         "MAKEUP_TARGET_INVALID: source and target sessions must share a subject and teacher.",
+      );
+    }
+    const targetGroupGrade = String(
+      targetSession.group_grade || targetSession.grade || "",
+    ).trim().toLowerCase();
+    const sourceGroupGrade = String(
+      sourceSession.group_grade || sourceSession.grade || "",
+    ).trim().toLowerCase();
+    if (
+      targetGroupGrade &&
+      sourceGroupGrade &&
+      targetGroupGrade !== sourceGroupGrade
+    ) {
+      throw new Error(
+        "MAKEUP_TARGET_INVALID: source and target sessions must belong to the same academic grade.",
       );
     }
     const sourceDate = String(sourceSession.session_date || "").slice(0, 10);
@@ -2690,6 +2730,10 @@ class SyncProcessor {
         const att = payload;
         const attendanceSessionId = att.session_id || att.sessionId;
         const attendanceStudentId = att.student_id || att.studentId;
+        const attendanceAction = String(att.action || "").toLowerCase();
+        const isDefaultAbsencePromotion =
+          String(operationType || "").toUpperCase() === "UPDATE" &&
+          attendanceAction === "attendance.promote_default_absence";
         const attendanceType = String(
           att.attendance_type || att.attendanceType || "present",
         ).toLowerCase();
@@ -2976,6 +3020,97 @@ class SyncProcessor {
           throw new Error(
             "ATTENDANCE_ALIAS_RECORD_CONFLICT: multiple historical attendance rows share this session identity; all rows were preserved for manual review.",
           );
+        }
+        if (isDefaultAbsencePromotion) {
+          const attendanceId = String(att.id || context.entityId || "");
+          const expectedOperationId = String(
+            att.expected_operation_id || att.expectedOperationId || "",
+          ).trim();
+          if (
+            !attendanceId.startsWith("att-default-") ||
+            !expectedOperationId ||
+            !["present", "makeup"].includes(attendanceType) ||
+            normalizedAttendanceStatus !== "present"
+          ) {
+            throw new Error(
+              "ATTENDANCE_DEFAULT_ABSENCE_TARGET_INVALID: only a marked initial absence can be promoted to present attendance.",
+            );
+          }
+          const existingDefaultAbsence = matchingAttendances[0];
+          if (
+            matchingAttendances.length !== 1 ||
+            !existingDefaultAbsence
+          ) {
+            throw new Error(
+              "ATTENDANCE_DEFAULT_ABSENCE_NOT_FOUND: initial absence has not synchronized yet.",
+            );
+          }
+          if (
+            String(existingDefaultAbsence.id) !== attendanceId ||
+            String(existingDefaultAbsence.status || "").toLowerCase() !== "absent" ||
+            String(existingDefaultAbsence.attendance_type || "").toLowerCase() !== "present" ||
+            existingDefaultAbsence.original_absence_id != null ||
+            String(existingDefaultAbsence.operation_id || "") !== expectedOperationId
+          ) {
+            throw new Error(
+              "ATTENDANCE_DEFAULT_ABSENCE_STALE_REVISION: the initial absence changed before attendance was recorded.",
+            );
+          }
+          const update = await client.query(
+            `UPDATE attendance
+                SET check_in_time = $5, status = $6, is_late = $7,
+                    attendance_type = $8, original_absence_id = $9,
+                    operation_id = $10
+              WHERE center_id = $1 AND id = $2 AND session_id = $3
+                AND student_id = $4 AND status = 'absent'
+                AND attendance_type = 'present'
+                AND original_absence_id IS NULL AND operation_id = $11`,
+            [
+              centerId,
+              attendanceId,
+              existingDefaultAbsence.session_id,
+              attendanceStudentId,
+              checkInTime,
+              normalizedAttendanceStatus,
+              isLate,
+              attendanceType,
+              att.original_absence_id || att.originalAbsenceId || null,
+              operationId,
+              expectedOperationId,
+            ],
+          );
+          if (update.rowCount !== 1) {
+            throw new Error(
+              "ATTENDANCE_DEFAULT_ABSENCE_STALE_REVISION: the initial absence changed before attendance was recorded.",
+            );
+          }
+          const promotedResult = await client.query(
+            `SELECT id, session_id, student_id, check_in_time, status, is_late,
+                    attendance_type, original_absence_id, operation_id
+               FROM attendance
+              WHERE center_id = $1 AND id = $2`,
+            [centerId, attendanceId],
+          );
+          const promoted = promotedResult.rows[0];
+          if (!promoted) {
+            throw new Error(
+              "ATTENDANCE_WRITE_FAILED: promoted attendance was not persisted.",
+            );
+          }
+          context.ledgerPayload = {
+            ...att,
+            id: promoted.id,
+            session_id: promoted.session_id,
+            student_id: promoted.student_id,
+            check_in_time: promoted.check_in_time,
+            status: promoted.status,
+            is_late: Boolean(promoted.is_late),
+            attendance_type: promoted.attendance_type,
+            original_absence_id: promoted.original_absence_id,
+            operation_id: promoted.operation_id,
+            expected_operation_id: expectedOperationId,
+          };
+          break;
         }
         if (matchingAttendances.length === 0) {
           await client.query(

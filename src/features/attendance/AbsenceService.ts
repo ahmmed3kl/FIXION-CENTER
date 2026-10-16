@@ -17,36 +17,45 @@ export class AbsenceService {
     return { centerId: activeCenterId, user: currentUser };
   }
 
-  /** Returns only students with an explicit absent attendance record. */
+  private static isStartedSession(centerId: string, sessionId: string): boolean {
+    const session = SessionRepository.findById(sessionId);
+    return Boolean(
+      session &&
+      session.centerId === centerId &&
+      (session.status === "open" || session.status === "closed"),
+    );
+  }
+
+  /** Missing attendance in a started session is an initial absence. */
   static getAbsenteesForSession(sessionId: string): Student[] {
     const { centerId, user } = this.getActiveContext();
     if (!PermissionService.hasAnyPermission(user.permissions, ["attendance.view", "reports.attendance.view", "reports.view"])) {
       throw new ForbiddenError("ليس لديك صلاحية عرض بيانات الحضور والغياب.");
     }
+    if (!this.isStartedSession(centerId, sessionId)) return [];
+
     const db = DatabaseService.getDb();
     const expectedStudents = SessionRepository.getExpectedStudents(sessionId);
-
-    const absentRows = db.getAllSync<{ studentId: string }>(
-      `SELECT student_id as studentId FROM attendance
-       WHERE center_id = ? AND session_id = ? AND status = 'absent'
-         AND attendance_type <> 'makeup'
-         AND NOT EXISTS (
-           SELECT 1 FROM attendance resolved
-            WHERE resolved.center_id = attendance.center_id
-              AND resolved.session_id = attendance.session_id
-              AND resolved.student_id = attendance.student_id
-              AND resolved.status IN ('present', 'late')
-         )
-         AND NOT EXISTS (
-           SELECT 1 FROM advance_coverages coverage
-            WHERE coverage.center_id = attendance.center_id
-              AND coverage.student_id = attendance.student_id
-              AND coverage.target_future_session_id = attendance.session_id
-         )`,
+    const attendanceRows = db.getAllSync<{ studentId: string; status: string }>(
+      `SELECT student_id as studentId, status FROM attendance
+       WHERE center_id = ? AND session_id = ?`,
       [centerId, sessionId],
     );
-    const absentIds = new Set(absentRows.map((row) => row.studentId));
-    return expectedStudents.filter((student) => absentIds.has(student.id));
+    const attendedIds = new Set(
+      attendanceRows
+        .filter((row) => row.status === "present" || row.status === "late")
+        .map((row) => row.studentId),
+    );
+    const advancedIds = new Set(
+      db.getAllSync<{ studentId: string }>(
+        `SELECT student_id as studentId FROM advance_coverages
+         WHERE center_id = ? AND target_future_session_id = ?`,
+        [centerId, sessionId],
+      ).map((row) => row.studentId),
+    );
+    return expectedStudents.filter(
+      (student) => !attendedIds.has(student.id) && !advancedIds.has(student.id),
+    );
   }
 
   /**
@@ -54,30 +63,26 @@ export class AbsenceService {
    */
   static isStudentAbsent(sessionId: string, studentId: string): boolean {
     const { centerId } = this.getActiveContext();
+    if (!this.isStartedSession(centerId, sessionId)) return false;
     const db = DatabaseService.getDb();
 
     if (!SessionRepository.getExpectedStudents(sessionId).some((student) => student.id === studentId)) return false;
 
-    const explicitAbsence = db.getFirstSync<any>(
+    const attended = db.getFirstSync<any>(
       `SELECT id FROM attendance
        WHERE center_id = ? AND session_id = ? AND student_id = ?
-         AND status = 'absent' AND attendance_type <> 'makeup'
-         AND NOT EXISTS (
-           SELECT 1 FROM attendance resolved
-            WHERE resolved.center_id = attendance.center_id
-              AND resolved.session_id = attendance.session_id
-              AND resolved.student_id = attendance.student_id
-              AND resolved.status IN ('present', 'late')
-         )
-         AND NOT EXISTS (
-           SELECT 1 FROM advance_coverages coverage
-            WHERE coverage.center_id = attendance.center_id
-              AND coverage.student_id = attendance.student_id
-              AND coverage.target_future_session_id = attendance.session_id
-         )`,
+         AND status IN ('present', 'late')
+       LIMIT 1`,
       [centerId, sessionId, studentId],
     );
-    return Boolean(explicitAbsence);
+    if (attended) return false;
+    const covered = db.getFirstSync<any>(
+      `SELECT id FROM advance_coverages
+       WHERE center_id = ? AND student_id = ? AND target_future_session_id = ?
+       LIMIT 1`,
+      [centerId, studentId, sessionId],
+    );
+    return !covered;
   }
 
   /**

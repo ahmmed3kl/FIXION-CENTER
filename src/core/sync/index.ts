@@ -2242,12 +2242,15 @@ export class SyncRepository {
       if (incomingWins) {
         db.runSync(
           `UPDATE attendance
-              SET status = ?, is_late = ?, check_in_time = ?, operation_id = ?
+              SET status = ?, is_late = ?, check_in_time = ?,
+                  attendance_type = ?, original_absence_id = ?, operation_id = ?
             WHERE center_id = ? AND id = ?`,
           [
             incomingStatus,
             isLate ? 1 : 0,
             checkInTime,
+            attendanceType,
+            originalAbsenceId,
             operationId,
             centerId,
             existing.id,
@@ -2256,12 +2259,15 @@ export class SyncRepository {
       } else if (!existingWins && !sameOutcome && existing.id === attendanceId) {
         db.runSync(
           `UPDATE attendance
-              SET status = ?, is_late = ?, check_in_time = ?, operation_id = ?
+              SET status = ?, is_late = ?, check_in_time = ?,
+                  attendance_type = ?, original_absence_id = ?, operation_id = ?
             WHERE center_id = ? AND id = ?`,
           [
             incomingStatus,
             isLate ? 1 : 0,
             checkInTime,
+            attendanceType,
+            originalAbsenceId,
             operationId,
             centerId,
             existing.id,
@@ -2270,9 +2276,18 @@ export class SyncRepository {
       } else if (sameOutcome) {
         db.runSync(
           `UPDATE attendance
-              SET operation_id = ?
+              SET check_in_time = ?, is_late = ?, attendance_type = ?,
+                  original_absence_id = ?, operation_id = ?
             WHERE center_id = ? AND id = ?`,
-          [operationId, centerId, existing.id],
+          [
+            checkInTime,
+            isLate ? 1 : 0,
+            attendanceType,
+            originalAbsenceId,
+            operationId,
+            centerId,
+            existing.id,
+          ],
         );
       }
       return;

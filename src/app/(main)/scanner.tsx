@@ -32,7 +32,10 @@ import {
 } from "../../core/theme";
 import { useServiceVisibility } from "../../core/services/ServiceVisibilityContext";
 import { AttendanceRepository } from "../../features/attendance/AttendanceRepository";
-import { recordScannedAttendanceIfEligible } from "../../features/attendance/barcodeAttendance";
+import {
+  findAttendanceStudentByNormalizedCode,
+  recordScannedAttendanceIfEligible,
+} from "../../features/attendance/barcodeAttendance";
 import { requiresAttendanceConfirmation } from "../../features/attendance/attendanceConfirmation";
 import { AttendanceSessionService, AttendanceSummary } from "../../features/attendance/AttendanceSessionService";
 import { MakeupService } from "../../features/attendance/MakeupService";
@@ -241,7 +244,12 @@ function ScannerContent() {
       setSearchError(getUserErrorMessage(error));
     }
     try {
-      setAllGroups(GroupRepository.getAll());
+      try {
+        setAllGroups(GroupRepository.getAll());
+      } catch (error) {
+        setAllGroups([]);
+        setSearchError(getUserErrorMessage(error));
+      }
       setAllStudents(StudentRepository.getAllForAttendance());
       try {
         setHomeworkStatuses(HomeworkEvaluationRepository.listStatuses());
@@ -561,7 +569,8 @@ function ScannerContent() {
     setIsProcessing(true);
 
     try {
-      const foundStudent = forcedStudent || StudentRepository.findByCardCode(normalized);
+      const foundStudent =
+        forcedStudent || findAttendanceStudentByNormalizedCode(normalized);
 
       if (!foundStudent) {
         setStudent(null);
@@ -719,7 +728,7 @@ function ScannerContent() {
   const attendancePickerStudents = useMemo(() => {
     if (!activeSessionId) return [];
     const session = SessionRepository.findById(activeSessionId);
-    const groupGrade = allGroups.find((group) => group.id === session?.groupId)?.grade;
+    const groupGrade = session?.groupGrade || allGroups.find((group) => group.id === session?.groupId)?.grade;
     return searchAttendanceStudents(allStudents, allStudentSearch, groupGrade, activeCenterId);
   }, [activeCenterId, activeSessionId, allGroups, allStudentSearch, allStudents]);
 

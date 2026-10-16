@@ -371,8 +371,8 @@ function ReportsContent() {
                   </Text>
                 </View>
                 <View style={styles.kpiBox}>
-                  <Text style={styles.kpiLabel}>لم يحسم</Text>
-                  <Text style={styles.kpiValue}>{dailyAttReport.totals.totalUnresolved}</Text>
+                  <Text style={styles.kpiLabel}>لم تبدأ</Text>
+                  <Text style={styles.kpiValue}>{dailyAttReport.totals.totalNotStarted}</Text>
                 </View>
               </View>
 
@@ -392,7 +392,7 @@ function ReportsContent() {
                     <Text style={[styles.statText, { color: Colors.warningText }]}>متأخر: {sess.lateCount}</Text>
                     <Text style={[styles.statText, { color: Colors.primary }]}>تعويض: {sess.makeupCount}</Text>
                     <Text style={[styles.statText, { color: Colors.dangerText }]}>غياب: {sess.absentCount}</Text>
-                    <Text style={styles.statText}>لم يحسم: {sess.unresolvedCount}</Text>
+                    <Text style={styles.statText}>لم تبدأ: {sess.notStartedCount}</Text>
                   </View>
                 </View>
               ))}
@@ -424,10 +424,15 @@ function ReportsContent() {
                   <Text style={styles.kpiValue}>{studentAttReport.totals.attendanceRate}%</Text>
                 </View>
                 <View style={styles.kpiBox}>
-                  <Text style={styles.kpiLabel}>لم يحسم</Text>
-                  <Text style={styles.kpiValue}>{studentAttReport.totals.unresolvedCount}</Text>
+                  <Text style={styles.kpiLabel}>لم تبدأ</Text>
+                  <Text style={styles.kpiValue}>{studentAttReport.totals.notStartedCount}</Text>
                 </View>
               </View>
+              {studentAttReport.totals.coveredCount > 0 && (
+                <Text style={styles.sessMeta}>
+                  الحصص المغطاة مسبقًا: {studentAttReport.totals.coveredCount}
+                </Text>
+              )}
 
               <Text style={styles.sectionHeader}>سجل حضور الطالب: {studentAttReport.studentName}</Text>
               {studentAttReport.sessions.map((sess, idx) => (
@@ -449,7 +454,9 @@ function ReportsContent() {
                               ? Colors.warningLight
                               : sess.status === "makeup"
                               ? Colors.primaryLight || "#EBF5FF"
-                              : sess.status === "unresolved"
+                              : sess.status === "covered"
+                              ? Colors.primaryMuted
+                              : sess.status === "not_started"
                               ? Colors.warningLight
                               : Colors.dangerLight,
                         },
@@ -466,7 +473,9 @@ function ReportsContent() {
                                 ? Colors.warningText
                                 : sess.status === "makeup"
                                 ? Colors.primary
-                                : sess.status === "unresolved"
+                                : sess.status === "covered"
+                                ? Colors.primary
+                                : sess.status === "not_started"
                                 ? Colors.warningText
                                 : Colors.dangerText,
                           },
@@ -478,8 +487,10 @@ function ReportsContent() {
                           ? "متأخر"
                           : sess.status === "makeup"
                           ? "حضور تعويضي"
-                          : sess.status === "unresolved"
-                          ? "لم تُحسم الحالة"
+                          : sess.status === "covered"
+                          ? "مغطاة مسبقًا"
+                          : sess.status === "not_started"
+                          ? "لم تبدأ الجلسة"
                           : "غائب"}
                       </Text>
                     </View>

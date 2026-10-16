@@ -77,7 +77,7 @@ export class NotificationService {
     return { centerId: activeCenterId, user: currentUser };
   }
 
-  private static findExplicitAbsence(
+  static findExplicitAbsence(
     centerId: string,
     sessionId: string,
     studentId: string,
@@ -159,7 +159,28 @@ export class NotificationService {
         LIMIT 1`,
       [centerId, studentId, ...logicalSessionIds],
     );
-    return coverage ? null : { id: String(explicitAbsence.id) };
+    if (coverage) return null;
+
+    const makeupAttendance = db.getAllSync<{ originalAbsenceId?: string | null }>(
+      `SELECT original_absence_id as originalAbsenceId
+         FROM attendance
+        WHERE center_id = ? AND student_id = ?
+          AND attendance_type = 'makeup'
+          AND status IN ('present', 'late')
+          AND original_absence_id IS NOT NULL`,
+      [centerId, studentId],
+    );
+    const hasCompensated = makeupAttendance.some((row) => {
+      const orig = String(row.originalAbsenceId || "");
+      if (logicalSessionIds.includes(orig)) return true;
+      for (const sid of logicalSessionIds) {
+        if (orig === `absence-${sid}-${studentId}`) return true;
+      }
+      return false;
+    });
+    if (hasCompensated) return null;
+
+    return { id: String(explicitAbsence.id) };
   }
 
   /**

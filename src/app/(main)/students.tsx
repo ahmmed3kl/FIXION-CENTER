@@ -1730,7 +1730,7 @@ export default function StudentsScreen() {
                       <View style={styles.profileAttendanceMetrics}>
                         <View><Text style={styles.profileAttendanceValue}>{summary.presentCount}</Text><Text style={styles.profileAttendanceLabel}>حضور</Text></View>
                         <View><Text style={[styles.profileAttendanceValue, { color: Colors.danger }]}>{summary.absentCount}</Text><Text style={styles.profileAttendanceLabel}>غياب</Text></View>
-                        <View><Text style={styles.profileAttendanceValue}>{summary.unresolvedCount}</Text><Text style={styles.profileAttendanceLabel}>لم يحسم</Text></View>
+                        <View><Text style={styles.profileAttendanceValue}>{summary.notStartedCount}</Text><Text style={styles.profileAttendanceLabel}>لم تبدأ</Text></View>
                         <View><Text style={[styles.profileAttendanceValue, { color: Colors.warning }]}>{summary.makeupCount}</Text><Text style={styles.profileAttendanceLabel}>تعويض</Text></View>
                         <View><Text style={styles.profileAttendanceValue}>{summary.expectedSessions}</Text><Text style={styles.profileAttendanceLabel}>حصص</Text></View>
                       </View>
@@ -2364,7 +2364,7 @@ export default function StudentsScreen() {
                                 <Text style={styles.groupInlineMetric}>متوقع: {attendance?.expectedSessions ?? 0}</Text>
                                 <Text style={[styles.groupInlineMetric, { color: Colors.successText }]}>حضور: {attendance?.presentCount ?? 0}</Text>
                                 <Text style={[styles.groupInlineMetric, { color: Colors.dangerText }]}>غياب: {attendance?.absentCount ?? 0}</Text>
-                                <Text style={styles.groupInlineMetric}>لم يحسم: {attendance?.unresolvedCount ?? 0}</Text>
+                                <Text style={styles.groupInlineMetric}>لم تبدأ: {attendance?.notStartedCount ?? 0}</Text>
                                 <Text style={[styles.groupInlineMetric, { color: Colors.warningText }]}>تعويض: {attendance?.makeupCount ?? 0}</Text>
                               </View>
                             </View>
@@ -2414,8 +2414,8 @@ export default function StudentsScreen() {
                             <Text style={styles.attendanceMetricLabel}>غياب</Text>
                           </View>
                           <View style={styles.attendanceMetric}>
-                            <Text style={styles.attendanceMetricValue}>{summary.unresolvedCount}</Text>
-                            <Text style={styles.attendanceMetricLabel}>لم يحسم</Text>
+                            <Text style={styles.attendanceMetricValue}>{summary.notStartedCount}</Text>
+                            <Text style={styles.attendanceMetricLabel}>لم تبدأ</Text>
                           </View>
                           <View style={styles.attendanceMetric}>
                             <Text style={[styles.attendanceMetricValue, { color: Colors.warningText }]}>{summary.makeupCount}</Text>

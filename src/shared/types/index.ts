@@ -225,6 +225,7 @@ export interface Session {
   groupId: string;
   scheduleId?: string | null;
   groupName?: string;
+  groupGrade?: string | null;
   subjectName?: string;
   teacherName?: string;
   subjectId?: string | null;
@@ -298,7 +299,7 @@ export interface StudentGroupAttendanceSummary {
   expectedSessions: number;
   presentCount: number;
   absentCount: number;
-  unresolvedCount: number;
+  notStartedCount: number;
   makeupCount: number;
 }
 
@@ -699,7 +700,7 @@ export interface DailyAttendanceReport {
     expectedCount: number;
     presentCount: number;
     absentCount: number;
-    unresolvedCount: number;
+    notStartedCount: number;
     lateCount: number;
     makeupCount: number;
     attendanceRate: number;
@@ -709,7 +710,7 @@ export interface DailyAttendanceReport {
     totalExpected: number;
     totalPresent: number;
     totalAbsent: number;
-    totalUnresolved: number;
+    totalNotStarted: number;
     attendanceRate: number;
   };
 }
@@ -725,7 +726,7 @@ export interface StudentAttendanceReport {
     sessionDate: string;
     groupName: string;
     subjectName: string;
-    status: "present" | "late" | "absent" | "makeup" | "unresolved" | "not_expected";
+    status: "present" | "late" | "absent" | "makeup" | "covered" | "not_started" | "not_expected";
     checkInTime?: string;
     isExternal?: boolean;
   }[];
@@ -734,8 +735,9 @@ export interface StudentAttendanceReport {
     presentCount: number;
     lateCount: number;
     absentCount: number;
-    unresolvedCount: number;
+    notStartedCount: number;
     makeupCount: number;
+    coveredCount: number;
     attendanceRate: number;
   };
 }

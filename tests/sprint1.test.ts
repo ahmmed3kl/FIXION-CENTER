@@ -345,9 +345,8 @@ describe("Sprint 1 - FIXION Mobile App Foundation & Complete Working Flow", () =
       // std-2 (present) and std-3 (makeup) attended
       expect(summary.presentCount + summary.lateCount).toBe(2);
 
-      // Missing attendance is unresolved; it is not an explicit absence.
-      expect(summary.absentCount).toBe(0);
-      expect(summary.unresolvedCount).toBe(1);
+      // A started session treats the remaining unscanned student as absent.
+      expect(summary.absentCount).toBe(1);
 
       // Today's collections include seed 250 + new 100 = 350
       expect(summary.todayCollections).toBeGreaterThanOrEqual(100);

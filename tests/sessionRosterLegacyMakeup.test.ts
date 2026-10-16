@@ -5,10 +5,14 @@ import { DatabaseService, SqlDatabase } from "../src/core/database";
 import { ConnectivityService } from "../src/core/connectivity";
 import { SyncRepository } from "../src/core/sync";
 import { AbsenceService } from "../src/features/attendance/AbsenceService";
+import { AttendanceRepository } from "../src/features/attendance/AttendanceRepository";
 import { AttendanceSessionService } from "../src/features/attendance/AttendanceSessionService";
+import { MakeupService } from "../src/features/attendance/MakeupService";
 import { useAuthStore } from "../src/features/auth/useAuthStore";
 import { EnrollmentRepository } from "../src/features/enrollments/EnrollmentRepository";
 import { SessionRepository } from "../src/features/sessions/SessionRepository";
+import { SessionDateService } from "../src/features/sessions/SessionDateService";
+import { OperationalReportsService } from "../src/features/reports/OperationalReportsService";
 import { Permission, User } from "../src/shared/types";
 
 interface NativeStatement {
@@ -94,6 +98,7 @@ describe("legacy compensation rows in expected session roster", () => {
         "attendance.view",
         "reports.attendance.view",
         "attendance.create",
+        "attendance.makeup",
         "enrollments.view",
       ] as Permission[],
     };
@@ -237,16 +242,16 @@ describe("legacy compensation rows in expected session roster", () => {
     fs.rmSync(tempDirectory, { recursive: true, force: true });
   });
 
-  it("removes three nonmember compensation visitors from expected and absent lists without rewriting their links", () => {
+  it("keeps compensation visitors out of the roster while treating the real member as initially absent", () => {
     expect(SessionRepository.getExpectedStudents(CURRENT_SESSION_ID).map((student) => student.id))
       .toEqual([MEMBER_ID]);
     expect(AbsenceService.getAbsenteesForSession(CURRENT_SESSION_ID).map((student) => student.id))
-      .toEqual([]);
+      .toEqual([MEMBER_ID]);
     expect(AttendanceSessionService.getSummary(CURRENT_SESSION_ID)).toEqual({
       total: 1,
       present: 0,
-      absent: 0,
-      unresolved: 1,
+      absent: 1,
+      notStarted: 0,
       makeup: 0,
     });
     for (const studentId of VISITOR_IDS) {
@@ -295,8 +300,8 @@ describe("legacy compensation rows in expected session roster", () => {
       .toEqual([MEMBER_ID]);
     expect(AttendanceSessionService.getSummary(CURRENT_SESSION_ID)).toMatchObject({
       total: 1,
-      absent: 0,
-      unresolved: 1,
+      absent: 1,
+      notStarted: 0,
     });
     expect(SyncRepository.getPendingOperations(CENTER_ID).map((operation) => operation.operationId))
       .toEqual(expect.arrayContaining(pendingBeforeActivation));
@@ -304,5 +309,299 @@ describe("legacy compensation rows in expected session roster", () => {
       "SELECT id FROM session_expected_students WHERE center_id = ? AND session_id = ?",
       [CENTER_ID, CURRENT_SESSION_ID],
     )).toHaveLength(4);
+  });
+
+  it("creates initial absences at session start and promotes one scan in place", async () => {
+    const secondMemberId = "legacy-member-second";
+    const coveredStudentId = "legacy-covered-student";
+    database.runSync(
+      "UPDATE sessions SET status = 'scheduled' WHERE center_id = ? AND id = ?",
+      [CENTER_ID, CURRENT_SESSION_ID],
+    );
+    seedStudent(secondMemberId, "990045");
+    database.runSync(
+      `INSERT INTO student_group_enrollments
+       (id, center_id, student_id, group_id, start_date, status, created_at)
+       VALUES (?, ?, ?, ?, '2099-10-04', 'active', '2026-10-13')`,
+      ["enr-target-second-member", CENTER_ID, secondMemberId, TARGET_GROUP_ID],
+    );
+    seedStudent(coveredStudentId, "990047");
+    database.runSync(
+      `INSERT INTO student_group_enrollments
+       (id, center_id, student_id, group_id, start_date, status, created_at)
+       VALUES (?, ?, ?, ?, '2099-10-01', 'active', '2026-10-13')`,
+      [`enr-source-${coveredStudentId}`, CENTER_ID, coveredStudentId, SOURCE_GROUP_ID],
+    );
+    database.runSync(
+      `INSERT INTO student_group_enrollments
+       (id, center_id, student_id, group_id, start_date, status, created_at)
+       VALUES (?, ?, ?, ?, '2099-10-04', 'active', '2026-10-13')`,
+      [`enr-target-${coveredStudentId}`, CENTER_ID, coveredStudentId, TARGET_GROUP_ID],
+    );
+    seedExpected(SOURCE_SESSION_ID, coveredStudentId);
+    database.runSync(
+      `INSERT INTO attendance
+       (id, center_id, student_id, session_id, check_in_time, status,
+        is_late, attendance_type, original_absence_id, is_external, operation_id)
+       VALUES (?, ?, ?, ?, '2099-10-01T10:30:00.000Z', 'present',
+               0, 'present', NULL, 0, ?)`,
+      [
+        `att-advance-source-${coveredStudentId}`,
+        CENTER_ID,
+        coveredStudentId,
+        SOURCE_SESSION_ID,
+        `op-advance-source-${coveredStudentId}`,
+      ],
+    );
+    database.runSync(
+      `INSERT INTO advance_coverages
+       (id, operation_id, center_id, student_id, advance_session_id,
+        target_future_session_id, created_by, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, '2026-10-13')`,
+      [
+        `coverage-${coveredStudentId}`,
+        `op-coverage-${coveredStudentId}`,
+        CENTER_ID,
+        coveredStudentId,
+        SOURCE_SESSION_ID,
+        CURRENT_SESSION_ID,
+        USER_ID,
+      ],
+    );
+
+    AttendanceSessionService.activate(CURRENT_SESSION_ID);
+
+    const initialRows = database.getAllSync<{
+      id: string;
+      studentId: string;
+      status: string;
+      attendanceType: string;
+      operationId: string;
+    }>(
+      `SELECT id, student_id as studentId, status,
+              attendance_type as attendanceType, operation_id as operationId
+       FROM attendance WHERE center_id = ? AND session_id = ?
+       ORDER BY student_id`,
+      [CENTER_ID, CURRENT_SESSION_ID],
+    );
+    expect(initialRows).toEqual(
+      [MEMBER_ID, secondMemberId].sort().map((studentId) => ({
+        id: `att-default-${CURRENT_SESSION_ID}-${studentId}`,
+        studentId,
+        status: "absent",
+        attendanceType: "present",
+        operationId: `op-att-default-${CURRENT_SESSION_ID}-${studentId}`,
+      })),
+    );
+    expect(AttendanceSessionService.getSummary(CURRENT_SESSION_ID)).toEqual({
+      total: 3,
+      present: 0,
+      absent: 2,
+      notStarted: 0,
+      makeup: 0,
+    });
+    expect(AttendanceRepository.isAlreadyAttended(CURRENT_SESSION_ID, MEMBER_ID)).toBe(false);
+
+    const promoted = await AttendanceRepository.recordAttendance({
+      studentId: MEMBER_ID,
+      sessionId: CURRENT_SESSION_ID,
+      status: "present",
+      isLate: false,
+      checkInTime: "2099-10-04T10:30:00.000Z",
+    });
+    expect(promoted.id).toBe(`att-default-${CURRENT_SESSION_ID}-${MEMBER_ID}`);
+    expect(AttendanceRepository.isAlreadyAttended(CURRENT_SESSION_ID, MEMBER_ID)).toBe(true);
+    expect(AttendanceSessionService.getSummary(CURRENT_SESSION_ID)).toEqual({
+      total: 3,
+      present: 1,
+      absent: 1,
+      notStarted: 0,
+      makeup: 0,
+    });
+    expect(AbsenceService.getAbsenteesForSession(CURRENT_SESSION_ID).map((student) => student.id))
+      .toEqual([secondMemberId]);
+    const coveredReport = OperationalReportsService.getStudentAttendanceReport(
+      coveredStudentId,
+      "2099-10-04",
+      "2099-10-04",
+    );
+    expect(coveredReport.sessions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ sessionId: CURRENT_SESSION_ID, status: "covered" }),
+    ]));
+    expect(coveredReport.totals).toMatchObject({ coveredCount: 1, absentCount: 0 });
+
+    const promotionOperation = SyncRepository.getByOperationId(promoted.operationId);
+    expect(promotionOperation?.operationType).toBe("UPDATE");
+    expect(JSON.parse(promotionOperation?.payload || "{}")).toMatchObject({
+      action: "attendance.promote_default_absence",
+      expectedOperationId: `op-att-default-${CURRENT_SESSION_ID}-${MEMBER_ID}`,
+      status: "present",
+    });
+    const orderedOperationIds = SyncRepository.getPendingOperations(CENTER_ID)
+      .map((operation) => operation.operationId);
+    const initialAbsenceOperationIndex = orderedOperationIds.indexOf(
+      `op-att-default-${CURRENT_SESSION_ID}-${MEMBER_ID}`,
+    );
+    const promotionOperationIndex = orderedOperationIds.indexOf(promoted.operationId);
+    expect(initialAbsenceOperationIndex).toBeGreaterThanOrEqual(0);
+    expect(promotionOperationIndex).toBeGreaterThan(initialAbsenceOperationIndex);
+
+    await expect(AttendanceRepository.recordAttendance({
+      studentId: MEMBER_ID,
+      sessionId: CURRENT_SESSION_ID,
+      status: "present",
+      isLate: false,
+      checkInTime: "2099-10-04T10:31:00.000Z",
+    })).rejects.toThrow("تم تحضير الطالب مسبقًا");
+
+    const newlyEnrolledStudentId = "legacy-member-added-during-session";
+    seedStudent(newlyEnrolledStudentId, "990048");
+    database.runSync(
+      `INSERT INTO student_group_enrollments
+       (id, center_id, student_id, group_id, start_date, status, created_at)
+       VALUES (?, ?, ?, ?, '2099-10-04', 'active', '2026-10-13')`,
+      [`enr-target-${newlyEnrolledStudentId}`, CENTER_ID, newlyEnrolledStudentId, TARGET_GROUP_ID],
+    );
+    AttendanceSessionService.addEnrolledStudentToOpenSession(
+      CURRENT_SESSION_ID,
+      newlyEnrolledStudentId,
+    );
+    const newStudentInitialAbsence = AttendanceRepository.getStudentAttendanceInSession(
+      CURRENT_SESSION_ID,
+      newlyEnrolledStudentId,
+    );
+    expect(newStudentInitialAbsence).toMatchObject({
+      id: `att-default-${CURRENT_SESSION_ID}-${newlyEnrolledStudentId}`,
+      status: "absent",
+    });
+    const newlyEnrolledAttendance = await AttendanceRepository.recordAttendance({
+      studentId: newlyEnrolledStudentId,
+      sessionId: CURRENT_SESSION_ID,
+      status: "present",
+      isLate: false,
+      checkInTime: "2099-10-04T10:32:00.000Z",
+    });
+    expect(newlyEnrolledAttendance.id).toBe(newStudentInitialAbsence?.id);
+    expect(AttendanceSessionService.getSummary(CURRENT_SESSION_ID)).toEqual({
+      total: 4,
+      present: 2,
+      absent: 1,
+      notStarted: 0,
+      makeup: 0,
+    });
+    expect(AbsenceService.getAbsenteesForSession(CURRENT_SESSION_ID).map((student) => student.id))
+      .toEqual([secondMemberId]);
+
+    AttendanceSessionService.activate(CURRENT_SESSION_ID);
+    expect(database.getAllSync<{ id: string }>(
+      "SELECT id FROM attendance WHERE center_id = ? AND session_id = ?",
+      [CENTER_ID, CURRENT_SESSION_ID],
+    )).toHaveLength(3);
+    expect(SyncRepository.getByOperationId(
+      `op-att-default-${CURRENT_SESSION_ID}-${secondMemberId}`,
+    )?.status).toBe("pending");
+  });
+
+  it("promotes a target-session initial absence to one linked makeup without changing the source absence", async () => {
+    const studentId = "legacy-makeup-promotion-student";
+    const sourceSessionId = "legacy-makeup-promotion-source";
+    const targetSessionId = "legacy-makeup-promotion-target";
+    const laterTargetSessionId = "legacy-makeup-promotion-later-target";
+    seedStudent(studentId, "990046");
+    database.runSync(
+      `INSERT INTO student_group_enrollments
+       (id, center_id, student_id, group_id, start_date, status, created_at)
+       VALUES (?, ?, ?, ?, '2099-09-01', 'active', '2026-10-13')`,
+      [`enr-makeup-source-${studentId}`, CENTER_ID, studentId, SOURCE_GROUP_ID],
+    );
+    database.runSync(
+      `INSERT INTO student_group_enrollments
+       (id, center_id, student_id, group_id, start_date, status, created_at)
+       VALUES (?, ?, ?, ?, '2099-09-01', 'active', '2026-10-13')`,
+      [`enr-makeup-target-${studentId}`, CENTER_ID, studentId, TARGET_GROUP_ID],
+    );
+    seedSession(sourceSessionId, SOURCE_GROUP_ID, "2099-10-01", "closed");
+    seedSession(targetSessionId, TARGET_GROUP_ID, "2099-10-02", "scheduled");
+    seedExpected(sourceSessionId, studentId);
+    database.runSync(
+      `INSERT INTO attendance
+       (id, center_id, student_id, session_id, check_in_time, status,
+        is_late, attendance_type, original_absence_id, is_external, operation_id)
+       VALUES (?, ?, ?, ?, '2099-10-01T10:30:00.000Z', 'absent',
+               0, 'present', NULL, 0, ?)`,
+      [`att-source-absence-${studentId}`, CENTER_ID, studentId, sourceSessionId, `op-source-absence-${studentId}`],
+    );
+
+    const currentDateSpy = jest
+      .spyOn(SessionDateService, "getCurrentSessionDate")
+      .mockReturnValue("2099-10-02");
+    try {
+      AttendanceSessionService.activate(targetSessionId);
+      expect(AttendanceRepository.getStudentAttendanceInSession(targetSessionId, studentId))
+        .toMatchObject({
+          id: `att-default-${targetSessionId}-${studentId}`,
+          status: "absent",
+        });
+      expect(MakeupService.getEligibilityForSession(targetSessionId, studentId))
+        .toMatchObject({ eligible: true, originalAbsenceId: sourceSessionId });
+
+      const makeup = await MakeupService.recordMakeupAttendance({
+        studentId,
+        sessionId: targetSessionId,
+        originalAbsenceId: sourceSessionId,
+        checkInTime: "2099-10-02T10:30:00.000Z",
+      });
+      expect(makeup).toMatchObject({
+        id: `att-default-${targetSessionId}-${studentId}`,
+        status: "present",
+        attendanceType: "makeup",
+        originalAbsenceId: sourceSessionId,
+      });
+      expect(AttendanceRepository.getStudentAttendanceInSession(sourceSessionId, studentId))
+        .toMatchObject({ status: "absent", attendanceType: "present" });
+
+      const initialOperation = SyncRepository.getByOperationId(
+        `op-att-default-${targetSessionId}-${studentId}`,
+      );
+      const promotionOperation = SyncRepository.getByOperationId(makeup.operationId);
+      expect(initialOperation?.status).toBe("pending");
+      expect(promotionOperation?.operationType).toBe("UPDATE");
+      expect(promotionOperation?.status).toBe("pending");
+      expect(JSON.parse(promotionOperation?.payload || "{}")).toMatchObject({
+        action: "attendance.promote_default_absence",
+        attendanceType: "makeup",
+        originalAbsenceId: sourceSessionId,
+        expectedOperationId: initialOperation?.operationId,
+      });
+
+      database.runSync(
+        `INSERT INTO sessions
+         (id, center_id, group_id, subject_id, teacher_id, session_date,
+          start_time, end_time, status, created_at)
+         VALUES (?, ?, ?, 'legacy-roster-subject', 'legacy-roster-teacher',
+                 '2099-10-02', '14:00', '16:00', 'open', '2026-10-13')`,
+        [laterTargetSessionId, CENTER_ID, TARGET_GROUP_ID],
+      );
+      expect(MakeupService.getEligibilityForSession(laterTargetSessionId, studentId).eligible)
+        .toBe(false);
+      await expect(AttendanceRepository.recordAttendance({
+        studentId,
+        sessionId: laterTargetSessionId,
+        status: "present",
+        isLate: false,
+        attendanceType: "makeup",
+        originalAbsenceId: sourceSessionId,
+        checkInTime: "2099-10-02T14:30:00.000Z",
+      })).rejects.toThrow("تم تسجيل تعويض لهذا الغياب مسبقًا");
+
+      expect(database.getAllSync<{ id: string }>(
+        `SELECT id FROM attendance
+         WHERE center_id = ? AND student_id = ? AND original_absence_id = ?
+           AND attendance_type = 'makeup'`,
+        [CENTER_ID, studentId, sourceSessionId],
+      )).toHaveLength(1);
+    } finally {
+      currentDateSpy.mockRestore();
+    }
   });
 });

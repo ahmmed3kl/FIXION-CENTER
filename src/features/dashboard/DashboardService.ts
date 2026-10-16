@@ -9,7 +9,6 @@ export interface DashboardSummary {
   presentCount: number;
   lateCount: number;
   absentCount: number;
-  unresolvedCount: number;
   makeupCount: number;
   totalSessions: number;
   openSessions: number;
@@ -131,7 +130,6 @@ export class DashboardService {
     let presentCount = 0;
     let lateCount = 0;
     let absentCount = 0;
-    let unresolvedCount = 0;
     let makeupCount = 0;
     let openSessions = 0;
     let closedSessions = 0;
@@ -235,7 +233,12 @@ export class DashboardService {
          WHERE center_id = ? AND target_future_session_id = ?`,
         [centerId, session.id],
       );
-      const counts = calculateSessionAttendanceCounts(expectedIds, attendance, covered.map((row: any) => String(row.studentId)));
+      const counts = calculateSessionAttendanceCounts(
+        expectedIds,
+        attendance,
+        covered.map((row: any) => String(row.studentId)),
+        true,
+      );
       
       console.log("[Dashboard] Session counts:", {
         sessionId: session.id,
@@ -251,7 +254,6 @@ export class DashboardService {
       presentCount += Math.max(0, counts.present - counts.late) + counts.makeup;
       lateCount += counts.late;
       absentCount += counts.absent;
-      unresolvedCount += counts.unresolved;
       makeupCount += counts.makeup;
     }
 
@@ -268,13 +270,12 @@ export class DashboardService {
       presentCount,
       lateCount,
       absentCount,
-      unresolvedCount,
       makeupCount,
       totalSessions: groups.length,
       openSessions,
       closedSessions,
     });
     
-    return { expectedCount, presentCount, lateCount, absentCount, unresolvedCount, makeupCount, totalSessions: groups.length, openSessions, closedSessions, todayCollections };
+    return { expectedCount, presentCount, lateCount, absentCount, makeupCount, totalSessions: groups.length, openSessions, closedSessions, todayCollections };
   }
 }

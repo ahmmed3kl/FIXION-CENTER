@@ -109,70 +109,67 @@ describe("absence report count aggregation", () => {
     }
   });
 
-  it("keeps session list and details at 1 present / 1 explicitly absent", () => {
-    const result = calculateAbsenceReportCounts(students, [students[1]], [attendance("a", "present")], []);
-    expect(result).toMatchObject({ total: 2, present: [students[0]], absent: [students[1]], unresolved: [], compensated: 0 });
+  it("keeps session list and details at 1 present / 1 initially absent", () => {
+    const result = calculateAbsenceReportCounts(students, [attendance("a", "present")], []);
+    expect(result).toMatchObject({ total: 2, present: [students[0]], absent: [students[1]], compensated: 0 });
   });
 
-  it("keeps students without attendance records unresolved", () => {
-    const result = calculateAbsenceReportCounts(students, [], [], []);
-    expect(result).toMatchObject({ total: 2, present: [], absent: [], unresolved: students, compensated: 0 });
+  it("counts students without attendance records as absent after session start", () => {
+    const result = calculateAbsenceReportCounts(students, [], []);
+    expect(result).toMatchObject({ total: 2, present: [], absent: students, compensated: 0 });
   });
 
   it("reports two present students", () => {
-    const result = calculateAbsenceReportCounts(students, [], [attendance("a", "present"), attendance("b", "present")], []);
+    const result = calculateAbsenceReportCounts(students, [attendance("a", "present"), attendance("b", "present")], []);
     expect(result).toMatchObject({ total: 2, present: students, absent: [], compensated: 0 });
   });
 
   it("keeps late as present, never absent", () => {
-    const result = calculateAbsenceReportCounts(students, [students[1]], [attendance("a", "late")], []);
+    const result = calculateAbsenceReportCounts(students, [attendance("a", "late")], []);
     expect(result.present).toHaveLength(1);
     expect(result.present[0].id).toBe("a");
     expect(result.absent.map((item) => item.id)).toEqual(["b"]);
-    expect(result.unresolved).toEqual([]);
   });
 
   it("lets recorded attendance win over an explicit absence conflict", () => {
     const result = calculateAbsenceReportCounts(
       [students[0]],
-      [students[0]],
       [attendance("a", "present")],
       [],
     );
-    expect(result).toMatchObject({ present: [students[0]], absent: [], unresolved: [] });
+    expect(result).toMatchObject({ present: [students[0]], absent: [] });
   });
 
   it("keeps an external makeup attendee out of the regular roster counts", () => {
     const result = calculateAbsenceReportCounts(
       [student("a"), student("b"), student("c")],
-      [student("c")],
       [attendance("a", "present"), attendance("b", "present"), makeupAttendance("d")],
       [],
     );
     expect(result.total).toBe(3);
     expect(result.present.map((item) => item.id)).toEqual(["a", "b"]);
     expect(result.absent.map((item) => item.id)).toEqual(["c"]);
-    expect(result.unresolved).toEqual([]);
     expect(result.compensated).toBe(1);
   });
 
-  it("keeps explicit absences while makeup rows do not change regular attendance counts", () => {
+  it("counts unscanned expected students as absent while makeup rows stay separate", () => {
     const result = calculateAbsenceReportCounts(
-      [student("a"), student("b"), student("c")],
       [student("a"), student("b"), student("c")],
       [makeupAttendance("d"), makeupAttendance("e")],
       [],
     );
-    expect(result).toMatchObject({ total: 3, present: [], absent: [student("a"), student("b"), student("c")], unresolved: [], compensated: 2 });
+    expect(result).toMatchObject({ total: 3, present: [], absent: [student("a"), student("b"), student("c")], compensated: 2 });
   });
 
-  it("does not mark an expected student absent when their attendance is recorded as makeup", () => {
+  it("keeps makeup outcomes separate and counts remaining unscanned students as absent", () => {
     const result = calculateSessionAttendanceCounts(
       ["a", "b", "c"],
       [attendance("a", "present"), makeupAttendance("b")],
+      [],
+      true,
     );
 
-    expect(result).toEqual({ expected: 3, present: 1, absent: 0, unresolved: 1, late: 0, makeup: 1 });
+    expect(result).toEqual({ expected: 3, present: 1, absent: 1, notStarted: 0, late: 0, makeup: 1 });
   });
 
   it("counts late regular attendance as present while keeping makeup separate", () => {
@@ -183,8 +180,10 @@ describe("absence report count aggregation", () => {
         { studentId: "b", status: "present", attendanceType: "present" },
         { studentId: "d", status: "present", attendanceType: "makeup" },
       ],
+      [],
+      true,
     );
-    expect(result).toEqual({ expected: 3, present: 2, absent: 0, unresolved: 1, late: 1, makeup: 1 });
+    expect(result).toEqual({ expected: 3, present: 2, absent: 1, notStarted: 0, late: 1, makeup: 1 });
   });
 
   it("scopes never-attended classification to the student's teacher cycle and month", () => {
@@ -232,7 +231,7 @@ describe("absence report count aggregation", () => {
     try {
       const rows = AbsenceReportsService.getMonthlyNeverAttended(
         "2026-10",
-        allSessions.map((item) => ({ session: item, total: 0, present: 0, absent: 0, unresolved: 0, compensated: 0 })),
+        allSessions.map((item) => ({ session: item, total: 0, present: 0, absent: 0, compensated: 0 })),
       );
       expect(rows.map((row) => row.student.id).sort()).toEqual([
         "old-attendance",
@@ -280,7 +279,6 @@ describe("absence report count aggregation", () => {
         total: 1,
         present: 0,
         absent: 1,
-        unresolved: 0,
         compensated: 1,
       }]);
       expect(rows).toHaveLength(1);
@@ -402,7 +400,6 @@ describe("absence report count aggregation", () => {
     try {
       const counts = calculateAbsenceReportCounts(
         expected,
-        expected.slice(4),
         expected.slice(0, 4).map((item) => attendance(item.id, "present")),
         [],
       );

@@ -209,13 +209,14 @@ export class OperationalReportsService {
         expected.map((row: any) => row.studentId ?? row.student_id).filter(Boolean),
         attendanceRows,
         coveredInAdvance.map((row) => row.studentId),
+        s.status === "open" || s.status === "closed",
       );
       const expectedCount = counts.expected;
       const presentCount = counts.present;
       const lateCount = counts.late;
       const makeupCount = counts.makeup;
       const absentCount = counts.absent;
-      const unresolvedCount = counts.unresolved;
+      const notStartedCount = counts.notStarted;
       const attendanceRate =
         expectedCount > 0
           ? Math.round((presentCount / expectedCount) * 100)
@@ -232,7 +233,7 @@ export class OperationalReportsService {
         expectedCount,
         presentCount,
         absentCount,
-        unresolvedCount,
+        notStartedCount,
         lateCount,
         makeupCount,
         attendanceRate,
@@ -244,7 +245,7 @@ export class OperationalReportsService {
       totalExpected: sessionReport.reduce((sum, s) => sum + s.expectedCount, 0),
       totalPresent: sessionReport.reduce((sum, s) => sum + s.presentCount, 0),
       totalAbsent: sessionReport.reduce((sum, s) => sum + s.absentCount, 0),
-      totalUnresolved: sessionReport.reduce((sum, s) => sum + s.unresolvedCount, 0),
+      totalNotStarted: sessionReport.reduce((sum, s) => sum + s.notStartedCount, 0),
       attendanceRate:
         sessionReport.reduce((sum, s) => sum + s.expectedCount, 0) > 0
           ? Math.round(
@@ -297,7 +298,7 @@ export class OperationalReportsService {
     // attendance row or a valid enrollment on the session date must still
     // keep the session visible in the report.
     const sessions = db.getAllSync<any>(
-      `SELECT DISTINCT s.id, s.session_date, s.start_time, s.end_time,
+      `SELECT DISTINCT s.id, s.session_date, s.start_time, s.end_time, s.status,
               g.name as group_name, subj.name as subject_name
        FROM sessions s
        JOIN groups g ON g.center_id = s.center_id AND s.group_id = g.id
@@ -334,16 +335,30 @@ export class OperationalReportsService {
     for (const a of allAttendance) {
       attendanceMap.set(a.session_id, a);
     }
+    const coveredSessionIds = new Set(
+      db.getAllSync<{ sessionId: string }>(
+        `SELECT target_future_session_id as sessionId
+         FROM advance_coverages
+         WHERE center_id = ? AND student_id = ?`,
+        [centerId, studentId],
+      ).map((row) => row.sessionId),
+    );
 
     const sessionDetails = sessions.map((s: any) => {
       const att = attendanceMap.get(s.id);
-      let status: "present" | "late" | "absent" | "makeup" | "unresolved" | "not_expected" =
-        "unresolved";
+      let status: "present" | "late" | "absent" | "makeup" | "covered" | "not_started" | "not_expected" =
+        s.status === "open" || s.status === "closed"
+          ? "absent"
+          : s.status === "cancelled"
+            ? "not_expected"
+            : "not_started";
       if (att) {
         if (att.attendance_type === "makeup") status = "makeup";
         else if (att.status === "absent") status = "absent";
         else if (att.status === "late") status = "late";
         else status = "present";
+      } else if (s.status !== "cancelled" && coveredSessionIds.has(s.id)) {
+        status = "covered";
       }
       return {
         sessionId: s.id,
@@ -363,11 +378,14 @@ export class OperationalReportsService {
     const absentCount = sessionDetails.filter(
       (s) => s.status === "absent",
     ).length;
-    const unresolvedCount = sessionDetails.filter(
-      (s) => s.status === "unresolved",
+    const notStartedCount = sessionDetails.filter(
+      (s) => s.status === "not_started",
     ).length;
     const makeupCount = sessionDetails.filter(
       (s) => s.status === "makeup",
+    ).length;
+    const coveredCount = sessionDetails.filter(
+      (s) => s.status === "covered",
     ).length;
     const total = sessionDetails.length;
     const attendanceRate =
@@ -385,8 +403,9 @@ export class OperationalReportsService {
         presentCount,
         lateCount,
         absentCount,
-        unresolvedCount,
+        notStartedCount,
         makeupCount,
+        coveredCount,
         attendanceRate,
       },
     };

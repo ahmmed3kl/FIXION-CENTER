@@ -1357,12 +1357,17 @@ class InMemorySqliteMock implements SqlDatabase {
     params: any[] = [],
   ): { lastInsertRowId: number; changes: number } {
     const trimmed = sql.trim();
-    if (trimmed.toUpperCase().startsWith("INSERT INTO")) {
+    if (
+      trimmed.toUpperCase().startsWith("INSERT INTO") ||
+      trimmed.toUpperCase().startsWith("INSERT OR REPLACE INTO") ||
+      trimmed.toUpperCase().startsWith("INSERT OR IGNORE INTO")
+    ) {
       const match = trimmed.match(
-        /INSERT\s+INTO\s+(\w+)\s*\(([^)]+)\)\s*VALUES\s*\(([^)]+)\)/i,
+        /INSERT\s+(?:OR\s+(?:REPLACE|IGNORE)\s+)?INTO\s+(\w+)\s*\(([^)]+)\)\s*VALUES\s*\(([^)]+)\)/i,
       );
       if (match) {
         const tableName = match[1].toLowerCase();
+        const isIgnoreInsert = trimmed.toUpperCase().startsWith("INSERT OR IGNORE INTO");
         const columns = match[2].split(",").map((c) => c.trim());
         const valuesTokens = match[3].split(",").map((v) => v.trim());
         const row: any = {};
@@ -1385,7 +1390,8 @@ class InMemorySqliteMock implements SqlDatabase {
         // Most sync writes use ON CONFLICT(id) DO UPDATE; merge those rows
         // instead of incorrectly raising a duplicate-key error.
         if (
-          trimmed.toUpperCase().includes("ON CONFLICT") &&
+          (trimmed.toUpperCase().includes("ON CONFLICT") ||
+            trimmed.toUpperCase().includes("OR REPLACE")) &&
           (row.id != null || row.center_id != null)
         ) {
           const keyField = row.id != null ? "id" : "center_id";
@@ -1496,10 +1502,14 @@ class InMemorySqliteMock implements SqlDatabase {
               r.session_id === row.session_id &&
               r.student_id === row.student_id,
           );
-          if (exists)
+          if (exists && isIgnoreInsert) {
+            return { lastInsertRowId: 0, changes: 0 };
+          }
+          if (exists) {
             throw new Error(
               "UNIQUE constraint failed: attendance.session_id, attendance.student_id",
             );
+          }
         }
         if (tableName === "absence_notes") {
           const exists = list.some(
@@ -1520,10 +1530,14 @@ class InMemorySqliteMock implements SqlDatabase {
               r.session_id === row.session_id &&
               r.student_id === row.student_id,
           );
-          if (exists)
+          if (exists && isIgnoreInsert) {
+            return { lastInsertRowId: 0, changes: 0 };
+          }
+          if (exists) {
             throw new Error(
               "UNIQUE constraint failed: session_expected_students.session_id, session_expected_students.student_id",
             );
+          }
         }
         if (tableName === "sync_operations") {
           const exists = list.some((r) => r.operation_id === row.operation_id);
@@ -1719,7 +1733,50 @@ class InMemorySqliteMock implements SqlDatabase {
         const tableName = match[1].toLowerCase();
         const list = this.tables.get(tableName) || [];
 
-        if (tableName === "sync_operations") {
+        if (
+          tableName === "attendance" &&
+          trimmed.includes("AND status = 'absent'") &&
+          trimmed.includes("AND attendance_type = 'present'") &&
+          trimmed.includes("original_absence_id IS NULL") &&
+          trimmed.includes("AND operation_id = ?")
+        ) {
+          const [
+            checkInTime,
+            status,
+            isLate,
+            attendanceType,
+            originalAbsenceId,
+            isExternal,
+            operationId,
+            centerId,
+            id,
+            sessionId,
+            studentId,
+            expectedOperationId,
+          ] = params;
+          const row = list.find(
+            (candidate) =>
+              candidate.center_id === centerId &&
+              candidate.id === id &&
+              candidate.session_id === sessionId &&
+              candidate.student_id === studentId &&
+              candidate.status === "absent" &&
+              candidate.attendance_type === "present" &&
+              candidate.original_absence_id == null &&
+              candidate.operation_id === expectedOperationId,
+          );
+          if (!row) return { lastInsertRowId: 0, changes: 0 };
+          Object.assign(row, {
+            check_in_time: checkInTime,
+            status,
+            is_late: isLate,
+            attendance_type: attendanceType,
+            original_absence_id: originalAbsenceId,
+            is_external: isExternal,
+            operation_id: operationId,
+          });
+          return { lastInsertRowId: 0, changes: 1 };
+        } else if (tableName === "sync_operations") {
           const statusMatch = trimmed.match(/status\s*=\s*'([^']+)'/i);
           const isRetryInc = trimmed.includes("retry_count = retry_count + 1");
           if (
@@ -2575,6 +2632,8 @@ class InMemorySqliteMock implements SqlDatabase {
           groupName: g ? g.name : "",
           subjectName: subj ? subj.name : "",
           teacherName: t ? t.name : "",
+          groupGrade: g ? g.grade : "",
+          grade: g ? g.grade : "",
           // snake_case
           center_id: s.center_id,
           group_id: s.group_id,
@@ -2586,8 +2645,27 @@ class InMemorySqliteMock implements SqlDatabase {
           session_date: s.session_date,
           start_time: s.start_time,
           end_time: s.end_time,
+          group_grade: g ? g.grade : "",
         };
       });
+
+      if (
+        params.length >= 4 &&
+        trimmed.includes("s.group_id <> ?") &&
+        (trimmed.includes("s.subject_id") || trimmed.includes("subject_id = ?"))
+      ) {
+        const [cId, exclGrpId, subId, teachId, hostDate, _hostDate2, hostTime] = params;
+        return joined.filter(
+          (s) =>
+            s.centerId === cId &&
+            s.groupId !== exclGrpId &&
+            s.subjectId === subId &&
+            s.teacherId === teachId &&
+            s.status !== "cancelled" &&
+            (s.sessionDate < hostDate ||
+              (s.sessionDate === hostDate && (!hostTime || s.startTime < hostTime))),
+        ) as T[];
+      }
 
       if (
         params.length >= 3 &&
@@ -2829,6 +2907,23 @@ class InMemorySqliteMock implements SqlDatabase {
       ) {
         return joined.filter(
           (r) => r.centerId === params[0] && r.id === params[1],
+        ) as T[];
+      }
+
+      if (
+        params.length >= 2 &&
+        (trimmed.includes("s.id != ?") ||
+          trimmed.includes("s.id <> ?") ||
+          trimmed.includes("id != ?") ||
+          trimmed.includes("id <> ?")) &&
+        (trimmed.includes("center_id = ?") ||
+          trimmed.includes("s.center_id = ?"))
+      ) {
+        return joined.filter(
+          (r) =>
+            r.centerId === params[0] &&
+            r.id !== params[1] &&
+            r.status !== "cancelled",
         ) as T[];
       }
 
@@ -3519,6 +3614,53 @@ class InMemorySqliteMock implements SqlDatabase {
         is_external: r.is_external,
         operation_id: r.operation_id,
       }));
+
+      if (
+        (trimmed.includes("original_absence_id = ?") ||
+          trimmed.includes("a.original_absence_id = ?") ||
+          trimmed.includes("original_absence_id = ('absence-'")) &&
+        (trimmed.includes("session_id <> ?") ||
+          trimmed.includes("a.session_id <> ?"))
+      ) {
+        const centerId = params[0];
+        const excludeSessionId = params[1];
+        const origAbsenceId = params[2];
+        return mapped
+          .filter(
+            (r) =>
+              r.centerId === centerId &&
+              r.attendanceType === "makeup" &&
+              (r.status === "present" || r.status === "late") &&
+              r.sessionId !== excludeSessionId &&
+              (r.originalAbsenceId === origAbsenceId ||
+                r.originalAbsenceId === `absence-${origAbsenceId}-${r.studentId}`),
+          )
+          .map((r) => ({
+            ...r,
+            targetSessionId: r.sessionId,
+            target_session_id: r.sessionId,
+          })) as T[];
+      }
+
+      if (
+        trimmed.includes("original_absence_id = ?") ||
+        trimmed.includes("original_absence_id = ('absence-'") ||
+        trimmed.includes("a.original_absence_id = ?")
+      ) {
+        const centerId = params[0];
+        const studentId = params[1];
+        const origAbsenceId = params[2];
+        return mapped.filter(
+          (r) =>
+            r.centerId === centerId &&
+            r.studentId === studentId &&
+            r.originalAbsenceId &&
+            (r.originalAbsenceId === origAbsenceId ||
+              r.originalAbsenceId === `absence-${origAbsenceId}-${r.studentId}` ||
+              (params[3] && r.originalAbsenceId === params[3])),
+        ) as T[];
+      }
+
       if (
         trimmed.includes(
           "center_id = ? AND session_id = ? AND student_id = ?",

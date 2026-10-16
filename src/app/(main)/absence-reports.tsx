@@ -238,7 +238,7 @@ export default function AbsenceReportsScreen() {
   const sendingSelectedAbsencesRef = useRef(false);
   const [report, setReport] = useState<AbsenceSessionReport | null>(null);
   const [search, setSearch] = useState("");
-  const [tab, setTab] = useState<"absent" | "unresolved" | "present" | "compensation">("absent");
+  const [tab, setTab] = useState<"absent" | "present" | "compensation">("absent");
   const [absenceSubsection, setAbsenceSubsection] = useState<AbsenceSubsection>("session-absent");
   const [loading, setLoading] = useState(true);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -378,7 +378,6 @@ export default function AbsenceReportsScreen() {
   };
 
   const filteredAbsent = useMemo(() => report ? smartSearch(report.absent, search, [{ get: (student) => student.fullName }, { get: (student) => student.studentCode }]) : [], [report, search]);
-  const filteredUnresolved = useMemo(() => report ? smartSearch(report.unresolved, search, [{ get: (student) => student.fullName }, { get: (student) => student.studentCode }]) : [], [report, search]);
   const filteredPresent = useMemo(() => report ? report.present.filter(({ student }) => smartSearch([student], search, [{ get: (item) => item.fullName }, { get: (item) => item.studentCode }]).length) : [], [report, search]);
   const filteredCompensation = useMemo(() => report ? report.compensation.filter(({ student }) => smartSearch([student], search, [{ get: (item) => item.fullName }, { get: (item) => item.studentCode }]).length) : [], [report, search]);
   const crossGroupMakeupsForSession = useMemo(() => monthlyCrossGroupMakeups
@@ -403,9 +402,42 @@ export default function AbsenceReportsScreen() {
     .filter(({ student }) => smartSearch([student], search, [{ get: (item) => item.fullName }, { get: (item) => item.studentCode }]).length),
   [crossGroupMakeupsForSession, search]);
 
+  const sessionCompensatedMap = useMemo(() => {
+    const map = new Map<string, { groupName?: string; sessionDate?: string }>();
+    if (!report) return map;
+    for (const row of crossGroupMakeupsForSession) {
+      map.set(row.student.id, {
+        groupName: row.targetSession.groupName,
+        sessionDate: row.targetSession.sessionDate,
+      });
+    }
+    for (const row of report.compensation || []) {
+      if (row.kind === "completed" && row.targetSession) {
+        map.set(row.student.id, {
+          groupName: row.targetSession.groupName,
+          sessionDate: row.targetSession.sessionDate,
+        });
+      }
+    }
+    return map;
+  }, [crossGroupMakeupsForSession, report]);
+
   const getAbsenceScopeStudentIds = (scope: AbsenceRecipientScope, sourceReport = report): string[] => {
     if (!sourceReport) return [];
-    if (scope === "session-absent") return sourceReport.absent.map((student) => student.id);
+    if (scope === "session-absent") {
+      const compensatedIds = new Set<string>();
+      for (const row of crossGroupMakeupsForSession) {
+        compensatedIds.add(row.student.id);
+      }
+      for (const row of sourceReport.compensation || []) {
+        if (row.kind === "completed") {
+          compensatedIds.add(row.student.id);
+        }
+      }
+      return sourceReport.absent
+        .filter((student) => !compensatedIds.has(student.id))
+        .map((student) => student.id);
+    }
     if (scope === "never-attended") return [];
     const absentIds = new Set(sourceReport.absent.map((student) => student.id));
     if (scope === "cross-group-makeups") {
@@ -592,13 +624,14 @@ export default function AbsenceReportsScreen() {
     try {
       const refreshedReport = AbsenceReportsService.getSessionReport(selectedSessionId);
       setReport(refreshedReport);
-      if (!refreshedReport.absent.length) {
+      const recipientIds = getAbsenceScopeStudentIds("session-absent", refreshedReport);
+      if (!recipientIds.length) {
         Alert.alert("تغيّرت حالة الغياب", "لم يعد هناك غياب صريح صالح لإرسال إشعارات عنه.");
         return;
       }
       const events = NotificationService.notifyAbsentees({
         sessionId: selectedSessionId,
-        selectedStudentIds: refreshedReport.absent.map((student) => student.id),
+        selectedStudentIds: recipientIds,
         operationPrefix: `op-a-${selectedSessionId.slice(-8)}-${Date.now().toString(36).slice(-5)}`,
       });
       setAbsenceSentBefore(true);
@@ -696,26 +729,41 @@ export default function AbsenceReportsScreen() {
           ) : null}
         </View>
       )}
-      {students.map((student) => (
-        <StudentRow
-          key={`${scope}:${student.id}`}
-          student={student}
-          status={scope === "never-attended" ? "لم يحضر" : scope === "cross-group-makeups" ? "تم التعويض" : undefined}
-          statusTone={scope === "cross-group-makeups" ? "green" : "orange"}
-          detailNote={getDetailNote?.(student.id)}
-          note={report?.absenceNotes[student.id]}
-          selected={selectedIds.has(student.id)}
-          selectionMode={selectionMode}
-          sendStatus={absenceSendStatuses[`${scope}:${student.id}`]}
-          onToggleSelection={() => toggleRecipientSelection(scope, student.id)}
-          onLongPress={canSendAbsenceNotifications && notificationEligible ? () => enterRecipientSelection(scope, student.id) : undefined}
-          onNotePress={!selectionMode && canEditAbsenceNotes ? () => openAbsenceNote(student) : undefined}
-          onPress={() => {
-            if (selectionMode) toggleRecipientSelection(scope, student.id);
-            else router.push({ pathname: "/(main)/students", params: { studentId: student.id } } as any);
-          }}
-        />
-      ))}
+      {students.map((student) => {
+        const comp = scope === "session-absent" ? sessionCompensatedMap.get(student.id) : undefined;
+        const status = comp
+          ? "تم التعويض"
+          : scope === "never-attended"
+            ? "لم يحضر"
+            : scope === "cross-group-makeups"
+              ? "تم التعويض"
+              : undefined;
+        const statusTone = comp || scope === "cross-group-makeups" ? "green" : "orange";
+        const detailNote = comp
+          ? `الأصل: ${report?.session.groupName || "مجموعة"} (${formatDate(report?.session.sessionDate || "")}) · التعويض: ${comp.groupName || "مجموعة"} (${formatDate(comp.sessionDate || "")})`
+          : getDetailNote?.(student.id);
+        const canSelectStudent = notificationEligible && !comp;
+        return (
+          <StudentRow
+            key={`${scope}:${student.id}`}
+            student={student}
+            status={status}
+            statusTone={statusTone}
+            detailNote={detailNote}
+            note={report?.absenceNotes[student.id]}
+            selected={selectedIds.has(student.id)}
+            selectionMode={selectionMode}
+            sendStatus={absenceSendStatuses[`${scope}:${student.id}`]}
+            onToggleSelection={canSelectStudent ? () => toggleRecipientSelection(scope, student.id) : undefined}
+            onLongPress={canSendAbsenceNotifications && canSelectStudent ? () => enterRecipientSelection(scope, student.id) : undefined}
+            onNotePress={!selectionMode && canEditAbsenceNotes ? () => openAbsenceNote(student) : undefined}
+            onPress={() => {
+              if (selectionMode && canSelectStudent) toggleRecipientSelection(scope, student.id);
+              else router.push({ pathname: "/(main)/students", params: { studentId: student.id } } as any);
+            }}
+          />
+        );
+      })}
       {!students.length ? <EmptyMessage text={search ? "لا توجد نتائج مطابقة." : emptyText} /> : null}
     </>;
   };
@@ -727,8 +775,8 @@ export default function AbsenceReportsScreen() {
   if (selectedSessionId && report) {
     return <SafeAreaView style={styles.safe}><ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
       <View style={styles.detailHeader}><TouchableOpacity onPress={() => { setSelectedSessionId(null); setReport(null); }} style={styles.backButton}><Ionicons name="chevron-forward" size={23} color={Colors.slate800} /></TouchableOpacity><View style={styles.headerCopy}><Text style={styles.eyebrow}>تفاصيل الحصة</Text><Text style={styles.title}>{report.session.groupName || "مجموعة"}</Text><Text style={styles.subtitle}>{report.session.subjectName || ""}  •  {report.session.teacherName || "مدرس غير محدد"}</Text></View><View style={styles.headerIcon}><Ionicons name="calendar-outline" size={22} color={Colors.primary} /></View></View>
-      <View style={styles.sessionInfo}><Text style={styles.sessionInfoLine}>{formatDate(report.session.sessionDate)}  •  {formatTimeArabic(report.session.startTime)} - {formatTimeArabic(report.session.endTime)}</Text><View style={styles.counterRow}><Counter label="الكل" value={report.expected.length} tone="blue" /><Counter label="حاضر" value={report.present.length} tone="green" /><Counter label="غائب" value={report.absent.length} tone="red" /><Counter label="لم يحسم" value={report.unresolved.length} tone="blue" /><Counter label="تعويض" value={report.compensated} tone="purple" /></View></View>
-      <View style={styles.tabRow}>{[["present", "الحاضرين", report.present.length], ["absent", "الغائبين", report.absent.length], ["unresolved", "لم يحسموا", report.unresolved.length], ["compensation", "التعويض", report.compensation.length]].map(([key, label, count]) => <TouchableOpacity key={String(key)} onPress={() => setTab(key as typeof tab)} style={[styles.tab, tab === key && styles.tabActive]}><Text style={[styles.tabText, tab === key && styles.tabTextActive]}>{label} ({count})</Text></TouchableOpacity>)}</View>
+      <View style={styles.sessionInfo}><Text style={styles.sessionInfoLine}>{formatDate(report.session.sessionDate)}  •  {formatTimeArabic(report.session.startTime)} - {formatTimeArabic(report.session.endTime)}</Text><View style={styles.counterRow}><Counter label="الكل" value={report.expected.length} tone="blue" /><Counter label="حاضر" value={report.present.length} tone="green" /><Counter label="غائب" value={report.absent.length} tone="red" /><Counter label="تعويض" value={report.compensated} tone="purple" /></View></View>
+      <View style={styles.tabRow}>{[["present", "الحاضرين", report.present.length], ["absent", "الغائبين", report.absent.length], ["compensation", "التعويض", report.compensation.length]].map(([key, label, count]) => <TouchableOpacity key={String(key)} onPress={() => setTab(key as typeof tab)} style={[styles.tab, tab === key && styles.tabActive]}><Text style={[styles.tabText, tab === key && styles.tabTextActive]}>{label} ({count})</Text></TouchableOpacity>)}</View>
       <View style={styles.searchWrap}><Ionicons name="search-outline" size={18} color={Colors.slate400} /><TextInputLike value={search} onChangeText={setSearch} placeholder="ابحث باسم الطالب أو الكود" /></View>
       {tab === "absent" ? <>
         <View style={styles.reportExtraTabs}>
@@ -781,7 +829,6 @@ export default function AbsenceReportsScreen() {
           : null}
       </> : null}
       {tab === "present" ? <>{filteredPresent.map(({ student, attendance }) => <StudentRow key={student.id} student={student} status={attendanceLabel(attendance)} statusTone={attendance.status === "late" ? "orange" : "green"} onPress={() => router.push({ pathname: "/(main)/students", params: { studentId: student.id } } as any)} />)}{!filteredPresent.length ? <EmptyMessage text={search ? "لا توجد نتائج مطابقة." : "لا يوجد حضور مسجل لهذه الحصة."} /> : null}</> : null}
-      {tab === "unresolved" ? <>{filteredUnresolved.map((student) => <StudentRow key={student.id} student={student} status="لم تُحسم الحالة" statusTone="orange" onPress={() => router.push({ pathname: "/(main)/students", params: { studentId: student.id } } as any)} />)}{!filteredUnresolved.length ? <EmptyMessage text={search ? "لا توجد نتائج مطابقة." : "تم حسم حالة جميع الطلاب المتوقعين."} /> : null}</> : null}
       {tab === "compensation" ? <>{filteredCompensation.map((row) => <CompensationRow key={`${row.student.id}-${row.kind}-${row.attendance?.id || row.opportunity?.nextEligibleSessionId || "advance"}`} row={row} targetSession={report.session} onPress={() => router.push({ pathname: "/(main)/students", params: { studentId: row.student.id } } as any)} />)}{!filteredCompensation.length ? <EmptyMessage text={search ? "لا توجد نتائج مطابقة." : "لا توجد بيانات تعويض لهذه الحصة."} /> : null}</> : null}
     </ScrollView>
     <Modal visible={Boolean(noteTarget)} transparent animationType="fade" onRequestClose={() => { if (!savingAbsenceNote) setNoteTarget(null); }}>

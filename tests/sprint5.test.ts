@@ -242,7 +242,7 @@ describe("Sprint 5 - FIXION Operational Layer Test Suite", () => {
       );
     }
 
-    it("does not infer absence from missing attendance records", () => {
+    it("treats missing attendance in a started session as absent without creating synthetic rows", () => {
       const db = DatabaseService.getDb();
       const attendanceBefore = db.getAllSync<{ id: string }>(
         `SELECT id FROM attendance
@@ -250,13 +250,30 @@ describe("Sprint 5 - FIXION Operational Layer Test Suite", () => {
         ["center-1", "sess-1"],
       ).length;
       const absentees = AbsenceService.getAbsenteesForSession("sess-1");
+      const expectedIds = SessionRepository.getExpectedStudents("sess-1")
+        .map((student) => student.id);
+      const attendedIds = new Set(
+        AttendanceRepository.getSessionAttendance("sess-1")
+         .filter((row) => row.status === "present" || row.status === "late")
+         .map((row) => row.studentId),
+      );
+      const advancedIds = new Set(
+        db.getAllSync<{ studentId: string }>(
+         `SELECT student_id as studentId FROM advance_coverages
+          WHERE center_id = ? AND target_future_session_id = ?`,
+         ["center-1", "sess-1"],
+        ).map((row) => row.studentId),
+      );
+      const expectedAbsenteeIds = expectedIds
+        .filter((studentId) => !attendedIds.has(studentId) && !advancedIds.has(studentId))
+        .sort();
       const attendanceAfter = db.getAllSync<{ id: string }>(
         `SELECT id FROM attendance
-         WHERE center_id = ? AND session_id = ?`,
+        WHERE center_id = ? AND session_id = ?`,
         ["center-1", "sess-1"],
       ).length;
 
-      expect(absentees).toEqual([]);
+      expect(absentees.map((student) => student.id).sort()).toEqual(expectedAbsenteeIds);
       expect(attendanceAfter).toBe(attendanceBefore);
     });
 

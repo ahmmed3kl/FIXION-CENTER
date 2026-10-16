@@ -4,7 +4,7 @@ export interface SessionAttendanceCounts {
   expected: number;
   present: number;
   absent: number;
-  unresolved: number;
+  notStarted: number;
   late: number;
   makeup: number;
 }
@@ -76,6 +76,7 @@ export function calculateSessionAttendanceCounts(
   expectedStudentIds: string[],
   attendance: Pick<Attendance, "studentId" | "status" | "attendanceType">[],
   coveredInAdvanceIds: string[] = [],
+  sessionStarted = false,
 ): SessionAttendanceCounts {
   const expectedIds = new Set(expectedStudentIds);
   const regularRows = attendance.filter((item) => item.attendanceType !== "makeup");
@@ -101,14 +102,23 @@ export function calculateSessionAttendanceCounts(
   const absent = Array.from(absentIds).filter(
     (id) => !presentIds.has(id) && !makeupIds.has(id) && !advancedIds.has(id),
   ).length;
-  const unresolved = expectedStudentIds.filter(
+  const noOutcomeIds = expectedStudentIds.filter(
     (id) => !presentIds.has(id) && !absentIds.has(id) && !advancedIds.has(id) && !makeupIds.has(id),
-  ).length;
+  );
+  const defaultAbsences = sessionStarted ? noOutcomeIds.length : 0;
+  const notStarted = sessionStarted ? 0 : noOutcomeIds.length;
   const makeup = makeupIds.size;
   const late = new Set(
     regularRows
       .filter((item) => item.status === "late" && expectedIds.has(item.studentId))
       .map((item) => item.studentId),
   ).size;
-  return { expected: expectedStudentIds.length, present: presentIds.size, absent, unresolved, late, makeup };
+  return {
+    expected: expectedStudentIds.length,
+    present: presentIds.size,
+    absent: absent + defaultAbsences,
+    notStarted,
+    late,
+    makeup,
+  };
 }

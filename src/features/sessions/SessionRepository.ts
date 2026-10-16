@@ -27,7 +27,7 @@ export class SessionRepository {
               s.late_after_minutes as lateAfterMinutes, s.session_date as sessionDate,
               s.start_time as startTime, s.end_time as endTime, s.status,
               s.created_at as createdAt, s.updated_at as updatedAt,
-              g.name as groupName, subj.name as subjectName, t.name as teacherName
+              g.name as groupName, g.grade as groupGrade, subj.name as subjectName, t.name as teacherName
        FROM sessions s
        JOIN groups g ON s.group_id = g.id
        LEFT JOIN subjects subj ON COALESCE(s.subject_id, g.subject_id) = subj.id
