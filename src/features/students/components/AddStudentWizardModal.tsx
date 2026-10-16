@@ -329,22 +329,6 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({
   };
   const firstScheduledDate = (groupId: string) => {
     if (groupId === requiredGroupId && attendanceSessionDate) return attendanceSessionDate;
-    const start = new Date(`${getLocalDateOnly()}T12:00:00`);
-    const groupSchedules = schedules[groupId] || GroupScheduleRepository.getSchedulesForGroup(groupId);
-    const now = new Date();
-    const currentMinutes = now.getHours() * 60 + now.getMinutes();
-    const parseMinutes = (value: string | undefined) => {
-      const [hours, minutes] = String(value || "00:00").split(":").map(Number);
-      return (Number.isFinite(hours) ? hours : 0) * 60 + (Number.isFinite(minutes) ? minutes : 0);
-    };
-    for (let offset = 0; offset <= 7; offset += 1) {
-      const candidate = new Date(start);
-      candidate.setDate(start.getDate() + offset);
-      const daySchedules = groupSchedules.filter((item) => item.dayOfWeek === candidate.getDay());
-      if (daySchedules.length && (offset > 0 || daySchedules.some((item) => currentMinutes < parseMinutes(item.endTime || item.startTime)))) {
-        return `${candidate.getFullYear()}-${String(candidate.getMonth() + 1).padStart(2, "0")}-${String(candidate.getDate()).padStart(2, "0")}`;
-      }
-    }
     return getLocalDateOnly();
   };
 

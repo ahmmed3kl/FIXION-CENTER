@@ -105,10 +105,11 @@ export class EnrollmentRepository {
 
     if (!targetDate) return rows;
 
-    // Filter by active validity on targetDate: startDate <= targetDate AND (endDate IS NULL OR endDate >= targetDate)
+    // Filter by active validity on targetDate: (startDate <= targetDate OR createdAt <= targetDate) AND (endDate IS NULL OR endDate >= targetDate)
     return rows.filter(
       (e) =>
-        e.startDate <= targetDate && (!e.endDate || e.endDate >= targetDate),
+        (e.startDate <= targetDate || (e.createdAt && e.createdAt.slice(0, 10) <= targetDate)) &&
+        (!e.endDate || e.endDate >= targetDate),
     );
   }
 

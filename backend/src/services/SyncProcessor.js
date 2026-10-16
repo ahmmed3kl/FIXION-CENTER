@@ -1115,7 +1115,7 @@ class SyncProcessor {
         WHERE e.center_id = $1 AND e.group_id = $2 AND e.student_id = $3
           AND e.status IN ('active', 'transferred', 'withdrawn', 'completed')
           AND (
-            e.joined_at::date <= $4::date
+            (e.joined_at::date <= $4::date OR e.created_at::date <= $4::date)
             ${lateEnrollmentEligibility}
           )
           AND (e.ended_at IS NULL OR e.ended_at::date >= $4::date)
@@ -1183,7 +1183,7 @@ class SyncProcessor {
           AND enrolled_group.id = e.group_id
         WHERE e.center_id = $1 AND e.student_id = $2
           AND e.group_id <> $3 AND e.status = 'active'
-          AND e.joined_at::date <= $4::date
+          AND (e.joined_at::date <= $4::date OR e.created_at::date <= $4::date)
           AND (e.ended_at IS NULL OR e.ended_at::date >= $4::date)
           AND enrolled_group.teacher_id = $5
           AND LOWER(TRIM(enrolled_group.grade)) = LOWER(TRIM($6))

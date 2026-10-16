@@ -510,7 +510,7 @@ export class MakeupService {
         return enrollments.some((enrollment) =>
           enrollment.centerId === centerId && enrollment.studentId === studentId &&
           enrollment.groupId === source.groupId && enrollment.status === "active" &&
-          enrollment.startDate <= source.sessionDate &&
+          (enrollment.startDate <= source.sessionDate || (enrollment.createdAt && enrollment.createdAt.slice(0, 10) <= source.sessionDate)) &&
           (!enrollment.endDate || enrollment.endDate >= source.sessionDate),
         );
       })

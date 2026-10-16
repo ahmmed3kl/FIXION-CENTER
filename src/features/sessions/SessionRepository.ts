@@ -159,7 +159,7 @@ export class SessionRepository {
          ON enrollment.center_id = session.center_id
         AND enrollment.group_id = session.group_id
         AND enrollment.status IN ('active', 'ended')
-        AND enrollment.start_date <= session.session_date
+        AND (enrollment.start_date <= session.session_date OR SUBSTR(enrollment.created_at, 1, 10) <= session.session_date)
         AND (enrollment.end_date IS NULL OR enrollment.end_date >= session.session_date)
         AND NOT EXISTS (
           SELECT 1
@@ -318,7 +318,7 @@ export class SessionRepository {
          ON enrollment.center_id = session.center_id
         AND enrollment.group_id = session.group_id
         AND enrollment.status = 'active'
-        AND enrollment.start_date <= session.session_date
+        AND (enrollment.start_date <= session.session_date OR SUBSTR(enrollment.created_at, 1, 10) <= session.session_date)
         AND (enrollment.end_date IS NULL OR enrollment.end_date >= session.session_date)
         AND NOT EXISTS (
           SELECT 1

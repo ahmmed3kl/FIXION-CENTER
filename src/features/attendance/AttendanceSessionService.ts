@@ -92,7 +92,7 @@ export class AttendanceSessionService {
                AND e.group_id = s.group_id
                AND e.student_id = ?
                AND e.status IN ('active', 'ended')
-               AND e.start_date <= s.session_date
+               AND (e.start_date <= s.session_date OR SUBSTR(e.created_at, 1, 10) <= s.session_date)
                AND (e.end_date IS NULL OR e.end_date >= s.session_date)
                AND NOT EXISTS (
                  SELECT 1 FROM session_expected_students any_expected
@@ -917,12 +917,13 @@ export class AttendanceSessionService {
           `SELECT 1 FROM student_group_enrollments
            WHERE center_id = ? AND group_id = ? AND student_id = ?
              AND status IN ('active', 'ended')
-             AND start_date <= ? AND (end_date IS NULL OR end_date >= ?)
+             AND (start_date <= ? OR SUBSTR(created_at, 1, 10) <= ?) AND (end_date IS NULL OR end_date >= ?)
            LIMIT 1`,
           [
             session.centerId,
             originalSession.groupId,
             item.studentId,
+            originalSession.sessionDate,
             originalSession.sessionDate,
             originalSession.sessionDate,
           ],
@@ -1003,9 +1004,9 @@ export class AttendanceSessionService {
       `SELECT 1 FROM student_group_enrollments
        WHERE center_id = ? AND group_id = ? AND student_id = ?
          AND status IN ('active', 'ended')
-         AND start_date <= ? AND (end_date IS NULL OR end_date >= ?)
+         AND (start_date <= ? OR SUBSTR(created_at, 1, 10) <= ?) AND (end_date IS NULL OR end_date >= ?)
        LIMIT 1`,
-      [activeCenterId, session.groupId, studentId, session.sessionDate, session.sessionDate],
+      [activeCenterId, session.groupId, studentId, session.sessionDate, session.sessionDate, session.sessionDate],
     ));
     const packageEligible = this.getPackageExpectedStudentIds(
       session.groupId,

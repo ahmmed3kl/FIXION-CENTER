@@ -1,6 +1,7 @@
 import { DatabaseService } from "../src/core/database";
 import { SyncEngine } from "../src/core/sync";
 import { AttendanceRepository } from "../src/features/attendance/AttendanceRepository";
+import { AttendanceSessionService } from "../src/features/attendance/AttendanceSessionService";
 import { MakeupService } from "../src/features/attendance/MakeupService";
 import { findAttendanceStudentByNormalizedCode } from "../src/features/attendance/barcodeAttendance";
 import { SessionRepository } from "../src/features/sessions/SessionRepository";
@@ -145,6 +146,49 @@ describe("Makeup focused verification tests", () => {
   afterAll(() => {
     currentDateSpy.mockRestore();
     syncSpy.mockRestore();
+  });
+
+  it("يجلب الطلاب المتوقعين وتظهر العدادات بشكل صحيح لجلسة المجموعة حتى لو كان تاريخ البدء مجدولاً لاحقاً", async () => {
+    const db = DatabaseService.getDb();
+    const groupId = "grp-v-d";
+    db.runSync(
+      `INSERT OR REPLACE INTO groups (id, center_id, name, subject_id, teacher_id, grade, session_price, status)
+       VALUES (?, ?, ?, ?, ?, ?, 100, 'active')`,
+      [groupId, centerId, "مجموعة د (أولى ثانوي)", subjectId, teacherId, grade1],
+    );
+
+    const studentD = StudentRepository.createStudent({
+      studentCode: "0880030",
+      cardCode: "100030",
+      fullName: "عمر خالد مصطفى",
+      phone: "01011115555",
+      parentPhone: "01111115555",
+      grade: grade1,
+    });
+
+    // Simulate forward-scheduled enrollment start date (e.g. 2026-10-09) with createdAt today (2026-10-02)
+    db.runSync(
+      `INSERT OR REPLACE INTO student_group_enrollments (id, center_id, student_id, group_id, status, start_date, created_at)
+       VALUES (?, ?, ?, ?, 'active', '2026-10-09', '2026-10-02T10:00:00.000Z')`,
+      ["enr-v-d", centerId, studentD.id, groupId],
+    );
+
+    const sessionDId = "session-v-d";
+    db.runSync(
+      `INSERT OR REPLACE INTO sessions
+       (id, center_id, group_id, subject_id, teacher_id, session_date, start_time, end_time, status, created_at)
+       VALUES (?, ?, ?, ?, ?, '2026-10-02', '10:00', '12:00', 'open', '2026-10-02T08:00:00.000Z')`,
+      [sessionDId, centerId, groupId, subjectId, teacherId],
+    );
+
+    const isExpected = AttendanceSessionService.isExpected(sessionDId, studentD.id);
+    expect(isExpected).toBe(true);
+
+    const summary = AttendanceSessionService.getSummary(sessionDId);
+    expect(summary.total).toBe(1);
+    expect(summary.absent).toBe(1);
+    expect(summary.present).toBe(0);
+    expect(summary.makeup).toBe(0);
   });
 
   it("يعثر على طالب التعويض بالاسم والباركود ويسجل التعويض مرة واحدة فقط", async () => {

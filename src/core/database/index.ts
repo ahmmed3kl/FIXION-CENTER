@@ -2579,7 +2579,7 @@ class InMemorySqliteMock implements SqlDatabase {
               enrollment.center_id === centerId &&
               enrollment.group_id === session.group_id &&
               enrollment.status === "active" &&
-              enrollment.start_date <= session.session_date &&
+              (enrollment.start_date <= session.session_date || (enrollment.created_at && enrollment.created_at.slice(0, 10) <= session.session_date)) &&
               (!enrollment.end_date ||
                 enrollment.end_date >= session.session_date),
           )
@@ -2856,7 +2856,7 @@ class InMemorySqliteMock implements SqlDatabase {
               enr.student_id === studentId &&
               enr.group_id === s.groupId &&
               enr.status === "active" &&
-              enr.start_date <= dateStr &&
+              (enr.start_date <= dateStr || (enr.created_at && enr.created_at.slice(0, 10) <= dateStr)) &&
               (!enr.end_date || enr.end_date >= dateStr),
           );
           const subscriptions = this.tables.get("student_subscriptions") || [];
