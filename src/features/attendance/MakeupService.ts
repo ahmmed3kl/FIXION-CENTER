@@ -29,6 +29,7 @@ import {
   TEACHER_MAKEUP_CYCLE_EXPIRED_ERROR,
   TEACHER_MAKEUP_CYCLE_EXPIRED_MESSAGE,
 } from "../../shared/utils/teacherWeeks";
+import { normalizeAcademicGrade } from "../../shared/utils/smartSearch";
 
 function generateUUID(): string {
   return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
@@ -460,8 +461,8 @@ export class MakeupService {
        WHERE s.center_id = ? AND s.group_id <> ? AND s.status <> 'cancelled'
          AND COALESCE(s.subject_id, g.subject_id) = ?
          AND COALESCE(s.teacher_id, g.teacher_id) = ?
-         AND (s.session_date < ? OR (s.session_date = ? AND s.start_time < ?))`,
-      [centerId, host.groupId, host.subjectId, host.teacherId, host.sessionDate, host.sessionDate, host.startTime],
+          AND (s.session_date < ? OR (s.session_date = ? AND (s.start_time < ? OR s.id <> ?)))`,
+      [centerId, host.groupId, host.subjectId, host.teacherId, host.sessionDate, host.sessionDate, host.startTime, sessionId],
     );
     const studentSnapshots = db.getAllSync<any>(
       `SELECT session_id as sessionId FROM session_expected_students
@@ -487,12 +488,12 @@ export class MakeupService {
     const sourceSessions = sessions
       .filter((source) => {
         const isBeforeHost = source.sessionDate < host.sessionDate ||
-          (source.sessionDate === host.sessionDate && source.startTime < host.startTime);
+          (source.sessionDate === host.sessionDate && (source.startTime < host.startTime || source.id !== host.id));
         if (
           source.centerId !== centerId || source.id === sessionId ||
           source.groupId === host.groupId || source.status === "cancelled" ||
           source.subjectId !== host.subjectId || source.teacherId !== host.teacherId ||
-          (host.groupGrade && source.groupGrade && host.groupGrade.trim() !== source.groupGrade.trim()) ||
+          (host.groupGrade && source.groupGrade && normalizeAcademicGrade(host.groupGrade) !== normalizeAcademicGrade(source.groupGrade)) ||
           !isBeforeHost ||
           !isTeacherMakeupCycleOpen(
             source.sessionDate,
@@ -502,11 +503,10 @@ export class MakeupService {
           )
         ) return false;
 
-        const hasSnapshot = snapshotSessionIds.has(source.id);
         const studentWasExpected = studentSnapshots.some(
           (row) => String(row.sessionId ?? row.session_id) === source.id,
         );
-        if (hasSnapshot) return studentWasExpected;
+        if (studentWasExpected) return true;
         return enrollments.some((enrollment) =>
           enrollment.centerId === centerId && enrollment.studentId === studentId &&
           enrollment.groupId === source.groupId && enrollment.status === "active" &&

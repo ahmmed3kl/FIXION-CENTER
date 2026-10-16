@@ -574,8 +574,10 @@ function ScannerContent() {
 
       if (!foundStudent) {
         setStudent(null);
-        setSearchError(`${Strings.unregisteredCardError} (${normalized})`);
+        const errMsg = `${Strings.unregisteredCardError} (${normalized})`;
+        setSearchError(errMsg);
         setIsProcessing(false);
+        Alert.alert(Strings.errorTitle, errMsg);
         return;
       }
 
@@ -646,8 +648,10 @@ function ScannerContent() {
       if (!expected && !makeupAbsenceId) {
         setStudent(null);
         setMakeupNotice(null);
-        setSearchError("لا توجد جلسة غياب صريحة مؤهلة للتعويض لهذا الطالب.");
+        const errMsg = "لا توجد جلسة غياب صريحة مؤهلة للتعويض لهذا الطالب.";
+        setSearchError(errMsg);
         setIsProcessing(false);
+        Alert.alert("غير مؤهل للتعويض", errMsg);
         return;
       }
 
@@ -1378,6 +1382,16 @@ function ScannerContent() {
             >
               <Text style={styles.rebuildManualText}>تسجيل مباشر بالكود</Text>
             </TouchableOpacity>
+            {searchError ? (
+              <View style={[styles.errorAlert, { marginTop: 10 }]}>
+                <Ionicons
+                  name="alert-circle-outline"
+                  size={18}
+                  color={Colors.dangerText}
+                />
+                <Text style={styles.errorAlertText}>{searchError}</Text>
+              </View>
+            ) : null}
             {isCameraActive ? (
               <BarcodeScannerView
                 onDetected={(data) => handleBarcodeScanned({ data })}

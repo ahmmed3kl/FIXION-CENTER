@@ -22,6 +22,7 @@ import { useAuthStore } from "../auth/useAuthStore";
 import { AttendanceSessionService } from "./AttendanceSessionService";
 import { SessionDateService } from "../sessions/SessionDateService";
 import { parseLocalDateOnly, parseLocalTimeParts } from "../../shared/utils/date";
+import { normalizeAcademicGrade } from "../../shared/utils/smartSearch";
 
 function generateUUID(): string {
   return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
@@ -204,9 +205,9 @@ export class AttendanceRepository {
         const isAfter =
           session.sessionDate > source.sessionDate ||
           (session.sessionDate === source.sessionDate &&
-            session.startTime > source.startTime);
+            (session.startTime > source.startTime || session.id !== source.id));
         const gradesMatch = !session.groupGrade || !source.groupGrade ||
-          session.groupGrade.trim().toLowerCase() === source.groupGrade.trim().toLowerCase();
+          normalizeAcademicGrade(session.groupGrade) === normalizeAcademicGrade(source.groupGrade);
         if (!isAfter || session.subjectId !== source.subjectId || session.teacherId !== source.teacherId || !gradesMatch) {
           throw new ConflictError("التعويض يجب أن يكون في الحصة التالية لنفس المادة والمدرس ونفس المرحلة الدراسية.");
         }
@@ -231,19 +232,15 @@ export class AttendanceRepository {
           `SELECT 1 FROM session_expected_students WHERE center_id = ? AND session_id = ? AND student_id = ?`,
           [centerId, source.id, params.studentId],
         );
-        const sourceHasSnapshot = db.getFirstSync<any>(
-          `SELECT 1 FROM session_expected_students WHERE center_id = ? AND session_id = ? LIMIT 1`,
-          [centerId, source.id],
-        );
         const legacyEnrollment = db.getFirstSync<any>(
           `SELECT 1 FROM student_group_enrollments
            WHERE center_id = ? AND group_id = ? AND student_id = ?
              AND status IN ('active', 'ended')
-             AND start_date <= ? AND (end_date IS NULL OR end_date >= ?)
+             AND (start_date <= ? OR SUBSTR(created_at, 1, 10) <= ?) AND (end_date IS NULL OR end_date >= ?)
            LIMIT 1`,
-          [centerId, source.groupId, params.studentId, source.sessionDate, source.sessionDate],
+          [centerId, source.groupId, params.studentId, source.sessionDate, source.sessionDate, source.sessionDate],
         );
-        if (!sourceExpected && (sourceHasSnapshot || !legacyEnrollment)) {
+        if (!sourceExpected && !legacyEnrollment) {
           throw new ConflictError("الطالب غير متوقع في الحصة الأصلية.");
         }
         const sourceAttendance = db.getAllSync<{

@@ -2649,6 +2649,107 @@ class InMemorySqliteMock implements SqlDatabase {
         };
       });
 
+      if (trimmed.includes("originalSessionId")) {
+        const [
+          cId,
+          hostDate,
+          _hostDate2,
+          hostTime,
+          hostSessionId,
+          teachId,
+          teachName,
+          exclGrpId,
+          subId,
+          subName,
+          _grade1,
+          _grade2,
+          _grade3,
+          studentId,
+        ] = params;
+        const attendanceList = this.tables.get("attendance") || [];
+        const enrollments = this.tables.get("student_group_enrollments") || [];
+        const normalizeGrade = (g: any) =>
+          String(g || "").replace(/^(الصف|صف)\s+/, "").trim();
+
+        const hostGrade = _grade1 ? normalizeGrade(_grade1) : "";
+
+        const candidateSessions = joined.filter((s) => {
+          if (s.centerId !== cId) return false;
+          if (s.groupId === exclGrpId) return false;
+          if (s.status === "cancelled") return false;
+          if (s.id === hostSessionId) return false;
+          if (teachId && s.teacherId !== teachId && s.teacherName !== teachName) return false;
+          if (subId && s.subjectId !== subId && s.subjectName !== subName) return false;
+          if (hostGrade && s.groupGrade && normalizeGrade(s.groupGrade) !== hostGrade) return false;
+
+          const isBeforeHost =
+            s.sessionDate < hostDate ||
+            (s.sessionDate === hostDate && (!hostTime || s.startTime < hostTime || s.id !== hostSessionId));
+          if (!isBeforeHost) return false;
+
+          // Check if student was expected (via expected table or enrollments)
+          const isExp = expected.some((e) => e.session_id === s.id && e.student_id === studentId);
+          const isEnrolled = enrollments.some(
+            (e) =>
+              e.center_id === cId &&
+              e.group_id === s.groupId &&
+              e.student_id === studentId &&
+              e.status === "active" &&
+              (e.start_date <= s.sessionDate || (e.created_at && e.created_at.slice(0, 10) <= s.sessionDate)) &&
+              (!e.end_date || e.end_date >= s.sessionDate),
+          );
+          if (!isExp && !isEnrolled) return false;
+
+          // Must have explicit absence in s
+          const hasAbsence = attendanceList.some(
+            (a) =>
+              a.center_id === cId &&
+              a.session_id === s.id &&
+              a.student_id === studentId &&
+              a.status === "absent" &&
+              a.attendance_type !== "makeup",
+          );
+          if (!hasAbsence) return false;
+
+          // Must not have present in s
+          const hasPresent = attendanceList.some(
+            (a) =>
+              a.center_id === cId &&
+              a.session_id === s.id &&
+              a.student_id === studentId &&
+              (a.status === "present" || a.status === "late"),
+          );
+          if (hasPresent) return false;
+
+          // Must not already be made up
+          const alreadyMadeUp = attendanceList.some(
+            (a) =>
+              a.center_id === cId &&
+              a.student_id === studentId &&
+              (a.original_absence_id === s.id ||
+                a.original_absence_id === `absence-${s.id}-${studentId}`),
+          );
+          if (alreadyMadeUp) return false;
+
+          return true;
+        });
+
+        candidateSessions.sort(
+          (a, b) =>
+            b.sessionDate.localeCompare(a.sessionDate) ||
+            (b.startTime || "").localeCompare(a.startTime || ""),
+        );
+
+        return candidateSessions.map((s) => ({
+          groupId: s.groupId,
+          groupName: s.groupName,
+          originalSessionId: s.id,
+          originalSessionDate: s.sessionDate,
+          groupGrade: s.groupGrade,
+          weekStartDay: 6,
+        })) as T[];
+      }
+
       if (
         params.length >= 4 &&
         trimmed.includes("s.group_id <> ?") &&
@@ -2811,7 +2912,7 @@ class InMemorySqliteMock implements SqlDatabase {
         ) as T[];
       }
 
-      if (params.length >= 3 && trimmed.includes("JOIN groups")) {
+      if (params.length >= 3 && trimmed.includes("JOIN groups") && !trimmed.includes("originalSessionId")) {
         const [studentId, centerId, dateStr] = params;
         // Jest runs in UTC while the seeded date follows the device-local
         // calendar. If the exact date has no rows, accept the adjacent local

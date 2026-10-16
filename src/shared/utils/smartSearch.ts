@@ -19,6 +19,13 @@ export function normalizeForSearch(value: unknown): string {
   return normalizeArabicForSearch(value);
 }
 
+export function normalizeAcademicGrade(value: unknown): string {
+  if (!value) return "";
+  return normalizeArabicForSearch(value)
+    .replace(/^(الصف|صف)\s+/, "")
+    .trim();
+}
+
 function compactCompoundName(value: string): string {
   // A compact spelling is a secondary representation, so ordinary words
   // separated by spaces are never treated as one word for ranking.

@@ -275,4 +275,109 @@ describe("Makeup focused verification tests", () => {
     );
     expect(makeupRecords.length).toBe(1);
   });
+
+  it("يعثر على طالب التعويض بكود 1051021 عند اختلاف صيغة المرحلة (الصف الثاني الثانوي مقابل الثاني الثانوي) ويثبت التعويض وحمايته من التكرار", async () => {
+    const db = DatabaseService.getDb();
+    const groupSecA = "grp-sec-a";
+    const groupSecB = "grp-sec-b";
+
+    // Groups created with grade "الثاني الثانوي" (without "الصف")
+    db.runSync(
+      `INSERT OR REPLACE INTO groups (id, center_id, name, subject_id, teacher_id, grade, session_price, status)
+       VALUES (?, ?, ?, ?, ?, ?, 100, 'active')`,
+      [groupSecA, centerId, "مجموعة 2 ثانوي - أ", subjectId, teacherId, "الثاني الثانوي"],
+    );
+    db.runSync(
+      `INSERT OR REPLACE INTO groups (id, center_id, name, subject_id, teacher_id, grade, session_price, status)
+       VALUES (?, ?, ?, ?, ?, ?, 100, 'active')`,
+      [groupSecB, centerId, "مجموعة 2 ثانوي - ب", subjectId, teacherId, "الثاني الثانوي"],
+    );
+
+    // Student registered with grade "الصف الثاني الثانوي" and code "1051021"
+    const student1051021 = StudentRepository.createStudent({
+      studentCode: "1051021",
+      cardCode: "051021",
+      fullName: "أحمد محمد محمود",
+      phone: "01099998888",
+      parentPhone: "01199998888",
+      grade: "الصف الثاني الثانوي",
+    });
+
+    // Enrolled in Group A
+    db.runSync(
+      `INSERT OR REPLACE INTO student_group_enrollments (id, center_id, student_id, group_id, status, start_date)
+       VALUES (?, ?, ?, ?, 'active', '2026-09-01')`,
+      ["enr-sec-1", centerId, student1051021.id, groupSecA],
+    );
+
+    // Group A had an earlier session where student1051021 was absent
+    const sessionSecA = "sess-sec-a";
+    db.runSync(
+      `INSERT OR REPLACE INTO sessions
+       (id, center_id, group_id, subject_id, teacher_id, session_date, start_time, end_time, status, created_at)
+       VALUES (?, ?, ?, ?, ?, '2026-10-01', '14:00', '16:00', 'open', '2026-10-01T10:00:00.000Z')`,
+      [sessionSecA, centerId, groupSecA, subjectId, teacherId],
+    );
+    db.runSync(
+      `INSERT OR REPLACE INTO attendance
+       (id, center_id, session_id, student_id, status, attendance_type, recorded_at, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 'absent', 'present', '2026-10-01T14:30:00.000Z', '2026-10-01T14:30:00.000Z', '2026-10-01T14:30:00.000Z')`,
+      [`att-default-${sessionSecA}-${student1051021.id}`, centerId, sessionSecA, student1051021.id],
+    );
+
+    // Active session for Group B today (host session for makeup)
+    const sessionSecB = "sess-sec-b";
+    db.runSync(
+      `INSERT OR REPLACE INTO sessions
+       (id, center_id, group_id, subject_id, teacher_id, session_date, start_time, end_time, status, created_at)
+       VALUES (?, ?, ?, ?, ?, '2026-10-02', '16:00', '18:00', 'open', '2026-10-02T12:00:00.000Z')`,
+      [sessionSecB, centerId, groupSecB, subjectId, teacherId],
+    );
+
+    // 1. Verify finding by normalized code "1051021"
+    const foundByCode = findAttendanceStudentByNormalizedCode("1051021");
+    expect(foundByCode).not.toBeNull();
+    expect(foundByCode?.id).toBe(student1051021.id);
+
+    // 2. Verify searchAttendanceStudents returns student 1051021 despite "الصف الثاني الثانوي" vs "الثاني الثانوي"
+    const allStudents = StudentRepository.getAllForAttendance();
+    const searchResults = searchAttendanceStudents(allStudents, "1051021", "الثاني الثانوي", centerId);
+    expect(searchResults.some((s) => s.id === student1051021.id)).toBe(true);
+
+    // 3. Verify eligibility check via MakeupService & AttendanceSessionService
+    const makeupEligibilityStrict = MakeupService.getEligibilityForSession(sessionSecB, student1051021.id);
+    expect(makeupEligibilityStrict.eligible).toBe(true);
+    expect(makeupEligibilityStrict.originalAbsenceId).toBe(sessionSecA);
+
+    const makeupEligibilitySession = AttendanceSessionService.getMakeupEligibility(sessionSecB, student1051021.id);
+    expect(makeupEligibilitySession.eligible).toBe(true);
+    expect(makeupEligibilitySession.originalAbsenceId).toBe(sessionSecA);
+
+    // 4. Record makeup attendance
+    const makeupAtt = await AttendanceRepository.recordAttendance({
+      studentId: student1051021.id,
+      sessionId: sessionSecB,
+      status: "present",
+      isLate: false,
+      attendanceType: "makeup",
+      originalAbsenceId: sessionSecA,
+    });
+    expect(makeupAtt).not.toBeNull();
+    expect(makeupAtt.attendanceType).toBe("makeup");
+
+    // 5. Verify duplicate prevention
+    const duplicateEligibility = MakeupService.getEligibilityForSession(sessionSecB, student1051021.id);
+    expect(duplicateEligibility.eligible).toBe(false);
+
+    await expect(
+      AttendanceRepository.recordAttendance({
+        studentId: student1051021.id,
+        sessionId: sessionSecB,
+        status: "present",
+        isLate: false,
+        attendanceType: "makeup",
+        originalAbsenceId: sessionSecA,
+      }),
+    ).rejects.toThrow("تم تسجيل تعويض لهذا الغياب مسبقًا.");
+  });
 });

@@ -1186,7 +1186,10 @@ class SyncProcessor {
           AND (e.joined_at::date <= $4::date OR e.created_at::date <= $4::date)
           AND (e.ended_at IS NULL OR e.ended_at::date >= $4::date)
           AND enrolled_group.teacher_id = $5
-          AND LOWER(TRIM(enrolled_group.grade)) = LOWER(TRIM($6))
+          AND (
+            LOWER(TRIM(enrolled_group.grade)) = LOWER(TRIM($6))
+            OR REPLACE(REPLACE(LOWER(TRIM(enrolled_group.grade)), 'الصف ', ''), 'صف ', '') = REPLACE(REPLACE(LOWER(TRIM($6)), 'الصف ', ''), 'صف ', '')
+          )
         LIMIT 1`,
       [centerId, studentId, groupId, sessionDate, teacherId, groupGrade],
     );

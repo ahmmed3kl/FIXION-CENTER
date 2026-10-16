@@ -16,6 +16,7 @@ import {
 } from "./AttendanceCalculations";
 import { stableSessionId } from "../../shared/utils/stableIds";
 import { DEFAULT_TEACHER_WEEK_START_DAY, isTeacherMakeupCycleOpen } from "../../shared/utils/teacherWeeks";
+import { normalizeAcademicGrade } from "../../shared/utils/smartSearch";
 import { SessionDateService } from "../sessions/SessionDateService";
 
 export interface AttendanceSummary {
@@ -62,6 +63,7 @@ export class AttendanceSessionService {
     const source = db.getFirstSync<any>(
       `SELECT g.id as groupId, g.name as groupName, s.id as originalSessionId,
               s.session_date as originalSessionDate,
+              g.grade as groupGrade,
               COALESCE(sourceTeacher.week_start_day, 6) as weekStartDay
        FROM sessions s
        JOIN groups g ON g.center_id = s.center_id AND g.id = s.group_id
@@ -70,13 +72,13 @@ export class AttendanceSessionService {
        WHERE s.center_id = ?
          AND (
            s.session_date < ?
-           OR (s.session_date = ? AND COALESCE(s.start_time, '') < COALESCE(?, ''))
+           OR (s.session_date = ? AND (COALESCE(s.start_time, '') < COALESCE(?, '') OR s.id <> ?))
          )
          AND s.status <> 'cancelled'
          AND (COALESCE(s.teacher_id, g.teacher_id) = ? OR LOWER(TRIM(sourceTeacher.name)) = LOWER(TRIM(?)))
          AND g.id <> ?
          AND (COALESCE(s.subject_id, g.subject_id) = ? OR LOWER(TRIM(sourceSubject.name)) = LOWER(TRIM(?)))
-         AND (? IS NULL OR g.grade = ?)
+         AND (? IS NULL OR g.grade = ? OR REPLACE(REPLACE(g.grade, 'الصف ', ''), 'صف ', '') = REPLACE(REPLACE(?, 'الصف ', ''), 'صف ', ''))
          -- A source session can come from a regular enrollment or a package
          -- roster snapshot. This keeps package students eligible for makeup.
          AND (
@@ -94,10 +96,6 @@ export class AttendanceSessionService {
                AND e.status IN ('active', 'ended')
                AND (e.start_date <= s.session_date OR SUBSTR(e.created_at, 1, 10) <= s.session_date)
                AND (e.end_date IS NULL OR e.end_date >= s.session_date)
-               AND NOT EXISTS (
-                 SELECT 1 FROM session_expected_students any_expected
-                 WHERE any_expected.center_id = s.center_id AND any_expected.session_id = s.id
-               )
            )
          )
          AND EXISTS (
@@ -125,10 +123,11 @@ export class AttendanceSessionService {
                   OR makeup.original_absence_id = ('absence-' || s.id || '-' || ?))
          )
        ORDER BY s.session_date DESC, s.start_time DESC LIMIT 1`,
-      [activeCenterId, session.sessionDate, session.sessionDate, session.startTime, session.teacherId, session.teacherName || "", session.groupId, session.subjectId, session.subjectName || "", session.groupGrade || null, session.groupGrade || null, studentId, studentId, studentId, studentId, studentId, studentId, studentId],
+      [activeCenterId, session.sessionDate, session.sessionDate, session.startTime, sessionId, session.teacherId, session.teacherName || "", session.groupId, session.subjectId, session.subjectName || "", session.groupGrade || null, session.groupGrade || null, session.groupGrade || null, studentId, studentId, studentId, studentId, studentId, studentId, studentId],
     );
     if (
       source &&
+      (!session.groupGrade || !source.groupGrade || normalizeAcademicGrade(source.groupGrade) === normalizeAcademicGrade(session.groupGrade)) &&
       isTeacherMakeupCycleOpen(
         source.originalSessionDate,
         session.sessionDate,
