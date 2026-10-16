@@ -20,6 +20,60 @@ import { Permission, User } from "../src/shared/types";
 import { stableSessionId } from "../src/shared/utils/stableIds";
 
 jest.mock("expo-device", () => ({ modelName: null }));
+jest.mock("../backend/src/db", () => ({ withTransaction: jest.fn() }));
+
+interface ServerSyncOperation {
+  centerId: string;
+  operationId: string;
+  operationType: string;
+  entityType: string;
+  entityId: string;
+  payload: string | Record<string, unknown>;
+  createdAt: string;
+}
+
+interface ServerQueryClient {
+  query(
+    sql: string,
+    params?: unknown[],
+  ): Promise<{
+    rows: Array<Record<string, unknown>>;
+    rowCount?: number;
+  }>;
+}
+
+interface ServerSyncProcessor {
+  orderSyncOperations(operations: ServerSyncOperation[]): ServerSyncOperation[];
+  isStudentEligibleForSessionGroup(
+    client: ServerQueryClient,
+    args: {
+      centerId: string;
+      groupId: string;
+      sessionDate: string;
+      scheduleId: string;
+      subjectId: string;
+      teacherId: string;
+      groupGrade: string;
+      studentId: string;
+      allowSameDayLateEnrollment: boolean;
+    },
+  ): Promise<boolean>;
+  applyDomainMutation(
+    client: ServerQueryClient,
+    context: {
+      centerId: string;
+      userId: string;
+      deviceId: string;
+      operationId: string;
+      operationType: string;
+      entityType: string;
+      entityId: string;
+      payload: Record<string, unknown>;
+    },
+  ): Promise<unknown>;
+}
+
+const ServerSyncProcessor = require("../backend/src/services/SyncProcessor") as ServerSyncProcessor;
 
 interface NativeStatement {
   all(...parameters: any[]): unknown[];
@@ -557,6 +611,242 @@ describe("SyncEngine against independent persistent SQLite databases", () => {
     ]);
   });
 
+  it("orders enrollment and schedule before the session roster and accepts attendance promotion", async () => {
+    const centerId = `session-enrollment-sync-${Date.now()}`;
+    const database = createClientDatabase("session-enrollment-sync", centerId);
+    const studentId = "roster-student";
+    const groupId = "roster-group";
+    const scheduleId = "roster-schedule";
+    const sessionId = "roster-session";
+    const attendanceId = `att-default-${sessionId}-${studentId}`;
+    const expectedOperationId = `op-att-default-${sessionId}-${studentId}`;
+    const now = new Date().toISOString();
+    const enqueue = (
+      operationId: string,
+      operationType: string,
+      entityType: string,
+      entityId: string,
+      payload: Record<string, unknown>,
+    ) => SyncRepository.enqueueOperation({
+      centerId,
+      userId: "roster-user",
+      deviceId: "roster-device",
+      operationType,
+      entityType,
+      entityId,
+      payload,
+      operationId,
+    });
+
+    enqueue("roster-attendance-op", "UPDATE", "attendance", attendanceId, {
+      id: attendanceId,
+      centerId,
+      studentId,
+      sessionId,
+      status: "present",
+      attendanceType: "present",
+      action: "attendance.promote_default_absence",
+      expectedOperationId,
+      checkInTime: now,
+    });
+    enqueue("roster-session-op", "session.reconcile", "session", sessionId, {
+      groupId,
+      scheduleId,
+      subjectId: "roster-subject",
+      teacherId: "roster-teacher",
+      sessionDate: "2026-10-16",
+      startTime: "10:00",
+      endTime: "11:00",
+      expectedStudentIds: [studentId],
+      status: "open",
+    });
+    enqueue("roster-enrollment-op", "CREATE", "enrollment", "roster-enrollment", {
+      id: "roster-enrollment",
+      studentId,
+      groupId,
+      startDate: "2026-10-22",
+      status: "active",
+      createdAt: now,
+    });
+    enqueue("roster-schedule-op", "CREATE", "group_schedule", scheduleId, {
+      id: scheduleId,
+      groupId,
+      dayOfWeek: 5,
+      startTime: "10:00",
+      endTime: "11:00",
+      status: "active",
+    });
+    enqueue("roster-student-op", "CREATE", "student", studentId, {
+      id: studentId,
+      centerId,
+    });
+    enqueue("roster-group-op", "CREATE", "group", groupId, {
+      id: groupId,
+      teacherId: "roster-teacher",
+      subjectId: "roster-subject",
+    });
+
+    const pending = SyncRepository.getPendingOperations(centerId);
+    const operationIds = pending.map((operation) => operation.operationId);
+    const operationIndex = (operationId: string) => operationIds.indexOf(operationId);
+    expect(operationIndex("roster-group-op")).toBeLessThan(operationIndex("roster-schedule-op"));
+    expect(operationIndex("roster-student-op")).toBeLessThan(operationIndex("roster-enrollment-op"));
+    expect(operationIndex("roster-schedule-op")).toBeLessThan(operationIndex("roster-session-op"));
+    expect(operationIndex("roster-enrollment-op")).toBeLessThan(operationIndex("roster-session-op"));
+    expect(operationIndex("roster-session-op")).toBeLessThan(operationIndex("roster-attendance-op"));
+    expect(
+      SyncRepository.getPendingOperations(centerId, 5).map((operation) => operation.operationId),
+    ).toContain("roster-session-op");
+    expect(
+      SyncRepository.getPendingOperations(centerId, 5).map((operation) => operation.operationId),
+    ).not.toContain("roster-attendance-op");
+
+    const serverOrdered = ServerSyncProcessor.orderSyncOperations(pending);
+    const serverOperationIds = serverOrdered.map((operation) => operation.operationId);
+    expect(serverOperationIds.indexOf("roster-enrollment-op")).toBeLessThan(
+      serverOperationIds.indexOf("roster-session-op"),
+    );
+    expect(serverOperationIds.indexOf("roster-schedule-op")).toBeLessThan(
+      serverOperationIds.indexOf("roster-session-op"),
+    );
+
+    let attendanceRecord: {
+      id: string;
+      session_id: string;
+      student_id: string;
+      check_in_time: string;
+      status: string;
+      is_late: boolean;
+      attendance_type: string;
+      original_absence_id: string | null;
+      operation_id: string;
+    } = {
+      id: attendanceId,
+      session_id: sessionId,
+      student_id: studentId,
+      check_in_time: now,
+      status: "absent",
+      is_late: false,
+      attendance_type: "present",
+      original_absence_id: null,
+      operation_id: expectedOperationId,
+    };
+    const serverStatements: string[] = [];
+    const serverClient: ServerQueryClient = {
+      async query(sql, params = []) {
+        const statement = sql.replace(/\s+/g, " ").trim();
+        serverStatements.push(statement);
+        if (statement.includes("FROM student_group_enrollments e")) {
+          expect(statement).toContain("server_sync_operations");
+          expect(statement).toContain("group_schedules session_schedule");
+          expect(params).toEqual([
+            centerId,
+            groupId,
+            studentId,
+            "2026-10-16",
+            scheduleId,
+          ]);
+          return { rows: [{ "?column?": 1 }] };
+        }
+        if (statement.includes("FROM student_package_subscriptions")) {
+          return { rows: [] };
+        }
+        if (
+          statement.includes("FROM sessions s") &&
+          statement.includes("WHERE s.center_id = $1::varchar AND s.id = $2::varchar")
+        ) {
+          return {
+            rows: [{
+              id: sessionId,
+              session_date: "2026-10-16",
+              start_time: "10:00",
+              group_id: groupId,
+              schedule_id: scheduleId,
+              subject_id: "roster-subject",
+              teacher_id: "roster-teacher",
+              status: "open",
+              updated_at: now,
+              validated_group_id: groupId,
+              group_grade: "Grade 8",
+              group_subject_id: "roster-subject",
+              group_teacher_id: "roster-teacher",
+            }],
+          };
+        }
+        if (statement.includes("FROM students") && statement.includes("deleted_at IS NULL")) {
+          return { rows: [{ center_id: centerId }] };
+        }
+        if (statement.includes("FROM session_expected_students")) {
+          return { rows: [{ "?column?": 1 }] };
+        }
+        if (statement.includes("WITH RECURSIVE session_ids(session_id)")) {
+          return { rows: [{ session_id: sessionId }] };
+        }
+        if (statement.includes("FROM attendance a") && statement.includes("FOR UPDATE OF a")) {
+          return { rows: [{ ...attendanceRecord }] };
+        }
+        if (statement.startsWith("UPDATE attendance")) {
+          attendanceRecord = {
+            ...attendanceRecord,
+            check_in_time: String(params[4]),
+            status: String(params[5]),
+            is_late: Boolean(params[6]),
+            attendance_type: String(params[7]),
+            original_absence_id: params[8] as string | null,
+            operation_id: String(params[9]),
+          };
+          return { rows: [], rowCount: 1 };
+        }
+        if (
+          statement.includes("FROM attendance") &&
+          statement.includes("WHERE center_id = $1 AND id = $2")
+        ) {
+          return { rows: [{ ...attendanceRecord }] };
+        }
+        return { rows: [], rowCount: 1 };
+      },
+    };
+
+    await expect(
+      ServerSyncProcessor.isStudentEligibleForSessionGroup(serverClient, {
+        centerId,
+        groupId,
+        sessionDate: "2026-10-16",
+        scheduleId,
+        subjectId: "roster-subject",
+        teacherId: "roster-teacher",
+        groupGrade: "Grade 8",
+        studentId,
+        allowSameDayLateEnrollment: true,
+      }),
+    ).resolves.toBe(true);
+    await ServerSyncProcessor.applyDomainMutation(serverClient, {
+      centerId,
+      userId: "roster-user",
+      deviceId: "roster-device",
+      operationId: "roster-attendance-present",
+      operationType: "UPDATE",
+      entityType: "attendance",
+      entityId: attendanceId,
+      payload: {
+        id: attendanceId,
+        centerId,
+        studentId,
+        sessionId,
+        status: "present",
+        attendanceType: "present",
+        action: "attendance.promote_default_absence",
+        expectedOperationId,
+        checkInTime: now,
+      },
+    });
+
+    expect(attendanceRecord.status).toBe("present");
+    expect(attendanceRecord.operation_id).toBe("roster-attendance-present");
+    expect(serverStatements.some((statement) => statement.startsWith("UPDATE attendance"))).toBe(true);
+    expect(serverStatements.some((statement) => statement.startsWith("INSERT INTO attendance"))).toBe(false);
+  });
+
   it("canonicalizes pulled session references and keeps present over absent in either pull order", () => {
     const centerId = `session-pull-order-${Date.now()}`;
     const firstDevice = createClientDatabase("session-pull-first", centerId);
@@ -1012,6 +1302,69 @@ describe("SyncEngine against independent persistent SQLite databases", () => {
       session_id: "canonical-session",
       original_absence_id: "device-session-alias",
     });
+  });
+
+  it("replays an exact historical attendance identity without changing its other alias row", () => {
+    const centerId = `session-reference-exact-replay-${Date.now()}`;
+    const database = createClientDatabase("session-reference-exact-replay", centerId);
+    insertSession(database, "canonical-session", centerId);
+    insertSession(database, "device-session-alias", centerId);
+    SyncRepository.recordSessionMappings(centerId, [{
+      localSessionId: "device-session-alias",
+      canonicalSessionId: "canonical-session",
+    }]);
+    database.runSync(
+      `INSERT INTO attendance
+         (id, center_id, student_id, session_id, check_in_time, status, is_late,
+          attendance_type, operation_id)
+       VALUES
+         ('canonical-history-attendance', ?, 'student-a', 'canonical-session',
+          '2026-10-15T10:00:00.000Z', 'present', 0, 'present',
+          'canonical-history-operation'),
+         ('alias-history-attendance', ?, 'student-a', 'device-session-alias',
+          '2026-10-15T10:01:00.000Z', 'absent', 0, 'present',
+          'alias-history-operation')`,
+      [centerId, centerId],
+    );
+    DatabaseService.setMockDb(database);
+
+    expect(() => SyncRepository.upsertPulledAttendance(database, centerId, {
+      id: "alias-history-attendance",
+      center_id: centerId,
+      student_id: "student-a",
+      session_id: "device-session-alias",
+      check_in_time: "2026-10-15T10:02:00.000Z",
+      status: "present",
+      operation_id: "alias-history-operation-replayed",
+    })).not.toThrow();
+    expect(database.getAllSync<{
+      id: string;
+      session_id: string;
+      status: string;
+      check_in_time: string;
+      operation_id: string;
+    }>(
+      `SELECT id, session_id, status, check_in_time, operation_id
+         FROM attendance
+        WHERE center_id = ? AND student_id = 'student-a'
+        ORDER BY id`,
+      [centerId],
+    )).toEqual([
+      {
+        id: "alias-history-attendance",
+        session_id: "device-session-alias",
+        status: "present",
+        check_in_time: "2026-10-15T10:02:00.000Z",
+        operation_id: "alias-history-operation-replayed",
+      },
+      {
+        id: "canonical-history-attendance",
+        session_id: "canonical-session",
+        status: "present",
+        check_in_time: "2026-10-15T10:00:00.000Z",
+        operation_id: "canonical-history-operation",
+      },
+    ]);
   });
 
   it("preserves multiple historical attendance rows instead of selecting an arbitrary alias match", () => {

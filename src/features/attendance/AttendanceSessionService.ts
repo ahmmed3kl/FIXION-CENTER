@@ -13,7 +13,6 @@ import { AuditService } from "../../core/audit";
 import {
   calculateSessionAttendanceCounts,
   excludeCompensationVisitorsFromExpectedRoster,
-  filterExpectedStudentIdsByEligibility,
 } from "./AttendanceCalculations";
 import { stableSessionId } from "../../shared/utils/stableIds";
 import { DEFAULT_TEACHER_WEEK_START_DAY, isTeacherMakeupCycleOpen } from "../../shared/utils/teacherWeeks";
@@ -212,8 +211,34 @@ export class AttendanceSessionService {
     sessionDate: string,
   ): string[] {
     const regular = EnrollmentRepository.getActiveEnrollmentsForGroup(groupId, sessionDate).map((item) => item.studentId);
+    const lateEnrollments = this.getLateSameDayEnrollmentStudentIds(groupId, sessionDate);
     const packageStudents = this.getPackageExpectedStudentIds(groupId, group.subjectId, group.teacherId, sessionDate);
-    return Array.from(new Set([...regular, ...packageStudents]));
+    return Array.from(new Set([...regular, ...lateEnrollments, ...packageStudents]));
+  }
+
+  private static getLateSameDayEnrollmentStudentIds(
+    groupId: string,
+    sessionDate: string,
+  ): string[] {
+    const enrollments = EnrollmentRepository.getActiveEnrollmentsForGroup(groupId)
+      .filter((enrollment) =>
+        enrollment.startDate > sessionDate &&
+        (!enrollment.endDate || enrollment.endDate >= sessionDate)
+      );
+    if (!enrollments.length) return [];
+
+    const schedules = GroupScheduleRepository.getSchedulesForGroup(groupId);
+    return enrollments
+      .filter((enrollment) =>
+        GroupScheduleRepository.isLateEnrollmentForSessionDate(
+          groupId,
+          sessionDate,
+          enrollment.startDate,
+          enrollment.createdAt,
+          schedules,
+        )
+      )
+      .map((enrollment) => enrollment.studentId);
   }
 
   static ensureSessionForGroup(
@@ -590,14 +615,10 @@ export class AttendanceSessionService {
     const reconciliationUpdatedAt = sessionWasActivated
       ? new Date().toISOString()
       : undefined;
-    const expectedRows = db.getAllSync<{ studentId: string }>(
-      "SELECT student_id as studentId FROM session_expected_students WHERE center_id = ? AND session_id = ?",
-      [session.centerId, session.id],
-    ).map((row) => row.studentId);
-    const eligibleStudentIds = SessionRepository.getEligibleStudentIdsForSession(session.id);
-    const expectedStudentIds = expectedRows.length > 0
-      ? filterExpectedStudentIdsByEligibility(expectedRows, eligibleStudentIds)
-      : eligibleStudentIds;
+    const expectedStudentIds = SessionRepository.getExpectedStudentIdsForSession(session.id);
+    const expectedRosterKey = JSON.stringify(
+      Array.from(new Set(expectedStudentIds.map(String))).sort(),
+    );
     const advancedStudentIds = new Set(
       db.getAllSync<{ studentId: string }>(
         `SELECT student_id as studentId FROM advance_coverages
@@ -629,8 +650,50 @@ export class AttendanceSessionService {
         if (attendanceId) initialAbsenceIds.push(attendanceId);
       }
     });
+    const queuedReconciliation = shouldEnqueueActivation
+      ? null
+      : db.getAllSync<{ operationId: string; payload: string }>(
+          `SELECT operation_id as operationId, payload
+           FROM sync_operations
+           WHERE center_id = ? AND entity_type = 'session' AND entity_id = ?
+             AND operation_type = 'session.reconcile'
+             AND status IN ('pending', 'syncing', 'failed', 'conflict')
+           ORDER BY created_at ASC`,
+          [session.centerId, session.id],
+        ).find((operation) => {
+          const payload =
+            typeof operation.payload === "string"
+              ? JSON.parse(operation.payload || "{}")
+              : operation.payload || {};
+          const queuedStudentIds =
+            payload.expectedStudentIds || payload.expected_student_ids || [];
+          const queuedRosterKey = JSON.stringify(
+            Array.isArray(queuedStudentIds)
+              ? Array.from(new Set(queuedStudentIds.map(String))).sort()
+              : [],
+          );
+          return (
+            String(payload.groupId || payload.group_id || "") ===
+              session.groupId &&
+            String(payload.scheduleId || payload.schedule_id || "") ===
+              String(session.scheduleId || "") &&
+            String(payload.sessionDate || payload.session_date || "") ===
+              session.sessionDate &&
+            queuedRosterKey === expectedRosterKey
+          );
+        }) || null;
+    const reconciliationOperationId =
+      queuedReconciliation?.operationId ||
+      `op-session-reconcile-${stableSessionId(
+        session.centerId,
+        session.groupId,
+        `${session.scheduleId || session.id}|${expectedRosterKey}`,
+        session.sessionDate,
+      )}`;
     SyncRepository.enqueueOperation({
-      operationId: shouldEnqueueActivation ? activationOperationId : undefined,
+      operationId: shouldEnqueueActivation
+        ? activationOperationId
+        : reconciliationOperationId,
       centerId: session.centerId,
       userId: currentUser.id,
       deviceId,
@@ -702,13 +765,13 @@ export class AttendanceSessionService {
         teacherId: rawSession.teacherId || group?.teacherId || null,
       };
     }
-    const snapshotEntry = db.getFirstSync<{ id: string }>(
-      `SELECT id FROM session_expected_students
+    const snapshotEntries = db.getAllSync<{ id: string; studentId: string }>(
+      `SELECT id, student_id as studentId FROM session_expected_students
        WHERE center_id = ? AND session_id = ? AND student_id = ?`,
       [session.centerId, sessionId, studentId],
     );
-    if (snapshotEntry) {
-      return SessionRepository.getEligibleStudentIdsForSession(sessionId).includes(studentId);
+    if (snapshotEntries.length > 0) {
+      return SessionRepository.getExpectedStudentIdsForSession(sessionId).includes(studentId);
     }
 
     // A student may be added to an old/legacy session only when their
@@ -790,11 +853,9 @@ export class AttendanceSessionService {
       [sessionId],
     );
     if (!session) return { total: 0, present: 0, absent: 0, notStarted: 0, makeup: 0 };
-    const eligibleIds = SessionRepository.getEligibleStudentIdsForSession(sessionId);
-    // A legacy expected snapshot can contain compensation visitors. Current
-    // date-valid enrollment/package relationships are the roster authority;
-    // keeping the snapshot rows themselves would turn old visitors into
-    // absentees after app restart or sync replay.
+    const eligibleIds = SessionRepository.getExpectedStudentIdsForSession(sessionId);
+    // Prefer live eligibility when available; use a saved non-compensation
+    // roster only when local enrollment/package data yields no students.
     let normalizedExpected = eligibleIds;
     const attendance = db.getAllSync<any>(
       `SELECT student_id as studentId, status,

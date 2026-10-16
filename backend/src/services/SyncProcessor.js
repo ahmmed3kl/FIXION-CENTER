@@ -243,6 +243,20 @@ function orderSyncOperations(operations) {
       operation,
     ]),
   );
+  const byEnrollmentMember = new Map();
+  for (const operation of base) {
+    if (canonicalSyncEntity(operation.entityType) !== "enrollment") continue;
+    const payload = syncPayload(operation.payload);
+    const studentId = firstSyncValue(payload, "studentId", "student_id");
+    const groupId = firstSyncValue(payload, "groupId", "group_id");
+    if (studentId === undefined || groupId === undefined) continue;
+    const key = JSON.stringify([
+      String(operation.centerId || ""),
+      String(studentId),
+      String(groupId),
+    ]);
+    if (!byEnrollmentMember.has(key)) byEnrollmentMember.set(key, operation);
+  }
   const dependencies = (operation) => {
     const entity = canonicalSyncEntity(operation.entityType);
     const payload = syncPayload(operation.payload);
@@ -261,15 +275,31 @@ function orderSyncOperations(operations) {
         ["group", value("groupId", "group_id")],
       );
     if (entity === "session") {
+      const groupId = value("groupId", "group_id");
+      const scheduleId = value("scheduleId", "schedule_id");
       refs.push(
         ["group", value("groupId", "group_id")],
         ["teacher", value("teacherId", "teacher_id")],
         ["subject", value("subjectId", "subject_id")],
+        ["group_schedule", scheduleId],
       );
       const students =
         payload.expectedStudentIds || payload.expected_student_ids;
-      if (Array.isArray(students))
-        students.forEach((id) => refs.push(["student", id]));
+      if (Array.isArray(students)) {
+        students.forEach((id) => {
+          refs.push(["student", id]);
+          if (groupId !== undefined) {
+            refs.push([
+              "enrollment_member",
+              JSON.stringify([
+                String(operation.centerId || ""),
+                String(id),
+                String(groupId),
+              ]),
+            ]);
+          }
+        });
+      }
     }
     if (
       entity === "attendance" ||
@@ -353,7 +383,12 @@ function orderSyncOperations(operations) {
     if (visited.has(key) || visiting.has(key)) return;
     visiting.add(key);
     for (const dependency of dependencies(operation)) {
-      const parent = byEntity.get(dependency);
+      const enrollmentMemberPrefix = "enrollment_member:";
+      const parent = dependency.startsWith(enrollmentMemberPrefix)
+        ? byEnrollmentMember.get(
+            dependency.slice(enrollmentMemberPrefix.length),
+          )
+        : byEntity.get(dependency);
       if (parent) visit(parent);
     }
     visiting.delete(key);
@@ -365,6 +400,10 @@ function orderSyncOperations(operations) {
 }
 
 class SyncProcessor {
+  static orderSyncOperations(operations) {
+    return orderSyncOperations(operations);
+  }
+
   /**
    * Serialize sync-ledger writes and snapshots for one center. The row lock is
    * held until the surrounding transaction commits, so a later writer cannot
@@ -995,16 +1034,90 @@ class SyncProcessor {
       teacherId,
       groupGrade,
       studentId,
+      scheduleId,
+      allowSameDayLateEnrollment = false,
       allowSameTeacherCompensation = false,
     },
   ) {
+    const lateEnrollmentEligibility =
+      allowSameDayLateEnrollment && scheduleId
+        ? ` OR EXISTS (
+            SELECT 1
+              FROM centers center_row
+              JOIN group_schedules session_schedule
+                ON session_schedule.center_id = center_row.id
+               AND session_schedule.group_id = e.group_id
+               AND session_schedule.id = $5::varchar
+               AND session_schedule.day_of_week =
+                   EXTRACT(DOW FROM $4::date)::smallint
+              LEFT JOIN LATERAL (
+                SELECT MIN(sync_operation.created_at) AS created_at
+                  FROM server_sync_operations sync_operation
+                 WHERE sync_operation.center_id = e.center_id
+                   AND sync_operation.status = 'applied'
+                   AND LOWER(sync_operation.entity_type) IN
+                       ('enrollment', 'student_group_enrollment')
+                   AND COALESCE(
+                     sync_operation.payload->>'studentId',
+                     sync_operation.payload->>'student_id',
+                     sync_operation.payload->'enrollment'->>'studentId',
+                     sync_operation.payload->'enrollment'->>'student_id'
+                   ) = e.student_id
+                   AND COALESCE(
+                     sync_operation.payload->>'groupId',
+                     sync_operation.payload->>'group_id',
+                     sync_operation.payload->'enrollment'->>'groupId',
+                     sync_operation.payload->'enrollment'->>'group_id'
+                   ) = e.group_id
+                   AND (
+                     sync_operation.entity_id = e.id
+                     OR COALESCE(
+                       sync_operation.payload->>'id',
+                       sync_operation.payload->>'enrollmentId',
+                       sync_operation.payload->>'enrollment_id',
+                       sync_operation.payload->'enrollment'->>'id'
+                     ) = e.id
+                   )
+              ) enrollment_sync ON TRUE
+             WHERE center_row.id = e.center_id
+               AND NULLIF(BTRIM(center_row.time_zone), '') IS NOT NULL
+               AND enrollment_sync.created_at IS NOT NULL
+               AND (enrollment_sync.created_at AT TIME ZONE center_row.time_zone)::date =
+                   $4::date
+               AND (enrollment_sync.created_at AT TIME ZONE center_row.time_zone)::time >= (
+                 SELECT MAX(today_schedule.end_time::time)
+                   FROM group_schedules today_schedule
+                  WHERE today_schedule.center_id = e.center_id
+                    AND today_schedule.group_id = e.group_id
+                    AND today_schedule.day_of_week =
+                        EXTRACT(DOW FROM $4::date)::smallint
+               )
+               AND e.joined_at::date = (
+                 SELECT MIN($4::date + candidate.day_offset)
+                   FROM generate_series(1, 7) AS candidate(day_offset)
+                  WHERE EXISTS (
+                    SELECT 1
+                      FROM group_schedules future_schedule
+                     WHERE future_schedule.center_id = e.center_id
+                       AND future_schedule.group_id = e.group_id
+                       AND future_schedule.day_of_week =
+                           EXTRACT(
+                             DOW FROM ($4::date + candidate.day_offset)
+                           )::smallint
+                  )
+               )
+          )`
+        : "";
     const enrollment = await client.query(
       `SELECT 1
          FROM student_group_enrollments e
          JOIN students st ON st.center_id = e.center_id AND st.id = e.student_id
         WHERE e.center_id = $1 AND e.group_id = $2 AND e.student_id = $3
           AND e.status IN ('active', 'transferred', 'withdrawn', 'completed')
-          AND e.joined_at::date <= $4::date
+          AND (
+            e.joined_at::date <= $4::date
+            ${lateEnrollmentEligibility}
+          )
           AND (e.ended_at IS NULL OR e.ended_at::date >= $4::date)
           AND NOT EXISTS (
             SELECT 1
@@ -1020,7 +1133,9 @@ class SyncProcessor {
                AND e.id = ('enr-' || compensation_expected.id)
           )
         LIMIT 1`,
-      [centerId, groupId, studentId, sessionDate],
+      allowSameDayLateEnrollment && scheduleId
+        ? [centerId, groupId, studentId, sessionDate, scheduleId]
+        : [centerId, groupId, studentId, sessionDate],
     );
     if (enrollment.rows.length > 0) return true;
 
@@ -1740,7 +1855,7 @@ class SyncProcessor {
       );
       maxServerSeq = parseInt(currentSeqRes.rows[0].max_seq, 10);
 
-      for (const op of orderSyncOperations(operations)) {
+      for (const op of SyncProcessor.orderSyncOperations(operations)) {
         const {
           operationId: rawOperationId,
           operationType,
@@ -2884,7 +2999,7 @@ class SyncProcessor {
         const sessionDateRes = await client.query(
           `SELECT s.id, s.session_date::text AS session_date,
                   COALESCE(s.start_time::text, '') AS start_time,
-                  s.group_id, s.subject_id, s.teacher_id,
+                  s.group_id, s.schedule_id, s.subject_id, s.teacher_id,
                   s.status, s.updated_at,
                   g.id AS validated_group_id,
                   g.grade AS group_grade,
@@ -2982,6 +3097,7 @@ class SyncProcessor {
               centerId,
               groupId: attendanceSession.group_id,
               sessionDate: attendanceSession.session_date,
+              scheduleId: attendanceSession.schedule_id,
               subjectId:
                 attendanceSession.subject_id ||
                 attendanceSession.group_subject_id,
@@ -2990,6 +3106,7 @@ class SyncProcessor {
                 attendanceSession.group_teacher_id,
               groupGrade: attendanceSession.group_grade,
               studentId: attendanceStudentId,
+              allowSameDayLateEnrollment: true,
             });
           if (
             !relationshipEligible ||
@@ -3944,10 +4061,12 @@ class SyncProcessor {
                 centerId,
                 groupId,
                 sessionDate,
+                scheduleId,
                 subjectId: rosterSubjectId,
                 teacherId: rosterTeacherId,
                 groupGrade: sessionGroup.grade,
                 studentId,
+                allowSameDayLateEnrollment: true,
               }))
             ) {
               throw new Error(

@@ -2,6 +2,7 @@ import { DatabaseService } from "../../core/database";
 import { ForbiddenError, UnauthorizedError } from "../../core/errors";
 import { PermissionService } from "../../core/permissions";
 import { Session, Student } from "../../shared/types";
+import { getSessionExpectedStudentIds } from "../attendance/AttendanceCalculations";
 import { useAuthStore } from "../auth/useAuthStore";
 
 export class SessionRepository {
@@ -227,6 +228,57 @@ export class SessionRepository {
     ));
   }
 
+  /**
+   * Preserves the session's saved roster while adding students whose
+   * date-valid enrollment or package eligibility is still available locally.
+   * Known legacy compensation visitors are excluded from the saved roster.
+   */
+  static getExpectedStudentIdsForSession(sessionId: string): string[] {
+    const { centerId } = this.getActiveContext();
+    const eligibleStudentIds = this.getEligibleStudentIdsForSession(sessionId);
+
+    const db = DatabaseService.getDb();
+    const snapshotRows = db.getAllSync<{ id: string; studentId: string }>(
+      `SELECT id, student_id as studentId FROM session_expected_students
+       WHERE center_id = ? AND session_id = ?`,
+      [centerId, sessionId],
+    );
+    const snapshotStudentIds = getSessionExpectedStudentIds(sessionId, snapshotRows);
+    if (snapshotStudentIds.length === 0) return eligibleStudentIds;
+
+    const legacyMakeupVisitors = new Set(
+      db.getAllSync<{ studentId: string }>(
+        `SELECT DISTINCT compensation.student_id as studentId
+         FROM session_expected_students compensation
+         JOIN sessions session
+           ON session.center_id = compensation.center_id
+          AND session.id = compensation.session_id
+         WHERE compensation.center_id = ? AND compensation.session_id = ?
+           AND compensation.id LIKE ('exp-comp-' || compensation.session_id || '-%')
+           AND EXISTS (
+             SELECT 1 FROM student_group_enrollments legacy_enrollment
+             WHERE legacy_enrollment.center_id = session.center_id
+               AND legacy_enrollment.group_id = session.group_id
+               AND legacy_enrollment.student_id = compensation.student_id
+               AND legacy_enrollment.id = ('enr-' || compensation.id)
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM student_group_enrollments real_enrollment
+             WHERE real_enrollment.center_id = session.center_id
+               AND real_enrollment.group_id = session.group_id
+               AND real_enrollment.student_id = compensation.student_id
+               AND real_enrollment.id NOT LIKE 'enr-exp-comp-%'
+           )`,
+        [centerId, sessionId],
+      ).map((row) => row.studentId),
+    );
+
+    return Array.from(new Set([
+      ...eligibleStudentIds,
+      ...snapshotStudentIds.filter((studentId) => !legacyMakeupVisitors.has(studentId)),
+    ]));
+  }
+
   /** Read-only expected-student snapshot for a historical session. */
   static getExpectedStudents(sessionId: string): Student[] {
     const { centerId, user } = this.getActiveContext();
@@ -235,7 +287,7 @@ export class SessionRepository {
     }
     const db = DatabaseService.getDb();
     const rows = db.getAllSync<Student>(
-      `SELECT s.id, s.center_id as centerId, s.student_code as studentCode,
+      `SELECT DISTINCT s.id, s.center_id as centerId, s.student_code as studentCode,
               s.full_name as fullName, s.card_code as cardCode, s.phone,
               s.parent_phone as parentPhone, s.grade, s.status,
               s.student_type as studentType, s.student_color as studentColor, s.notes,
@@ -248,8 +300,8 @@ export class SessionRepository {
     );
 
     if (rows.length > 0) {
-      const eligible = new Set(this.getEligibleStudentIdsForSession(sessionId));
-      return rows.filter((student) => eligible.has(student.id));
+      const expected = new Set(this.getExpectedStudentIdsForSession(sessionId));
+      return rows.filter((student) => expected.has(student.id));
     }
 
     // Older sessions may have been created before roster snapshots were

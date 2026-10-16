@@ -8,11 +8,20 @@ import { AbsenceService } from "../src/features/attendance/AbsenceService";
 import { AttendanceRepository } from "../src/features/attendance/AttendanceRepository";
 import { AttendanceSessionService } from "../src/features/attendance/AttendanceSessionService";
 import { MakeupService } from "../src/features/attendance/MakeupService";
+import { searchAttendanceStudents } from "../src/features/attendance/attendanceStudentSearch";
+import { findAttendanceStudentByNormalizedCode } from "../src/features/attendance/barcodeAttendance";
 import { useAuthStore } from "../src/features/auth/useAuthStore";
 import { EnrollmentRepository } from "../src/features/enrollments/EnrollmentRepository";
+import { GroupRepository } from "../src/features/groups/GroupRepository";
+import { GroupScheduleRepository } from "../src/features/groups/GroupScheduleRepository";
+import { DebtCycleRepository } from "../src/features/payments/DebtCycleRepository";
+import { ScannerService } from "../src/features/scanner/ScannerService";
 import { SessionRepository } from "../src/features/sessions/SessionRepository";
 import { SessionDateService } from "../src/features/sessions/SessionDateService";
 import { OperationalReportsService } from "../src/features/reports/OperationalReportsService";
+import { TeacherSubjectRepository } from "../src/features/teachers/TeacherSubjectRepository";
+import { CardRangeRepository } from "../src/features/students/CardRangeRepository";
+import { StudentRepository } from "../src/features/students/StudentRepository";
 import { Permission, User } from "../src/shared/types";
 
 interface NativeStatement {
@@ -85,7 +94,7 @@ describe("legacy compensation rows in expected session roster", () => {
   let originalDatabase: SqlDatabase;
   let databaseFilename: string;
 
-  const setUser = () => {
+  const setUser = (additionalPermissions: Permission[] = []) => {
     const user: User = {
       id: USER_ID,
       fullName: "Roster Test Staff",
@@ -100,7 +109,8 @@ describe("legacy compensation rows in expected session roster", () => {
         "attendance.create",
         "attendance.makeup",
         "enrollments.view",
-      ] as Permission[],
+        ...additionalPermissions,
+      ],
     };
     useAuthStore.setState({
       currentUser: user,
@@ -502,12 +512,217 @@ describe("legacy compensation rows in expected session roster", () => {
     )?.status).toBe("pending");
   });
 
+  it("uses a saved roster when live eligibility is empty, then promotes one student in place", async () => {
+    const secondMemberId = "legacy-snapshot-second-member";
+    seedStudent(secondMemberId, "990048");
+    seedExpected(CURRENT_SESSION_ID, secondMemberId);
+    for (const studentId of VISITOR_IDS) {
+      seedExpected(CURRENT_SESSION_ID, studentId, `exp-${CURRENT_SESSION_ID}-${studentId}`);
+    }
+    database.runSync(
+      "DELETE FROM student_group_enrollments WHERE center_id = ? AND group_id = ? AND student_id = ?",
+      [CENTER_ID, TARGET_GROUP_ID, MEMBER_ID],
+    );
+
+    expect(SessionRepository.getEligibleStudentIdsForSession(CURRENT_SESSION_ID)).toEqual([]);
+    expect(SessionRepository.getExpectedStudents(CURRENT_SESSION_ID).map((student) => student.id))
+      .toEqual([MEMBER_ID, secondMemberId]);
+
+    AttendanceSessionService.activate(CURRENT_SESSION_ID);
+    expect(database.getAllSync<{ id: string; studentId: string; status: string }>(
+      `SELECT id, student_id as studentId, status FROM attendance
+       WHERE center_id = ? AND session_id = ? ORDER BY student_id`,
+      [CENTER_ID, CURRENT_SESSION_ID],
+    )).toEqual([
+      { id: `att-default-${CURRENT_SESSION_ID}-${MEMBER_ID}`, studentId: MEMBER_ID, status: "absent" },
+      { id: `att-default-${CURRENT_SESSION_ID}-${secondMemberId}`, studentId: secondMemberId, status: "absent" },
+    ]);
+    expect(AttendanceSessionService.getSummary(CURRENT_SESSION_ID)).toMatchObject({
+      total: 2,
+      present: 0,
+      absent: 2,
+    });
+    for (const studentId of VISITOR_IDS) {
+      expect(AttendanceSessionService.isExpected(CURRENT_SESSION_ID, studentId)).toBe(false);
+    }
+    for (const studentId of [MEMBER_ID, secondMemberId]) {
+      expect(SyncRepository.getByOperationId(
+        `op-att-default-${CURRENT_SESSION_ID}-${studentId}`,
+      )?.status).toBe("pending");
+    }
+
+    const promoted = await AttendanceRepository.recordAttendance({
+      studentId: MEMBER_ID,
+      sessionId: CURRENT_SESSION_ID,
+      status: "present",
+      isLate: false,
+      checkInTime: "2099-10-04T10:30:00.000Z",
+    });
+    expect(promoted).toMatchObject({
+      id: `att-default-${CURRENT_SESSION_ID}-${MEMBER_ID}`,
+      status: "present",
+      attendanceType: "present",
+    });
+    expect(SyncRepository.getByOperationId(promoted.operationId)).toMatchObject({
+      operationType: "UPDATE",
+      status: "pending",
+    });
+
+    expect(database.getAllSync<{ id: string; studentId: string; status: string }>(
+      `SELECT id, student_id as studentId, status FROM attendance
+       WHERE center_id = ? AND session_id = ? ORDER BY student_id`,
+      [CENTER_ID, CURRENT_SESSION_ID],
+    )).toEqual([
+      { id: `att-default-${CURRENT_SESSION_ID}-${MEMBER_ID}`, studentId: MEMBER_ID, status: "present" },
+      { id: `att-default-${CURRENT_SESSION_ID}-${secondMemberId}`, studentId: secondMemberId, status: "absent" },
+    ]);
+    expect(AttendanceSessionService.getSummary(CURRENT_SESSION_ID)).toMatchObject({
+      total: 2,
+      present: 1,
+      absent: 1,
+    });
+  });
+
+  it("keeps a saved member expected when another member still has live eligibility", () => {
+    const snapshotOnlyMemberId = "legacy-snapshot-only-member";
+    seedStudent(snapshotOnlyMemberId, "990049");
+    seedExpected(CURRENT_SESSION_ID, snapshotOnlyMemberId);
+
+    expect(SessionRepository.getEligibleStudentIdsForSession(CURRENT_SESSION_ID))
+      .toEqual([MEMBER_ID]);
+    expect(SessionRepository.getExpectedStudentIdsForSession(CURRENT_SESSION_ID))
+      .toEqual([MEMBER_ID, snapshotOnlyMemberId]);
+    expect(AttendanceSessionService.isExpected(CURRENT_SESSION_ID, snapshotOnlyMemberId))
+      .toBe(true);
+    expect(SessionRepository.getExpectedStudents(CURRENT_SESSION_ID)
+      .map((student) => student.id))
+      .toEqual(expect.arrayContaining([MEMBER_ID, snapshotOnlyMemberId]));
+
+    AttendanceSessionService.activate(CURRENT_SESSION_ID);
+    expect(database.getAllSync<{ studentId: string; status: string }>(
+      `SELECT student_id as studentId, status FROM attendance
+       WHERE center_id = ? AND session_id = ? ORDER BY student_id`,
+      [CENTER_ID, CURRENT_SESSION_ID],
+    )).toEqual([
+      { studentId: MEMBER_ID, status: "absent" },
+      { studentId: snapshotOnlyMemberId, status: "absent" },
+    ]);
+    expect(AttendanceSessionService.getSummary(CURRENT_SESSION_ID))
+      .toMatchObject({ total: 2, absent: 2 });
+  });
+
+  it("creates a group member and includes today's scheduled class after its time has passed", async () => {
+    const now = new Date("2026-10-16T18:30:00+03:00");
+    database.runSync(
+      "UPDATE centers SET time_zone = 'Africa/Cairo' WHERE id = ?",
+      [CENTER_ID],
+    );
+    setUser([
+      "groups.view",
+      "groups.create",
+      "groups.update",
+      "teachers.view",
+      "teachers.update",
+      "subjects.view",
+      "students.create",
+      "students.cards.manage",
+      "enrollments.create",
+    ]);
+    CardRangeRepository.replaceCenterRanges(CENTER_ID, [{
+      id: "new-roster-card-range",
+      start_code: "0000000",
+      end_code: "9999999",
+      updated_at: "2026-10-16T00:00:00.000Z",
+    }]);
+    TeacherSubjectRepository.assignTeacherToSubject(
+      "legacy-roster-teacher",
+      "legacy-roster-subject",
+    );
+    const group = GroupRepository.createGroup({
+      name: "New center roster group",
+      teacherId: "legacy-roster-teacher",
+      subjectId: "legacy-roster-subject",
+      grade: "Grade 1",
+      sessionPrice: 0,
+      monthlyPrice: 0,
+    });
+    const sessionDate = SessionDateService.getCurrentSessionDate(CENTER_ID, now);
+    const schedule = GroupScheduleRepository.createSchedule({
+      groupId: group.id,
+      dayOfWeek: new Date(`${sessionDate}T12:00:00Z`).getUTCDay(),
+      startTime: "09:00",
+      endTime: "10:00",
+    });
+    const student = StudentRepository.createStudent({
+      studentCode: "0900301",
+      cardCode: "0900301",
+      fullName: "New roster student",
+      phone: "01012345678",
+      parentPhone: "01112345678",
+      grade: "Grade 1",
+      groupIds: [],
+    });
+
+    const enrollmentStartDate = "2026-10-23";
+    const enrollment = EnrollmentRepository.enrollStudent({
+      studentId: student.id,
+      groupId: group.id,
+      startDate: enrollmentStartDate,
+    });
+    database.runSync(
+      "UPDATE student_group_enrollments SET created_at = ? WHERE id = ?",
+      [now.toISOString(), enrollment.id],
+    );
+    expect(EnrollmentRepository.getActiveEnrollmentsForGroup(group.id, sessionDate)
+      .map((enrollment) => enrollment.studentId))
+      .toEqual([]);
+    expect(AttendanceSessionService.getExpectedStudentIdsForGroup(
+      group,
+      group.id,
+      sessionDate,
+    )).toEqual([student.id]);
+
+    const session = AttendanceSessionService.ensureSessionForGroup(
+      group.id,
+      sessionDate,
+      schedule.id,
+    );
+    AttendanceSessionService.activate(session.id);
+    expect(SessionRepository.getExpectedStudents(session.id).map((item) => item.id))
+      .toEqual([student.id]);
+    expect(AttendanceRepository.getStudentAttendanceInSession(session.id, student.id))
+      .toMatchObject({ status: "absent" });
+    expect(AttendanceSessionService.getSummary(session.id))
+      .toMatchObject({ total: 1, present: 0, absent: 1 });
+
+    await AttendanceRepository.recordAttendance({
+      studentId: student.id,
+      sessionId: session.id,
+      status: "present",
+      isLate: false,
+      checkInTime: "2026-10-16T15:30:00.000Z",
+    });
+    expect(AttendanceSessionService.getSummary(session.id))
+      .toMatchObject({ total: 1, present: 1, absent: 0 });
+    expect(database.getAllSync<{ id: string }>(
+      "SELECT id FROM attendance WHERE center_id = ? AND session_id = ? AND student_id = ?",
+      [CENTER_ID, session.id, student.id],
+    )).toHaveLength(1);
+
+    setUser(["payments.create", "payments.view"]);
+    expect(DebtCycleRepository.generateCyclesForEnrollment(enrollment.id, sessionDate))
+      .toEqual([]);
+    expect(DebtCycleRepository.generateCyclesForEnrollment(enrollment.id, enrollmentStartDate)
+      .map((cycle) => cycle.startDate))
+      .toEqual([enrollmentStartDate]);
+  });
+
   it("promotes a target-session initial absence to one linked makeup without changing the source absence", async () => {
     const studentId = "legacy-makeup-promotion-student";
     const sourceSessionId = "legacy-makeup-promotion-source";
     const targetSessionId = "legacy-makeup-promotion-target";
     const laterTargetSessionId = "legacy-makeup-promotion-later-target";
-    seedStudent(studentId, "990046");
+    seedStudent(studentId, "0990046");
     database.runSync(
       `INSERT INTO student_group_enrollments
        (id, center_id, student_id, group_id, start_date, status, created_at)
@@ -536,19 +751,42 @@ describe("legacy compensation rows in expected session roster", () => {
       .spyOn(SessionDateService, "getCurrentSessionDate")
       .mockReturnValue("2099-10-02");
     try {
+      const pickerStudents = StudentRepository.getAllForAttendance();
+      const nameMatches = searchAttendanceStudents(
+        pickerStudents,
+        "Student 0990046",
+        "Grade 1",
+        CENTER_ID,
+      );
+      expect(nameMatches.map((student) => student.id)).toContain(studentId);
+      const barcodeStudent = findAttendanceStudentByNormalizedCode(
+        ScannerService.normalizeCardCode("٠٩٩٠٠٤٦"),
+      );
+      expect(barcodeStudent?.id).toBe(studentId);
+
       AttendanceSessionService.activate(targetSessionId);
       expect(AttendanceRepository.getStudentAttendanceInSession(targetSessionId, studentId))
         .toMatchObject({
           id: `att-default-${targetSessionId}-${studentId}`,
           status: "absent",
         });
-      expect(MakeupService.getEligibilityForSession(targetSessionId, studentId))
+      const nameEligibility = MakeupService.getEligibilityForSession(
+        targetSessionId,
+        nameMatches.find((student) => student.id === studentId)!.id,
+      );
+      const barcodeEligibility = MakeupService.getEligibilityForSession(
+        targetSessionId,
+        barcodeStudent!.id,
+      );
+      expect(nameEligibility)
+        .toMatchObject({ eligible: true, originalAbsenceId: sourceSessionId });
+      expect(barcodeEligibility)
         .toMatchObject({ eligible: true, originalAbsenceId: sourceSessionId });
 
       const makeup = await MakeupService.recordMakeupAttendance({
         studentId,
         sessionId: targetSessionId,
-        originalAbsenceId: sourceSessionId,
+        originalAbsenceId: nameEligibility.originalAbsenceId!,
         checkInTime: "2099-10-02T10:30:00.000Z",
       });
       expect(makeup).toMatchObject({

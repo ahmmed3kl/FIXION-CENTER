@@ -372,6 +372,54 @@ test("makeup accepts only a same-center explicit absence and later matching sess
   );
 });
 
+test("accepted makeup preserves the original absence and rejects duplicate coverage", async () => {
+  const otherTargetId = "stage-two-duplicate-target";
+  const client = makeClient({
+    sessions: new Map([
+      [sourceSessionId, makeSession(sourceSessionId)],
+      [targetSessionId, makeSession(targetSessionId)],
+      [otherTargetId, makeSession(otherTargetId, { session_date: "2026-10-15" })],
+    ]),
+  });
+  const accepted = await SyncProcessor.validateMakeupAttendance(client, {
+    centerId,
+    sourceSessionId,
+    targetSession: makeSession(targetSessionId),
+    targetSessionId,
+    studentId,
+  });
+
+  assert.equal(accepted.absenceId, "stage-two-absence");
+  assert.equal(
+    client.state.attendance.find((row) => row.id === accepted.absenceId).status,
+    "absent",
+  );
+
+  client.state.attendance.push({
+    id: "stage-two-recorded-makeup",
+    center_id: centerId,
+    session_id: targetSessionId,
+    student_id: studentId,
+    status: "present",
+    attendance_type: "makeup",
+    original_absence_id: sourceSessionId,
+  });
+  await assert.rejects(
+    SyncProcessor.validateMakeupAttendance(client, {
+      centerId,
+      sourceSessionId,
+      targetSession: makeSession(otherTargetId, { session_date: "2026-10-15" }),
+      targetSessionId: otherTargetId,
+      studentId,
+    }),
+    /MAKEUP_ORIGINAL_ABSENCE_ALREADY_USED/,
+  );
+  assert.equal(
+    client.state.attendance.find((row) => row.id === accepted.absenceId).status,
+    "absent",
+  );
+});
+
 test("makeup cannot reuse one explicit absence in a different target session", async () => {
   const otherTargetId = "stage-two-other-target";
   const client = makeClient({

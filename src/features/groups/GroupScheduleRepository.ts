@@ -14,7 +14,9 @@ import {
 } from "../../core/permissions";
 import { SyncRepository } from "../../core/sync";
 import { GroupSchedule } from "../../shared/types";
+import { addDateOnlyDays } from "../../shared/utils/date";
 import { isValidTime, ValidationMessages } from "../../shared/utils/validation";
+import { SessionDateService } from "../sessions/SessionDateService";
 import { useAuthStore } from "../auth/useAuthStore";
 import { GroupRepository } from "./GroupRepository";
 
@@ -48,6 +50,62 @@ export class GroupScheduleRepository {
        ORDER BY day_of_week ASC, start_time ASC`,
       [centerId, groupId],
     );
+  }
+
+  static isLateEnrollmentForSessionDate(
+    groupId: string,
+    sessionDate: string,
+    enrollmentStartDate: string,
+    createdAt: string,
+    scheduleRows?: readonly GroupSchedule[],
+  ): boolean {
+    const { centerId } = this.getActiveContext();
+    const enrolledAt = new Date(createdAt);
+    if (
+      !Number.isFinite(enrolledAt.getTime()) ||
+      enrollmentStartDate <= sessionDate ||
+      SessionDateService.getCurrentSessionDate(centerId, enrolledAt) !== sessionDate
+    ) {
+      return false;
+    }
+
+    const schedules = scheduleRows ?? this.getSchedulesForGroup(groupId);
+    const sessionDay = new Date(`${sessionDate}T12:00:00Z`).getUTCDay();
+    const todaySchedules = schedules.filter((schedule) => schedule.dayOfWeek === sessionDay);
+    if (!todaySchedules.length) return false;
+
+    const timeZone = SessionDateService.getCenterTimeZone(centerId);
+    const timeParts = new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23",
+    }).formatToParts(enrolledAt);
+    const currentMinutes =
+      Number(timeParts.find((part) => part.type === "hour")?.value) * 60 +
+      Number(timeParts.find((part) => part.type === "minute")?.value);
+    if (!Number.isFinite(currentMinutes)) return false;
+
+    const parseMinutes = (value: string | undefined) => {
+      const [hours, minutes] = String(value || "00:00").split(":").map(Number);
+      return (Number.isFinite(hours) ? hours : 0) * 60 +
+        (Number.isFinite(minutes) ? minutes : 0);
+    };
+    if (todaySchedules.some((schedule) =>
+      currentMinutes < parseMinutes(schedule.endTime || schedule.startTime)
+    )) {
+      return false;
+    }
+
+    for (let offset = 1; offset <= 7; offset += 1) {
+      const candidateDate = addDateOnlyDays(sessionDate, offset);
+      const dayOfWeek = new Date(`${candidateDate}T12:00:00Z`).getUTCDay();
+      if (schedules.some((schedule) => schedule.dayOfWeek === dayOfWeek)) {
+        return enrollmentStartDate === candidateDate;
+      }
+    }
+
+    return false;
   }
 
   static getAllActiveSchedules(): GroupSchedule[] {

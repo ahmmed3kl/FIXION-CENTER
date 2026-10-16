@@ -383,6 +383,25 @@ function orderOperationsByDependencies(rows: SyncOperation[]): SyncOperation[] {
       byExplicitAbsence.set(JSON.stringify([sessionId, studentId]), operation);
     }
   }
+  const byEnrollmentMember = new Map<string, SyncOperation>();
+  for (const operation of baseSorted) {
+    if (canonicalEntityType(operation.entityType) !== "enrollment") continue;
+    const payload = parseOperationPayload(operation.payload);
+    const studentId = firstValue(payload, "studentId", "student_id");
+    const groupId = firstValue(payload, "groupId", "group_id");
+    if (studentId === undefined || groupId === undefined) continue;
+    const key = JSON.stringify([
+      String(operation.centerId || ""),
+      String(studentId),
+      String(groupId),
+    ]);
+    if (
+      !byEnrollmentMember.has(key) ||
+      operation.operationType === "REPAIR_AFTER_SERVER_RESET"
+    ) {
+      byEnrollmentMember.set(key, operation);
+    }
+  }
 
   const dependencies = (operation: SyncOperation): string[] => {
     const payload = parseOperationPayload(operation.payload);
@@ -390,16 +409,30 @@ function orderOperationsByDependencies(rows: SyncOperation[]): SyncOperation[] {
     const value = (...keys: string[]) => firstValue(payload, ...keys);
     const refs: Array<[string, any]> = [];
     if (entity === "session") {
+      const groupId = value("groupId", "group_id");
+      const scheduleId = value("scheduleId", "schedule_id");
       refs.push(["group", value("groupId", "group_id")]);
       refs.push(["teacher", value("teacherId", "teacher_id")]);
       refs.push(["subject", value("subjectId", "subject_id")]);
+      refs.push(["group_schedule", scheduleId]);
       // The server builds session_expected_students with a foreign-key
-      // lookup. Ensure every student in the manifest is uploaded before the
-      // session, otherwise the server silently drops the roster and reports
-      // show expected=0 after the next bootstrap.
+      // lookup. Ensure every student and its group membership are uploaded
+      // before the session manifest, even when the batch limit is reached.
       const expectedStudentIds = payload.expectedStudentIds || payload.expected_student_ids || [];
       if (Array.isArray(expectedStudentIds)) {
-        for (const studentId of expectedStudentIds) refs.push(["student", studentId]);
+        for (const studentId of expectedStudentIds) {
+          refs.push(["student", studentId]);
+          if (groupId !== undefined) {
+            refs.push([
+              "enrollment_member",
+              JSON.stringify([
+                String(operation.centerId || ""),
+                String(studentId),
+                String(groupId),
+              ]),
+            ]);
+          }
+        }
       }
     }
     if (entity === "group") {
@@ -483,9 +516,12 @@ function orderOperationsByDependencies(rows: SyncOperation[]): SyncOperation[] {
     visiting.add(operationKey);
     for (const dependencyKey of dependencies(operation)) {
       const explicitAbsencePrefix = "explicit_absence:";
+      const enrollmentMemberPrefix = "enrollment_member:";
       const dependency = dependencyKey.startsWith(explicitAbsencePrefix)
         ? byExplicitAbsence.get(dependencyKey.slice(explicitAbsencePrefix.length))
-        : byKey.get(dependencyKey);
+        : dependencyKey.startsWith(enrollmentMemberPrefix)
+          ? byEnrollmentMember.get(dependencyKey.slice(enrollmentMemberPrefix.length))
+          : byKey.get(dependencyKey);
       if (dependency) visit(dependency);
     }
     visiting.delete(operationKey);
@@ -874,6 +910,8 @@ export class SyncRepository {
            OR last_error LIKE '%PAYMENT_DEBT_CYCLE_NOT_FOUND%'
            OR last_error LIKE '%DEBT_CYCLE_NATURAL_KEY_CONFLICT%'
            OR last_error LIKE '%PAYMENT_SESSION_NOT_FOUND%'
+           OR last_error LIKE '%SESSION_ROSTER_STUDENT_NOT_ELIGIBLE%'
+           OR last_error LIKE '%ATTENDANCE_NOT_EXPECTED%'
            OR last_error LIKE '%uq_notification_template%'
            OR last_error LIKE '%notification_templates%'
            OR last_error LIKE '%violates check constraint%'
@@ -2212,12 +2250,26 @@ export class SyncRepository {
           AND session_id IN (${sessionPlaceholders})`,
       [centerId, studentId, ...logicalSessionIds],
     );
-    if (sameLogicalSessionRecords.length > 1) {
+    const exactHistoricalMatch = sameLogicalSessionRecords.find(
+      (record) => String(record.id) === attendanceId,
+    ) || null;
+    if (sameLogicalSessionRecords.length > 1 && !exactHistoricalMatch) {
       throw new Error(
         "Pulled attendance has multiple historical rows for the same logical session and student; all references were preserved for manual review.",
       );
     }
-    const naturalMatch = sameLogicalSessionRecords[0] || null;
+    if (sameLogicalSessionRecords.length > 1) {
+      Logger.warn("sync", "attendance_duplicate_identity_replay_preserved", {
+        centerId,
+        metadata: {
+          attendanceId,
+          studentId,
+          sessionId,
+          historicalRowCount: sameLogicalSessionRecords.length,
+        },
+      });
+    }
+    const naturalMatch = exactHistoricalMatch || sameLogicalSessionRecords[0] || null;
     if (existingById && naturalMatch && existingById.id !== naturalMatch.id) {
       throw new Error(
         "Pulled attendance conflicts with a different existing record for the same student and session.",
