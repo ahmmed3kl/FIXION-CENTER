@@ -254,20 +254,15 @@ export class SessionRepository {
            ON session.center_id = compensation.center_id
           AND session.id = compensation.session_id
          WHERE compensation.center_id = ? AND compensation.session_id = ?
-           AND compensation.id LIKE ('exp-comp-' || compensation.session_id || '-%')
-           AND EXISTS (
-             SELECT 1 FROM student_group_enrollments legacy_enrollment
-             WHERE legacy_enrollment.center_id = session.center_id
-               AND legacy_enrollment.group_id = session.group_id
-               AND legacy_enrollment.student_id = compensation.student_id
-               AND legacy_enrollment.id = ('enr-' || compensation.id)
-           )
-           AND NOT EXISTS (
-             SELECT 1 FROM student_group_enrollments real_enrollment
-             WHERE real_enrollment.center_id = session.center_id
-               AND real_enrollment.group_id = session.group_id
-               AND real_enrollment.student_id = compensation.student_id
-               AND real_enrollment.id NOT LIKE 'enr-exp-comp-%'
+           AND (
+             compensation.id LIKE ('exp-comp-' || compensation.session_id || '-%')
+             OR NOT EXISTS (
+               SELECT 1 FROM student_group_enrollments real_enrollment
+               WHERE real_enrollment.center_id = session.center_id
+                 AND real_enrollment.group_id = session.group_id
+                 AND real_enrollment.student_id = compensation.student_id
+                 AND real_enrollment.id NOT LIKE 'enr-exp-comp-%'
+             )
            )`,
         [centerId, sessionId],
       ).map((row) => row.studentId),

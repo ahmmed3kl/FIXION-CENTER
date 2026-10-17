@@ -645,10 +645,10 @@ function ScannerContent() {
       const makeupAbsenceId = makeupEligibility.eligible
         ? makeupEligibility.originalAbsenceId?.trim()
         : undefined;
-      if (!expected && !makeupAbsenceId) {
+      if (!expected && !makeupEligibility.eligible) {
         setStudent(null);
         setMakeupNotice(null);
-        const errMsg = "لا توجد جلسة غياب صريحة مؤهلة للتعويض لهذا الطالب.";
+        const errMsg = "الطالب غير مسجل في هذه المجموعة وغير مؤهل للتعويض في هذه الجلسة.";
         setSearchError(errMsg);
         setIsProcessing(false);
         Alert.alert("غير مؤهل للتعويض", errMsg);
@@ -657,7 +657,7 @@ function ScannerContent() {
 
       setIsExternalAttendance(false);
 
-      if (makeupAbsenceId) {
+      if (makeupEligibility.eligible) {
         setMakeupNotice({
           sourceGroupName: makeupEligibility.sourceGroupName,
           teacherName: makeupEligibility.teacherName,

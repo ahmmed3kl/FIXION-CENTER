@@ -1396,9 +1396,27 @@ class SyncProcessor {
   ) {
     const submittedSourceId = String(sourceSessionId || "").trim();
     if (!submittedSourceId) {
-      throw new Error(
-        "MAKEUP_ORIGINAL_ABSENCE_REQUIRED: makeup attendance must reference an explicit absence session.",
-      );
+      // Advance makeup / compensation prior to absence:
+      // Verify student is enrolled in another group for same teacher and grade
+      const relationshipEligible =
+        await SyncProcessor.isStudentEligibleForSessionGroup(client, {
+          centerId,
+          groupId: targetSession.group_id,
+          sessionDate: targetSession.session_date,
+          subjectId:
+            targetSession.subject_id || targetSession.group_subject_id,
+          teacherId:
+            targetSession.teacher_id || targetSession.group_teacher_id,
+          groupGrade: targetSession.group_grade,
+          studentId,
+          allowSameTeacherCompensation: true,
+        });
+      if (!relationshipEligible) {
+        throw new Error(
+          "MAKEUP_STUDENT_NOT_ELIGIBLE: student has no active enrollment in a matching group for compensation.",
+        );
+      }
+      return { originalSessionId: null, absenceId: null };
     }
 
     const findSession = async (sessionId) => {
@@ -3110,10 +3128,11 @@ class SyncProcessor {
               groupGrade: attendanceSession.group_grade,
               studentId: attendanceStudentId,
               allowSameDayLateEnrollment: true,
+              allowSameTeacherCompensation: true,
             });
           if (
             !relationshipEligible ||
-            (expected.rows.length === 0 && snapshot.rows.length > 0)
+            (expected.rows.length === 0 && snapshot.rows.length > 0 && !isExternal && attendanceType !== "makeup")
           ) {
             throw new Error(
               "ATTENDANCE_NOT_EXPECTED: student is not in this session's group roster.",

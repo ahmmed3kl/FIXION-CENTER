@@ -380,4 +380,150 @@ describe("Makeup focused verification tests", () => {
       }),
     ).rejects.toThrow("تم تسجيل تعويض لهذا الغياب مسبقًا.");
   });
+
+  it("يسمح بحضور التعويض المسبق دون اشتراط غياب سابق، ويضمن استقلال جلسة الطالب الأصلية وعدم تكرار الحضور واستقلال الرسوم", async () => {
+    const db = DatabaseService.getDb();
+    const groupAdvA = "grp-adv-a";
+    const groupAdvB = "grp-adv-b";
+
+    // Teacher for this test
+    const teacherAdv = "teacher-adv-1";
+    db.runSync(
+      `INSERT OR REPLACE INTO teachers (id, center_id, name, subject_id, week_start_day)
+       VALUES (?, ?, ?, ?, ?)`,
+      [teacherAdv, centerId, "أستاذ التعويض المسبق", subjectId, 6],
+    );
+
+    // Group A (session price 150)
+    db.runSync(
+      `INSERT OR REPLACE INTO groups (id, center_id, name, subject_id, teacher_id, grade, session_price, status)
+       VALUES (?, ?, ?, ?, ?, ?, 150, 'active')`,
+      [groupAdvA, centerId, "مجموعة أ (المجموعة الأصلية)", subjectId, teacherAdv, "الصف الأول الثانوي"],
+    );
+    // Group B (session price 120)
+    db.runSync(
+      `INSERT OR REPLACE INTO groups (id, center_id, name, subject_id, teacher_id, grade, session_price, status)
+       VALUES (?, ?, ?, ?, ?, ?, 120, 'active')`,
+      [groupAdvB, centerId, "مجموعة ب (مجموعة التعويض الموازي)", subjectId, teacherAdv, "الأول الثانوي"],
+    );
+
+    // Create student enrolled ONLY in Group A
+    const advanceStudent = StudentRepository.createStudent({
+      studentCode: "0880099",
+      cardCode: "100099",
+      fullName: "يوسف حسام الدين",
+      phone: "01099887766",
+      parentPhone: "01199887766",
+      grade: "الصف الأول الثانوي",
+    });
+
+    db.runSync(
+      `INSERT OR REPLACE INTO student_group_enrollments (id, center_id, student_id, group_id, status, start_date)
+       VALUES (?, ?, ?, ?, 'active', '2026-09-01')`,
+      ["enr-adv-1", centerId, advanceStudent.id, groupAdvA],
+    );
+
+    // Session in Group B occurs first (e.g. at 12:00 on 2026-10-02)
+    const sessionAdvB = "sess-adv-b";
+    db.runSync(
+      `INSERT OR REPLACE INTO sessions
+       (id, center_id, group_id, subject_id, teacher_id, session_date, start_time, end_time, status, created_at)
+       VALUES (?, ?, ?, ?, ?, '2026-10-02', '12:00', '14:00', 'open', '2026-10-02T08:00:00.000Z')`,
+      [sessionAdvB, centerId, groupAdvB, subjectId, teacherAdv],
+    );
+
+    // 1. Advance student has NO prior absence in group A or anywhere else.
+    // Verify eligibility check allows advance makeup.
+    const makeupEligibilityB = MakeupService.getEligibilityForSession(sessionAdvB, advanceStudent.id);
+    expect(makeupEligibilityB.eligible).toBe(true);
+    expect(makeupEligibilityB.isAdvanceMakeup).toBe(true);
+    expect(makeupEligibilityB.originalAbsenceId).toBeUndefined();
+
+    const sessionServiceEligibility = AttendanceSessionService.getMakeupEligibility(sessionAdvB, advanceStudent.id);
+    expect(sessionServiceEligibility.eligible).toBe(true);
+    expect(sessionServiceEligibility.isAdvanceMakeup).toBe(true);
+    expect(sessionServiceEligibility.originalAbsenceId).toBeUndefined();
+
+    // 2. Record advance makeup attendance in Group B
+    const makeupAtt = await AttendanceRepository.recordAttendance({
+      studentId: advanceStudent.id,
+      sessionId: sessionAdvB,
+      status: "present",
+      isLate: false,
+      attendanceType: "makeup",
+    });
+    expect(makeupAtt).not.toBeNull();
+    expect(makeupAtt.attendanceType).toBe("makeup");
+    expect(makeupAtt.sessionId).toBe(sessionAdvB);
+
+    // Verify Group B summary: advance makeup visitor is counted in makeup counter, not polluting total expected roster
+    const summaryB = AttendanceSessionService.getSummary(sessionAdvB);
+    expect(summaryB.total).toBe(0);
+    expect(summaryB.present).toBe(0);
+    expect(summaryB.makeup).toBe(1);
+
+    // 3. Duplicate prevention: cannot attend makeup again in session B
+    const dupEligibility = MakeupService.getEligibilityForSession(sessionAdvB, advanceStudent.id);
+    expect(dupEligibility.eligible).toBe(false);
+
+    await expect(
+      AttendanceRepository.recordAttendance({
+        studentId: advanceStudent.id,
+        sessionId: sessionAdvB,
+        status: "present",
+        isLate: false,
+        attendanceType: "makeup",
+      }),
+    ).rejects.toThrow();
+
+    // 4. Group A session occurs LATER (e.g. at 16:00 on 2026-10-02)
+    const sessionAdvA = "sess-adv-a";
+    db.runSync(
+      `INSERT OR REPLACE INTO sessions
+       (id, center_id, group_id, subject_id, teacher_id, session_date, start_time, end_time, status, created_at)
+       VALUES (?, ?, ?, ?, ?, '2026-10-02', '16:00', '18:00', 'open', '2026-10-02T08:00:00.000Z')`,
+      [sessionAdvA, centerId, groupAdvA, subjectId, teacherAdv],
+    );
+
+    // 5. Verify the student appears on the regular roster of Group A
+    const isExpectedInOriginal = AttendanceSessionService.isExpected(sessionAdvA, advanceStudent.id);
+    expect(isExpectedInOriginal).toBe(true);
+
+    const summaryA = AttendanceSessionService.getSummary(sessionAdvA);
+    expect(summaryA.total).toBe(1);
+    expect(summaryA.absent).toBe(1);
+    expect(summaryA.present).toBe(0);
+    expect(summaryA.makeup).toBe(0);
+
+    // 6. Student attends their regular session in Group A independently
+    const regularAtt = await AttendanceRepository.recordAttendance({
+      studentId: advanceStudent.id,
+      sessionId: sessionAdvA,
+      status: "present",
+      isLate: false,
+      attendanceType: "present",
+    });
+    expect(regularAtt).not.toBeNull();
+    expect(regularAtt.attendanceType).toBe("present");
+    expect(regularAtt.sessionId).toBe(sessionAdvA);
+
+    const summaryAAfter = AttendanceSessionService.getSummary(sessionAdvA);
+    expect(summaryAAfter.total).toBe(1);
+    expect(summaryAAfter.present).toBe(1);
+    expect(summaryAAfter.absent).toBe(0);
+
+    // 7. Group A enrollment and pricing remains completely unchanged
+    const originalGroup = db.getFirstSync<any>(
+      "SELECT session_price as sessionPrice FROM groups WHERE center_id = ? AND id = ?",
+      [centerId, groupAdvA],
+    );
+    expect(originalGroup.sessionPrice).toBe(150);
+
+    const studentEnrollment = db.getFirstSync<any>(
+      "SELECT group_id as groupId, status FROM student_group_enrollments WHERE center_id = ? AND student_id = ? AND group_id = ?",
+      [centerId, advanceStudent.id, groupAdvA],
+    );
+    expect(studentEnrollment.groupId).toBe(groupAdvA);
+    expect(studentEnrollment.status).toBe("active");
+  });
 });

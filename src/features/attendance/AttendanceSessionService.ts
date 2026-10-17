@@ -15,7 +15,11 @@ import {
   excludeCompensationVisitorsFromExpectedRoster,
 } from "./AttendanceCalculations";
 import { stableSessionId } from "../../shared/utils/stableIds";
-import { DEFAULT_TEACHER_WEEK_START_DAY, isTeacherMakeupCycleOpen } from "../../shared/utils/teacherWeeks";
+import {
+  DEFAULT_TEACHER_WEEK_START_DAY,
+  getTeacherWeekBounds,
+  isTeacherMakeupCycleOpen,
+} from "../../shared/utils/teacherWeeks";
 import { normalizeAcademicGrade } from "../../shared/utils/smartSearch";
 import { SessionDateService } from "../sessions/SessionDateService";
 
@@ -33,6 +37,7 @@ export interface MakeupEligibility {
   sourceGroupName?: string;
   teacherName?: string;
   originalAbsenceId?: string;
+  isAdvanceMakeup?: boolean;
 }
 
 /** Single source of truth for the normal attendance session flow. */
@@ -47,11 +52,12 @@ export class AttendanceSessionService {
     const db = DatabaseService.getDb();
     const session = db.getFirstSync<any>(
       `SELECT s.group_id as groupId, s.session_date as sessionDate,
-              s.start_time as startTime,
+              s.start_time as startTime, s.status,
               COALESCE(s.subject_id, g.subject_id) as subjectId,
               COALESCE(s.teacher_id, g.teacher_id) as teacherId,
               g.name as groupName, g.grade as groupGrade, t.name as teacherName,
-              subj.name as subjectName
+              subj.name as subjectName,
+              COALESCE(t.week_start_day, 6) as weekStartDay
        FROM sessions s
        JOIN groups g ON g.center_id = s.center_id AND g.id = s.group_id
        LEFT JOIN teachers t ON t.center_id = g.center_id AND t.id = g.teacher_id
@@ -59,7 +65,23 @@ export class AttendanceSessionService {
        WHERE s.center_id = ? AND s.id = ?`,
       [activeCenterId, sessionId],
     );
-    if (!session?.teacherId) return { eligible: false };
+    if (!session?.teacherId || (session.status && session.status !== "open")) return { eligible: false };
+    if (!isTeacherMakeupCycleOpen(
+      session.sessionDate,
+      session.sessionDate,
+      session.weekStartDay ?? DEFAULT_TEACHER_WEEK_START_DAY,
+      this.localDate(),
+    )) {
+      return { eligible: false };
+    }
+    const hostAttendance = db.getFirstSync<any>(
+      `SELECT status, attendance_type as attendanceType FROM attendance
+       WHERE center_id = ? AND session_id = ? AND student_id = ?`,
+      [activeCenterId, sessionId, studentId],
+    );
+    if (hostAttendance && (hostAttendance.status === "present" || hostAttendance.status === "late")) {
+      return { eligible: false };
+    }
     const source = db.getFirstSync<any>(
       `SELECT g.id as groupId, g.name as groupName, s.id as originalSessionId,
               s.session_date as originalSessionDate,
@@ -143,11 +165,67 @@ export class AttendanceSessionService {
         // Store the canonical source session id. Legacy prefixed ids are still
         // recognized above so old local rows remain usable.
         originalAbsenceId: source.originalSessionId,
+        isAdvanceMakeup: false,
       };
     }
 
-    // Without a concrete historical session there is no canonical absence id
-    // to link to, so do not show a makeup action that will fail validation.
+    // A student can also attend makeup in advance before an absence occurs,
+    // provided they are actively enrolled in another group for the same teacher
+    // and academic grade.
+    const advanceSource = db.getFirstSync<any>(
+      `SELECT g.id as groupId, g.name as groupName, g.grade as groupGrade
+       FROM student_group_enrollments e
+       JOIN groups g ON g.center_id = e.center_id AND g.id = e.group_id
+       WHERE e.center_id = ?
+         AND e.student_id = ?
+         AND e.status = 'active'
+         AND g.id <> ?
+         AND COALESCE(g.teacher_id, '') = ?
+         AND (e.start_date <= ? OR SUBSTR(e.created_at, 1, 10) <= ?)
+         AND (e.end_date IS NULL OR e.end_date >= ?)
+         AND (? IS NULL OR g.grade = ? OR REPLACE(REPLACE(g.grade, 'الصف ', ''), 'صف ', '') = REPLACE(REPLACE(?, 'الصف ', ''), 'صف ', ''))
+       LIMIT 1`,
+      [
+        activeCenterId,
+        studentId,
+        session.groupId,
+        session.teacherId,
+        session.sessionDate,
+        session.sessionDate,
+        session.sessionDate,
+        session.groupGrade || null,
+        session.groupGrade || null,
+        session.groupGrade || null,
+      ],
+    );
+    if (
+      advanceSource &&
+      (!session.groupGrade || !advanceSource.groupGrade || normalizeAcademicGrade(advanceSource.groupGrade) === normalizeAcademicGrade(session.groupGrade))
+    ) {
+      const weekBounds = getTeacherWeekBounds(session.sessionDate, session.weekStartDay);
+      const alreadyAttendedTeacherInCycle = db.getFirstSync<any>(
+        `SELECT a.id
+         FROM attendance a
+         JOIN sessions s ON s.center_id = a.center_id AND s.id = a.session_id
+         JOIN groups g ON g.center_id = s.center_id AND g.id = s.group_id
+         WHERE a.center_id = ? AND a.student_id = ?
+           AND a.status IN ('present', 'late')
+           AND COALESCE(s.teacher_id, g.teacher_id) = ?
+           AND s.session_date >= ? AND s.session_date <= ?`,
+        [activeCenterId, studentId, session.teacherId, weekBounds.startDate, weekBounds.endDate],
+      );
+      if (!alreadyAttendedTeacherInCycle) {
+        return {
+          eligible: true,
+          sourceGroupId: advanceSource.groupId,
+          sourceGroupName: advanceSource.groupName,
+          teacherName: session.teacherName,
+          originalAbsenceId: undefined,
+          isAdvanceMakeup: true,
+        };
+      }
+    }
+
     return { eligible: false };
   }
   static getTodayGroups(date = AttendanceSessionService.localDate()): Group[] {
@@ -872,10 +950,12 @@ export class AttendanceSessionService {
       };
       if (
         item.attendanceType !== "makeup" ||
-        (item.status !== "present" && item.status !== "late") ||
-        !item.originalAbsenceId
+        (item.status !== "present" && item.status !== "late")
       ) {
         return { ...item, originalAbsenceValid: false };
+      }
+      if (!item.originalAbsenceId) {
+        return { ...item, originalAbsenceValid: true };
       }
 
       const originalSession = db.getFirstSync<any>(

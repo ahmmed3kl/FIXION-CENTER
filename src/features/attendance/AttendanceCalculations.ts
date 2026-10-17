@@ -56,8 +56,7 @@ export function excludeCompensationVisitorsFromExpectedRoster(
       .filter((item) =>
         item.attendanceType === "makeup" &&
         (item.status === "present" || item.status === "late") &&
-        item.originalAbsenceValid === true &&
-        Boolean(item.originalAbsenceId),
+        (item.originalAbsenceValid === true || !item.originalAbsenceId),
       )
       .map((item) => item.studentId)
       .filter((studentId) => !eligible.has(studentId)),

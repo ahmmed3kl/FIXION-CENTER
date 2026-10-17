@@ -45,6 +45,7 @@ export interface MakeupEligibility {
   sourceGroupName?: string;
   teacherName?: string;
   originalAbsenceId?: string;
+  isAdvanceMakeup?: boolean;
 }
 
 export class MakeupService {
@@ -435,6 +436,14 @@ export class MakeupService {
     if (!host || host.status !== "open" || !host.subjectId || !host.teacherId) {
       return { eligible: false };
     }
+    const hostAttendance = db.getFirstSync<any>(
+      `SELECT status, attendance_type as attendanceType FROM attendance
+       WHERE center_id = ? AND session_id = ? AND student_id = ?`,
+      [centerId, sessionId, studentId],
+    );
+    if (hostAttendance && (hostAttendance.status === "present" || hostAttendance.status === "late")) {
+      return { eligible: false };
+    }
     const weekStart = db.getFirstSync<{ weekStartDay?: number | null }>(
       "SELECT week_start_day as weekStartDay FROM teachers WHERE center_id = ? AND id = ?",
       [centerId, host.teacherId],
@@ -534,9 +543,66 @@ export class MakeupService {
           sourceGroupName: source.groupName,
           teacherName: host.teacherName,
           originalAbsenceId: source.id,
+          isAdvanceMakeup: false,
         };
       }
     }
+
+    // A student can also attend makeup in advance before an absence occurs,
+    // provided they are actively enrolled in another group for the same teacher
+    // and academic grade.
+    const eligibleGroup = db.getFirstSync<any>(
+      `SELECT g.id as groupId, g.name as groupName, g.grade as groupGrade
+       FROM student_group_enrollments e
+       JOIN groups g ON g.center_id = e.center_id AND g.id = e.group_id
+       WHERE e.center_id = ? AND e.student_id = ? AND e.status = 'active'
+         AND e.group_id <> ?
+         AND COALESCE(g.teacher_id, '') = ?
+         AND (e.start_date <= ? OR SUBSTR(e.created_at, 1, 10) <= ?)
+         AND (e.end_date IS NULL OR e.end_date >= ?)
+         AND (? IS NULL OR g.grade = ? OR REPLACE(REPLACE(g.grade, 'الصف ', ''), 'صف ', '') = REPLACE(REPLACE(?, 'الصف ', ''), 'صف ', ''))
+       LIMIT 1`,
+      [
+        centerId,
+        studentId,
+        host.groupId,
+        host.teacherId,
+        host.sessionDate,
+        host.sessionDate,
+        host.sessionDate,
+        host.groupGrade || null,
+        host.groupGrade || null,
+        host.groupGrade || null,
+      ],
+    );
+    if (
+      eligibleGroup &&
+      (!host.groupGrade || !eligibleGroup.groupGrade || normalizeAcademicGrade(eligibleGroup.groupGrade) === normalizeAcademicGrade(host.groupGrade))
+    ) {
+      const weekBounds = getTeacherWeekBounds(host.sessionDate, weekStartDay);
+      const alreadyAttendedTeacherInCycle = db.getFirstSync<any>(
+        `SELECT a.id
+         FROM attendance a
+         JOIN sessions s ON s.center_id = a.center_id AND s.id = a.session_id
+         JOIN groups g ON g.center_id = s.center_id AND g.id = s.group_id
+         WHERE a.center_id = ? AND a.student_id = ?
+           AND a.status IN ('present', 'late')
+           AND COALESCE(s.teacher_id, g.teacher_id) = ?
+           AND s.session_date >= ? AND s.session_date <= ?`,
+        [centerId, studentId, host.teacherId, weekBounds.startDate, weekBounds.endDate],
+      );
+      if (!alreadyAttendedTeacherInCycle) {
+        return {
+          eligible: true,
+          sourceGroupId: eligibleGroup.groupId,
+          sourceGroupName: eligibleGroup.groupName,
+          teacherName: host.teacherName,
+          originalAbsenceId: undefined,
+          isAdvanceMakeup: true,
+        };
+      }
+    }
+
     return { eligible: false };
   }
 
@@ -604,23 +670,25 @@ export class MakeupService {
   static async recordMakeupAttendance(params: {
     studentId: string;
     sessionId: string;
-    originalAbsenceId: string;
+    originalAbsenceId?: string;
     isLate?: boolean;
     checkInTime?: string;
   }): Promise<Attendance> {
-    const originalSession = SessionRepository.findById(params.originalAbsenceId);
-    if (originalSession) {
-      const db = DatabaseService.getDb();
-      const teacherWeek = db.getFirstSync<{ weekStartDay?: number | null }>(
-        "SELECT week_start_day as weekStartDay FROM teachers WHERE center_id = ? AND id = ?",
-        [originalSession.centerId, originalSession.teacherId],
-      );
-      const weekStartDay = teacherWeek?.weekStartDay ?? DEFAULT_TEACHER_WEEK_START_DAY;
-      if (AttendanceSessionService.getCurrentSessionDate() > getTeacherWeekBounds(originalSession.sessionDate, weekStartDay).endDate) {
-        throw new ConflictError(
-          TEACHER_MAKEUP_CYCLE_EXPIRED_ERROR,
-          TEACHER_MAKEUP_CYCLE_EXPIRED_MESSAGE,
+    if (params.originalAbsenceId) {
+      const originalSession = SessionRepository.findById(params.originalAbsenceId);
+      if (originalSession) {
+        const db = DatabaseService.getDb();
+        const teacherWeek = db.getFirstSync<{ weekStartDay?: number | null }>(
+          "SELECT week_start_day as weekStartDay FROM teachers WHERE center_id = ? AND id = ?",
+          [originalSession.centerId, originalSession.teacherId],
         );
+        const weekStartDay = teacherWeek?.weekStartDay ?? DEFAULT_TEACHER_WEEK_START_DAY;
+        if (AttendanceSessionService.getCurrentSessionDate() > getTeacherWeekBounds(originalSession.sessionDate, weekStartDay).endDate) {
+          throw new ConflictError(
+            TEACHER_MAKEUP_CYCLE_EXPIRED_ERROR,
+            TEACHER_MAKEUP_CYCLE_EXPIRED_MESSAGE,
+          );
+        }
       }
     }
 
@@ -653,9 +721,9 @@ export class MakeupService {
       params.studentId,
     );
     const nextEligible =
-      (sharedEligibility.eligible && sharedEligibility.originalAbsenceId === params.originalAbsenceId) ||
-      (strictEligibility.eligible && strictEligibility.originalAbsenceId === params.originalAbsenceId) ||
-      this.getNextEligibleSession(params.studentId, params.originalAbsenceId, params.sessionId)?.id === params.sessionId;
+      (sharedEligibility.eligible && (!params.originalAbsenceId || sharedEligibility.originalAbsenceId === params.originalAbsenceId)) ||
+      (strictEligibility.eligible && (!params.originalAbsenceId || strictEligibility.originalAbsenceId === params.originalAbsenceId)) ||
+      (params.originalAbsenceId ? this.getNextEligibleSession(params.studentId, params.originalAbsenceId, params.sessionId)?.id === params.sessionId : false);
     if (!nextEligible) {
       throw new ValidationError(
         "الحصة المحددة ليست الحصة التالية المؤهلة للتعويض أو انتهت صلاحية فرصة التعويض.",

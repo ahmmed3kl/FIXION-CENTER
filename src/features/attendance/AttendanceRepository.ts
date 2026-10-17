@@ -132,9 +132,6 @@ export class AttendanceRepository {
     ) {
       throw new ForbiddenError("ليس لديك صلاحية تسجيل حضور تعويضي.");
     }
-    if (params.attendanceType === "makeup" && !params.originalAbsenceId?.trim()) {
-      throw new ConflictError("يجب تحديد جلسة الغياب الأصلية قبل تسجيل الحضور التعويضي.");
-    }
 
     const db = DatabaseService.getDb();
 
@@ -171,16 +168,16 @@ export class AttendanceRepository {
       throw new ConflictError("لا يمكن تسجيل الحضور في حصة ملغاة.");
     }
 
-    let canonicalOriginalAbsenceId = params.originalAbsenceId;
-    if (params.attendanceType === "makeup" && params.originalAbsenceId) {
+    let canonicalOriginalAbsenceId = params.originalAbsenceId?.trim() || null;
+    if (params.attendanceType === "makeup" && canonicalOriginalAbsenceId) {
       // Strict makeup validation: requires a real historical absence session
       const legacyPrefix = "absence-";
       const legacySuffix = `-${params.studentId}`;
       if (
-        params.originalAbsenceId.startsWith(legacyPrefix) &&
-        params.originalAbsenceId.endsWith(legacySuffix)
+        canonicalOriginalAbsenceId.startsWith(legacyPrefix) &&
+        canonicalOriginalAbsenceId.endsWith(legacySuffix)
       ) {
-        canonicalOriginalAbsenceId = params.originalAbsenceId.slice(
+        canonicalOriginalAbsenceId = canonicalOriginalAbsenceId.slice(
           legacyPrefix.length,
           -legacySuffix.length,
         );
@@ -298,6 +295,36 @@ export class AttendanceRepository {
         )) {
           throw new ConflictError("لا يمكن تعويض غير الحصة التالية المؤهلة.");
         }
+      }
+    } else if (params.attendanceType === "makeup") {
+      // Advance makeup without prior absence: verify the student has an active enrollment
+      // in another group of the same teacher and grade.
+      const eligibleGroup = db.getFirstSync<any>(
+        `SELECT g.id, g.name, g.grade
+         FROM student_group_enrollments e
+         JOIN groups g ON g.center_id = e.center_id AND g.id = e.group_id
+         WHERE e.center_id = ? AND e.student_id = ? AND e.status = 'active'
+           AND e.group_id <> ?
+           AND COALESCE(g.teacher_id, '') = ?
+           AND (e.start_date <= ? OR SUBSTR(e.created_at, 1, 10) <= ?)
+           AND (e.end_date IS NULL OR e.end_date >= ?)
+           AND (? IS NULL OR g.grade = ? OR REPLACE(REPLACE(g.grade, 'الصف ', ''), 'صف ', '') = REPLACE(REPLACE(?, 'الصف ', ''), 'صف ', ''))
+         LIMIT 1`,
+        [
+          centerId,
+          params.studentId,
+          session.groupId,
+          session.teacherId,
+          session.sessionDate,
+          session.sessionDate,
+          session.sessionDate,
+          session.groupGrade || null,
+          session.groupGrade || null,
+          session.groupGrade || null,
+        ],
+      );
+      if (!eligibleGroup) {
+        throw new ConflictError("الطالب غير مسجل في أي مجموعة مؤهلة للتعويض لنفس المدرس والمرحلة الدراسية.");
       }
     }
 
@@ -487,7 +514,7 @@ export class AttendanceRepository {
       status: params.status,
       isLate: params.isLate,
       attendanceType,
-      originalAbsenceId: canonicalOriginalAbsenceId,
+      originalAbsenceId: canonicalOriginalAbsenceId || undefined,
       isExternal: Boolean(params.isExternal),
       operationId,
     };
