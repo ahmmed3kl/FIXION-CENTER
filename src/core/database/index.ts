@@ -2271,12 +2271,27 @@ class InMemorySqliteMock implements SqlDatabase {
             }
           }
         } else if (tableName === "notification_templates") {
-          // UPDATE notification_templates SET template_body = ?, updated_by = ?, updated_at = ? WHERE id = ? AND center_id = ?
-          const centerId = params[params.length - 1];
-          const id = params[params.length - 2];
+          const centerId = trimmed.includes("WHERE center_id = ?")
+            ? params[params.length - 2]
+            : params[params.length - 1];
+          const id = trimmed.includes("WHERE center_id = ?")
+            ? params[params.length - 1]
+            : params[params.length - 2];
           const row = list.find((r) => r.id === id && r.center_id === centerId);
           if (row) {
-            if (trimmed.includes("template_body = ?")) {
+            if (trimmed.includes("event_type = ?") && trimmed.includes("channel = ?")) {
+              row.event_type = params[0];
+              row.channel = params[1];
+              row.template_body = params[2];
+              row.is_default = params[3];
+              row.updated_by = params[4];
+              row.updated_at = params[5];
+            } else if (trimmed.includes("SET id = ?")) {
+              row.id = params[0];
+              row.template_body = params[1];
+              row.updated_by = params[2];
+              row.updated_at = params[3];
+            } else if (trimmed.includes("template_body = ?")) {
               row.template_body = params[0];
               row.updated_by = params[1];
               row.updated_at = params[2];
@@ -2488,6 +2503,23 @@ class InMemorySqliteMock implements SqlDatabase {
           this.tables.set(
             "group_schedules",
             list.filter((r) => r.id !== id),
+          );
+        }
+      }
+      if (trimmed.includes("FROM notification_templates")) {
+        const list = this.tables.get("notification_templates") || [];
+        if (/\bid\s*=\s*\?/.test(trimmed) && params.length >= 1) {
+          const id = params[params.length - 1];
+          const centerId = params.length >= 2 ? params[0] : null;
+          this.tables.set(
+            "notification_templates",
+            list.filter((r) => !(r.id === id && (!centerId || r.center_id === centerId))),
+          );
+        } else if (trimmed.includes("center_id = ?") && params.length >= 1) {
+          const centerId = params[0];
+          this.tables.set(
+            "notification_templates",
+            list.filter((r) => r.center_id !== centerId),
           );
         }
       }
@@ -5023,24 +5055,51 @@ class InMemorySqliteMock implements SqlDatabase {
         updated_at: r.updated_at,
       }));
       if (
+        params.length >= 2 &&
+        trimmed.includes("center_id = ?") &&
+        /\bid\s*=\s*\?/.test(trimmed)
+      ) {
+        return mapped.filter(
+          (r) => r.center_id === params[0] && r.id === params[1],
+        ) as T[];
+      }
+      if (
+        params.length >= 4 &&
+        trimmed.includes("event_type = ?") &&
+        trimmed.includes("channel = ?") &&
+        trimmed.includes("is_default = ?")
+      ) {
+        return mapped.filter(
+          (r) =>
+            r.center_id === params[0] &&
+            r.event_type === params[1] &&
+            (r.channel === params[2] || r.channel_type === params[2]) &&
+            Number(r.is_default) === Number(params[3]),
+        ) as T[];
+      }
+      if (
         params.length >= 3 &&
         trimmed.includes("event_type = ?") &&
         trimmed.includes("channel = ?")
       ) {
         return mapped.filter(
           (r) =>
-            r.centerId === params[0] &&
-            r.eventType === params[1] &&
-            r.channel === params[2],
+            (r.centerId === params[0] || r.center_id === params[0]) &&
+            (r.eventType === params[1] || r.event_type === params[1]) &&
+            (r.channel === params[2] || r.channel_type === params[2]),
         ) as T[];
       }
       if (params.length >= 2 && trimmed.includes("event_type = ?")) {
         return mapped.filter(
-          (r) => r.centerId === params[0] && r.eventType === params[1],
+          (r) =>
+            (r.centerId === params[0] || r.center_id === params[0]) &&
+            (r.eventType === params[1] || r.event_type === params[1]),
         ) as T[];
       }
       if (params.length >= 1 && trimmed.includes("center_id = ?")) {
-        return mapped.filter((r) => r.centerId === params[0]) as T[];
+        return mapped.filter(
+          (r) => r.centerId === params[0] || r.center_id === params[0],
+        ) as T[];
       }
       return mapped as T[];
     }

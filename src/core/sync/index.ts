@@ -4057,10 +4057,7 @@ export class SyncEngine {
       }
       if (Array.isArray(data.notificationTemplates)) {
         for (const t of data.notificationTemplates) {
-          db.runSync(`INSERT INTO notification_templates (id, center_id, event_type, channel, template_body, is_default, created_by, updated_by, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(center_id, event_type, channel, is_default) DO UPDATE SET template_body=excluded.template_body, updated_by=excluded.updated_by, updated_at=excluded.updated_at`,
-            [t.id, t.center_id || centerId, t.event_type || t.eventType, t.channel, t.template_body || t.templateBody || "", t.is_default ? 1 : 0, t.created_by || t.createdBy || "system", t.updated_by || t.updatedBy || null, t.created_at || new Date().toISOString(), t.updated_at || t.updatedAt || new Date().toISOString()]);
+          SyncEngine.upsertNotificationTemplate(db, centerId, t);
         }
       }
 
@@ -4230,6 +4227,78 @@ export class SyncEngine {
   }
 
   /**
+   * Safely upserts a notification template into local SQLite during pull or bootstrap.
+   * Prevents SQLiteErrorException: Error code 19 (UNIQUE constraint failed: notification_templates.id)
+   * by resolving conflicts on both the primary key (id) and natural key (center_id, event_type, channel, is_default).
+   */
+  static upsertNotificationTemplate(
+    db: any,
+    centerId: string,
+    t: any,
+  ): void {
+    const templateId = String(t.id || t.templateId || "");
+    const eventType = t.event_type || t.eventType;
+    const channel = t.channel;
+    const templateBody = t.template_body || t.templateBody || "";
+    const isDefault =
+      t.is_default === 1 || t.is_default === true || t.isDefault === true || t.isDefault === 1
+        ? 1
+        : 0;
+    const updatedBy = t.updated_by || t.updatedBy || null;
+    const updatedAt = t.updated_at || t.updatedAt || new Date().toISOString();
+    const createdBy = t.created_by || t.createdBy || "system";
+    const createdAt = t.created_at || t.createdAt || new Date().toISOString();
+
+    if (!templateId || !eventType || !channel) return;
+
+    const existingById = db.getFirstSync(
+      `SELECT id, center_id, event_type, channel, is_default FROM notification_templates WHERE center_id = ? AND id = ?`,
+      [centerId, templateId],
+    );
+
+    const existingByNatural = db.getFirstSync(
+      `SELECT id, center_id, event_type, channel, is_default FROM notification_templates WHERE center_id = ? AND event_type = ? AND channel = ? AND is_default = ?`,
+      [centerId, eventType, channel, isDefault],
+    );
+
+    if (existingById) {
+      if (existingByNatural && existingByNatural.id !== templateId) {
+        db.runSync(
+          `DELETE FROM notification_templates WHERE center_id = ? AND id = ?`,
+          [centerId, existingByNatural.id],
+        );
+      }
+      db.runSync(
+        `UPDATE notification_templates
+         SET event_type = ?, channel = ?, template_body = ?, is_default = ?, updated_by = ?, updated_at = ?
+         WHERE center_id = ? AND id = ?`,
+        [eventType, channel, templateBody, isDefault, updatedBy, updatedAt, centerId, templateId],
+      );
+    } else if (existingByNatural) {
+      db.runSync(
+        `UPDATE notification_templates
+         SET id = ?, template_body = ?, updated_by = ?, updated_at = ?
+         WHERE center_id = ? AND id = ?`,
+        [templateId, templateBody, updatedBy, updatedAt, centerId, existingByNatural.id],
+      );
+    } else {
+      db.runSync(
+        `INSERT INTO notification_templates
+           (id, center_id, event_type, channel, template_body, is_default, created_by, updated_by, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           event_type = excluded.event_type,
+           channel = excluded.channel,
+           template_body = excluded.template_body,
+           is_default = excluded.is_default,
+           updated_by = excluded.updated_by,
+           updated_at = excluded.updated_at`,
+        [templateId, centerId, eventType, channel, templateBody, isDefault, createdBy, updatedBy, createdAt, updatedAt],
+      );
+    }
+  }
+
+  /**
    * Applies server stream changes incrementally to local SQLite.
    */
   static applyServerChanges(
@@ -4304,7 +4373,7 @@ export class SyncEngine {
         const entityType = change.entityType;
         const data = SyncRepository.canonicalizeSessionReferences(
           centerId,
-          change.data || {},
+          change.data || (change as any).payload || {},
         );
 
         if (entityType === "student_color") {
@@ -5189,10 +5258,10 @@ export class SyncEngine {
           }
         } else if (entityType === "notification_template") {
           const t = data.template || data;
-          db.runSync(`INSERT INTO notification_templates (id, center_id, event_type, channel, template_body, is_default, created_by, updated_by, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(center_id, event_type, channel, is_default) DO UPDATE SET event_type=excluded.event_type, channel=excluded.channel, template_body=excluded.template_body, updated_by=excluded.updated_by, updated_at=excluded.updated_at`,
-            [t.id || t.templateId || change.entityId, centerId, t.event_type || t.eventType, t.channel, t.template_body || t.templateBody || "", t.is_default ? 1 : 0, t.created_by || t.createdBy || "system", t.updated_by || t.updatedBy || null, t.created_at || t.createdAt || new Date().toISOString(), t.updated_at || t.updatedAt || new Date().toISOString()]);
+          SyncEngine.upsertNotificationTemplate(db, centerId, {
+            ...t,
+            id: t.id || t.templateId || change.entityId,
+          });
         } else if (entityType === "session_closing") {
           const c = data.closing || data;
           const incomingSessionId = c.session_id || c.sessionId || change.entityId;
