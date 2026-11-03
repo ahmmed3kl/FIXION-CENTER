@@ -14,6 +14,7 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { ConnectivityService } from "../../core/connectivity";
+import { LocalDataEvents } from "../../core/database/localDataEvents";
 import { useLocalDataRevision } from "../../core/database/useLocalDataRevision";
 import { Strings, formatCurrency, formatNumber } from "../../core/localization";
 import { PermissionService, resolveUserPermissions } from "../../core/permissions";
@@ -59,6 +60,7 @@ export default function DashboardScreen() {
   const localDataRevision = useLocalDataRevision();
   const lastLoadedRevisionRef = useRef(localDataRevision);
   const hasInitialLoadedRef = useRef(false);
+  const isFocusedRef = useRef(true);
 
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
   const [summaryError, setSummaryError] = useState<string | null>(null);
@@ -106,15 +108,21 @@ export default function DashboardScreen() {
 
   useFocusEffect(
     useCallback(() => {
-      if (!hasInitialLoadedRef.current || lastLoadedRevisionRef.current !== localDataRevision) {
+      isFocusedRef.current = true;
+      const currentRevision = LocalDataEvents.getRevision();
+      if (!hasInitialLoadedRef.current || lastLoadedRevisionRef.current !== currentRevision) {
         hasInitialLoadedRef.current = true;
-        lastLoadedRevisionRef.current = localDataRevision;
+        lastLoadedRevisionRef.current = currentRevision;
         loadData();
       }
-    }, [loadData, localDataRevision]),
+      return () => {
+        isFocusedRef.current = false;
+      };
+    }, [loadData]),
   );
 
   useEffect(() => {
+    if (!isFocusedRef.current) return;
     if (localDataRevision > 0 && lastLoadedRevisionRef.current !== localDataRevision) {
       lastLoadedRevisionRef.current = localDataRevision;
       loadData();

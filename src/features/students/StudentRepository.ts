@@ -129,15 +129,143 @@ export class StudentRepository {
   }
 
   private static resolveCardCode(centerId: string, row: { id: string; cardCode?: string | null; deletedAt?: string | null }): string | undefined {
-    const activeCard = StudentCardRepository.getActiveCardByStudentId(row.id);
     if (row.deletedAt) {
-      return row.cardCode || activeCard?.cardCode || this.getHistoricalCardCode(centerId, row.id);
+      if (row.cardCode) return row.cardCode;
+      const activeCard = StudentCardRepository.getActiveCardByStudentId(row.id);
+      return activeCard?.cardCode || this.getHistoricalCardCode(centerId, row.id);
     }
-    const knownCard = row.cardCode
-      ? StudentCardRepository.findCardByCodeInActiveCenter(row.cardCode)
-      : null;
-    if (knownCard && knownCard.studentId !== row.id) return undefined;
-    return row.cardCode || activeCard?.cardCode || undefined;
+    if (row.cardCode) {
+      const knownCard = StudentCardRepository.findCardByCodeInActiveCenter(row.cardCode);
+      if (knownCard && knownCard.studentId !== row.id) return undefined;
+      return row.cardCode;
+    }
+    const activeCard = StudentCardRepository.getActiveCardByStudentId(row.id);
+    return activeCard?.cardCode || undefined;
+  }
+
+  private static createBatchCardResolver(centerId: string) {
+    const db = DatabaseService.getDb();
+    const allCards = db.getAllSync<{
+      id: string;
+      studentId: string;
+      cardCode: string;
+      status: string;
+      issuedAt?: string | null;
+      createdAt?: string | null;
+    }>(
+      `SELECT id, student_id as studentId, card_code as cardCode, status,
+              issued_at as issuedAt, created_at as createdAt
+       FROM student_cards
+       WHERE center_id = ?`,
+      [centerId],
+    );
+
+    const firstCardByCode = new Map<string, { studentId: string; cardCode: string; status: string }>();
+    const activeCardByStudentId = new Map<string, { studentId: string; cardCode: string; issuedAt?: string | null; createdAt?: string | null }>();
+
+    for (const card of allCards) {
+      const trimmedCode = typeof card.cardCode === "string" ? card.cardCode.trim() : "";
+      if (trimmedCode && !firstCardByCode.has(trimmedCode)) {
+        firstCardByCode.set(trimmedCode, card);
+      }
+      if (card.status === "active" && card.studentId) {
+        const existing = activeCardByStudentId.get(card.studentId);
+        if (!existing) {
+          activeCardByStudentId.set(card.studentId, card);
+        } else {
+          const existingIssued = String(existing.issuedAt ?? "");
+          const candidateIssued = String(card.issuedAt ?? "");
+          const existingCreated = String(existing.createdAt ?? "");
+          const candidateCreated = String(card.createdAt ?? "");
+          if (
+            candidateIssued > existingIssued ||
+            (candidateIssued === existingIssued && candidateCreated > existingCreated)
+          ) {
+            activeCardByStudentId.set(card.studentId, card);
+          }
+        }
+      }
+    }
+
+    let sortedAuditLogs: Array<{
+      entityType: string;
+      entityId: string;
+      action: string;
+      timestamp: string;
+      payload: string | null;
+    }> | null = null;
+
+    const getAuditLogs = () => {
+      if (!sortedAuditLogs) {
+        const rawLogs = db.getAllSync<any>(
+          `SELECT entity_type as entityType, entity_id as entityId, action, timestamp, payload
+           FROM audit_logs
+           WHERE center_id = ?
+           ORDER BY timestamp DESC, rowid DESC`,
+          [centerId],
+        );
+        sortedAuditLogs = [...rawLogs].sort((a, b) =>
+          String(b.timestamp || "").localeCompare(String(a.timestamp || "")),
+        );
+      }
+      return sortedAuditLogs;
+    };
+
+    const getHistoricalCardCodeFromBatch = (studentId: string): string | undefined => {
+      for (const event of getAuditLogs()) {
+        if (
+          event.entityType !== "student_card" ||
+          event.action !== "student_card.deactivate" ||
+          !event.payload
+        ) {
+          continue;
+        }
+        if (event.entityId !== studentId && !String(event.payload).includes(studentId)) {
+          continue;
+        }
+        try {
+          const payload = JSON.parse(event.payload);
+          if (payload.studentId === studentId && typeof payload.cardCode === "string") {
+            return payload.cardCode;
+          }
+        } catch {
+          continue;
+        }
+      }
+      return undefined;
+    };
+
+    const getDeletedByNameFromBatch = (studentId: string): string | null => {
+      for (const event of getAuditLogs()) {
+        if (event.action !== "student.delete" || !event.payload) continue;
+        if (event.entityId !== studentId && !String(event.payload).includes(studentId)) {
+          continue;
+        }
+        try {
+          const payload = JSON.parse(event.payload);
+          return typeof payload.actorName === "string" ? payload.actorName : null;
+        } catch {
+          return null;
+        }
+      }
+      return null;
+    };
+
+    const resolveCardCodeForRow = (row: { id: string; cardCode?: string | null; deletedAt?: string | null }): string | undefined => {
+      const activeCard = activeCardByStudentId.get(row.id);
+      if (row.deletedAt) {
+        return row.cardCode || activeCard?.cardCode || getHistoricalCardCodeFromBatch(row.id);
+      }
+      const trimmedCode = typeof row.cardCode === "string" ? row.cardCode.trim() : "";
+      const knownCard = trimmedCode ? firstCardByCode.get(trimmedCode) : null;
+      if (knownCard && knownCard.studentId !== row.id) return undefined;
+      return row.cardCode || activeCard?.cardCode || undefined;
+    };
+
+    return {
+      resolveCardCodeForRow,
+      getDeletedByNameFromBatch,
+    };
   }
 
   private static findByIdInternal(studentId: string, includeDeleted = true): Student | null {
@@ -194,24 +322,13 @@ export class StudentRepository {
        FROM students WHERE center_id = ? AND deleted_at IS NOT NULL ORDER BY deleted_at DESC, full_name ASC`,
       [centerId],
     );
-    return rows.map((row) => {
-      const deleteEvent = AuditService.getEntityLogs(centerId, row.id)
-        .find((event) => event.action === "student.delete");
-      let deletedByName: string | null = null;
-      if (deleteEvent?.payload) {
-        try {
-          const payload = JSON.parse(deleteEvent.payload);
-          deletedByName = typeof payload.actorName === "string" ? payload.actorName : null;
-        } catch {
-          deletedByName = null;
-        }
-      }
-      return {
-        ...row,
-        deletedByName,
-        cardCode: this.resolveCardCode(centerId, row),
-      };
-    });
+    if (rows.length === 0) return [];
+    const batchResolver = this.createBatchCardResolver(centerId);
+    return rows.map((row) => ({
+      ...row,
+      deletedByName: batchResolver.getDeletedByNameFromBatch(row.id),
+      cardCode: batchResolver.resolveCardCodeForRow(row),
+    }));
   }
 
   static getArchivedCardOwner(cardCode: string): Student | null {
@@ -284,7 +401,9 @@ export class StudentRepository {
     const filtered = includeInactive || includeDeleted
       ? rows
       : rows.filter((r) => this.isActiveStudentStatus(r.status));
-    return filtered.map((row) => ({ ...row, cardCode: this.resolveCardCode(centerId, row) }));
+    if (filtered.length === 0) return [];
+    const batchResolver = this.createBatchCardResolver(centerId);
+    return filtered.map((row) => ({ ...row, cardCode: batchResolver.resolveCardCodeForRow(row) }));
   }
 
   /** Students available to the attendance picker without requiring full student-list access. */
@@ -303,9 +422,10 @@ export class StudentRepository {
        FROM students WHERE center_id = ? AND deleted_at IS NULL
        ORDER BY full_name ASC`, [centerId],
     );
-    return rows
-      .filter((row) => this.isActiveStudentStatus(row.status))
-      .map((row) => ({ ...row, cardCode: this.resolveCardCode(centerId, row) || "" }));
+    const activeRows = rows.filter((row) => this.isActiveStudentStatus(row.status));
+    if (activeRows.length === 0) return [];
+    const batchResolver = this.createBatchCardResolver(centerId);
+    return activeRows.map((row) => ({ ...row, cardCode: batchResolver.resolveCardCodeForRow(row) || "" }));
   }
 
   /** Loads a student selected in an attendance flow without requiring student-list access. */

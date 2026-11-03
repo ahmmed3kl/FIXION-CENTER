@@ -598,6 +598,7 @@ export class DebtCycleRepository {
     }
 
     // Generate cycles while nextStart <= cutoffDate and within enrollment validity
+    let hasChanges = false;
     while (nextStart <= cutoffDate) {
       // Bounding check: No cycle may start after the enrollment's effective end date
       if (enrollmentEndDate && nextStart > enrollmentEndDate) {
@@ -657,6 +658,8 @@ export class DebtCycleRepository {
         continue;
       }
 
+      hasChanges = true;
+
       // Queue for sync
       SyncRepository.enqueueOperation({
         centerId,
@@ -704,7 +707,7 @@ export class DebtCycleRepository {
       nextStart = nextCycleStart;
     }
 
-    return this.getCyclesForEnrollment(enrollmentId);
+    return hasChanges ? this.getCyclesForEnrollment(enrollmentId) : existingCycles;
   }
 
   /**
@@ -795,14 +798,17 @@ export class DebtCycleRepository {
       [centerId, subscription.packageId],
     );
     const packagePrice = Number(pkg?.price ?? 0);
-    this.repairLegacyPackageCycles(subscription.id, existingCycles, packagePrice);
-    existingCycles = this.getCyclesForPackageSubscription(subscriptionId);
+    const repaired = this.repairLegacyPackageCycles(subscription.id, existingCycles, packagePrice);
+    if (repaired) {
+      existingCycles = this.getCyclesForPackageSubscription(subscriptionId);
+    }
     // The debt ledger is intentionally one cycle for the whole package. The
     // selected groups are used for reporting/teacher settlement only; they
     // must never create separate package debts.
     const allocations = [{ enrollmentId: subscription.id, groupId: subscription.packageId, cyclePrice: packagePrice }];
 
     // Generate cycles while nextStart <= cutoffDate and within subscription validity
+    let hasChanges = false;
     while (nextStart <= cutoffDate) {
       // Bounding check: No cycle may start after the subscription's effective end date
       if (subscriptionEndDate && nextStart > subscriptionEndDate) {
@@ -832,6 +838,7 @@ export class DebtCycleRepository {
         }
         if (!insertedCycle.changes) continue;
 
+        hasChanges = true;
         SyncRepository.enqueueOperation({
           centerId, userId: user.id, deviceId, operationType: "debt_cycle.create", entityType: "debt_cycle", entityId: cycleId,
           payload: { id: cycleId, centerId, studentId: subscription.studentId, enrollmentId: allocation.enrollmentId, groupId: allocation.groupId, packageSubscriptionId: subscription.id, packageId: subscription.packageId, cycleType: "package", billingMode: "package", cycleNumber: nextCycleNum, startDate: nextStart, endDate: cycleEndDate, cyclePrice: allocation.cyclePrice, status: "open", createdAt: now },
@@ -847,20 +854,29 @@ export class DebtCycleRepository {
       nextStart = nextCycleStart;
     }
 
-    return this.getCyclesForPackageSubscription(subscriptionId);
+    return hasChanges ? this.getCyclesForPackageSubscription(subscriptionId) : existingCycles;
   }
 
   /** Collapse old per-group package cycles into one package ledger cycle. */
-  private static repairLegacyPackageCycles(subscriptionId: string, cycles: DebtCycle[], packagePrice = 0): void {
-    const { centerId, user } = this.getActiveContext();
-    const db = DatabaseService.getDb();
-    const deviceId = DeviceService.getDeviceIdSync();
+  private static repairLegacyPackageCycles(subscriptionId: string, cycles: DebtCycle[], packagePrice = 0): boolean {
     const byNumber = new Map<number, DebtCycle[]>();
     for (const cycle of cycles.filter((item) => item.cycleType === "package" && item.status !== "cancelled")) {
       const list = byNumber.get(cycle.cycleNumber) || [];
       list.push(cycle);
       byNumber.set(cycle.cycleNumber, list);
     }
+    let hasDuplicates = false;
+    for (const list of byNumber.values()) {
+      if (list.length >= 2) {
+        hasDuplicates = true;
+        break;
+      }
+    }
+    if (!hasDuplicates) return false;
+
+    const { centerId, user } = this.getActiveContext();
+    const db = DatabaseService.getDb();
+    const deviceId = DeviceService.getDeviceIdSync();
     for (const list of byNumber.values()) {
       if (list.length < 2) continue;
       const canonical = list.find((item) => item.enrollmentId === subscriptionId) || list[0];
@@ -903,6 +919,7 @@ export class DebtCycleRepository {
         });
       }
     }
+    return true;
   }
 
   /**

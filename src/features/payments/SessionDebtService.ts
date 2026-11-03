@@ -304,15 +304,14 @@ export class SessionDebtService {
     const plannedSessionIds = new Set(
       planned.map((item) => item.sessionId).filter((id): id is string => Boolean(id)),
     );
-    const externalAttendance = db.getAllSync<any>(
+    const unhandledAttendance = db.getAllSync<any>(
       `SELECT session_id as sessionId, status, is_external as isExternal
        FROM attendance
        WHERE center_id = ? AND student_id = ?`,
       [activeCenterId, studentId],
     );
-    for (const attendance of externalAttendance) {
+    for (const attendance of unhandledAttendance) {
       if (
-        !attendance.isExternal ||
         !["present", "late"].includes(attendance.status) ||
         plannedSessionIds.has(attendance.sessionId)
       ) {
@@ -351,16 +350,51 @@ export class SessionDebtService {
            AND is_reversed = 0`,
         [activeCenterId, studentId, session.id],
       )?.amount || 0);
+
+      const cycle = db.getFirstSync<{
+        id: string;
+        billingMode?: string;
+        cycleType?: string;
+      }>(
+        `SELECT id, billing_mode as billingMode, cycle_type as cycleType
+         FROM debt_cycles
+         WHERE center_id = ? AND student_id = ? AND group_id = ?
+           AND start_date <= ? AND end_date >= ?
+           AND status NOT IN ('cancelled', 'paid')
+           AND package_subscription_id IS NULL
+           AND COALESCE(cycle_type, '') <> 'package'
+           AND COALESCE(billing_mode, '') <> 'package'
+         ORDER BY start_date DESC LIMIT 1`,
+        [activeCenterId, studentId, session.groupId, session.sessionDate, session.sessionDate],
+      );
+
+      const sessionAmountDue = sessionPrice === null
+        ? 0
+        : Math.max(0, sessionPrice - directlyPaid);
+
       paymentCandidates.push({
         sessionId: session.id,
         groupId: session.groupId,
         groupName: String(group.name || ""),
         sessionDate: session.sessionDate,
+        debtCycleId: cycle?.id,
         sessionPrice,
-        amountDue: sessionPrice === null
-          ? 0
-          : Math.max(0, sessionPrice - directlyPaid),
+        amountDue: sessionAmountDue,
       });
+
+      if (sessionPrice !== null) {
+        sessionPriceTotal += sessionPrice;
+      }
+      if (sessionAmountDue <= 0) {
+        attendedPaidSessions += 1;
+      } else {
+        attendedUnpaidSessions += 1;
+        if (cycle && isPerSessionBillingMode(cycle.billingMode, cycle.cycleType)) {
+          currentDebt += sessionAmountDue;
+          currentDebtByGroup[session.groupId] =
+            (currentDebtByGroup[session.groupId] || 0) + sessionAmountDue;
+        }
+      }
     }
 
     return {

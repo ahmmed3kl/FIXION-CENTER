@@ -8,6 +8,7 @@ import {
     PaymentEvent,
     PaymentReversal,
     SessionDebtBreakdown,
+    StudentPaymentRequestObligation,
     StudentSubscription,
 } from "../../shared/types";
 import { useAuthStore } from "../auth/useAuthStore";
@@ -139,6 +140,8 @@ export class FinancialCalculationService {
       `SELECT id, operation_id as operationId, center_id as centerId,
               student_id as studentId, subscription_id as subscriptionId,
               debt_cycle_id as debtCycleId, session_id as sessionId,
+              payment_request_obligation_id as paymentRequestObligationId,
+              payment_request_id as paymentRequestId,
               amount, payment_type as paymentType, payment_method as paymentMethod,
               payment_date as paymentDate,
               notes, is_reversed as isReversed, created_at as createdAt,
@@ -160,6 +163,8 @@ export class FinancialCalculationService {
         subscriptionId: p.subscriptionId || undefined,
         debtCycleId: p.debtCycleId || undefined,
         sessionId: p.sessionId || undefined,
+        paymentRequestObligationId: p.paymentRequestObligationId || undefined,
+        paymentRequestId: p.paymentRequestId || undefined,
         amount: Number(p.amount) || 0,
         paymentType: storedType,
         paymentMethod: pMethod,
@@ -195,6 +200,23 @@ export class FinancialCalculationService {
       [centerId, studentId],
     );
 
+    // 6b. Fetch independent payment request obligations for this student
+    const rawObligations = db.getAllSync<any>(
+      `SELECT o.id, o.operation_id as operationId, o.center_id as centerId,
+              o.request_id as requestId, o.group_id as groupId, o.student_id as studentId,
+              o.amount_due as amountDue, o.amount_paid as amountPaid,
+              o.status, o.payment_id as paymentId, o.paid_at as paidAt,
+              o.created_at as createdAt, o.updated_at as updatedAt, o.cancelled_at as cancelledAt,
+              r.name as requestName, r.reference_month as referenceMonth, r.status as requestStatus,
+              g.name as groupName
+       FROM student_payment_request_obligations o
+       LEFT JOIN group_payment_requests r ON r.id = o.request_id AND r.center_id = o.center_id
+       LEFT JOIN groups g ON g.id = o.group_id AND g.center_id = o.center_id
+       WHERE o.center_id = ? AND o.student_id = ?
+       ORDER BY o.created_at DESC`,
+      [centerId, studentId],
+    );
+
     // 7. Calculate per-cycle effective price, payments, and remaining debt
     // A session payment linked to a monthly cycle reduces that cycle while
     // remaining classified as a session payment in the ledger.
@@ -207,6 +229,8 @@ export class FinancialCalculationService {
       (p) =>
         !p.isReversed &&
         p.paymentType !== "session" &&
+        p.paymentType !== "payment_request" &&
+        !p.paymentRequestObligationId &&
         (!p.debtCycleId || !perSessionCycleIds.has(p.debtCycleId)) &&
         (!!p.debtCycleId || !p.sessionId),
     );
@@ -215,6 +239,78 @@ export class FinancialCalculationService {
         !p.isReversed &&
         p.paymentType === "session",
     );
+    const seenPrPaymentKeys = new Set<string>();
+    const activePaymentRequestPayments = payments.filter((p) => {
+      if (p.isReversed) return false;
+      if (
+        p.paymentType !== "payment_request" &&
+        !Boolean(p.paymentRequestObligationId)
+      ) {
+        return false;
+      }
+      const key = String(p.operationId || p.id);
+      if (seenPrPaymentKeys.has(key)) return false;
+      seenPrPaymentKeys.add(key);
+      return true;
+    });
+
+    const paymentRequestObligations: StudentPaymentRequestObligation[] =
+      rawObligations.map((row) => {
+        const amountDue = Math.round((Number(row.amountDue) || 0) * 100) / 100;
+        const matchingPayments = activePaymentRequestPayments.filter(
+          (p) =>
+            p.paymentRequestObligationId === row.id ||
+            (!p.paymentRequestObligationId &&
+              p.paymentRequestId === row.requestId &&
+              p.studentId === row.studentId),
+        );
+        const confirmedPaid =
+          Math.round(
+            matchingPayments.reduce(
+              (sum, p) => sum + (Number(p.amount) || 0),
+              0,
+            ) * 100,
+          ) / 100;
+        const isPaid = amountDue > 0 && confirmedPaid >= amountDue - 0.000001;
+        const isCancelled =
+          !isPaid &&
+          (row.status === "cancelled" || row.requestStatus === "archived");
+        const effectiveStatus = isPaid
+          ? "paid"
+          : isCancelled
+            ? "cancelled"
+            : "unpaid";
+        const latestPayment = matchingPayments[0];
+        const amountOwed =
+          effectiveStatus === "cancelled" || isPaid
+            ? 0
+            : Math.round(Math.max(0, amountDue - confirmedPaid) * 100) / 100;
+
+        return {
+          id: row.id,
+          operationId: row.operationId,
+          centerId: row.centerId,
+          requestId: row.requestId,
+          groupId: row.groupId,
+          studentId: row.studentId,
+          amountDue,
+          amountPaid: confirmedPaid,
+          confirmedAmountPaid: confirmedPaid,
+          amountOwed,
+          isPaid,
+          isPartiallyPaid: !isPaid && confirmedPaid > 0,
+          status: effectiveStatus,
+          paymentId: isPaid || confirmedPaid > 0 ? latestPayment?.id || row.paymentId || null : null,
+          paidAt: isPaid ? row.paidAt || latestPayment?.createdAt || latestPayment?.paymentDate || null : null,
+          createdAt: row.createdAt,
+          updatedAt: row.updatedAt || null,
+          cancelledAt: row.cancelledAt || null,
+          requestName: row.requestName || undefined,
+          referenceMonth: row.referenceMonth || null,
+          requestStatus: row.requestStatus || "active",
+          groupName: row.groupName || undefined,
+        };
+      });
     const sessionPaymentsAppliedToMonthlyCycles =
       this.getSessionPaymentsAppliedToMonthlyCycles(
         activeSessionPayments,
@@ -386,15 +482,31 @@ export class FinancialCalculationService {
       enrichedCycles,
     );
     const perSessionDebt = sessionDebt.currentDebt;
-    const totalRemainingDebt = monthlyRemainingDebt + perSessionDebt;
-    const totalDue = monthlyTotalDue + billableSessionTotalPaid + perSessionDebt;
+
+    const paymentRequestsTotalDue = paymentRequestObligations
+      .filter((ob) => ob.status !== "cancelled")
+      .reduce((sum, ob) => sum + ob.amountDue, 0);
+    const paymentRequestsTotalPaid = paymentRequestObligations
+      .reduce((sum, ob) => sum + (ob.amountPaid || 0), 0);
+    const paymentRequestsRemainingDebt = paymentRequestObligations
+      .filter((ob) => ob.status === "unpaid")
+      .reduce((sum, ob) => sum + Math.max(0, ob.amountDue - ob.amountPaid), 0);
+
+    const totalRemainingDebt =
+      monthlyRemainingDebt + perSessionDebt + paymentRequestsRemainingDebt;
+    const totalDue =
+      monthlyTotalDue +
+      billableSessionTotalPaid +
+      perSessionDebt +
+      paymentRequestsTotalDue;
     const totalPaid =
       monthlyTotalPaid +
       billableSessionTotalPaid +
       sessionPaymentsAppliedToMonthlyCycles.reduce(
         (sum, payment) => sum + payment.amount,
         0,
-      );
+      ) +
+      paymentRequestsTotalPaid;
     const remainingBalance = totalRemainingDebt;
     const creditBalance = Math.max(0, unassignedPool);
 
@@ -433,6 +545,11 @@ export class FinancialCalculationService {
       sessionDebt,
       currentPeriodDebt: sessionDebt.currentDebt,
       creditBalance,
+      paymentRequestObligations,
+      paymentRequestsTotalDue,
+      paymentRequestsTotalPaid,
+      paymentRequestsRemainingDebt,
+      paymentRequestPayments: activePaymentRequestPayments,
     };
   }
 
@@ -445,8 +562,10 @@ export class FinancialCalculationService {
     studentId: string,
     groupId: string,
     targetDate?: string,
+    precomputedFullStatus?: DetailedStudentFinancialStatus,
   ): DetailedStudentFinancialStatus {
-    const full = this.getStudentFinancialStatus(studentId, targetDate);
+    const full =
+      precomputedFullStatus ?? this.getStudentFinancialStatus(studentId, targetDate);
     const db = DatabaseService.getDb();
     const sessionRows = db.getAllSync<{ id: string }>(
       `SELECT id FROM sessions WHERE center_id = ? AND group_id = ?`,
@@ -494,10 +613,16 @@ export class FinancialCalculationService {
     const packageCycleIds = new Set(packageCycleRows.map((row) => row.id));
     const cycles = full.cycles.filter((cycle) => groupCycles.some((item) => item.id === cycle.id) || packageCycleIds.has(cycle.id));
     const cycleIds = new Set(cycles.map((cycle) => cycle.id));
+    const scopedObligations = (full.paymentRequestObligations || []).filter(
+      (ob) => ob.groupId === groupId,
+    );
+    const scopedObligationIds = new Set(scopedObligations.map((ob) => ob.id));
     const payments = full.payments.filter(
       (payment) =>
         (payment.debtCycleId && cycleIds.has(payment.debtCycleId)) ||
-        (payment.sessionId && sessionIds.has(payment.sessionId)),
+        (payment.sessionId && sessionIds.has(payment.sessionId)) ||
+        (payment.paymentRequestObligationId &&
+          scopedObligationIds.has(payment.paymentRequestObligationId)),
     );
     const adjustments = full.adjustments.filter((adjustment) =>
       cycleIds.has(adjustment.debtCycleId),
@@ -506,6 +631,8 @@ export class FinancialCalculationService {
       (payment) =>
         !payment.isReversed &&
         payment.paymentType !== "session" &&
+        payment.paymentType !== "payment_request" &&
+        !payment.paymentRequestObligationId &&
         (!payment.debtCycleId || !cycles.some((cycle) =>
           cycle.id === payment.debtCycleId &&
           isPerSessionBillingMode(cycle.billingMode, cycle.cycleType),
@@ -516,6 +643,12 @@ export class FinancialCalculationService {
       (payment) =>
         !payment.isReversed &&
         payment.paymentType === "session",
+    );
+    const scopedPaymentRequestPayments = payments.filter(
+      (payment) =>
+        !payment.isReversed &&
+        (payment.paymentType === "payment_request" ||
+          Boolean(payment.paymentRequestObligationId)),
     );
     const packageCycles = cycles.filter((cycle) => cycle.cycleType === "package");
     const monthlyGroupDue = groupCycles.reduce(
@@ -571,7 +704,17 @@ export class FinancialCalculationService {
       (sum, cycle) => sum + Number(cycle.remainingDebt ?? 0),
       0,
     );
-    const scopedRemainingDebt = monthlyRemainingDebt + sessionDebt.currentDebt;
+    const scopedRequestsTotalDue = scopedObligations
+      .filter((ob) => ob.status !== "cancelled")
+      .reduce((sum, ob) => sum + ob.amountDue, 0);
+    const scopedRequestsTotalPaid = scopedObligations
+      .reduce((sum, ob) => sum + (ob.amountPaid || 0), 0);
+    const scopedRequestsRemainingDebt = scopedObligations
+      .filter((ob) => ob.status === "unpaid")
+      .reduce((sum, ob) => sum + Math.max(0, ob.amountDue - ob.amountPaid), 0);
+
+    const scopedRemainingDebt =
+      monthlyRemainingDebt + sessionDebt.currentDebt + scopedRequestsRemainingDebt;
     const subscriptions = full.subscriptions.filter(
       (subscription) => subscription.groupId === groupId,
     );
@@ -581,14 +724,19 @@ export class FinancialCalculationService {
 
     return {
       ...full,
-      totalDue: monthlyTotalDue + billableSessionTotalPaid + sessionDebt.currentDebt,
+      totalDue:
+        monthlyTotalDue +
+        billableSessionTotalPaid +
+        sessionDebt.currentDebt +
+        scopedRequestsTotalDue,
       totalPaid:
         monthlyTotalPaid +
         billableSessionTotalPaid +
         sessionPaymentsAppliedToMonthlyCycles.reduce(
           (sum, payment) => sum + Number(payment.amount || 0),
           0,
-        ),
+        ) +
+        scopedRequestsTotalPaid,
       remainingBalance: scopedRemainingDebt,
       subscriptions,
       payments,
@@ -620,6 +768,11 @@ export class FinancialCalculationService {
       // credit only when this scoped view contains the student's full cycle
       // set (the usual single-group case).
       creditBalance: cycles.length === full.cycles.length ? full.creditBalance : 0,
+      paymentRequestObligations: scopedObligations,
+      paymentRequestsTotalDue: scopedRequestsTotalDue,
+      paymentRequestsTotalPaid: scopedRequestsTotalPaid,
+      paymentRequestsRemainingDebt: scopedRequestsRemainingDebt,
+      paymentRequestPayments: scopedPaymentRequestPayments,
     };
   }
 }

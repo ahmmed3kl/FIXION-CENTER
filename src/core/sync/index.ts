@@ -1,5 +1,5 @@
 import { env } from "../../config/env";
-import { SyncOperation, SyncOperationStatus } from "../../shared/types";
+import { Permission, SyncConflict, SyncOperation, SyncOperationStatus } from "../../shared/types";
 import {
   HttpSyncApiAdapter,
   ISyncApiAdapter,
@@ -9,8 +9,11 @@ import {
 import { SyncOperationPayload } from "../api/contracts";
 import { ConnectivityService } from "../connectivity";
 import { DatabaseService, SqlDatabase } from "../database";
+import { LocalDataEvents } from "../database/localDataEvents";
 import { DeviceRepository, DeviceService } from "../device";
-import { DatabaseError } from "../errors";
+import { DatabaseError, ForbiddenError, ValidationError } from "../errors";
+import { AuditService } from "../audit";
+import { PermissionService } from "../permissions";
 import { Logger } from "../logger";
 import { getLocalDateOnly } from "../../shared/utils/date";
 import { CardRangeRepository } from "../../features/students/CardRangeRepository";
@@ -66,7 +69,13 @@ export function getOperationPriority(entityType: string): number {
   if (e === "attendance" || e === "advance_coverage" || e === "makeup")
     return 2;
   if (e === "absence_note") return 3;
-  if (e === "payment" || e === "payment_reversal" || e === "debt_adjustment")
+  if (
+    e === "payment" ||
+    e === "payment_reversal" ||
+    e === "debt_adjustment" ||
+    e === "payment_request" ||
+    e === "payment_request_obligation"
+  )
     return 3;
   if (e === "session_closing" || e === "daily_closing") return 4;
   // CRUD mutations remain priority 5 for callers that consume the public
@@ -98,6 +107,8 @@ const REPAIR_DEPENDENCY_PRIORITY: Record<string, number> = {
   package_subscription: 65,
   package_teacher_override: 70,
   debt_cycle: 75,
+  payment_request: 76,
+  payment_request_obligation: 77,
   session: 80,
   attendance: 90,
   absence_note: 95,
@@ -765,14 +776,18 @@ export class SyncRepository {
        SET status = 'synced', synced_at = ?, next_retry_at = NULL,
            last_error = 'Superseded by server newer version'
        WHERE center_id = ? AND status = 'conflict'
-         AND last_error LIKE '%STALE_UPDATE%'`,
+         AND last_error LIKE '%STALE_UPDATE%'
+         AND LOWER(TRIM(entity_type)) NOT IN ('payment', 'payment_reversal', 'debt_cycle', 'debt_adjustment', 'daily_closing', 'advance_coverage', 'payment_collected')`,
       [staleResolvedAt, centerId],
     );
     db.runSync(
       `UPDATE sync_conflicts
-       SET resolved_at = COALESCE(resolved_at, ?)
+       SET resolved_at = COALESCE(resolved_at, ?),
+           resolved_by = COALESCE(resolved_by, 'system'),
+           resolution_note = COALESCE(resolution_note, 'تم التجاوز بنسخة أحدث على الخادم (لم يُطبق التعديل المحلي)')
        WHERE center_id = ? AND resolved_at IS NULL
-         AND reason LIKE '%STALE_UPDATE%'`,
+         AND reason LIKE '%STALE_UPDATE%'
+         AND LOWER(TRIM(entity_type)) NOT IN ('payment', 'payment_reversal', 'debt_cycle', 'debt_adjustment', 'daily_closing', 'advance_coverage', 'payment_collected')`,
       [staleResolvedAt, centerId],
     );
     // Rewrite legacy attendance payloads before retrying them. Older builds
@@ -882,7 +897,8 @@ export class SyncRepository {
        WHERE center_id = ?
          AND status = 'conflict'
          AND retry_count < 10
-         AND entity_type IN ('teacher', 'subject', 'teacher_subject', 'group', 'group_schedule', 'enrollment', 'student_group_enrollment', 'student', 'student_card', 'package', 'package_subject', 'package_subscription', 'package_teacher_override', 'notification_template', 'notification_event', 'notification_delivery', 'session', 'attendance', 'makeup', 'debt_cycle', 'payment', 'debt_adjustment', 'grade_exam', 'grade_score', 'homework_evaluation_status', 'session_homework_evaluation')
+         AND entity_type IN ('teacher', 'subject', 'teacher_subject', 'group', 'group_schedule', 'enrollment', 'student_group_enrollment', 'student', 'student_card', 'package', 'package_subject', 'package_subscription', 'package_teacher_override', 'notification_template', 'notification_event', 'notification_delivery', 'session', 'attendance', 'makeup', 'grade_exam', 'grade_score', 'homework_evaluation_status', 'session_homework_evaluation')
+         AND LOWER(TRIM(entity_type)) NOT IN ('payment', 'payment_reversal', 'debt_cycle', 'debt_adjustment', 'daily_closing', 'advance_coverage', 'payment_collected')
          AND (
            last_error LIKE '%CARD_OUTSIDE_ALLOWED_RANGE%'
            OR last_error LIKE '%CARD_ALREADY_ASSIGNED%'
@@ -892,7 +908,6 @@ export class SyncRepository {
            OR last_error LIKE '%total_price%'
            OR last_error LIKE '%billing_cycle%'
            OR last_error LIKE '%column%does not exist%'
-           OR last_error LIKE '%STALE_UPDATE%'
            OR last_error LIKE '%value too long%'
            OR last_error LIKE '%outside the authenticated center%'
            OR last_error LIKE '%CARD_BELONGS_TO_OTHER_CENTER%'
@@ -905,11 +920,6 @@ export class SyncRepository {
            OR last_error LIKE '%violates foreign key%'
            OR last_error LIKE '%inconsistent types deduced%'
            OR last_error LIKE '%invalid input syntax for type timestamp%'
-           OR last_error LIKE '%debt_cycles_%'
-           OR last_error LIKE '%payments_debt_cycle_id_fkey%'
-           OR last_error LIKE '%PAYMENT_DEBT_CYCLE_NOT_FOUND%'
-           OR last_error LIKE '%DEBT_CYCLE_NATURAL_KEY_CONFLICT%'
-           OR last_error LIKE '%PAYMENT_SESSION_NOT_FOUND%'
            OR last_error LIKE '%SESSION_ROSTER_STUDENT_NOT_ELIGIBLE%'
            OR last_error LIKE '%ATTENDANCE_NOT_EXPECTED%'
            OR last_error LIKE '%uq_notification_template%'
@@ -972,8 +982,16 @@ export class SyncRepository {
   static getStats(centerId: string) {
     const db = DatabaseService.getDb();
     this.cleanupSupersededConflicts(centerId);
-    const rows = db.getAllSync<{ status: SyncOperationStatus; retryCount: number }>(
-      "SELECT status, retry_count as retryCount FROM sync_operations WHERE center_id = ?",
+    const rows = db.getAllSync<{
+      status: SyncOperationStatus;
+      retryCount: number;
+      conflictResolvedAt?: string | null;
+    }>(
+      `SELECT so.status, so.retry_count as retryCount,
+              sc.resolved_at as conflictResolvedAt
+       FROM sync_operations so
+       LEFT JOIN sync_conflicts sc ON sc.operation_id = so.operation_id
+       WHERE so.center_id = ?`,
       [centerId],
     );
 
@@ -994,7 +1012,11 @@ export class SyncRepository {
         if (Number(r.retryCount || 0) < 10) pending++;
         else failed++;
       }
-      else if (r.status === "conflict") conflict++;
+      else if (r.status === "conflict") {
+        // Only active unresolved conflicts cause a sync problem;
+        // resolved conflicts retain audit history but do not degrade sync health.
+        if (!r.conflictResolvedAt) conflict++;
+      }
     }
 
     return { pending, syncing, synced, failed, conflict, total: rows.length };
@@ -1022,15 +1044,20 @@ export class SyncRepository {
   static getUnsyncedOperations(centerId: string, limit = 200): SyncOperation[] {
     const safeLimit = Math.max(1, Math.min(500, Math.floor(limit)));
     return DatabaseService.getDb().getAllSync<SyncOperation>(
-      `SELECT id, operation_id as operationId, center_id as centerId,
-              user_id as userId, device_id as deviceId,
-              operation_type as operationType, entity_type as entityType,
-              entity_id as entityId, payload, status,
-              created_at as createdAt, synced_at as syncedAt,
-              retry_count as retryCount, last_error as lastError
-       FROM sync_operations
-       WHERE center_id = ? AND status IN ('pending', 'syncing', 'failed', 'conflict')
-       ORDER BY created_at ASC
+      `SELECT so.id, so.operation_id as operationId, so.center_id as centerId,
+              so.user_id as userId, so.device_id as deviceId,
+              so.operation_type as operationType, so.entity_type as entityType,
+              so.entity_id as entityId, so.payload, so.status,
+              so.created_at as createdAt, so.synced_at as syncedAt,
+              so.retry_count as retryCount, so.last_error as lastError
+       FROM sync_operations so
+       LEFT JOIN sync_conflicts sc ON sc.operation_id = so.operation_id
+       WHERE so.center_id = ?
+         AND (
+           so.status IN ('pending', 'syncing', 'failed')
+           OR (so.status = 'conflict' AND sc.resolved_at IS NULL)
+         )
+       ORDER BY so.created_at ASC
        LIMIT ?`,
       [centerId, safeLimit],
     );
@@ -1038,11 +1065,15 @@ export class SyncRepository {
 
   /**
    * Clear historical conflict markers once a newer operation for the same
-   * entity has already synced successfully. This also repairs devices that
-   * completed the package upload before the conflict-cleanup code shipped.
+   * entity has already synced successfully, or when the parent group of a
+   * schedule has been deleted/archived, or for duplicate repair operations.
    */
   private static cleanupSupersededConflicts(centerId: string): void {
     const db = DatabaseService.getDb();
+    const now = new Date().toISOString();
+
+    // 1. If an entity was synced successfully by another operation,
+    // retire older failed/conflicted attempts for the same entity.
     const successful = db.getAllSync<{
       entityType: string;
       entityId: string;
@@ -1083,6 +1114,143 @@ export class SyncRepository {
           winner.createdAt,
         ],
       );
+    }
+
+    // 2. Resolve conflicts for group_schedules whose parent group has been deleted
+    // or archived on device or server.
+    const conflictedSchedules = db.getAllSync<{
+      operationId: string;
+      entityId: string;
+      payload: string;
+    }>(
+      `SELECT so.operation_id as operationId, so.entity_id as entityId, so.payload
+       FROM sync_operations so
+       JOIN sync_conflicts sc ON sc.operation_id = so.operation_id
+       WHERE so.center_id = ? AND so.entity_type = 'group_schedule'
+         AND so.status = 'conflict' AND sc.resolved_at IS NULL`,
+      [centerId],
+    );
+
+    for (const item of conflictedSchedules) {
+      let groupId = "";
+      try {
+        const parsed = JSON.parse(item.payload || "{}");
+        groupId = parsed.groupId || parsed.group_id || "";
+      } catch {
+        // Fall back to querying group_schedules
+      }
+      if (!groupId && item.entityId) {
+        const schedRow = db.getFirstSync<{ group_id: string }>(
+          "SELECT group_id FROM group_schedules WHERE id = ? AND center_id = ?",
+          [item.entityId, centerId],
+        );
+        groupId = schedRow?.group_id || "";
+      }
+
+      if (groupId) {
+        const groupRow = db.getFirstSync<{ status: string }>(
+          "SELECT status FROM groups WHERE id = ? AND center_id = ?",
+          [groupId, centerId],
+        );
+        const groupStatus = String(groupRow?.status || "").toLowerCase();
+
+        // 1. Never auto-resolve a conflict for an active group.
+        if (groupStatus === "active") {
+          continue;
+        }
+
+        // 2. If a group deletion operation is still in flight (pending, syncing,
+        // failed, or in conflict), keep the schedule conflict unresolved until
+        // the server confirms the deletion outcome.
+        const unconfirmedGroupDelete = db.getFirstSync<{ operation_id: string }>(
+          `SELECT operation_id FROM sync_operations
+           WHERE center_id = ? AND entity_type = 'group' AND entity_id = ?
+             AND UPPER(operation_type) IN ('DELETE', 'REMOVE')
+             AND status IN ('pending', 'syncing', 'failed', 'conflict')
+           LIMIT 1`,
+          [centerId, groupId],
+        );
+        if (unconfirmedGroupDelete) {
+          continue;
+        }
+
+        // 3. Confirm deletion or archival on the server before recording resolved_at:
+        // A. A group delete operation that reached the server and marked 'synced'.
+        const hasSyncedGroupDelete = db.getFirstSync<{ operation_id: string }>(
+          `SELECT operation_id FROM sync_operations
+           WHERE center_id = ? AND entity_type = 'group' AND entity_id = ?
+             AND UPPER(operation_type) IN ('DELETE', 'REMOVE') AND status = 'synced'
+           LIMIT 1`,
+          [centerId, groupId],
+        );
+
+        // B. Authoritative server status of 'archived'. (The client application
+        // sets status to 'deleted' or 'inactive'; 'archived' originates from the
+        // backend PostgreSQL server).
+        const isServerArchived = groupStatus === "archived";
+
+        // Local deletion alone or absence of local row without server confirmation
+        // is NOT sufficient to resolve the conflict.
+        const isConfirmedDeletedOnServer =
+          Boolean(hasSyncedGroupDelete) || isServerArchived;
+
+        if (isConfirmedDeletedOnServer) {
+          db.runSync(
+            `UPDATE sync_conflicts SET resolved_at = ? WHERE operation_id = ?`,
+            [now, item.operationId],
+          );
+          db.runSync(
+            `UPDATE sync_operations
+             SET last_error = 'تم حسم التعارض: تم تأكيد حذف أو أرشفة المجموعة على الخادم',
+                 next_retry_at = NULL
+             WHERE operation_id = ?`,
+            [item.operationId],
+          );
+        }
+      }
+    }
+
+    // 3. Resolve duplicate REPAIR_AFTER_SERVER_RESET operations for the same entity:
+    // If multiple repair operations exist for the same entity in 'conflict',
+    // retire the older ones and keep only the latest for review.
+    const duplicateRepairs = db.getAllSync<{
+      entityType: string;
+      entityId: string;
+      count: number;
+    }>(
+      `SELECT entity_type as entityType, entity_id as entityId, COUNT(*) as count
+       FROM sync_operations
+       WHERE center_id = ? AND operation_type = 'REPAIR_AFTER_SERVER_RESET'
+         AND status = 'conflict'
+       GROUP BY entity_type, entity_id
+       HAVING COUNT(*) > 1`,
+      [centerId],
+    );
+
+    for (const dup of duplicateRepairs) {
+      const allOps = db.getAllSync<{ operationId: string; createdAt: string }>(
+        `SELECT operation_id as operationId, created_at as createdAt
+         FROM sync_operations
+         WHERE center_id = ? AND entity_type = ? AND entity_id = ?
+           AND operation_type = 'REPAIR_AFTER_SERVER_RESET'
+           AND status = 'conflict'
+         ORDER BY created_at DESC`,
+        [centerId, dup.entityType, dup.entityId],
+      );
+      const olderDuplicates = allOps.slice(1);
+      for (const old of olderDuplicates) {
+        db.runSync(
+          `UPDATE sync_conflicts SET resolved_at = COALESCE(resolved_at, ?) WHERE operation_id = ?`,
+          [now, old.operationId],
+        );
+        db.runSync(
+          `UPDATE sync_operations
+           SET last_error = 'تم حسم العملية المكررة تلقائيًا لنفس الكيان',
+               next_retry_at = NULL
+           WHERE operation_id = ?`,
+          [old.operationId],
+        );
+      }
     }
   }
 
@@ -1532,16 +1700,18 @@ export class SyncRepository {
     const candidates = db.getAllSync<{
       operationId: string;
       entityType: string;
+      status: string;
       entityId: string;
       payload: unknown;
       lastError: string | null;
     }>(
-      `SELECT operation_id as operationId, entity_type as entityType,
+      `SELECT operation_id as operationId, status, entity_type as entityType,
               entity_id as entityId,
               payload, last_error as lastError
          FROM sync_operations
         WHERE center_id = ?
           AND status IN ('failed', 'conflict')
+          AND NOT (status = 'conflict' AND LOWER(TRIM(entity_type)) IN ('payment', 'payment_reversal', 'debt_cycle', 'debt_adjustment', 'daily_closing', 'advance_coverage', 'payment_collected'))
           AND (
             last_error LIKE '%ATTENDANCE_TARGET_NOT_FOUND%'
             OR last_error LIKE '%ATTENDANCE_SESSION_NOT_FOUND%'
@@ -2026,6 +2196,9 @@ export class SyncRepository {
       }
 
       if (!canRequeue) continue;
+      if (candidate.status === "conflict" && SyncRepository.FINANCIAL_TYPES.has(entityType)) {
+        continue;
+      }
       const result = db.runSync(
         `UPDATE sync_operations
             SET status = 'pending', retry_count = 0,
@@ -2490,7 +2663,9 @@ export class SyncRepository {
          reason = excluded.reason,
          server_payload = excluded.server_payload,
          created_at = excluded.created_at,
-         resolved_at = NULL`,
+         resolved_at = NULL,
+         resolved_by = NULL,
+         resolution_note = NULL`,
       [
         `conflict-${generateUUID()}`,
         operationId,
@@ -2505,23 +2680,340 @@ export class SyncRepository {
     );
   }
 
-  static getConflicts(centerId: string): any[] {
-    return DatabaseService.getDb().getAllSync<any>(
-      `SELECT id, operation_id as operationId, center_id as centerId,
-              entity_type as entityType, entity_id as entityId, reason,
-              local_payload as localPayload, server_payload as serverPayload,
-              created_at as createdAt, resolved_at as resolvedAt
-       FROM sync_conflicts WHERE center_id = ? AND resolved_at IS NULL
-       ORDER BY created_at DESC`,
-      [centerId],
-    );
+  static formatConflictReason(reason?: string): string {
+    if (!reason) return "تعارض غير محدد في المزامنة";
+    if (reason.includes("STALE_UPDATE")) {
+      return "تم تجاوز هذا التعديل بنسخة أحدث موجودة بالفعل على الخادم (التعديل المحلي لم يُطبق)";
+    }
+    if (reason.includes("TEACHER_SCHEDULE_CONFLICT")) {
+      return "تعارض جدول المدرس مع موعد مجموعة أخرى في نفس اليوم والوقت";
+    }
+    if (reason.includes("ROOM_SCHEDULE_CONFLICT")) {
+      return "تعارض القاعة مع موعد مجموعة أخرى في نفس التوقيت";
+    }
+    if (reason.includes("STUDENT_ALREADY_ENROLLED")) {
+      return "الطالب مسجل بالفعل في هذه المجموعة على الخادم";
+    }
+    if (reason.includes("SESSION_ROSTER_STUDENT_NOT_ELIGIBLE")) {
+      return "الطالب غير مؤهل للتسجيل في كشف هذه الحصة";
+    }
+    if (reason.includes("ATTENDANCE_NOT_EXPECTED")) {
+      return "الطالب غير مدرج في كشف حضور هذه الحصة";
+    }
+    if (reason.includes("DUPLICATE_CARD_CODE")) {
+      return "كود الكارت مستخدم بالفعل لطالب آخر";
+    }
+    if (reason.includes("DEVICE_INACTIVE")) {
+      return "الجهاز غير مفعّل في هذا المركز";
+    }
+    if (reason.includes("PACKAGE_NOT_FOUND")) {
+      return "الباقة المطلوبة غير موجودة على الخادم";
+    }
+    return reason;
   }
 
-  static resolveConflict(operationId: string): void {
-    DatabaseService.getDb().runSync(
-      `UPDATE sync_conflicts SET resolved_at = ? WHERE operation_id = ?`,
-      [new Date().toISOString(), operationId],
+  private static readonly FINANCIAL_TYPES = new Set([
+    "payment",
+    "payment_reversal",
+    "debt_cycle",
+    "debt_adjustment",
+    "daily_closing",
+    "advance_coverage",
+    "payment_collected",
+  ]);
+
+  private static enrichConflictRecords(centerId: string, rows: any[]): SyncConflict[] {
+    const db = DatabaseService.getDb();
+
+    return rows.map((r) => {
+      let groupName: string | undefined;
+      let teacherName: string | undefined;
+      let studentName: string | undefined;
+
+      let parsedPayload: any = null;
+      if (r.localPayload) {
+        try {
+          parsedPayload = typeof r.localPayload === "string" ? JSON.parse(r.localPayload) : r.localPayload;
+        } catch {}
+      }
+
+      const entityType = r.entityType;
+      const normalizedEntityType = String(entityType ?? "").trim().toLowerCase();
+      const entityId = r.entityId;
+
+      try {
+        if (normalizedEntityType === "group_schedule") {
+          let groupId = parsedPayload?.groupId || parsedPayload?.group_id;
+          if (!groupId) {
+            const schedRows = db.getAllSync<any>(
+              `SELECT group_id FROM group_schedules WHERE id = ? AND center_id = ?`,
+              [entityId, centerId],
+            );
+            groupId = schedRows?.[0]?.group_id || schedRows?.[0]?.groupId;
+          }
+          if (groupId) {
+            const grpRows = db.getAllSync<any>(
+              `SELECT name, teacher_id FROM groups WHERE id = ? AND center_id = ?`,
+              [groupId, centerId],
+            );
+            if (grpRows?.[0]) {
+              groupName = grpRows[0].name;
+              const teacherId = grpRows[0].teacher_id || grpRows[0].teacherId;
+              if (teacherId) {
+                const tRows = db.getAllSync<any>(
+                  `SELECT name FROM teachers WHERE id = ? AND center_id = ?`,
+                  [teacherId, centerId],
+                );
+                teacherName = tRows?.[0]?.name;
+              }
+            }
+          }
+        } else if (normalizedEntityType === "group") {
+          const grpRows = db.getAllSync<any>(
+            `SELECT name, teacher_id FROM groups WHERE id = ? AND center_id = ?`,
+            [entityId, centerId],
+          );
+          if (grpRows?.[0]) {
+            groupName = grpRows[0].name;
+            const teacherId = grpRows[0].teacher_id || grpRows[0].teacherId;
+            if (teacherId) {
+              const tRows = db.getAllSync<any>(
+                `SELECT name FROM teachers WHERE id = ? AND center_id = ?`,
+                [teacherId, centerId],
+              );
+              teacherName = tRows?.[0]?.name;
+            }
+          }
+        } else if (normalizedEntityType === "student") {
+          const stRows = db.getAllSync<any>(
+            `SELECT name FROM students WHERE id = ? AND center_id = ?`,
+            [entityId, centerId],
+          );
+          studentName = stRows?.[0]?.name;
+        } else if (normalizedEntityType === "teacher") {
+          const tRows = db.getAllSync<any>(
+            `SELECT name FROM teachers WHERE id = ? AND center_id = ?`,
+            [entityId, centerId],
+          );
+          teacherName = tRows?.[0]?.name;
+        } else if (
+          normalizedEntityType === "payment" ||
+          normalizedEntityType === "payment_reversal" ||
+          normalizedEntityType === "debt_cycle" ||
+          normalizedEntityType === "debt_adjustment" ||
+          normalizedEntityType === "payment_collected"
+        ) {
+          let studentId = parsedPayload?.studentId || parsedPayload?.student_id;
+          if (studentId) {
+            const stRows = db.getAllSync<any>(
+              `SELECT name FROM students WHERE id = ? AND center_id = ?`,
+              [studentId, centerId],
+            );
+            studentName = stRows?.[0]?.name;
+          }
+        }
+      } catch {}
+
+      const entityName = groupName || studentName || teacherName || entityId;
+      const isFinancial = SyncRepository.FINANCIAL_TYPES.has(normalizedEntityType);
+      const friendlyReason = SyncRepository.formatConflictReason(r.reason);
+
+      return {
+        id: r.id,
+        operationId: r.operationId,
+        centerId: r.centerId,
+        entityType: r.entityType,
+        entityId: r.entityId,
+        reason: r.reason,
+        localPayload: r.localPayload,
+        serverPayload: r.serverPayload,
+        createdAt: r.createdAt,
+        resolvedAt: r.resolvedAt || null,
+        resolvedBy: r.resolvedBy || null,
+        resolutionNote: r.resolutionNote || null,
+        safeRetryCount: Number(r.safeRetryCount || 0),
+        lastSafeRetryAt: r.lastSafeRetryAt || null,
+        entityName,
+        groupName,
+        teacherName,
+        studentName,
+        friendlyReason,
+        isFinancial,
+      };
+    });
+  }
+
+  static getOpenConflicts(centerId: string): SyncConflict[] {
+    const db = DatabaseService.getDb();
+    this.cleanupSupersededConflicts(centerId);
+    const rows = db.getAllSync<any>(
+      `SELECT sc.id, sc.operation_id as operationId, sc.center_id as centerId,
+              sc.entity_type as entityType, sc.entity_id as entityId, sc.reason,
+              sc.local_payload as localPayload, sc.server_payload as serverPayload,
+              sc.created_at as createdAt, sc.resolved_at as resolvedAt,
+              sc.resolved_by as resolvedBy, sc.resolution_note as resolutionNote,
+              sc.safe_retry_count as safeRetryCount, sc.last_safe_retry_at as lastSafeRetryAt
+       FROM sync_conflicts sc
+       WHERE sc.center_id = ? AND sc.resolved_at IS NULL
+       ORDER BY sc.created_at DESC`,
+      [centerId],
     );
+    return this.enrichConflictRecords(centerId, rows);
+  }
+
+  static getHistoricalConflicts(centerId: string, limit = 50): SyncConflict[] {
+    const db = DatabaseService.getDb();
+    const safeLimit = Math.max(1, Math.min(200, Math.floor(limit)));
+    const rows = db.getAllSync<any>(
+      `SELECT sc.id, sc.operation_id as operationId, sc.center_id as centerId,
+              sc.entity_type as entityType, sc.entity_id as entityId, sc.reason,
+              sc.local_payload as localPayload, sc.server_payload as serverPayload,
+              sc.created_at as createdAt, sc.resolved_at as resolvedAt,
+              sc.resolved_by as resolvedBy, sc.resolution_note as resolutionNote,
+              sc.safe_retry_count as safeRetryCount, sc.last_safe_retry_at as lastSafeRetryAt
+       FROM sync_conflicts sc
+       WHERE sc.center_id = ? AND sc.resolved_at IS NOT NULL
+       ORDER BY sc.resolved_at DESC
+       LIMIT ?`,
+      [centerId, safeLimit],
+    );
+    return this.enrichConflictRecords(centerId, rows);
+  }
+
+  static getConflicts(centerId: string): SyncConflict[] {
+    return this.getOpenConflicts(centerId);
+  }
+
+  static dismissConflict(params: {
+    centerId: string;
+    operationId: string;
+    reason: string;
+    user: { id: string; permissions: string[] };
+    deviceId?: string;
+  }): void {
+    if (
+      !params.user ||
+      !PermissionService.hasPermission(params.user.permissions as Permission[], "sync.manage")
+    ) {
+      throw new ForbiddenError(
+        "User does not have sync.manage permission",
+        "ليس لديك الصلاحية الكافية لإغلاق تعارضات المزامنة.",
+      );
+    }
+
+    const rawUserId = String(params.user?.id ?? "").trim();
+    if (!rawUserId || rawUserId.toLowerCase() === "unknown") {
+      throw new ValidationError(
+        "A valid acting user ID is required to dismiss a conflict",
+        "يجب تحديد مستخدم صالح وموثوق لتوثيق مسؤولية إغلاق التعارض.",
+      );
+    }
+
+    const trimmedReason = String(params.reason || "").trim();
+    if (!trimmedReason || trimmedReason.length < 5) {
+      throw new ValidationError(
+        "Resolution note must be at least 5 characters",
+        "يجب إدخال سبب واضح ومفصل لإغلاق التعارض (5 أحرف على الأقل).",
+      );
+    }
+
+    const db = DatabaseService.getDb();
+    const rows = db.getAllSync<any>(
+      `SELECT id, operation_id, center_id, entity_type, entity_id, reason,
+              local_payload, server_payload, created_at, resolved_at
+       FROM sync_conflicts
+       WHERE operation_id = ? AND center_id = ?`,
+      [params.operationId, params.centerId],
+    );
+
+    if (!rows || rows.length === 0) {
+      throw new ValidationError(
+        `Conflict record not found for operation ${params.operationId} in center ${params.centerId}`,
+        "لم يتم العثور على سجل التعارض في هذا المركز.",
+      );
+    }
+
+    const conflict = rows[0];
+
+    // Idempotency: if already resolved, do not error or re-resolve
+    if (conflict.resolved_at) {
+      return;
+    }
+
+    const normalizedEntityType = String(conflict.entity_type ?? "").trim().toLowerCase();
+    if (SyncRepository.FINANCIAL_TYPES.has(normalizedEntityType)) {
+      throw new ValidationError(
+        `Financial conflict cannot be dismissed manually: ${conflict.entity_type}`,
+        "لا يمكن إغلاق التعارضات المالية يدويًا لحماية سلامة الحسابات والأرصدة.",
+      );
+    }
+
+    const now = new Date().toISOString();
+
+    DatabaseService.runInTransaction((db) => {
+      // 1. Update sync_conflicts
+      db.runSync(
+        `UPDATE sync_conflicts
+         SET resolved_at = ?, resolved_by = ?, resolution_note = ?
+         WHERE operation_id = ? AND center_id = ?`,
+        [now, rawUserId, trimmedReason, params.operationId, params.centerId],
+      );
+
+      // 2. Update sync_operations (PRESERVE status = 'conflict', DO NOT set 'synced'!)
+      const opRows = db.getAllSync<any>(
+        `SELECT last_error FROM sync_operations WHERE operation_id = ? AND center_id = ?`,
+        [params.operationId, params.centerId],
+      );
+      const originalError = opRows?.[0]?.last_error || conflict.reason || "";
+      const updatedLastError = originalError.includes("[إغلاق يدوي]")
+        ? originalError
+        : `${originalError}\n[إغلاق يدوي]: ${trimmedReason}`.trim();
+
+      db.runSync(
+        `UPDATE sync_operations
+         SET next_retry_at = NULL, last_error = ?
+         WHERE operation_id = ? AND center_id = ?`,
+        [updatedLastError, params.operationId, params.centerId],
+      );
+
+      // 3. Record Audit Log
+      AuditService.recordEvent({
+        operationId: params.operationId,
+        centerId: params.centerId,
+        userId: rawUserId,
+        deviceId: params.deviceId || "system",
+        entityType: conflict.entity_type,
+        entityId: conflict.entity_id,
+        action: "CONFLICT_DISMISSED",
+        payload: {
+          resolutionNote: trimmedReason,
+          originalReason: conflict.reason,
+          resolvedAt: now,
+        },
+      });
+    });
+
+    // 4. Emit LocalDataEvents
+    LocalDataEvents.emit({
+      centerId: params.centerId,
+      entityType: "sync_conflicts",
+      entityId: conflict.entity_id,
+    });
+  }
+
+  static resolveConflict(operationId: string, resolutionNote?: string): void {
+    const now = new Date().toISOString();
+    const db = DatabaseService.getDb();
+    db.runSync(
+      `UPDATE sync_conflicts SET resolved_at = ? WHERE operation_id = ?`,
+      [now, operationId],
+    );
+    if (resolutionNote) {
+      db.runSync(
+        `UPDATE sync_operations SET last_error = ?, next_retry_at = NULL WHERE operation_id = ?`,
+        [resolutionNote, operationId],
+      );
+    }
   }
 
   /**
@@ -2531,14 +3023,40 @@ export class SyncRepository {
    */
   static recoverInterruptedOperations(centerId: string): number {
     const db = DatabaseService.getDb();
-    const result = db.runSync(
-      `UPDATE sync_operations
-       SET status = 'pending', next_retry_at = NULL,
-           last_error = COALESCE(last_error, 'sync interrupted')
-       WHERE center_id = ? AND status = 'syncing'`,
+    const openConflictRows = db.getAllSync<{ operationId: string }>(
+      `SELECT operation_id as operationId FROM sync_conflicts WHERE center_id = ? AND resolved_at IS NULL`,
       [centerId],
     );
-    return result.changes ?? 0;
+    const openConflictIds = new Set(openConflictRows.map((r) => r.operationId));
+
+    const syncingRows = db.getAllSync<{ operationId: string }>(
+      `SELECT operation_id as operationId FROM sync_operations WHERE center_id = ? AND status = 'syncing'`,
+      [centerId],
+    );
+
+    let recovered = 0;
+    for (const row of syncingRows) {
+      if (openConflictIds.has(row.operationId)) {
+        db.runSync(
+          `UPDATE sync_operations
+           SET status = 'conflict',
+               next_retry_at = NULL,
+               last_error = 'تمت استعادة حالة التعارض بعد إعادة تشغيل التطبيق'
+           WHERE center_id = ? AND operation_id = ? AND status = 'syncing'`,
+          [centerId, row.operationId],
+        );
+      } else {
+        db.runSync(
+          `UPDATE sync_operations
+           SET status = 'pending', next_retry_at = NULL,
+               last_error = COALESCE(last_error, 'sync interrupted')
+           WHERE center_id = ? AND operation_id = ? AND status = 'syncing'`,
+          [centerId, row.operationId],
+        );
+        recovered++;
+      }
+    }
+    return recovered;
   }
 
   /** Permission checks were tightened after some repair rows were queued.
@@ -2950,7 +3468,15 @@ export class SyncEngine {
     return Math.min(1000 * Math.pow(2, retryCount), 60000);
   }
 
-  private static async withSyncLocks<T>(
+  static isSyncLocked(centerId: string): boolean {
+    return Boolean(
+      this.syncLocks.has(centerId) ||
+      this.databaseSyncLock !== null ||
+      this.currentState === "syncing"
+    );
+  }
+
+  static async withSyncLocks<T>(
     centerId: string,
     task: () => Promise<T>,
   ): Promise<T> {
@@ -3197,7 +3723,7 @@ export class SyncEngine {
         `SELECT operation_id as operationId FROM sync_operations
          WHERE center_id = ? AND entity_type = ? AND entity_id = ?
            AND operation_type = 'REPAIR_AFTER_SERVER_RESET'
-           AND status IN ('pending', 'syncing', 'failed')
+           AND status IN ('pending', 'syncing', 'failed', 'conflict')
          LIMIT 1`,
         [centerId, entityType, entityId],
       );
@@ -3268,10 +3794,14 @@ export class SyncEngine {
     }
 
     const schedules = db.getAllSync<any>(
-      `SELECT id, group_id as groupId, day_of_week as dayOfWeek,
-              start_time as startTime, end_time as endTime, status,
-              created_at as createdAt, updated_at as updatedAt
-       FROM group_schedules WHERE center_id = ?`,
+      `SELECT gs.id, gs.group_id as groupId, gs.day_of_week as dayOfWeek,
+              gs.start_time as startTime, gs.end_time as endTime, gs.status,
+              gs.created_at as createdAt, gs.updated_at as updatedAt
+       FROM group_schedules gs
+       JOIN groups g ON g.center_id = gs.center_id AND g.id = gs.group_id
+       WHERE gs.center_id = ?
+         AND COALESCE(gs.status, 'active') = 'active'
+         AND COALESCE(g.status, 'active') NOT IN ('deleted', 'archived', 'inactive')`,
       [centerId],
     );
     for (const schedule of schedules) queue("group_schedule", schedule.id, schedule);
@@ -5779,3 +6309,5 @@ export class SyncEngine {
     }
   }
 }
+
+export * from "./SafeConflictRetryService";

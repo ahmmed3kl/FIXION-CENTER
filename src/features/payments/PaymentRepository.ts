@@ -84,6 +84,8 @@ export class PaymentRepository {
       `SELECT id, operation_id as operationId, center_id as centerId,
               student_id as studentId, subscription_id as subscriptionId,
               debt_cycle_id as debtCycleId, session_id as sessionId,
+              payment_request_obligation_id as paymentRequestObligationId,
+              payment_request_id as paymentRequestId,
               amount, payment_type as paymentType, payment_method as paymentMethod,
               payment_date as paymentDate,
               notes, is_reversed as isReversed, created_at as createdAt,
@@ -102,6 +104,8 @@ export class PaymentRepository {
       subscriptionId: p.subscriptionId || undefined,
       debtCycleId: p.debtCycleId || undefined,
       sessionId: p.sessionId || undefined,
+      paymentRequestObligationId: p.paymentRequestObligationId || undefined,
+      paymentRequestId: p.paymentRequestId || undefined,
       amount: Number(p.amount) || 0,
       paymentType: p.paymentType === "cash" ? "session" : p.paymentType,
       paymentMethod: p.paymentMethod || "cash",
@@ -139,16 +143,18 @@ export class PaymentRepository {
   /**
    * Records an immutable payment event with operation_id for idempotency,
    * adds to sync_operations, and writes to audit_logs.
-   * Payment types: 'monthly', 'partial', 'session'.
+   * Payment types: 'monthly', 'partial', 'session', 'payment_request'.
    */
   static async recordPayment(params: {
     studentId: string;
     amount: number;
-    paymentType?: "monthly" | "partial" | "session" | "full";
+    paymentType?: "monthly" | "partial" | "session" | "full" | "payment_request";
     paymentMethod?: string;
     debtCycleId?: string;
     sessionId?: string;
     subscriptionId?: string;
+    paymentRequestObligationId?: string;
+    paymentRequestId?: string;
     paymentDate?: string;
     notes?: string;
     operationId?: string;
@@ -162,6 +168,10 @@ export class PaymentRepository {
     if (!Number.isFinite(params.amount) || params.amount <= 0) {
       throw new ValidationError("مبلغ الدفعة يجب أن يكون أكبر من صفر.");
     }
+    const roundedAmount = Math.round(params.amount * 100) / 100;
+    if (Math.abs(params.amount - roundedAmount) > 0.000001) {
+      throw new ValidationError("مبلغ الدفعة يجب ألا يتجاوز منزلتين عشريتين.");
+    }
     const db = DatabaseService.getDb();
     const operationId = params.operationId || `op-pay-${generateUUID()}`;
     const deviceId = DeviceService.getDeviceIdSync();
@@ -174,8 +184,13 @@ export class PaymentRepository {
     const paymentMethod = params.paymentMethod || "cash";
 
     // Normalize payment type: 'full' in legacy calls maps to 'monthly'
-    let normType: "monthly" | "partial" | "session" = "partial";
-    if (params.paymentType === "session") {
+    let normType: "monthly" | "partial" | "session" | "payment_request" = "partial";
+    if (
+      params.paymentType === "payment_request" ||
+      Boolean(params.paymentRequestObligationId)
+    ) {
+      normType = "payment_request";
+    } else if (params.paymentType === "session") {
       normType = "session";
     } else if (
       params.paymentType === "monthly" ||
@@ -185,7 +200,7 @@ export class PaymentRepository {
     } else if (params.paymentType === "partial") {
       normType = "partial";
     }
-    if (params.allowCreditBalance && normType === "session") {
+    if (params.allowCreditBalance && (normType === "session" || normType === "payment_request")) {
       throw new ValidationError("الرصيد المقدم يُسجل كدفعة شهرية أو جزئية، وليس كدفعة حصة.");
     }
 
@@ -193,6 +208,8 @@ export class PaymentRepository {
       `SELECT id, operation_id as operationId, center_id as centerId,
               student_id as studentId, subscription_id as subscriptionId,
               debt_cycle_id as debtCycleId, session_id as sessionId,
+              payment_request_obligation_id as paymentRequestObligationId,
+              payment_request_id as paymentRequestId,
               amount, payment_type as paymentType, payment_method as paymentMethod,
               payment_date as paymentDate, notes, is_reversed as isReversed,
               created_at as createdAt, user_id as userId, updated_at as updatedAt
@@ -209,11 +226,16 @@ export class PaymentRepository {
         Number(existingPayment.amount) !== params.amount ||
         existingType !== normType ||
         (existingPayment.sessionId || undefined) !== (params.sessionId || undefined) ||
+        (existingPayment.paymentRequestObligationId || undefined) !==
+          (params.paymentRequestObligationId || undefined) ||
         (params.debtCycleId && existingPayment.debtCycleId !== params.debtCycleId)
       ) {
         throw new ConflictError("معرّف العملية مستخدم لدفعة ببيانات مختلفة.");
       }
-      FinancialCalculationService.getStudentFinancialStatus(params.studentId);
+      FinancialCalculationService.getStudentFinancialStatus(
+        params.studentId,
+        existingPayment.paymentDate,
+      );
       return {
         id: existingPayment.id,
         operationId: existingPayment.operationId,
@@ -222,6 +244,9 @@ export class PaymentRepository {
         subscriptionId: existingPayment.subscriptionId || undefined,
         debtCycleId: existingPayment.debtCycleId || undefined,
         sessionId: existingPayment.sessionId || undefined,
+        paymentRequestObligationId:
+          existingPayment.paymentRequestObligationId || undefined,
+        paymentRequestId: existingPayment.paymentRequestId || undefined,
         amount: Number(existingPayment.amount) || 0,
         paymentType: existingType,
         paymentMethod: existingPayment.paymentMethod || "cash",
@@ -232,6 +257,216 @@ export class PaymentRepository {
         userId: existingPayment.userId,
         updatedAt: existingPayment.updatedAt || undefined,
       };
+    }
+
+    if (normType === "payment_request") {
+      if (!params.paymentRequestObligationId) {
+        throw new ValidationError("يجب تحديد مطالبة الدفع الخاصة بالطالب.");
+      }
+      const obligation = db.getFirstSync<any>(
+        `SELECT id, center_id as centerId, request_id as requestId,
+                group_id as groupId, student_id as studentId,
+                amount_due as amountDue, amount_paid as amountPaid,
+                status, payment_id as paymentId
+         FROM student_payment_request_obligations
+         WHERE center_id = ? AND id = ?`,
+        [centerId, params.paymentRequestObligationId],
+      );
+      if (!obligation) {
+        throw new NotFoundError("المطالبة المالية للطالب غير موجودة في هذا المركز.");
+      }
+      if (obligation.studentId !== params.studentId) {
+        throw new ValidationError("المطالبة المالية لا تخص هذا الطالب.");
+      }
+      const parentRequest = db.getFirstSync<any>(
+        `SELECT id, name, status, reference_month as referenceMonth
+         FROM group_payment_requests
+         WHERE center_id = ? AND id = ?`,
+        [centerId, obligation.requestId],
+      );
+      if (!parentRequest) {
+        throw new NotFoundError("متطلب الدفع غير موجود.");
+      }
+      if (parentRequest.status === "archived" || obligation.status === "cancelled") {
+        throw new ValidationError("لا يمكن تسجيل دفعة لمطالبة ملغاة أو مؤرشفة.");
+      }
+      const existingObligationPayments = db.getAllSync<any>(
+        `SELECT id, operation_id as operationId, amount, is_reversed as isReversed
+         FROM payments
+         WHERE center_id = ? AND payment_request_obligation_id = ? AND is_reversed = 0`,
+        [centerId, obligation.id],
+      );
+      const seenPaymentKeys = new Set<string>();
+      let confirmedPaidSoFar = 0;
+      for (const p of existingObligationPayments) {
+        if (p.isReversed === 1 || p.isReversed === true) continue;
+        const key = String(p.operationId || p.operation_id || p.id);
+        if (seenPaymentKeys.has(key)) continue;
+        seenPaymentKeys.add(key);
+        confirmedPaidSoFar += Number(p.amount) || 0;
+      }
+      confirmedPaidSoFar = Math.round(confirmedPaidSoFar * 100) / 100;
+
+      const expectedDue = Math.round((Number(obligation.amountDue) || 0) * 100) / 100;
+      const remainingDue = Math.round(Math.max(0, expectedDue - confirmedPaidSoFar) * 100) / 100;
+      if (obligation.status === "paid" && remainingDue <= 0.000001) {
+        throw new ConflictError("تم سداد هذه المطالبة مسبقًا لهذا الطالب.");
+      }
+      if (remainingDue <= 0.000001) {
+        throw new ConflictError("تم سداد هذه المطالبة مسبقًا لهذا الطالب.");
+      }
+      if (params.amount > remainingDue + 0.000001) {
+        throw new ValidationError(
+          `مبلغ الدفعة (${params.amount}) يتجاوز قيمة المطالبة المستحقة المتبقية (${remainingDue}).`,
+        );
+      }
+
+      const paymentId = `pay-${generateUUID()}`;
+      const paymentNotes =
+        [
+          `سداد متطلب: ${parentRequest.name}`,
+          parentRequest.referenceMonth ? `(${parentRequest.referenceMonth})` : "",
+          params.notes?.trim() || "",
+        ]
+          .filter(Boolean)
+          .join(" • ") || undefined;
+
+      const paymentEvent: PaymentEvent = {
+        id: paymentId,
+        operationId,
+        centerId,
+        studentId: params.studentId,
+        paymentRequestObligationId: obligation.id,
+        paymentRequestId: obligation.requestId,
+        amount: params.amount,
+        paymentType: "payment_request",
+        paymentMethod,
+        paymentDate,
+        notes: paymentNotes,
+        isReversed: false,
+        createdAt,
+        userId: user.id,
+      };
+
+      const newTotalPaid =
+        Math.round(Math.min(expectedDue, confirmedPaidSoFar + params.amount) * 100) / 100;
+      const newObligationStatus =
+        newTotalPaid >= expectedDue - 0.000001 ? "paid" : "unpaid";
+      const newPaidAt = newObligationStatus === "paid" ? createdAt : null;
+
+      DatabaseService.runInTransaction(() => {
+        const latestOb = db.getFirstSync<any>(
+          `SELECT status, amount_due as amountDue
+           FROM student_payment_request_obligations
+           WHERE center_id = ? AND id = ?`,
+          [centerId, obligation.id],
+        );
+        if (!latestOb || (latestOb.status === "paid" && remainingDue <= 0.000001)) {
+          throw new ConflictError("تم سداد هذه المطالبة مسبقًا لهذا الطالب.");
+        }
+        if (latestOb.status === "cancelled") {
+          throw new ValidationError("لا يمكن تسجيل دفعة لمطالبة ملغاة.");
+        }
+        db.runSync(
+          `INSERT INTO payments (id, operation_id, center_id, student_id, subscription_id, debt_cycle_id, session_id, payment_request_obligation_id, payment_request_id, amount, payment_type, payment_method, payment_date, notes, is_reversed, created_at, user_id)
+           VALUES (?, ?, ?, ?, NULL, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+          [
+            paymentId,
+            operationId,
+            centerId,
+            params.studentId,
+            obligation.id,
+            obligation.requestId,
+            params.amount,
+            "payment_request",
+            paymentMethod,
+            paymentDate,
+            paymentNotes || null,
+            createdAt,
+            user.id,
+          ],
+        );
+        if (newObligationStatus === "paid") {
+          db.runSync(
+            `UPDATE student_payment_request_obligations
+             SET status = 'paid', amount_paid = ?, payment_id = ?, paid_at = ?, updated_at = ?
+             WHERE center_id = ? AND id = ?`,
+            [newTotalPaid, paymentId, createdAt, createdAt, centerId, obligation.id],
+          );
+        } else {
+          db.runSync(
+            `UPDATE student_payment_request_obligations
+             SET status = 'unpaid', amount_paid = ?, payment_id = ?, paid_at = NULL, updated_at = ?
+             WHERE center_id = ? AND id = ?`,
+            [newTotalPaid, paymentId, createdAt, centerId, obligation.id],
+          );
+        }
+        SyncRepository.enqueueOperation({
+          centerId,
+          userId: user.id,
+          deviceId,
+          operationType: "payment.create",
+          entityType: "payment",
+          entityId: paymentId,
+          payload: paymentEvent,
+          operationId,
+        });
+        SyncRepository.enqueueOperation({
+          centerId,
+          userId: user.id,
+          deviceId,
+          operationType: "payment_request_obligation.pay",
+          entityType: "payment_request_obligation",
+          entityId: obligation.id,
+          payload: {
+            id: obligation.id,
+            centerId,
+            requestId: obligation.requestId,
+            studentId: params.studentId,
+            paymentId,
+            amountPaid: newTotalPaid,
+            status: newObligationStatus,
+            paidAt: newPaidAt,
+            updatedAt: createdAt,
+          },
+          operationId: `${operationId}-ob`,
+        });
+        AuditService.recordEvent({
+          operationId,
+          centerId,
+          userId: user.id,
+          deviceId,
+          entityType: "payment",
+          entityId: paymentId,
+          action: "payment.record",
+          payload: {
+            studentId: params.studentId,
+            amount: params.amount,
+            paymentType: "payment_request",
+            paymentRequestId: obligation.requestId,
+            paymentRequestObligationId: obligation.id,
+            requestName: parentRequest.name,
+            notes: paymentNotes || null,
+            actorName: user.fullName,
+          },
+        });
+        DatabaseService.notifyLocalChange({
+          centerId,
+          entityType: "payment_request_obligation",
+          entityId: obligation.id,
+        });
+        DatabaseService.notifyLocalChange({
+          centerId,
+          entityType: "payment",
+          entityId: paymentId,
+        });
+      });
+
+      FinancialCalculationService.getStudentFinancialStatus(
+        params.studentId,
+        paymentDate,
+      );
+      return paymentEvent;
     }
 
     let paymentSessionGroupId: string | undefined;
@@ -397,6 +632,7 @@ export class PaymentRepository {
 
     const currentFinancialStatus = FinancialCalculationService.getStudentFinancialStatus(
       params.studentId,
+      paymentDate,
     );
     let targetCycle = assignedCycleId
       ? currentFinancialStatus.cycles.find((cycle) => cycle.id === assignedCycleId)
@@ -543,6 +779,7 @@ export class PaymentRepository {
       if (normType === "session" && params.sessionId) {
         const latestStatus = FinancialCalculationService.getStudentFinancialStatus(
           params.studentId,
+          paymentDate,
         );
         const latestCandidate = getPayableSessionPaymentCandidates(
           latestStatus,
@@ -567,7 +804,10 @@ export class PaymentRepository {
       AuditService.recordEvent({ operationId, centerId, userId: user.id, deviceId, entityType: "payment", entityId: paymentId, action: "payment.record", payload: { studentId: params.studentId, amount: params.amount, paymentType: normType, debtCycleId: assignedCycleId, sessionId: params.sessionId, subscriptionId: params.subscriptionId, notes: paymentNotes || null, actorName: user.fullName } });
     });
 
-    FinancialCalculationService.getStudentFinancialStatus(params.studentId);
+    FinancialCalculationService.getStudentFinancialStatus(
+      params.studentId,
+      paymentDate,
+    );
     return paymentEvent;
   }
 
@@ -616,7 +856,9 @@ export class PaymentRepository {
 
     // 1. Fetch payment
     const payment = db.getFirstSync<any>(
-      `SELECT id, center_id as centerId, student_id as studentId, amount, is_reversed as isReversed
+      `SELECT id, center_id as centerId, student_id as studentId, amount, is_reversed as isReversed,
+              payment_request_obligation_id as paymentRequestObligationId,
+              payment_request_id as paymentRequestId
        FROM payments
        WHERE center_id = ? AND id = ?`,
       [centerId, params.paymentId],
@@ -657,8 +899,116 @@ export class PaymentRepository {
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [reversalId, operationId, centerId, params.paymentId, payment.studentId, Number(payment.amount), params.reason.trim(), user.id, now, now],
       );
+      const linkedObligation = payment.paymentRequestObligationId
+        ? db.getFirstSync<any>(
+            `SELECT id, request_id as requestId, amount_due as amountDue, status
+             FROM student_payment_request_obligations
+             WHERE center_id = ? AND id = ?`,
+            [centerId, payment.paymentRequestObligationId],
+          )
+        : db.getFirstSync<any>(
+            `SELECT id, request_id as requestId, amount_due as amountDue, status
+             FROM student_payment_request_obligations
+             WHERE center_id = ? AND payment_id = ?`,
+            [centerId, params.paymentId],
+          );
+      if (linkedObligation) {
+        const parentReq = db.getFirstSync<any>(
+          `SELECT status FROM group_payment_requests WHERE center_id = ? AND id = ?`,
+          [centerId, linkedObligation.requestId],
+        );
+        const remainingPayments = db.getAllSync<any>(
+          `SELECT id, operation_id as operationId, amount, created_at as createdAt, is_reversed as isReversed
+           FROM payments
+           WHERE center_id = ? AND payment_request_obligation_id = ? AND is_reversed = 0`,
+          [centerId, linkedObligation.id],
+        );
+        const seenKeys = new Set<string>();
+        let remainingConfirmedPaid = 0;
+        let latestRemainingPayment: any = null;
+        for (const rp of remainingPayments) {
+          if (rp.id === params.paymentId) continue;
+          if (rp.isReversed === 1 || rp.isReversed === true) continue;
+          const key = String(rp.operationId || rp.operation_id || rp.id);
+          if (seenKeys.has(key)) continue;
+          seenKeys.add(key);
+          remainingConfirmedPaid += Number(rp.amount) || 0;
+          if (!latestRemainingPayment) latestRemainingPayment = rp;
+        }
+        remainingConfirmedPaid = Math.round(remainingConfirmedPaid * 100) / 100;
+        const obDue = Math.round((Number(linkedObligation.amountDue ?? linkedObligation.amount_due) || 0) * 100) / 100;
+        const isStillFullyPaid = obDue > 0 && remainingConfirmedPaid >= obDue - 0.000001;
+        const restoredStatus = isStillFullyPaid
+          ? "paid"
+          : parentReq?.status === "archived"
+            ? "cancelled"
+            : "unpaid";
+        const restoredPaymentId = latestRemainingPayment?.id || null;
+        const restoredPaidAt = isStillFullyPaid
+          ? latestRemainingPayment?.createdAt || latestRemainingPayment?.created_at || now
+          : null;
+        if (restoredStatus === "cancelled") {
+          db.runSync(
+            `UPDATE student_payment_request_obligations
+             SET status = 'cancelled', amount_paid = ?, payment_id = NULL, paid_at = NULL, cancelled_at = ?, updated_at = ?
+             WHERE center_id = ? AND id = ?`,
+            [remainingConfirmedPaid, now, now, centerId, linkedObligation.id],
+          );
+        } else if (restoredStatus === "paid") {
+          db.runSync(
+            `UPDATE student_payment_request_obligations
+             SET status = 'paid', amount_paid = ?, payment_id = ?, paid_at = ?, updated_at = ?
+             WHERE center_id = ? AND id = ?`,
+            [remainingConfirmedPaid, restoredPaymentId, restoredPaidAt, now, centerId, linkedObligation.id],
+          );
+        } else if (restoredPaymentId) {
+          db.runSync(
+            `UPDATE student_payment_request_obligations
+             SET status = 'unpaid', amount_paid = ?, payment_id = ?, paid_at = NULL, updated_at = ?
+             WHERE center_id = ? AND id = ?`,
+            [remainingConfirmedPaid, restoredPaymentId, now, centerId, linkedObligation.id],
+          );
+        } else {
+          db.runSync(
+            `UPDATE student_payment_request_obligations
+             SET status = 'unpaid', amount_paid = 0, payment_id = NULL, paid_at = NULL, updated_at = ?
+             WHERE center_id = ? AND id = ?`,
+            [now, centerId, linkedObligation.id],
+          );
+        }
+        SyncRepository.enqueueOperation({
+          centerId,
+          userId: user.id,
+          deviceId,
+          operationType: "payment_request_obligation.reverse",
+          entityType: "payment_request_obligation",
+          entityId: linkedObligation.id,
+          payload: {
+            id: linkedObligation.id,
+            centerId,
+            requestId: linkedObligation.requestId,
+            studentId: payment.studentId,
+            status: restoredStatus,
+            amountPaid: remainingConfirmedPaid,
+            paymentId: restoredPaymentId,
+            paidAt: restoredPaidAt,
+            updatedAt: now,
+          },
+          operationId: `${operationId}-ob`,
+        });
+        DatabaseService.notifyLocalChange({
+          centerId,
+          entityType: "payment_request_obligation",
+          entityId: linkedObligation.id,
+        });
+      }
       SyncRepository.enqueueOperation({ centerId, userId: user.id, deviceId, operationType: "payment.reverse", entityType: "payment_reversal", entityId: reversalId, payload: { ...reversal, updatedAt: now }, operationId });
-      AuditService.recordEvent({ operationId, centerId, userId: user.id, deviceId, entityType: "payment", entityId: params.paymentId, action: "payment.reverse", payload: { studentId: payment.studentId, reversedAmount: Number(payment.amount), reason: params.reason.trim(), reversalId, actorName: user.fullName } });
+      AuditService.recordEvent({ operationId, centerId, userId: user.id, deviceId, entityType: "payment", entityId: params.paymentId, action: "payment.reverse", payload: { studentId: payment.studentId, reversedAmount: Number(payment.amount), reason: params.reason.trim(), reversalId, paymentRequestObligationId: linkedObligation?.id || null, actorName: user.fullName } });
+      DatabaseService.notifyLocalChange({
+        centerId,
+        entityType: "payment",
+        entityId: params.paymentId,
+      });
     });
 
     // 6. Recalculate financial status to update cycle statuses dynamically

@@ -1857,7 +1857,8 @@ class SyncProcessor {
    * Processes a batch of sync operations inside a true ACID transaction.
    */
   static async processPush(centerId, userId, deviceId, operations) {
-    return db.withTransaction(async (client) => {
+    const pendingSmsDeliveryIds = [];
+    const txResult = await db.withTransaction(async (client) => {
       await SyncProcessor.acquireCenterSyncLock(client, centerId);
       const syncedOperationIds = [];
       const conflicts = [];
@@ -1867,6 +1868,7 @@ class SyncProcessor {
       const canonicalSessionIds = new Map();
       const sessionMappings = new Map();
       const canonicalDebtCycleIds = new Map();
+      const serviceStateCache = new Map();
       let maxServerSeq = 0;
 
       // Get current highest server sequence for the center
@@ -1876,7 +1878,28 @@ class SyncProcessor {
       );
       maxServerSeq = parseInt(currentSeqRes.rows[0].max_seq, 10);
 
-      for (const op of SyncProcessor.orderSyncOperations(operations)) {
+      const orderedOperations = SyncProcessor.orderSyncOperations(operations);
+      const batchOperationIds = Array.from(
+        new Set(
+          orderedOperations
+            .map((op) =>
+              op && op.operationId ? normalizeOperationId(op.operationId) : null,
+            )
+            .filter(Boolean),
+        ),
+      );
+      const existingOpsById = new Map();
+      if (batchOperationIds.length > 0) {
+        const existingOpsRes = await client.query(
+          "SELECT operation_id, server_seq, status, center_id FROM server_sync_operations WHERE operation_id = ANY($1::text[])",
+          [batchOperationIds],
+        );
+        for (const row of existingOpsRes.rows || []) {
+          existingOpsById.set(String(row.operation_id), row);
+        }
+      }
+
+      for (const op of orderedOperations) {
         const {
           operationId: rawOperationId,
           operationType,
@@ -1902,13 +1925,10 @@ class SyncProcessor {
         logGroupScheduleUpdate(operationLogContext, operationPhase);
 
         // 1. Check if operation was already processed (Database-level Idempotency)
-        const existingOp = await client.query(
-          "SELECT server_seq, status, center_id FROM server_sync_operations WHERE operation_id = $1",
-          [operationId],
-        );
+        const existingOpRow = existingOpsById.get(operationId);
 
-        if (existingOp.rows.length > 0) {
-          if (existingOp.rows[0].center_id !== centerId) {
+        if (existingOpRow) {
+          if (existingOpRow.center_id !== centerId) {
             conflicts.push({
               operationId: rawOperationId,
               entityType,
@@ -1946,9 +1966,11 @@ class SyncProcessor {
               sessionMappings.set(String(entityId), String(canonicalSessionId));
             }
           }
+          // Do NOT re-queue SMS dispatch for operations that were already applied.
+          // Re-dispatching an already-applied notification_delivery duplicates SMS messages.
           logGroupScheduleUpdate(operationLogContext, "already_applied");
           syncedOperationIds.push(rawOperationId);
-          const existingSeq = parseInt(existingOp.rows[0].server_seq, 10);
+          const existingSeq = parseInt(existingOpRow.server_seq, 10);
           if (existingSeq > maxServerSeq) {
             maxServerSeq = existingSeq;
           }
@@ -2044,6 +2066,7 @@ class SyncProcessor {
             entityId,
             payload: normalizedPayload,
             createdAt,
+            serviceStateCache,
           };
           await SyncProcessor.applyDomainMutation(client, mutationContext);
           if (canonicalSyncEntity(entityType) === "session") {
@@ -2257,6 +2280,17 @@ class SyncProcessor {
           );
 
           await client.query("RELEASE SAVEPOINT op_savepoint");
+          existingOpsById.set(operationId, {
+            operation_id: operationId,
+            server_seq: seq,
+            status: "applied",
+            center_id: centerId,
+          });
+          if (mutationContext.queuedSmsDeliveryId) {
+            pendingSmsDeliveryIds.push(
+              String(mutationContext.queuedSmsDeliveryId),
+            );
+          }
           logGroupScheduleUpdate(operationLogContext, "applied");
           syncedOperationIds.push(rawOperationId);
         } catch (opErr) {
@@ -2352,6 +2386,15 @@ class SyncProcessor {
         processedAt: new Date().toISOString(),
       };
     });
+
+    if (pendingSmsDeliveryIds.length > 0) {
+      await SyncProcessor.dispatchPendingSmsDeliveries(
+        centerId,
+        pendingSmsDeliveryIds,
+      );
+    }
+
+    return txResult;
   }
 
   /** Returns the authoritative row for conflict review without mutating it. */
@@ -4735,6 +4778,7 @@ class SyncProcessor {
            JOIN groups g ON g.center_id = gs.center_id AND g.id = gs.group_id
            WHERE gs.center_id = $1 AND gs.id <> $2 AND gs.day_of_week = $3
              AND g.teacher_id = $4
+             AND g.status = 'active'
              AND NOT ($5::varchar <= gs.start_time OR $6::varchar >= gs.end_time)
            LIMIT 1`,
           [
@@ -5499,7 +5543,7 @@ class SyncProcessor {
         const notificationEventId =
           delivery.notification_event_id || delivery.notificationEventId;
         const eventResult = await client.query(
-          `SELECT id, event_type, student_id, session_id
+          `SELECT id, event_type, student_id, session_id, recipient_phone
              FROM notification_events
             WHERE center_id = $1 AND id = $2
             FOR UPDATE`,
@@ -5518,12 +5562,154 @@ class SyncProcessor {
             studentId: notificationEvent.student_id,
           });
         }
+        const existingDeliveryRes = await client.query(
+          `SELECT id, center_id, status, retry_count, response_payload, provider_message_id
+             FROM notification_deliveries
+            WHERE id = $1
+            FOR UPDATE`,
+          [id],
+        );
+        const existingDelivery = existingDeliveryRes.rows?.[0] || null;
+        if (
+          existingDelivery &&
+          String(existingDelivery.center_id) !== String(centerId)
+        ) {
+          throw new Error(
+            "Notification delivery does not belong to the authenticated center.",
+          );
+        }
+        const existingPayloadObj = SyncProcessor.parseSmsResponsePayload(
+          existingDelivery?.response_payload,
+        );
+        if (
+          existingDelivery &&
+          (existingDelivery.status === "sent" ||
+            existingDelivery.status === "delivered" ||
+            existingDelivery.status === "failed" ||
+            existingPayloadObj.dispatchState === "ambiguous_outcome" ||
+            existingPayloadObj.dispatchState === "failed")
+        ) {
+          break;
+        }
+        const parsedResponsePayload = SyncProcessor.parseSmsResponsePayload(
+          delivery.response_payload || delivery.responsePayload,
+        );
+        if (channel === "sms") {
+          let smsEnabled;
+          if (
+            context.serviceStateCache instanceof Map &&
+            context.serviceStateCache.has("sms")
+          ) {
+            smsEnabled = context.serviceStateCache.get("sms");
+          } else {
+            const serviceState = await client.query(
+              "SELECT enabled FROM center_services WHERE center_id=$1 AND service_key='sms'",
+              [centerId],
+            );
+            smsEnabled =
+              !serviceState.rows[0] || serviceState.rows[0].enabled !== false;
+            if (context.serviceStateCache instanceof Map) {
+              context.serviceStateCache.set("sms", smsEnabled);
+            }
+          }
+          if (!smsEnabled || !zadxSmsProvider.isConfigured()) {
+            await client.query(
+              `INSERT INTO notification_deliveries
+               (id, center_id, notification_event_id, provider, status, retry_count, response_payload, created_at)
+               VALUES ($1,$2,$3,$4,'failed',$5,$6,NOW())
+               ON CONFLICT (id) DO UPDATE SET
+                 provider = EXCLUDED.provider,
+                 status = 'failed',
+                 retry_count = GREATEST(notification_deliveries.retry_count, EXCLUDED.retry_count),
+                 response_payload = EXCLUDED.response_payload
+               WHERE notification_deliveries.center_id = EXCLUDED.center_id`,
+              [
+                id,
+                centerId,
+                notificationEventId,
+                channel,
+                Number(delivery.retry_count || 0),
+                JSON.stringify({
+                  category: "sms_disabled",
+                  dispatchState: "failed",
+                  retryable: false,
+                  retry_count: Number(delivery.retry_count || 0),
+                  nextRetryAtMs: null,
+                }),
+              ],
+            );
+            break;
+          }
+          const recipient =
+            delivery.recipient ||
+            delivery.recipientPhone ||
+            existingPayloadObj.recipient ||
+            notificationEvent.recipient_phone ||
+            "";
+          const renderedMessage =
+            delivery.rendered_message ||
+            delivery.renderedMessage ||
+            existingPayloadObj.renderedMessage ||
+            "";
+          const preserveExistingDispatchState =
+            existingDelivery &&
+            existingDelivery.status === "queued" &&
+            (existingPayloadObj.dispatchState === "sending" ||
+              existingPayloadObj.dispatchState === "retry_scheduled");
+          const initialRetryCount = Number(
+            existingDelivery?.retry_count ?? delivery.retry_count ?? 0,
+          );
+          const pendingPayload = preserveExistingDispatchState
+            ? existingPayloadObj
+            : {
+                ...parsedResponsePayload,
+                dispatchState: "pending",
+                recipient,
+                renderedMessage,
+                operationId:
+                  operationId || existingPayloadObj.operationId || null,
+                retry_count: initialRetryCount,
+                nextRetryAtMs: null,
+              };
+          await client.query(
+            `INSERT INTO notification_deliveries
+             (id, center_id, notification_event_id, provider, status, retry_count, response_payload, created_at)
+             VALUES ($1,$2,$3,$4,'queued',$5,$6,NOW())
+             ON CONFLICT (id) DO UPDATE SET
+               provider = EXCLUDED.provider,
+               status = CASE
+                 WHEN notification_deliveries.status IN ('sent', 'delivered', 'failed') THEN notification_deliveries.status
+                 ELSE 'queued'
+               END,
+               retry_count = GREATEST(notification_deliveries.retry_count, EXCLUDED.retry_count),
+               response_payload = CASE
+                 WHEN notification_deliveries.status IN ('sent', 'delivered', 'failed') THEN notification_deliveries.response_payload
+                 WHEN notification_deliveries.status = 'queued'
+                  AND jsonb_typeof(notification_deliveries.response_payload) = 'object'
+                  AND (notification_deliveries.response_payload->>'dispatchState') IN ('sending', 'retry_scheduled', 'ambiguous_outcome', 'failed')
+                 THEN notification_deliveries.response_payload
+                 ELSE EXCLUDED.response_payload
+               END
+             WHERE notification_deliveries.center_id = EXCLUDED.center_id`,
+            [
+              id,
+              centerId,
+              notificationEventId,
+              channel,
+              initialRetryCount,
+              JSON.stringify(pendingPayload),
+            ],
+          );
+          context.queuedSmsDeliveryId = id;
+          break;
+        }
         await client.query(
           `INSERT INTO notification_deliveries
           (id, center_id, notification_event_id, provider, status, retry_count, response_payload, created_at)
           VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())
           ON CONFLICT (id) DO UPDATE SET provider=EXCLUDED.provider, status=EXCLUDED.status,
-            retry_count=EXCLUDED.retry_count, response_payload=EXCLUDED.response_payload`,
+            retry_count=EXCLUDED.retry_count, response_payload=EXCLUDED.response_payload
+          WHERE notification_deliveries.center_id = EXCLUDED.center_id`,
           [
             id,
             centerId,
@@ -5533,78 +5719,9 @@ class SyncProcessor {
               ? "queued"
               : delivery.status || "queued",
             Number(delivery.retry_count || 0),
-            JSON.stringify(
-              delivery.response_payload || delivery.responsePayload || {},
-            ),
+            JSON.stringify(parsedResponsePayload),
           ],
         );
-        if (channel === "sms") {
-          const serviceState = await client.query(
-            "SELECT enabled FROM center_services WHERE center_id=$1 AND service_key='sms'",
-            [centerId],
-          );
-          if (
-            (serviceState.rows[0] && serviceState.rows[0].enabled === false) ||
-            !zadxSmsProvider.isConfigured()
-          ) {
-            await client.query(
-              `UPDATE notification_deliveries SET status='failed', response_payload=$1 WHERE id=$2 AND center_id=$3`,
-              [JSON.stringify({ category: "sms_disabled" }), id, centerId],
-            );
-            break;
-          }
-          try {
-            const result = await zadxSmsProvider.send({
-              to: delivery.recipient || delivery.recipientPhone,
-              message:
-                delivery.rendered_message || delivery.renderedMessage || "",
-              idempotencyKey: `fixion-sms-${id}`,
-            });
-            await client.query(
-              `UPDATE notification_deliveries
-              SET status='sent', provider_message_id=$1, response_payload=$2
-              WHERE id=$3 AND center_id=$4`,
-              [
-                result.providerMessageId,
-                JSON.stringify({
-                  httpStatus: result.httpStatus,
-                  providerMessageId: result.providerMessageId,
-                }),
-                id,
-                centerId,
-              ],
-            );
-            console.info("SMS delivery accepted", {
-              deliveryId: id,
-              centerId,
-              provider: "zadx",
-              httpStatus: result.httpStatus,
-              providerMessageId: result.providerMessageId || null,
-            });
-          } catch (error) {
-            await client.query(
-              `UPDATE notification_deliveries
-              SET status='failed', retry_count=retry_count+1, response_payload=$1
-              WHERE id=$2 AND center_id=$3`,
-              [
-                JSON.stringify({
-                  category: error.category || "provider_error",
-                  httpStatus: error.httpStatus || null,
-                  retryable: Boolean(error.retryable),
-                }),
-                id,
-                centerId,
-              ],
-            );
-            console.warn("SMS delivery failed", {
-              deliveryId: id,
-              centerId,
-              provider: "zadx",
-              category: error.category || "provider_error",
-              httpStatus: error.httpStatus || null,
-            });
-          }
-        }
         break;
       }
 
@@ -5650,6 +5767,573 @@ class SyncProcessor {
       default:
         throw new Error(`Unsupported sync entity type: ${entityType}`);
     }
+  }
+
+  static SMS_RETRY_DELAYS_MS = [
+    30 * 1000,       // 30 seconds
+    2 * 60 * 1000,   // 2 minutes
+    5 * 60 * 1000,   // 5 minutes
+    15 * 60 * 1000,  // 15 minutes
+    30 * 60 * 1000,  // 30 minutes
+  ];
+
+  static MAX_SMS_RETRIES = 5;
+
+  static SMS_SENDING_TIMEOUT_MS = 5 * 60 * 1000;
+
+  static parseSmsResponsePayload(raw) {
+    if (!raw) return {};
+    if (typeof raw === "string") {
+      try {
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+          ? parsed
+          : {};
+      } catch {
+        return {};
+      }
+    }
+    return typeof raw === "object" && !Array.isArray(raw) ? { ...raw } : {};
+  }
+
+  /**
+   * Transitions expired 'sending' SMS rows to 'failed' with dispatchState='ambiguous_outcome'
+   * and category='interrupted_during_send' without ever re-sending them to ZADX.
+   */
+  static async expireStaleSendingSmsDeliveries(centerId, nowMs, staleCutoffMs) {
+    try {
+      const expiredRes = await db.query(
+        `UPDATE notification_deliveries
+            SET status = 'failed',
+                response_payload = (
+                  CASE WHEN jsonb_typeof(response_payload) = 'object' THEN response_payload ELSE '{}'::jsonb END
+                ) || jsonb_build_object(
+                  'dispatchState', 'ambiguous_outcome',
+                  'category', 'interrupted_during_send',
+                  'retryable', false,
+                  'nextRetryAtMs', NULL,
+                  'ambiguousAtMs', $1::bigint
+                )
+          WHERE provider = 'sms'
+            AND status = 'queued'
+            AND ($2::varchar IS NULL OR center_id = $2)
+            AND (CASE WHEN jsonb_typeof(response_payload) = 'object' THEN response_payload->>'dispatchState' ELSE NULL END) = 'sending'
+            AND (
+              CASE
+                WHEN jsonb_typeof(response_payload) = 'object' AND (response_payload->>'claimAtMs') ~ '^[0-9]+$'
+                THEN (response_payload->>'claimAtMs')::bigint
+                ELSE 0
+              END
+            ) <= $3::bigint
+         RETURNING id, center_id, notification_event_id, provider, status, retry_count, response_payload, provider_message_id`,
+        [nowMs, centerId || null, staleCutoffMs],
+      );
+      const expiredRows = expiredRes.rows || [];
+      for (const row of expiredRows) {
+        await db.query(
+          `UPDATE server_sync_operations
+              SET payload = $1, applied_at = NOW()
+            WHERE center_id = $2
+              AND entity_type = 'notification_delivery'
+              AND entity_id = $3`,
+          [
+            JSON.stringify({
+              delivery: {
+                id: row.id,
+                notification_event_id: row.notification_event_id,
+                provider: row.provider || "sms",
+                status: "failed",
+                retry_count: Number(row.retry_count || 0),
+                provider_message_id: row.provider_message_id || null,
+              },
+            }),
+            row.center_id,
+            row.id,
+          ],
+        );
+      }
+      return expiredRows.length;
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  /**
+   * Atomically updates a claimed SMS delivery row only if id, center_id,
+   * status='queued', and the active claimToken all match. Prevents stale
+   * workers from overwriting a newer claim.
+   */
+  static async finalizeClaimedSmsDelivery({
+    id,
+    centerId,
+    claimToken,
+    status,
+    retryCount,
+    providerMessageId = null,
+    responsePayload,
+  }) {
+    const updateRes = await db.query(
+      `UPDATE notification_deliveries
+          SET status = $1,
+              retry_count = $2,
+              provider_message_id = COALESCE($3, provider_message_id),
+              response_payload = $4::jsonb
+        WHERE id = $5
+          AND center_id = $6
+          AND status = 'queued'
+          AND (CASE WHEN jsonb_typeof(response_payload) = 'object' THEN response_payload->>'claimToken' ELSE NULL END) = $7
+       RETURNING id, center_id, notification_event_id, provider, status, retry_count, response_payload, provider_message_id`,
+      [
+        status,
+        Number(retryCount || 0),
+        providerMessageId,
+        JSON.stringify(responsePayload || {}),
+        id,
+        centerId,
+        claimToken,
+      ],
+    );
+    const updatedRow = updateRes.rows?.[0] || null;
+    if (!updatedRow) {
+      return null;
+    }
+    await db.query(
+      `UPDATE server_sync_operations
+          SET payload = $1, applied_at = NOW()
+        WHERE center_id = $2
+          AND entity_type = 'notification_delivery'
+          AND entity_id = $3`,
+      [
+        JSON.stringify({
+          delivery: {
+            id: updatedRow.id,
+            notification_event_id: updatedRow.notification_event_id,
+            provider: updatedRow.provider || "sms",
+            status: updatedRow.status,
+            retry_count: Number(updatedRow.retry_count || 0),
+            provider_message_id: updatedRow.provider_message_id || null,
+          },
+        }),
+        centerId,
+        id,
+      ],
+    );
+    return updatedRow;
+  }
+
+  /**
+   * Dispatches durable pending SMS deliveries outside the database transaction
+   * and after the center sync lock has been released. Uses atomic database row
+   * claiming with a unique claimToken on notification_deliveries.
+   */
+  static async dispatchPendingSmsDeliveries(
+    centerId,
+    deliveryIds = [],
+    options = {},
+  ) {
+    if (!centerId) {
+      return { sent: 0, failed: 0, rescheduled: 0, ambiguous: 0, skipped: 0 };
+    }
+    const nowMs = Number.isFinite(options?.nowMs)
+      ? Number(options.nowMs)
+      : Date.now();
+    const staleCutoffMs = nowMs - SyncProcessor.SMS_SENDING_TIMEOUT_MS;
+
+    let ambiguous = 0;
+    if (!options?.skipExpireCheck) {
+      ambiguous += await SyncProcessor.expireStaleSendingSmsDeliveries(
+        centerId,
+        nowMs,
+        staleCutoffMs,
+      );
+    }
+
+    const candidateIds = new Set(
+      (Array.isArray(deliveryIds) ? deliveryIds : [])
+        .map((id) => String(id || "").trim())
+        .filter(Boolean),
+    );
+    if (!options?.onlyExplicitIds) {
+      try {
+        const recoverableRes = await db.query(
+          `SELECT id
+             FROM notification_deliveries
+            WHERE center_id = $1
+              AND provider = 'sms'
+              AND status = 'queued'
+              AND (
+                COALESCE(
+                  CASE WHEN jsonb_typeof(response_payload) = 'object' THEN response_payload->>'dispatchState' ELSE NULL END,
+                  'pending'
+                ) = 'pending'
+                OR (
+                  (CASE WHEN jsonb_typeof(response_payload) = 'object' THEN response_payload->>'dispatchState' ELSE NULL END) = 'retry_scheduled'
+                  AND (
+                    CASE
+                      WHEN jsonb_typeof(response_payload) = 'object' AND (response_payload->>'nextRetryAtMs') ~ '^[0-9]+$'
+                      THEN (response_payload->>'nextRetryAtMs')::bigint
+                      ELSE 0
+                    END
+                  ) <= $2::bigint
+                )
+              )
+            ORDER BY created_at ASC, id ASC`,
+          [centerId, nowMs],
+        );
+        for (const row of recoverableRes.rows || []) {
+          if (row && row.id) candidateIds.add(String(row.id));
+        }
+      } catch (_) {
+        // Fall back to explicit deliveryIds if recovery lookup is unavailable.
+      }
+    }
+
+    let sent = 0;
+    let failed = 0;
+    let rescheduled = 0;
+    let skipped = 0;
+
+    for (const id of candidateIds) {
+      const claimAtMs = Number.isFinite(options?.nowMs)
+        ? Number(options.nowMs)
+        : Date.now();
+      const claimToken =
+        typeof options?.claimToken === "string" && options.claimToken
+          ? options.claimToken
+          : `claim-${claimAtMs}-${crypto.randomBytes(6).toString("hex")}`;
+
+      const claimRes = await db.query(
+        `UPDATE notification_deliveries
+            SET response_payload = (
+                  CASE WHEN jsonb_typeof(response_payload) = 'object' THEN response_payload ELSE '{}'::jsonb END
+                ) || jsonb_build_object(
+                  'dispatchState', 'sending',
+                  'claimToken', $3::text,
+                  'claimAtMs', $4::bigint
+                )
+          WHERE center_id = $1
+            AND id = $2
+            AND provider = 'sms'
+            AND status = 'queued'
+            AND (
+              COALESCE(
+                CASE WHEN jsonb_typeof(response_payload) = 'object' THEN response_payload->>'dispatchState' ELSE NULL END,
+                'pending'
+              ) = 'pending'
+              OR (
+                (CASE WHEN jsonb_typeof(response_payload) = 'object' THEN response_payload->>'dispatchState' ELSE NULL END) = 'retry_scheduled'
+                AND (
+                  CASE
+                    WHEN jsonb_typeof(response_payload) = 'object' AND (response_payload->>'nextRetryAtMs') ~ '^[0-9]+$'
+                    THEN (response_payload->>'nextRetryAtMs')::bigint
+                    ELSE 0
+                  END
+                ) <= $4::bigint
+              )
+            )
+         RETURNING id, center_id, notification_event_id, provider, status, retry_count, response_payload, provider_message_id`,
+        [centerId, id, claimToken, claimAtMs],
+      );
+      const claimed = claimRes.rows && claimRes.rows[0];
+      if (!claimed) {
+        skipped += 1;
+        continue;
+      }
+
+      const payloadObj = SyncProcessor.parseSmsResponsePayload(
+        claimed.response_payload,
+      );
+      const currentRetryCount = Number(
+        claimed.retry_count ?? payloadObj.retry_count ?? 0,
+      );
+
+      let recipient = payloadObj.recipient || payloadObj.recipientPhone || "";
+      const renderedMessage =
+        payloadObj.renderedMessage || payloadObj.rendered_message || "";
+      if (!recipient && claimed.notification_event_id) {
+        const evRes = await db.query(
+          "SELECT recipient_phone FROM notification_events WHERE center_id = $1 AND id = $2",
+          [centerId, claimed.notification_event_id],
+        );
+        recipient = evRes.rows?.[0]?.recipient_phone || "";
+      }
+
+      const serviceState = await db.query(
+        "SELECT enabled FROM center_services WHERE center_id = $1 AND service_key = 'sms'",
+        [centerId],
+      );
+      if (
+        (serviceState.rows?.[0] && serviceState.rows[0].enabled === false) ||
+        !zadxSmsProvider.isConfigured()
+      ) {
+        const finalized = await SyncProcessor.finalizeClaimedSmsDelivery({
+          id,
+          centerId,
+          claimToken,
+          status: "failed",
+          retryCount: currentRetryCount,
+          providerMessageId: null,
+          responsePayload: {
+            ...payloadObj,
+            category: "sms_disabled",
+            retryable: false,
+            dispatchState: "failed",
+            claimToken,
+            claimAtMs,
+            retry_count: currentRetryCount,
+            nextRetryAtMs: null,
+            recipient,
+            renderedMessage,
+            operationId: payloadObj.operationId || null,
+          },
+        });
+        if (finalized) {
+          failed += 1;
+        } else {
+          skipped += 1;
+        }
+        continue;
+      }
+
+      try {
+        const result = await zadxSmsProvider.send({
+          to: recipient,
+          message: renderedMessage,
+          idempotencyKey: `fixion-sms-${id}`,
+        });
+        const finalized = await SyncProcessor.finalizeClaimedSmsDelivery({
+          id,
+          centerId,
+          claimToken,
+          status: "sent",
+          retryCount: currentRetryCount,
+          providerMessageId: result.providerMessageId || null,
+          responsePayload: {
+            ...payloadObj,
+            httpStatus: result.httpStatus,
+            providerMessageId: result.providerMessageId || null,
+            dispatchState: "sent",
+            claimToken,
+            claimAtMs,
+            retry_count: currentRetryCount,
+            nextRetryAtMs: null,
+          },
+        });
+        if (!finalized) {
+          skipped += 1;
+          continue;
+        }
+        sent += 1;
+        console.info("SMS delivery accepted", {
+          deliveryId: id,
+          centerId,
+          provider: "zadx",
+          httpStatus: result.httpStatus,
+          providerMessageId: result.providerMessageId || null,
+        });
+      } catch (error) {
+        const isAmbiguous =
+          Boolean(error?.ambiguous) ||
+          error?.category === "timeout_ambiguous" ||
+          error?.category === "network_failure_ambiguous";
+        const isConfirmedRetryable =
+          !isAmbiguous && Boolean(error?.retryable);
+        const nextRetryCount = currentRetryCount + 1;
+
+        if (isAmbiguous) {
+          const finalized = await SyncProcessor.finalizeClaimedSmsDelivery({
+            id,
+            centerId,
+            claimToken,
+            status: "failed",
+            retryCount: nextRetryCount,
+            providerMessageId: error?.providerMessageId || null,
+            responsePayload: {
+              ...payloadObj,
+              category: error?.category || "timeout_ambiguous",
+              httpStatus: error?.httpStatus || null,
+              retryable: false,
+              dispatchState: "ambiguous_outcome",
+              claimToken,
+              claimAtMs,
+              retry_count: nextRetryCount,
+              nextRetryAtMs: null,
+              recipient,
+              renderedMessage,
+              operationId: payloadObj.operationId || null,
+            },
+          });
+          if (finalized) {
+            ambiguous += 1;
+            failed += 1;
+          } else {
+            skipped += 1;
+          }
+        } else if (
+          isConfirmedRetryable &&
+          currentRetryCount < SyncProcessor.MAX_SMS_RETRIES
+        ) {
+          const delayMs =
+            SyncProcessor.SMS_RETRY_DELAYS_MS[currentRetryCount] ||
+            SyncProcessor.SMS_RETRY_DELAYS_MS[
+              SyncProcessor.SMS_RETRY_DELAYS_MS.length - 1
+            ];
+          const baseTimeMs = Number.isFinite(options?.nowMs)
+            ? Number(options.nowMs)
+            : Date.now();
+          const nextRetryAtMs = baseTimeMs + delayMs;
+          const finalized = await SyncProcessor.finalizeClaimedSmsDelivery({
+            id,
+            centerId,
+            claimToken,
+            status: "queued",
+            retryCount: nextRetryCount,
+            providerMessageId: null,
+            responsePayload: {
+              ...payloadObj,
+              category: error?.category || "service_unavailable",
+              httpStatus: error?.httpStatus || null,
+              retryable: true,
+              dispatchState: "retry_scheduled",
+              claimToken,
+              claimAtMs,
+              retry_count: nextRetryCount,
+              nextRetryAtMs,
+              recipient,
+              renderedMessage,
+              operationId: payloadObj.operationId || null,
+            },
+          });
+          if (finalized) {
+            rescheduled += 1;
+          } else {
+            skipped += 1;
+          }
+        } else {
+          const finalized = await SyncProcessor.finalizeClaimedSmsDelivery({
+            id,
+            centerId,
+            claimToken,
+            status: "failed",
+            retryCount: nextRetryCount,
+            providerMessageId: error?.providerMessageId || null,
+            responsePayload: {
+              ...payloadObj,
+              category: error?.category || "provider_error",
+              httpStatus: error?.httpStatus || null,
+              retryable: false,
+              retryExhausted: Boolean(
+                isConfirmedRetryable &&
+                  currentRetryCount >= SyncProcessor.MAX_SMS_RETRIES,
+              ),
+              dispatchState: "failed",
+              claimToken,
+              claimAtMs,
+              retry_count: nextRetryCount,
+              nextRetryAtMs: null,
+              recipient,
+              renderedMessage,
+              operationId: payloadObj.operationId || null,
+            },
+          });
+          if (finalized) {
+            failed += 1;
+          } else {
+            skipped += 1;
+          }
+        }
+        console.warn("SMS delivery failed", {
+          deliveryId: id,
+          centerId,
+          provider: "zadx",
+          category: error?.category || "provider_error",
+          httpStatus: error?.httpStatus || null,
+        });
+      }
+    }
+
+    return { sent, failed, rescheduled, ambiguous, skipped };
+  }
+
+  /**
+   * Sweeps due SMS deliveries ('pending' and due 'retry_scheduled') fairly across
+   * centers outside any database transaction, while transitioning expired 'sending'
+   * rows to 'ambiguous_outcome' without re-sending.
+   */
+  static async sweepPendingSmsDeliveries(limit = 10, options = {}) {
+    const safeLimit = Math.max(1, Math.min(Number(limit) || 10, 50));
+    const nowMs = Number.isFinite(options?.nowMs)
+      ? Number(options.nowMs)
+      : Date.now();
+    const staleCutoffMs = nowMs - SyncProcessor.SMS_SENDING_TIMEOUT_MS;
+
+    const expiredCount = await SyncProcessor.expireStaleSendingSmsDeliveries(
+      null,
+      nowMs,
+      staleCutoffMs,
+    );
+
+    const dueRes = await db.query(
+      `WITH eligible AS (
+         SELECT id,
+                center_id,
+                created_at,
+                ROW_NUMBER() OVER (
+                  PARTITION BY center_id
+                  ORDER BY created_at ASC, id ASC
+                ) AS center_rank
+           FROM notification_deliveries
+          WHERE provider = 'sms'
+            AND status = 'queued'
+            AND (
+              COALESCE(
+                CASE WHEN jsonb_typeof(response_payload) = 'object' THEN response_payload->>'dispatchState' ELSE NULL END,
+                'pending'
+              ) = 'pending'
+              OR (
+                (CASE WHEN jsonb_typeof(response_payload) = 'object' THEN response_payload->>'dispatchState' ELSE NULL END) = 'retry_scheduled'
+                AND (
+                  CASE
+                    WHEN jsonb_typeof(response_payload) = 'object' AND (response_payload->>'nextRetryAtMs') ~ '^[0-9]+$'
+                    THEN (response_payload->>'nextRetryAtMs')::bigint
+                    ELSE 0
+                  END
+                ) <= $1::bigint
+              )
+            )
+       )
+       SELECT id, center_id
+         FROM eligible
+        ORDER BY center_rank ASC, created_at ASC, id ASC
+        LIMIT $2`,
+      [nowMs, safeLimit],
+    );
+
+    let sent = 0;
+    let failed = 0;
+    let rescheduled = 0;
+    let ambiguous = expiredCount;
+    let skipped = 0;
+
+    for (const row of dueRes.rows || []) {
+      if (!row?.id || !row?.center_id) continue;
+      const res = await SyncProcessor.dispatchPendingSmsDeliveries(
+        String(row.center_id),
+        [String(row.id)],
+        {
+          nowMs,
+          onlyExplicitIds: true,
+          skipExpireCheck: true,
+        },
+      );
+      sent += res.sent || 0;
+      failed += res.failed || 0;
+      rescheduled += res.rescheduled || 0;
+      ambiguous += res.ambiguous || 0;
+      skipped += res.skipped || 0;
+    }
+
+    return { sent, failed, rescheduled, ambiguous, skipped };
   }
 }
 

@@ -12,12 +12,14 @@ import { NotificationService } from "../../features/notifications/NotificationSe
 import { getStudentColorPresentation } from "../../features/students/studentColor";
 import { Group, Student } from "../../shared/types";
 import { smartSearch } from "../../shared/utils/smartSearch";
+import { LocalDataEvents } from "../../core/database/localDataEvents";
 import { useLocalDataRevision } from "../../core/database/useLocalDataRevision";
 
 export default function GradesScreen() {
   const localDataRevision = useLocalDataRevision();
   const lastLoadedRevisionRef = useRef(localDataRevision);
   const hasInitialLoadedRef = useRef(false);
+  const isFocusedRef = useRef(true);
   const { colors } = useTheme();
   const { groupId } = useLocalSearchParams<{ groupId?: string }>();
   const styles = useMemo(() => createStyles(), [colors]);
@@ -83,15 +85,21 @@ export default function GradesScreen() {
 
   useFocusEffect(
     useCallback(() => {
-      if (!hasInitialLoadedRef.current || lastLoadedRevisionRef.current !== localDataRevision) {
+      isFocusedRef.current = true;
+      const currentRevision = LocalDataEvents.getRevision();
+      if (!hasInitialLoadedRef.current || lastLoadedRevisionRef.current !== currentRevision) {
         hasInitialLoadedRef.current = true;
-        lastLoadedRevisionRef.current = localDataRevision;
+        lastLoadedRevisionRef.current = currentRevision;
         load();
       }
-    }, [load, localDataRevision]),
+      return () => {
+        isFocusedRef.current = false;
+      };
+    }, [load]),
   );
 
   useEffect(() => {
+    if (!isFocusedRef.current) return;
     if (localDataRevision > 0 && lastLoadedRevisionRef.current !== localDataRevision) {
       lastLoadedRevisionRef.current = localDataRevision;
       load();

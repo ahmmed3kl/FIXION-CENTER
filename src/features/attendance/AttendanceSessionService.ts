@@ -33,6 +33,7 @@ export interface AttendanceSummary {
 
 export interface MakeupEligibility {
   eligible: boolean;
+  alreadyRegistered?: boolean;
   sourceGroupId?: string;
   sourceGroupName?: string;
   teacherName?: string;
@@ -75,11 +76,19 @@ export class AttendanceSessionService {
       return { eligible: false };
     }
     const hostAttendance = db.getFirstSync<any>(
-      `SELECT status, attendance_type as attendanceType FROM attendance
+      `SELECT status, attendance_type as attendanceType, original_absence_id as originalAbsenceId FROM attendance
        WHERE center_id = ? AND session_id = ? AND student_id = ?`,
       [activeCenterId, sessionId, studentId],
     );
     if (hostAttendance && (hostAttendance.status === "present" || hostAttendance.status === "late")) {
+      if (hostAttendance.attendanceType === "makeup") {
+        return {
+          eligible: false,
+          alreadyRegistered: true,
+          teacherName: session.teacherName,
+          originalAbsenceId: hostAttendance.originalAbsenceId || undefined,
+        };
+      }
       return { eligible: false };
     }
     const source = db.getFirstSync<any>(

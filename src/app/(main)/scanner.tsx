@@ -3,6 +3,7 @@ import { router, useFocusEffect, useLocalSearchParams } from "expo-router";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
     Alert,
+    FlatList,
     Modal,
     ScrollView,
     StyleSheet,
@@ -15,6 +16,7 @@ import {
   DuplicateAttendanceError,
   getUserErrorMessage,
 } from "../../core/errors";
+import { LocalDataEvents } from "../../core/database/localDataEvents";
 import { useLocalDataRevision } from "../../core/database/useLocalDataRevision";
 import { PermissionService } from "../../core/permissions";
 import {
@@ -114,8 +116,11 @@ function ScannerContent() {
   const canManageStudentNotes = PermissionService.hasPermission(currentUser?.permissions || [], "students.update");
   const activeCenterId = useAuthStore((state) => state.activeCenterId);
   const localDataRevision = useLocalDataRevision();
+  const homeworkDataRevision = useLocalDataRevision(["session_homework_evaluation", "homework_status"]);
+  const studentNoteRevision = useLocalDataRevision("student_note");
   const lastLoadedRevisionRef = useRef(localDataRevision);
   const hasInitialLoadedRef = useRef(false);
+  const isFocusedRef = useRef(true);
   const { attendanceSessionId, addedStudentId } = useLocalSearchParams<{ attendanceSessionId?: string; addedStudentId?: string }>();
   const [isCameraActive, setIsCameraActive] = useState(false);
   const [manualCode, setManualCode] = useState("00125");
@@ -228,7 +233,8 @@ function ScannerContent() {
     });
   }, []);
 
-  const refreshTodayData = useCallback(() => {
+  const refreshTodayData = useCallback((options?: { includeDirectory?: boolean }) => {
+    const includeDirectory = options?.includeDirectory ?? true;
     try {
       const sessionDate = AttendanceSessionService.getCurrentSessionDate();
       setTodaySessionDate(sessionDate);
@@ -243,6 +249,7 @@ function ScannerContent() {
       setSessionActivationTimes(new Map());
       setSearchError(getUserErrorMessage(error));
     }
+    if (!includeDirectory) return;
     try {
       try {
         setAllGroups(GroupRepository.getAll());
@@ -282,7 +289,7 @@ function ScannerContent() {
       setHomeworkEvaluation(null);
       setHomeworkError(getUserErrorMessage(error));
     }
-  }, [student?.id, activeSessionId, selectedSessionId, localDataRevision]);
+  }, [student?.id, activeSessionId, selectedSessionId, homeworkDataRevision]);
 
   useEffect(() => {
     if (!student) {
@@ -295,7 +302,7 @@ function ScannerContent() {
       console.warn("Failed to load student notes in attendance.", error);
       setAttendanceNotes([]);
     }
-  }, [student?.id, localDataRevision]);
+  }, [student?.id, studentNoteRevision]);
 
   const saveHomeworkEvaluation = (statusId: string | null) => {
     const sessionId = activeSessionId || selectedSessionId;
@@ -329,18 +336,45 @@ function ScannerContent() {
   // Refresh when the screen becomes active. Deduplication ensures we don't
   // double-load when focus and revision fire at the same time.
   useFocusEffect(useCallback(() => {
-    hasInitialLoadedRef.current = true;
-    lastLoadedRevisionRef.current = localDataRevision;
-    refreshTodayData();
-    refreshDisplayedStudents();
-  }, [refreshTodayData, refreshDisplayedStudents, localDataRevision]));
+    isFocusedRef.current = true;
+    const currentRevision = LocalDataEvents.getRevision();
+    if (!hasInitialLoadedRef.current || lastLoadedRevisionRef.current !== currentRevision) {
+      hasInitialLoadedRef.current = true;
+      lastLoadedRevisionRef.current = currentRevision;
+      refreshTodayData({ includeDirectory: true });
+      refreshDisplayedStudents();
+    }
+    return () => {
+      isFocusedRef.current = false;
+    };
+  }, [refreshTodayData, refreshDisplayedStudents]));
 
   // React to local data changes (attendance recorded on another screen, sync, etc.)
   useEffect(() => {
+    if (!isFocusedRef.current) return;
     if (localDataRevision > 0 && lastLoadedRevisionRef.current !== localDataRevision) {
       lastLoadedRevisionRef.current = localDataRevision;
-      refreshTodayData();
-      refreshDisplayedStudents();
+      const lastChange = LocalDataEvents.getLastChange();
+      const entityTypes = lastChange?.entityTypes?.length
+        ? lastChange.entityTypes
+        : lastChange?.entityType
+          ? [lastChange.entityType]
+          : [];
+      const NON_DIRECTORY_ENTITIES = new Set([
+        "attendance",
+        "payment",
+        "debt_cycle",
+        "advance_coverage",
+        "student_note",
+        "session_homework_evaluation",
+      ]);
+      const isNonDirectoryOnly =
+        entityTypes.length > 0 &&
+        entityTypes.every((type) => NON_DIRECTORY_ENTITIES.has(type));
+      refreshTodayData({ includeDirectory: !isNonDirectoryOnly });
+      if (!isNonDirectoryOnly) {
+        refreshDisplayedStudents();
+      }
     }
   }, [localDataRevision, refreshTodayData, refreshDisplayedStudents]);
 
@@ -621,14 +655,20 @@ function ScannerContent() {
           .filter(Boolean)
           .join(" • "),
       );
-      if (currentGroupId) {
-        setGroupAttendanceSummary(
-          AttendanceRepository.getStudentGroupAttendanceSummaries(foundStudent.id)
-            .find((summary) => summary.groupId === currentGroupId) || null,
-        );
-      } else {
-        setGroupAttendanceSummary(null);
-      }
+
+      const existingSessionAttendance = AttendanceRepository.getStudentAttendanceInSession(
+        activeSessionId,
+        foundStudent.id,
+      );
+      const alreadyAttendedInSession = Boolean(
+        existingSessionAttendance &&
+        !AttendanceRepository.isSessionStartAbsenceRecord(existingSessionAttendance),
+      );
+      const alreadyRegisteredAsMakeup = Boolean(
+        alreadyAttendedInSession &&
+        (existingSessionAttendance?.status === "present" || existingSessionAttendance?.status === "late") &&
+        existingSessionAttendance?.attendanceType === "makeup",
+      );
 
       const expected = AttendanceSessionService.isExpected(activeSessionId, foundStudent.id);
       console.log("[Scanner] Student expected in session?", expected);
@@ -637,17 +677,21 @@ function ScannerContent() {
         ? { eligible: false }
         : (() => {
             const strict = MakeupService.getEligibilityForSession(activeSessionId, foundStudent.id);
-            return strict.eligible
+            return strict.eligible || strict.alreadyRegistered
               ? strict
               : AttendanceSessionService.getMakeupEligibility(activeSessionId, foundStudent.id);
           })();
+      const isMakeupDuplicate = Boolean(
+        alreadyRegisteredAsMakeup || makeupEligibility.alreadyRegistered,
+      );
 
       const makeupAbsenceId = makeupEligibility.eligible
         ? makeupEligibility.originalAbsenceId?.trim()
-        : undefined;
-      if (!expected && !makeupEligibility.eligible) {
+        : existingSessionAttendance?.originalAbsenceId?.trim();
+      if (!expected && !makeupEligibility.eligible && !isMakeupDuplicate && !alreadyAttendedInSession) {
         setStudent(null);
         setMakeupNotice(null);
+        setGroupAttendanceSummary(null);
         const errMsg = "الطالب غير مسجل في هذه المجموعة وغير مؤهل للتعويض في هذه الجلسة.";
         setSearchError(errMsg);
         setIsProcessing(false);
@@ -657,10 +701,10 @@ function ScannerContent() {
 
       setIsExternalAttendance(false);
 
-      if (makeupEligibility.eligible) {
+      if (makeupEligibility.eligible || isMakeupDuplicate) {
         setMakeupNotice({
           sourceGroupName: makeupEligibility.sourceGroupName,
-          teacherName: makeupEligibility.teacherName,
+          teacherName: makeupEligibility.teacherName || currentSession?.teacherName,
           originalAbsenceId: makeupAbsenceId,
         });
       } else {
@@ -668,9 +712,14 @@ function ScannerContent() {
       }
 
       // Load eligible sessions; a same-teacher makeup uses the current session.
-      const sessions = (expected ? ScannerService.getEligibleSessionsForStudent(foundStudent.id) : [SessionRepository.findById(activeSessionId)].filter(Boolean) as Session[]).filter((session) => session.id === activeSessionId);
+      const sessions = (
+        expected
+          ? ScannerService.getEligibleSessionsForStudent(foundStudent.id)
+          : (currentSession ? [currentSession] : [])
+      ).filter((session) => session.id === activeSessionId);
       setEligibleSessions(sessions);
 
+      let recordedDuringLookup = false;
       if (sessions.length === 1) {
         setSelectedSessionId(sessions[0].id);
         const attended = AttendanceRepository.isAlreadyAttended(
@@ -678,34 +727,52 @@ function ScannerContent() {
           foundStudent.id,
         );
         setIsAlreadyAttended(attended);
+        if (isMakeupDuplicate) {
+          Alert.alert("تم تحضير الطالب مسبقًا", Strings.duplicateMakeupScanWarning);
+        }
         await recordScannedAttendanceIfEligible({
           isBarcodeScan,
           isExpectedInSession: expected,
           isMakeupEligible: makeupEligibility.eligible,
           isAlreadyAttended: attended,
           isSessionOpen: sessions[0].status === "open",
-        }, () => recordAttendanceFor(foundStudent, sessions[0]));
+        }, async () => {
+          recordedDuringLookup = await recordAttendanceFor(foundStudent, sessions[0]);
+        });
       } else if (sessions.length > 1) {
         setSelectedSessionId(null);
         setIsAlreadyAttended(false);
       }
 
-      // Load financial status calculated dynamically
-      if (paymentsEnabled && canViewPayments) {
-        const fin = FinancialCalculationService.getStudentFinancialStatus(foundStudent.id);
-        setFinancialStatus(fin);
-        const attendanceGroupId = sessions[0]?.groupId || selectedGroupId;
-        setAttendanceGroupFinancialStatus(
-          attendanceGroupId
-            ? FinancialCalculationService.getStudentFinancialStatusForGroup(
-                foundStudent.id,
-                attendanceGroupId,
-              )
-            : fin,
-        );
-      } else {
-        setFinancialStatus(null);
-        setAttendanceGroupFinancialStatus(null);
+      if (!recordedDuringLookup) {
+        if (currentGroupId) {
+          setGroupAttendanceSummary(
+            AttendanceRepository.getStudentGroupAttendanceSummaries(foundStudent.id)
+              .find((summary) => summary.groupId === currentGroupId) || null,
+          );
+        } else {
+          setGroupAttendanceSummary(null);
+        }
+
+        // Load financial status calculated dynamically (single full computation)
+        if (paymentsEnabled && canViewPayments) {
+          const fin = FinancialCalculationService.getStudentFinancialStatus(foundStudent.id);
+          setFinancialStatus(fin);
+          const attendanceGroupId = sessions[0]?.groupId || selectedGroupId;
+          setAttendanceGroupFinancialStatus(
+            attendanceGroupId
+              ? FinancialCalculationService.getStudentFinancialStatusForGroup(
+                  foundStudent.id,
+                  attendanceGroupId,
+                  undefined,
+                  fin,
+                )
+              : fin,
+          );
+        } else {
+          setFinancialStatus(null);
+          setAttendanceGroupFinancialStatus(null);
+        }
       }
     } catch (err) {
       setSearchError(getUserErrorMessage(err));
@@ -821,8 +888,13 @@ function ScannerContent() {
     });
   };
 
-  const recordAttendanceFor = async (targetStudent: Student, session: Session, makeup?: typeof makeupNotice, isExternal = false) => {
-    if (attendanceSubmissionRef.current) return;
+  const recordAttendanceFor = async (
+    targetStudent: Student,
+    session: Session,
+    makeup?: typeof makeupNotice,
+    isExternal = false,
+  ): Promise<boolean> => {
+    if (attendanceSubmissionRef.current) return false;
     attendanceSubmissionRef.current = true;
     setIsProcessing(true);
 
@@ -857,21 +929,29 @@ function ScannerContent() {
       setAttendanceResult(result);
       setIsAlreadyAttended(true);
       setAttendanceSummary(AttendanceSessionService.getSummary(session.id));
-      try {
-        setFinancialStatus(FinancialCalculationService.getStudentFinancialStatus(targetStudent.id));
-        setAttendanceGroupFinancialStatus(
-          FinancialCalculationService.getStudentFinancialStatusForGroup(
-            targetStudent.id,
-            session.groupId,
-          ),
-        );
-      } catch (financialError) {
+      if (paymentsEnabled && canViewPayments) {
+        try {
+          const fin = FinancialCalculationService.getStudentFinancialStatus(targetStudent.id);
+          setFinancialStatus(fin);
+          setAttendanceGroupFinancialStatus(
+            FinancialCalculationService.getStudentFinancialStatusForGroup(
+              targetStudent.id,
+              session.groupId,
+              undefined,
+              fin,
+            ),
+          );
+        } catch (financialError) {
+          setFinancialStatus(null);
+          setAttendanceGroupFinancialStatus(null);
+          setPaymentNotice({
+            title: "تعذر تحديث الموقف المالي",
+            message: getUserErrorMessage(financialError),
+          });
+        }
+      } else {
         setFinancialStatus(null);
         setAttendanceGroupFinancialStatus(null);
-        setPaymentNotice({
-          title: "تعذر تحديث الموقف المالي",
-          message: getUserErrorMessage(financialError),
-        });
       }
       
       console.log("[Scanner] Attendance recorded. Session details:", {
@@ -885,6 +965,7 @@ function ScannerContent() {
         AttendanceRepository.getStudentGroupAttendanceSummaries(targetStudent.id)
           .find((summary) => summary.groupId === session.groupId) || null,
       );
+      return true;
     } catch (err: unknown) {
       if (err instanceof DuplicateAttendanceError) {
         setAttendanceResult(null);
@@ -894,6 +975,7 @@ function ScannerContent() {
       } else {
         Alert.alert(Strings.errorTitle, getUserErrorMessage(err));
       }
+      return false;
     } finally {
       attendanceSubmissionRef.current = false;
       setIsProcessing(false);
@@ -1029,6 +1111,8 @@ function ScannerContent() {
         sessionStatus = FinancialCalculationService.getStudentFinancialStatusForGroup(
           student.id,
           currentGroupId,
+          undefined,
+          financialStatus,
         );
         setAttendanceGroupFinancialStatus(sessionStatus);
       } catch (error) {
@@ -1103,6 +1187,8 @@ function ScannerContent() {
         ? FinancialCalculationService.getStudentFinancialStatusForGroup(
             student.id,
             currentGroupId,
+            undefined,
+            latestStatus,
           )
         : latestStatus;
       setAttendanceGroupFinancialStatus(latestSessionStatus);
@@ -1164,12 +1250,15 @@ function ScannerContent() {
         (identity) => { paymentOperationIdentityRef.current = identity; },
       );
 
-      setFinancialStatus(FinancialCalculationService.getStudentFinancialStatus(student.id));
+      const updatedStatus = FinancialCalculationService.getStudentFinancialStatus(student.id);
+      setFinancialStatus(updatedStatus);
       setAttendanceGroupFinancialStatus(
         currentGroupId
           ? FinancialCalculationService.getStudentFinancialStatusForGroup(
               student.id,
               currentGroupId,
+              undefined,
+              updatedStatus,
             )
           : null,
       );
@@ -1437,10 +1526,10 @@ function ScannerContent() {
                     styles.rebuildStatusText,
                     makeupNotice && !attendanceResult ? styles.rebuildStatusMakeupText : null,
                   ]}>
-                    {attendanceResult?.isLate ? "متأخر" : attendanceResult ? "حاضر" : isAlreadyAttended ? "مسجل" : makeupNotice ? "تعويض مستحق" : isExternalAttendance ? "خارج المجموعة" : "جاهز للتسجيل"}
+                    {attendanceResult?.isLate ? "متأخر" : attendanceResult ? "حاضر" : isAlreadyAttended ? (makeupNotice ? "مسجل تعويض" : "مسجل") : makeupNotice ? "تعويض مستحق" : isExternalAttendance ? "خارج المجموعة" : "جاهز للتسجيل"}
                   </Text>
                   {attendanceResult ? <Text style={styles.attendanceSuccessTitle}>{Strings.attendanceRecordedSuccess}</Text> : null}
-                  {isAlreadyAttended && !attendanceResult ? <Text style={styles.duplicateWarningText}>{Strings.duplicateScanWarning}</Text> : null}
+                  {isAlreadyAttended && !attendanceResult ? <Text style={styles.duplicateWarningText}>{makeupNotice ? Strings.duplicateMakeupScanWarning : Strings.duplicateScanWarning}</Text> : null}
                   {attendanceResult?.checkInTime ? <Text style={styles.rebuildTime}>{attendanceResult.checkInTime}</Text> : null}
                 </View>
               </View>
@@ -1979,17 +2068,24 @@ function ScannerContent() {
               onChangeText={setAllStudentSearch}
               placeholder="ابحث بالاسم أو الهاتف أو الكود"
             />
-            <ScrollView style={{ maxHeight: 360 }}>
-              {attendancePickerStudents.length > 0 ? (
-                attendancePickerStudents.map((item) => (
+            <FlatList
+              data={attendancePickerStudents}
+              keyExtractor={(item) => item.id}
+              style={{ maxHeight: 360 }}
+              keyboardShouldPersistTaps="handled"
+              initialNumToRender={12}
+              maxToRenderPerBatch={12}
+              windowSize={5}
+              renderItem={({ item }) => {
+                const colorPresentation = getStudentColorPresentation(item.studentColor);
+                return (
                   <TouchableOpacity
-                    key={item.id}
                     style={[
                       styles.rebuildGroupRow,
-                      getStudentColorPresentation(item.studentColor).backgroundColor
+                      colorPresentation.backgroundColor
                         ? {
-                            backgroundColor: getStudentColorPresentation(item.studentColor).backgroundColor,
-                            borderColor: getStudentColorPresentation(item.studentColor).accentColor,
+                            backgroundColor: colorPresentation.backgroundColor,
+                            borderColor: colorPresentation.accentColor,
                           }
                         : null,
                     ]}
@@ -2010,15 +2106,16 @@ function ScannerContent() {
                     </View>
                     <Ionicons name="chevron-back" size={18} color={Colors.slate400} />
                   </TouchableOpacity>
-                ))
-              ) : (
+                );
+              }}
+              ListEmptyComponent={
                 <Text style={styles.rebuildEmpty}>
                   {allStudentSearch.trim()
                     ? "لا يوجد طلاب مطابقون في المجموعة أو المستوى المحدد."
                     : "ابحث عن طالب من نطاق هذه المجموعة."}
                 </Text>
-              )}
-            </ScrollView>
+              }
+            />
             <AppButton
               title="إلغاء"
               variant="outline"
@@ -2391,7 +2488,7 @@ function ScannerContent() {
                   color={Colors.warningText}
                 />
                 <Text style={styles.duplicateWarningText}>
-                  {Strings.duplicateScanWarning}
+                  {makeupNotice ? Strings.duplicateMakeupScanWarning : Strings.duplicateScanWarning}
                 </Text>
               </View>
             ) : null}

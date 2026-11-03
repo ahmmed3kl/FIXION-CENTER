@@ -1,13 +1,15 @@
 import { DatabaseService } from "../src/core/database";
-import { ConflictError, DuplicateAttendanceError, ForbiddenError } from "../src/core/errors";
+import { ConflictError, DuplicateAttendanceError, ForbiddenError, getUserErrorMessage } from "../src/core/errors";
 import { Strings } from "../src/core/localization";
 import { SyncEngine, SyncRepository } from "../src/core/sync";
 import { AttendanceRepository } from "../src/features/attendance/AttendanceRepository";
 import { AttendanceSessionService } from "../src/features/attendance/AttendanceSessionService";
+import { MakeupService } from "../src/features/attendance/MakeupService";
 import { recordScannedAttendanceIfEligible } from "../src/features/attendance/barcodeAttendance";
 import { AuditService } from "../src/core/audit";
 import { useAuthStore } from "../src/features/auth/useAuthStore";
 import { SessionRepository } from "../src/features/sessions/SessionRepository";
+import { SessionDateService } from "../src/features/sessions/SessionDateService";
 
 describe("attendance duplicate protection", () => {
   beforeAll(async () => {
@@ -418,5 +420,403 @@ describe("attendance duplicate protection", () => {
     expect(SyncRepository.getRecentOperations("center-1", 1000)
       .filter((operation) => operation.operationType === "attendance.create"))
       .toHaveLength(operationsBefore);
+  });
+
+  describe("makeup attendance duplicate detection regression", () => {
+    const centerId = "center-1";
+    const sourceGroupId = "grp-makeup-dup-source";
+    const hostGroupId = "grp-makeup-dup-host";
+    const otherHostGroupId = "grp-makeup-dup-other-host";
+    const sourceSessionId = "sess-makeup-dup-source";
+    const hostSessionId = "sess-makeup-dup-host";
+    const secondHostSessionId = "sess-makeup-dup-host-2";
+    const advanceHostSessionId = "sess-makeup-dup-advance-host";
+    const advanceSecondHostSessionId = "sess-makeup-dup-advance-host-2";
+    const regularHostSessionId = "sess-makeup-dup-regular-host";
+    const makeupStudentId = "std-makeup-dup-1";
+    const advanceStudentId = "std-makeup-dup-advance";
+    const regularStudentId = "std-makeup-dup-regular";
+
+    beforeAll(() => {
+      const db = DatabaseService.getDb();
+      db.runSync(
+        `INSERT INTO groups
+         (id, center_id, name, teacher_id, subject_id, grade, default_fee, session_price, monthly_price, status, created_at, updated_at)
+         VALUES (?, ?, ?, 'teach-1', 'subj-1', 'الصف الأول الثانوي', 200, 50, 200, 'active', '2026-09-01', '2026-09-01')`,
+        [sourceGroupId, centerId, "مجموعة الأصل للتعويض"],
+      );
+      db.runSync(
+        `INSERT INTO groups
+         (id, center_id, name, teacher_id, subject_id, grade, default_fee, session_price, monthly_price, status, created_at, updated_at)
+         VALUES (?, ?, ?, 'teach-1', 'subj-1', 'الصف الأول الثانوي', 200, 50, 200, 'active', '2026-09-01', '2026-09-01')`,
+        [hostGroupId, centerId, "مجموعة الاستضافة للتعويض"],
+      );
+      db.runSync(
+        `INSERT INTO groups
+         (id, center_id, name, teacher_id, subject_id, grade, default_fee, session_price, monthly_price, status, created_at, updated_at)
+         VALUES (?, ?, ?, 'teach-1', 'subj-1', 'الصف الأول الثانوي', 200, 50, 200, 'active', '2026-09-01', '2026-09-01')`,
+        [otherHostGroupId, centerId, "مجموعة استضافة ثانية"],
+      );
+
+      for (const [id, code, name] of [
+        [makeupStudentId, "880101", "طالب تعويض غياب"],
+        [advanceStudentId, "880102", "طالب تعويض مسبق"],
+        [regularStudentId, "880103", "طالب حضور عادي"],
+      ]) {
+        db.runSync(
+          `INSERT INTO students
+           (id, center_id, student_code, full_name, card_code, phone, parent_phone, grade, status, created_at)
+           VALUES (?, ?, ?, ?, ?, '01000008801', '01100008801', 'الصف الأول الثانوي', 'active', '2026-09-01')`,
+          [id, centerId, code, name, code],
+        );
+      }
+
+      // Enroll makeupStudentId & advanceStudentId ONLY in sourceGroupId (NOT in hostGroupId)
+      db.runSync(
+        `INSERT INTO student_group_enrollments
+         (id, center_id, student_id, group_id, start_date, status, created_at)
+         VALUES (?, ?, ?, ?, '2026-09-01', 'active', '2026-09-01')`,
+        ["enr-makeup-dup-1", centerId, makeupStudentId, sourceGroupId],
+      );
+      db.runSync(
+        `INSERT INTO student_group_enrollments
+         (id, center_id, student_id, group_id, start_date, status, created_at)
+         VALUES (?, ?, ?, ?, '2026-09-01', 'active', '2026-09-01')`,
+        ["enr-makeup-dup-adv", centerId, advanceStudentId, sourceGroupId],
+      );
+      // Enroll regularStudentId in hostGroupId
+      db.runSync(
+        `INSERT INTO student_group_enrollments
+         (id, center_id, student_id, group_id, start_date, status, created_at)
+         VALUES (?, ?, ?, ?, '2026-09-01', 'active', '2026-09-01')`,
+        ["enr-makeup-dup-reg", centerId, regularStudentId, hostGroupId],
+      );
+
+      // Source session (closed, with explicit absence for makeupStudentId)
+      db.runSync(
+        `INSERT INTO sessions
+         (id, center_id, group_id, subject_id, teacher_id, session_date, start_time, end_time, status, created_at)
+         VALUES (?, ?, ?, 'subj-1', 'teach-1', '2026-10-12', '10:00', '12:00', 'closed', '2026-10-12')`,
+        [sourceSessionId, centerId, sourceGroupId],
+      );
+      db.runSync(
+        `INSERT INTO session_expected_students
+         (id, center_id, session_id, student_id, created_at)
+         VALUES (?, ?, ?, ?, '2026-10-12')`,
+        ["exp-makeup-dup-source", centerId, sourceSessionId, makeupStudentId],
+      );
+      db.runSync(
+        `INSERT INTO attendance
+         (id, center_id, student_id, session_id, check_in_time, status, is_late, attendance_type, operation_id)
+         VALUES (?, ?, ?, ?, '2026-10-12T10:00:00.000Z', 'absent', 0, 'present', ?)`,
+        ["att-makeup-dup-source-abs", centerId, makeupStudentId, sourceSessionId, "op-makeup-dup-source-abs"],
+      );
+
+      // Host sessions in the same teacher cycle
+      db.runSync(
+        `INSERT INTO sessions
+         (id, center_id, group_id, subject_id, teacher_id, session_date, start_time, end_time, status, created_at)
+         VALUES (?, ?, ?, 'subj-1', 'teach-1', '2026-10-13', '12:00', '14:00', 'open', '2026-10-13')`,
+        [hostSessionId, centerId, hostGroupId],
+      );
+      db.runSync(
+        `INSERT INTO sessions
+         (id, center_id, group_id, subject_id, teacher_id, session_date, start_time, end_time, status, created_at)
+         VALUES (?, ?, ?, 'subj-1', 'teach-1', '2026-10-14', '12:00', '14:00', 'open', '2026-10-14')`,
+        [secondHostSessionId, centerId, otherHostGroupId],
+      );
+      db.runSync(
+        `INSERT INTO sessions
+         (id, center_id, group_id, subject_id, teacher_id, session_date, start_time, end_time, status, created_at)
+         VALUES (?, ?, ?, 'subj-1', 'teach-1', '2026-10-13', '15:00', '17:00', 'open', '2026-10-13')`,
+        [advanceHostSessionId, centerId, hostGroupId],
+      );
+      db.runSync(
+        `INSERT INTO sessions
+         (id, center_id, group_id, subject_id, teacher_id, session_date, start_time, end_time, status, created_at)
+         VALUES (?, ?, ?, 'subj-1', 'teach-1', '2026-10-14', '15:00', '17:00', 'open', '2026-10-14')`,
+        [advanceSecondHostSessionId, centerId, otherHostGroupId],
+      );
+      db.runSync(
+        `INSERT INTO sessions
+         (id, center_id, group_id, subject_id, teacher_id, session_date, start_time, end_time, status, created_at)
+         VALUES (?, ?, ?, 'subj-1', 'teach-1', '2026-10-15', '12:00', '14:00', 'open', '2026-10-15')`,
+        [regularHostSessionId, centerId, hostGroupId],
+      );
+      db.runSync(
+        `INSERT INTO session_expected_students
+         (id, center_id, session_id, student_id, created_at)
+         VALUES (?, ?, ?, ?, '2026-10-15')`,
+        ["exp-makeup-dup-reg", centerId, regularHostSessionId, regularStudentId],
+      );
+    });
+
+    it("1 & 2 & 3 & 6 & 7: first makeup registration succeeds, repeated registration in same host session returns makeup duplicate even when not enrolled in host group, preserves original session attendance, and does not consume entitlement twice", async () => {
+      const dateSpy = jest.spyOn(SessionDateService, "getCurrentSessionDate").mockReturnValue("2026-10-13");
+      try {
+        // Verify student is NOT enrolled/expected in host group
+        expect(AttendanceSessionService.isExpected(hostSessionId, makeupStudentId)).toBe(false);
+
+        // 1. First makeup registration: eligible and succeeds
+        const eligibilityBefore = MakeupService.getEligibilityForSession(hostSessionId, makeupStudentId);
+        expect(eligibilityBefore).toMatchObject({
+          eligible: true,
+          originalAbsenceId: sourceSessionId,
+        });
+
+        const firstRecord = await MakeupService.recordMakeupAttendance({
+          studentId: makeupStudentId,
+          sessionId: hostSessionId,
+          originalAbsenceId: sourceSessionId,
+          checkInTime: "2026-10-13T12:10:00.000Z",
+        });
+        expect(firstRecord).toMatchObject({
+          studentId: makeupStudentId,
+          sessionId: hostSessionId,
+          status: "present",
+          attendanceType: "makeup",
+          originalAbsenceId: sourceSessionId,
+        });
+
+        // 2 & 3. Repeated registration in the SAME host session:
+        // Eligibility check recognizes existing makeup registration (alreadyRegistered: true)
+        // even though the student is not enrolled in the host group
+        expect(AttendanceSessionService.isExpected(hostSessionId, makeupStudentId)).toBe(false);
+        expect(AttendanceRepository.isAlreadyAttended(hostSessionId, makeupStudentId)).toBe(true);
+        expect(AttendanceRepository.isAlreadyRegisteredAsMakeup(hostSessionId, makeupStudentId)).toBe(true);
+        expect(MakeupService.getEligibilityForSession(hostSessionId, makeupStudentId)).toMatchObject({
+          eligible: false,
+          alreadyRegistered: true,
+          originalAbsenceId: sourceSessionId,
+        });
+        expect(AttendanceSessionService.getMakeupEligibility(hostSessionId, makeupStudentId)).toMatchObject({
+          eligible: false,
+          alreadyRegistered: true,
+          originalAbsenceId: sourceSessionId,
+        });
+
+        // Repeated call via MakeupService.recordMakeupAttendance returns DuplicateAttendanceError with Arabic makeup duplicate message
+        let duplicateError: unknown;
+        try {
+          await MakeupService.recordMakeupAttendance({
+            studentId: makeupStudentId,
+            sessionId: hostSessionId,
+            originalAbsenceId: sourceSessionId,
+          });
+        } catch (err) {
+          duplicateError = err;
+        }
+        expect(duplicateError).toBeInstanceOf(DuplicateAttendanceError);
+        expect(getUserErrorMessage(duplicateError)).toBe(Strings.duplicateMakeupScanWarning);
+
+        // Repeated call via AttendanceRepository.recordAttendance (even without makeup params) returns DuplicateAttendanceError
+        await expect(
+          AttendanceRepository.recordAttendance({
+            studentId: makeupStudentId,
+            sessionId: hostSessionId,
+            status: "present",
+            isLate: false,
+          }),
+        ).rejects.toThrow(DuplicateAttendanceError);
+
+        await expect(
+          AttendanceRepository.recordAttendance({
+            studentId: makeupStudentId,
+            sessionId: hostSessionId,
+            status: "present",
+            isLate: false,
+            attendanceType: "makeup",
+            originalAbsenceId: sourceSessionId,
+          }),
+        ).rejects.toThrow(Strings.duplicateMakeupScanWarning);
+
+        // 6. Existing makeup attendance does not alter the original session attendance
+        const originalSessionAttendance = AttendanceRepository.getStudentAttendanceInSession(
+          sourceSessionId,
+          makeupStudentId,
+        );
+        expect(originalSessionAttendance).toMatchObject({
+          id: "att-makeup-dup-source-abs",
+          status: "absent",
+          attendanceType: "present",
+        });
+
+        // 7. Repeated scans do not create duplicate attendance rows or consume entitlement twice
+        const db = DatabaseService.getDb();
+        const makeupRows = db.getAllSync<{ id: string }>(
+          `SELECT id FROM attendance WHERE center_id = ? AND student_id = ? AND attendance_type = 'makeup'`,
+          [centerId, makeupStudentId],
+        );
+        expect(makeupRows).toHaveLength(1);
+      } finally {
+        dateSpy.mockRestore();
+      }
+    });
+
+    it("4 & 7: registration in a different host session is not treated as a same-session duplicate and does not consume makeup entitlement twice (including advance makeup)", async () => {
+      const dateSpy = jest.spyOn(SessionDateService, "getCurrentSessionDate").mockReturnValue("2026-10-13");
+      try {
+        // In a different host session (secondHostSessionId), makeupStudentId is NOT marked as alreadyRegistered
+        expect(AttendanceRepository.isAlreadyAttended(secondHostSessionId, makeupStudentId)).toBe(false);
+        expect(AttendanceRepository.isAlreadyRegisteredAsMakeup(secondHostSessionId, makeupStudentId)).toBe(false);
+        const differentHostEligibility = MakeupService.getEligibilityForSession(secondHostSessionId, makeupStudentId);
+        expect(differentHostEligibility.eligible).toBe(false);
+        expect(differentHostEligibility.alreadyRegistered).toBeUndefined();
+
+        // Attempting to reuse the consumed originalAbsenceId in secondHostSessionId fails with entitlement conflict, NOT DuplicateAttendanceError
+        let secondSessionErr: unknown;
+        try {
+          await AttendanceRepository.recordAttendance({
+            studentId: makeupStudentId,
+            sessionId: secondHostSessionId,
+            status: "present",
+            isLate: false,
+            attendanceType: "makeup",
+            originalAbsenceId: sourceSessionId,
+          });
+        } catch (err) {
+          secondSessionErr = err;
+        }
+        expect(secondSessionErr).toBeInstanceOf(ConflictError);
+        expect(secondSessionErr).not.toBeInstanceOf(DuplicateAttendanceError);
+
+        // Advance makeup without prior absence:
+        const advEligibility = MakeupService.getEligibilityForSession(advanceHostSessionId, advanceStudentId);
+        expect(advEligibility).toMatchObject({
+          eligible: true,
+          isAdvanceMakeup: true,
+        });
+        const advRecord = await AttendanceRepository.recordAttendance({
+          studentId: advanceStudentId,
+          sessionId: advanceHostSessionId,
+          status: "present",
+          isLate: false,
+          attendanceType: "makeup",
+          checkInTime: "2026-10-13T15:10:00.000Z",
+        });
+        expect(advRecord.attendanceType).toBe("makeup");
+
+        // Same advanceHostSessionId -> recognized as makeup duplicate
+        expect(MakeupService.getEligibilityForSession(advanceHostSessionId, advanceStudentId)).toMatchObject({
+          eligible: false,
+          alreadyRegistered: true,
+        });
+        await expect(
+          AttendanceRepository.recordAttendance({
+            studentId: advanceStudentId,
+            sessionId: advanceHostSessionId,
+            status: "present",
+            isLate: false,
+            attendanceType: "makeup",
+          }),
+        ).rejects.toThrow(DuplicateAttendanceError);
+
+        // Different host session in same teacher cycle -> NOT a duplicate, and blocked from consuming advance makeup twice
+        expect(MakeupService.getEligibilityForSession(advanceSecondHostSessionId, advanceStudentId)).toEqual({
+          eligible: false,
+        });
+        let advSecondErr: unknown;
+        try {
+          await AttendanceRepository.recordAttendance({
+            studentId: advanceStudentId,
+            sessionId: advanceSecondHostSessionId,
+            status: "present",
+            isLate: false,
+            attendanceType: "makeup",
+          });
+        } catch (err) {
+          advSecondErr = err;
+        }
+        expect(advSecondErr).toBeInstanceOf(ConflictError);
+        expect(advSecondErr).not.toBeInstanceOf(DuplicateAttendanceError);
+      } finally {
+        dateSpy.mockRestore();
+      }
+    });
+
+    it("5: a regular attendance record does not incorrectly become a makeup duplicate", async () => {
+      const dateSpy = jest.spyOn(SessionDateService, "getCurrentSessionDate").mockReturnValue("2026-10-15");
+      try {
+        const regularRecord = await AttendanceRepository.recordAttendance({
+          studentId: regularStudentId,
+          sessionId: regularHostSessionId,
+          status: "present",
+          isLate: false,
+          checkInTime: "2026-10-15T12:05:00.000Z",
+        });
+        expect(regularRecord.attendanceType).toBe("present");
+        expect(AttendanceRepository.isAlreadyAttended(regularHostSessionId, regularStudentId)).toBe(true);
+        expect(AttendanceRepository.isAlreadyRegisteredAsMakeup(regularHostSessionId, regularStudentId)).toBe(false);
+        expect(MakeupService.getEligibilityForSession(regularHostSessionId, regularStudentId).alreadyRegistered).toBeUndefined();
+        expect(AttendanceSessionService.getMakeupEligibility(regularHostSessionId, regularStudentId).alreadyRegistered).toBeUndefined();
+
+        let errRegularDup: unknown;
+        try {
+          await AttendanceRepository.recordAttendance({
+            studentId: regularStudentId,
+            sessionId: regularHostSessionId,
+            status: "present",
+            isLate: false,
+          });
+        } catch (err) {
+          errRegularDup = err;
+        }
+        expect(errRegularDup).toBeInstanceOf(DuplicateAttendanceError);
+        expect(getUserErrorMessage(errRegularDup)).toBe(Strings.duplicateScanWarning);
+      } finally {
+        dateSpy.mockRestore();
+      }
+    });
+
+    it("8 & 9: center isolation is preserved and offline retry with the same operation_id does not create duplicate attendance", async () => {
+      const dateSpy = jest.spyOn(SessionDateService, "getCurrentSessionDate").mockReturnValue("2026-10-13");
+      try {
+        // 8. Center isolation
+        await useAuthStore.getState().selectCenter("center-2");
+        expect(AttendanceRepository.isAlreadyAttended(hostSessionId, makeupStudentId)).toBe(false);
+        expect(AttendanceRepository.isAlreadyRegisteredAsMakeup(hostSessionId, makeupStudentId)).toBe(false);
+        expect(MakeupService.getEligibilityForSession(hostSessionId, makeupStudentId)).toEqual({
+          eligible: false,
+        });
+        await useAuthStore.getState().selectCenter("center-1");
+        expect(AttendanceRepository.isAlreadyRegisteredAsMakeup(hostSessionId, makeupStudentId)).toBe(true);
+
+        // 9. Offline retry with the same operation_id does not create duplicate attendance or outbox rows
+        const existingMakeup = AttendanceRepository.getStudentAttendanceInSession(
+          hostSessionId,
+          makeupStudentId,
+        );
+        expect(existingMakeup).toBeTruthy();
+        const opsBefore = SyncRepository.getRecentOperations(centerId, 1000)
+          .filter((op) => op.entityType === "attendance" && op.entityId === existingMakeup!.id);
+
+        const retriedViaRepo = await AttendanceRepository.recordAttendance({
+          studentId: makeupStudentId,
+          sessionId: hostSessionId,
+          status: "present",
+          isLate: false,
+          attendanceType: "makeup",
+          originalAbsenceId: sourceSessionId,
+          operationId: existingMakeup!.operationId,
+        });
+        expect(retriedViaRepo.id).toBe(existingMakeup!.id);
+        expect(retriedViaRepo.operationId).toBe(existingMakeup!.operationId);
+
+        const retriedViaService = await MakeupService.recordMakeupAttendance({
+          studentId: makeupStudentId,
+          sessionId: hostSessionId,
+          originalAbsenceId: sourceSessionId,
+          operationId: existingMakeup!.operationId,
+        });
+        expect(retriedViaService.id).toBe(existingMakeup!.id);
+
+        const opsAfter = SyncRepository.getRecentOperations(centerId, 1000)
+          .filter((op) => op.entityType === "attendance" && op.entityId === existingMakeup!.id);
+        expect(opsAfter).toHaveLength(opsBefore.length);
+      } finally {
+        await useAuthStore.getState().selectCenter("center-1");
+        dateSpy.mockRestore();
+      }
+    });
   });
 });

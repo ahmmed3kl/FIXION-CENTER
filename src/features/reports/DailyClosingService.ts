@@ -120,7 +120,7 @@ export class DailyClosingService {
 
       if (pType === "monthly" || pType === "full" || pType === "package") {
         monthlyTotal += amount;
-      } else if (pType === "partial") {
+      } else if (pType === "partial" || pType === "payment_request") {
         partialTotal += amount;
       } else if (pType === "session") {
         const isExternal =

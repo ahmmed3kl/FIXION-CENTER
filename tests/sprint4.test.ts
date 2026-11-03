@@ -649,10 +649,10 @@ describe("Sprint 4 - FIXION Packages, Makeups & Unified Attendance/Financial Int
       });
 
       const db = DatabaseService.getDb();
-      // Missed Session: 2026-11-01 10:00 (subj-1, teach-1)
+      // Missed Session: 2026-11-10 10:00 (subj-1, teach-1)
       db.runSync(
         `INSERT INTO sessions (id, center_id, group_id, subject_id, teacher_id, session_price, session_date, start_time, end_time, status, created_at)
-         VALUES ('sess-missed-1', 'center-1', 'grp-1', 'subj-1', 'teach-1', 100, '2026-11-01', '10:00', '12:00', 'open', '2026-09-20')`,
+         VALUES ('sess-missed-1', 'center-1', 'grp-1', 'subj-1', 'teach-1', 100, '2026-11-10', '10:00', '12:00', 'open', '2026-09-20')`,
       );
       db.runSync(
         `INSERT INTO session_expected_students (id, center_id, session_id, student_id, created_at)
@@ -662,14 +662,14 @@ describe("Sprint 4 - FIXION Packages, Makeups & Unified Attendance/Financial Int
       db.runSync(
         `INSERT INTO attendance
          (id, center_id, student_id, session_id, check_in_time, status, is_late, attendance_type, operation_id)
-         VALUES ('att-missed-1', 'center-1', ?, 'sess-missed-1', '2026-11-01T10:00:00.000Z', 'absent', 0, 'present', 'op-missed-1')`,
+         VALUES ('att-missed-1', 'center-1', ?, 'sess-missed-1', '2026-11-10T10:00:00.000Z', 'absent', 0, 'regular', 'op-missed-1')`,
         [student.id],
       );
 
       // Next eligible session in the same Saturday-Friday teacher cycle.
       db.runSync(
         `INSERT INTO sessions (id, center_id, group_id, subject_id, teacher_id, session_price, session_date, start_time, end_time, status, created_at)
-         VALUES ('sess-next-elg', 'center-1', 'grp-1', 'subj-1', 'teach-1', 100, '2026-11-02', '10:00', '12:00', 'open', '2026-09-20')`,
+         VALUES ('sess-next-elg', 'center-1', 'grp-1', 'subj-1', 'teach-1', 100, '2026-11-11', '10:00', '12:00', 'open', '2026-09-20')`,
       );
       db.runSync(
         `INSERT INTO session_expected_students (id, center_id, session_id, student_id, created_at)
@@ -680,7 +680,7 @@ describe("Sprint 4 - FIXION Packages, Makeups & Unified Attendance/Financial Int
       // Third session: the next eligible session after the makeup opportunity.
       db.runSync(
         `INSERT INTO sessions (id, center_id, group_id, subject_id, teacher_id, session_price, session_date, start_time, end_time, status, created_at)
-         VALUES ('sess-third-elg', 'center-1', 'grp-1', 'subj-1', 'teach-1', 100, '2026-11-03', '10:00', '12:00', 'open', '2026-09-20')`,
+         VALUES ('sess-third-elg', 'center-1', 'grp-1', 'subj-1', 'teach-1', 100, '2026-11-12', '10:00', '12:00', 'open', '2026-09-20')`,
       );
     });
 
@@ -856,6 +856,7 @@ describe("Sprint 4 - FIXION Packages, Makeups & Unified Attendance/Financial Int
 
       const financial = FinancialCalculationService.getStudentFinancialStatus(
         studentDual.id,
+        "2026-10-02",
       );
       expect(financial.groupRemainingDebt).toBe(0);
       expect(financial.packageRemainingDebt).toBe(800);

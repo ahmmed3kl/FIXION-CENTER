@@ -11,6 +11,7 @@ import { TeacherRepository } from "../../features/teachers/TeacherRepository";
 import { Group } from "../../shared/types";
 import { AppButton, AppInput, EmptyState } from "../../shared/components";
 import { smartSearch } from "../../shared/utils/smartSearch";
+import { LocalDataEvents } from "../../core/database/localDataEvents";
 import { useLocalDataRevision } from "../../core/database/useLocalDataRevision";
 import { captureLoad } from "../../shared/utils/loadResult";
 
@@ -20,6 +21,7 @@ export default function GroupsScreen() {
   const localDataRevision = useLocalDataRevision();
   const lastLoadedRevisionRef = useRef(localDataRevision);
   const hasInitialLoadedRef = useRef(false);
+  const isFocusedRef = useRef(true);
   const router = useRouter();
   const { colors } = useTheme();
   const [groups, setGroups] = useState<Group[]>([]);
@@ -44,15 +46,21 @@ export default function GroupsScreen() {
 
   useFocusEffect(
     useCallback(() => {
-      if (!hasInitialLoadedRef.current || lastLoadedRevisionRef.current !== localDataRevision) {
+      isFocusedRef.current = true;
+      const currentRevision = LocalDataEvents.getRevision();
+      if (!hasInitialLoadedRef.current || lastLoadedRevisionRef.current !== currentRevision) {
         hasInitialLoadedRef.current = true;
-        lastLoadedRevisionRef.current = localDataRevision;
+        lastLoadedRevisionRef.current = currentRevision;
         load();
       }
-    }, [load, localDataRevision]),
+      return () => {
+        isFocusedRef.current = false;
+      };
+    }, [load]),
   );
 
   useEffect(() => {
+    if (!isFocusedRef.current) return;
     if (localDataRevision > 0 && lastLoadedRevisionRef.current !== localDataRevision) {
       lastLoadedRevisionRef.current = localDataRevision;
       load();

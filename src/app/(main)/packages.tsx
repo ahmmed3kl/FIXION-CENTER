@@ -10,6 +10,7 @@ import { PermissionService, resolveUserPermissions } from "../../core/permission
 import { Colors, Spacing, Typography, useTheme } from "../../core/theme";
 import { AppButton, AppCard, AppInput, EmptyState, StatusBadge } from "../../shared/components";
 import { useAuthStore } from "../../features/auth/useAuthStore";
+import { LocalDataEvents } from "../../core/database/localDataEvents";
 import { useLocalDataRevision } from "../../core/database/useLocalDataRevision";
 
 type OptionDraft = { teacherId: string; subjectId: string };
@@ -18,6 +19,7 @@ export default function PackagesScreen() {
   const localDataRevision = useLocalDataRevision();
   const lastLoadedRevisionRef = useRef(localDataRevision);
   const hasInitialLoadedRef = useRef(false);
+  const isFocusedRef = useRef(true);
   const router = useRouter();
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(), [colors]);
@@ -50,19 +52,25 @@ export default function PackagesScreen() {
   useEffect(() => {
     load();
     hasInitialLoadedRef.current = true;
-    lastLoadedRevisionRef.current = localDataRevision;
+    lastLoadedRevisionRef.current = LocalDataEvents.getRevision();
   }, [activeCenterId, load]);
 
   useFocusEffect(
     useCallback(() => {
-      if (hasInitialLoadedRef.current && lastLoadedRevisionRef.current !== localDataRevision) {
-        lastLoadedRevisionRef.current = localDataRevision;
+      isFocusedRef.current = true;
+      const currentRevision = LocalDataEvents.getRevision();
+      if (hasInitialLoadedRef.current && lastLoadedRevisionRef.current !== currentRevision) {
+        lastLoadedRevisionRef.current = currentRevision;
         load();
       }
-    }, [localDataRevision, load]),
+      return () => {
+        isFocusedRef.current = false;
+      };
+    }, [load]),
   );
 
   useEffect(() => {
+    if (!isFocusedRef.current) return;
     if (localDataRevision > 0 && lastLoadedRevisionRef.current !== localDataRevision) {
       lastLoadedRevisionRef.current = localDataRevision;
       load();

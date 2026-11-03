@@ -333,6 +333,7 @@ router.post("/push", authMiddleware, deviceGuard, async (req, res, next) => {
       );
     }
 
+    const serviceCheckCache = new Map();
     for (const operation of operations) {
       assertSyncPermission(req, operation);
       const serviceKey = getServiceKeyForEntity(operation.entityType || operation.entity_type, operation.operationType || operation.operation_type, operation.payload);
@@ -340,7 +341,12 @@ router.post("/push", authMiddleware, deviceGuard, async (req, res, next) => {
       // disabled/unconfigured SMS service must not block unrelated sync work;
       // SyncProcessor records the delivery as skipped/failed without calling
       // the provider.
-      if (serviceKey && serviceKey !== "sms") await requireService(req.centerId, serviceKey);
+      if (serviceKey && serviceKey !== "sms") {
+        await requireService(req.centerId, serviceKey, {
+          cache: serviceCheckCache,
+          expectedCenterId: req.centerId,
+        });
+      }
     }
 
     const result = await SyncProcessor.processPush(

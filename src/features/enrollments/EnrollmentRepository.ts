@@ -195,7 +195,7 @@ export class EnrollmentRepository {
     // enroll students but are not allowed to view financial data.
     try {
       if (PermissionService.hasPermission(user.permissions, "payments.view") || PermissionService.hasPermission(user.permissions, "payments.create")) {
-        DebtCycleRepository.generateCyclesForEnrollment(enrollmentId);
+        DebtCycleRepository.generateCyclesForEnrollment(enrollmentId, dto.startDate);
       }
     } catch {
       // Financial generation is retried when the student's financial status is opened.

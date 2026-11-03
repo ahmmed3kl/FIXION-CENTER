@@ -758,19 +758,36 @@ describe("Sprint 5 - FIXION Operational Layer Test Suite", () => {
     });
 
     it("Point 3: Daily Closing Complete Lifecycle (open -> closed -> reopened -> financial changes -> closed again)", async () => {
+      const db = DatabaseService.getDb();
+      const testBusinessDate = "2026-11-15";
       const session = SessionRepository.findById("sess-1");
       if (!session) throw new Error("The daily-closing test session was not seeded.");
-      const testBusinessDate = session.sessionDate;
+
+      db.runSync(
+        `INSERT OR REPLACE INTO sessions (id, center_id, group_id, schedule_id, subject_id, teacher_id, session_price, late_after_minutes, session_date, start_time, end_time, status, created_at)
+         VALUES ('sess-closing-point3', 'center-1', 'grp-1', 'sched-1', 'subj-1', 'teach-1', 150, 15, ?, '14:00', '16:00', 'open', '2026-09-01')`,
+        [testBusinessDate],
+      );
+      db.runSync(
+        `INSERT OR REPLACE INTO session_expected_students (id, center_id, session_id, student_id, created_at)
+         VALUES ('exp-closing-point3', 'center-1', 'sess-closing-point3', 'std-3', '2026-09-01')`,
+      );
+      db.runSync(
+        `INSERT OR REPLACE INTO attendance (id, center_id, student_id, session_id, check_in_time, status, is_late, attendance_type, operation_id)
+         VALUES ('att-closing-point3', 'center-1', 'std-3', 'sess-closing-point3', ? || 'T14:00:00.000Z', 'present', 0, 'regular', 'op-att-closing-point3')`,
+        [testBusinessDate],
+      );
+
       const existingCycles = DebtCycleRepository.getCyclesForStudent("std-3");
       let sessionCycle = existingCycles.find((cycle) =>
         cycle.groupId === session.groupId &&
         cycle.status !== "cancelled" &&
         cycle.status !== "paid" &&
-        cycle.startDate <= session.sessionDate &&
-        cycle.endDate >= session.sessionDate,
+        cycle.startDate <= testBusinessDate &&
+        cycle.endDate >= testBusinessDate,
       );
       if (!sessionCycle) {
-        const [year, month] = session.sessionDate.split("-").map(Number);
+        const [year, month] = testBusinessDate.split("-").map(Number);
         const periodStart = `${year}-${String(month).padStart(2, "0")}-01`;
         const periodEnd = `${year}-${String(month).padStart(2, "0")}-${String(new Date(year, month, 0).getDate()).padStart(2, "0")}`;
         const cycleNumber = Math.max(
@@ -785,7 +802,7 @@ describe("Sprint 5 - FIXION Operational Layer Test Suite", () => {
           cycleNumber,
           periodStart,
           periodEnd,
-          amountDue: Number(session.sessionPrice ?? 0),
+          amountDue: 150,
         });
       } else if (
         !isPerSessionBillingMode(
@@ -831,7 +848,7 @@ describe("Sprint 5 - FIXION Operational Layer Test Suite", () => {
       // - Explicitly configured per-session payment of 150 EGP
       await PaymentRepository.recordSessionPayment({
         studentId: "std-3",
-        sessionId: session.id,
+        sessionId: "sess-closing-point3",
         amount: 150,
         paymentDate: testBusinessDate,
         notes: "حصة فردية",
@@ -848,7 +865,6 @@ describe("Sprint 5 - FIXION Operational Layer Test Suite", () => {
       });
 
       // Confirm original payment (400 EGP) was NOT mutated or deleted
-      const db = DatabaseService.getDb();
       const allPaymentsOnDate = db.getAllSync<any>(
         "SELECT id, amount, payment_type FROM payments WHERE center_id = 'center-1' AND payment_date = ?",
         [testBusinessDate],

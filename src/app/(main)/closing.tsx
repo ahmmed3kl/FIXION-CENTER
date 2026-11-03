@@ -13,6 +13,7 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
+import { LocalDataEvents } from "../../core/database/localDataEvents";
 import { useLocalDataRevision } from "../../core/database/useLocalDataRevision";
 import { PermissionGate } from "../../core/permissions";
 import { Colors, useTheme } from "../../core/theme";
@@ -49,6 +50,7 @@ export default function ClosingScreen() {
   const lastLoadedRevisionRef = useRef(localDataRevision);
   const lastLoadedBusinessDateRef = useRef<string | null>(null);
   const hasInitialLoadedRef = useRef(false);
+  const isFocusedRef = useRef(true);
 
   const resolveBusinessDate = useCallback((): string | null => {
     if (!activeCenterId) {
@@ -109,28 +111,34 @@ export default function ClosingScreen() {
   useEffect(() => {
     loadData();
     hasInitialLoadedRef.current = true;
-    lastLoadedRevisionRef.current = localDataRevision;
+    lastLoadedRevisionRef.current = LocalDataEvents.getRevision();
   }, [activeCenterId, loadData]);
 
   useFocusEffect(
     useCallback(() => {
-      if (hasInitialLoadedRef.current) {
-        lastLoadedRevisionRef.current = localDataRevision;
+      isFocusedRef.current = true;
+      const currentRevision = LocalDataEvents.getRevision();
+      if (hasInitialLoadedRef.current && lastLoadedRevisionRef.current !== currentRevision) {
+        lastLoadedRevisionRef.current = currentRevision;
         loadData();
       }
       const intervalId = setInterval(() => {
         if (!lastLoadedBusinessDateRef.current) return;
         const businessDate = resolveBusinessDate();
         if (businessDate !== lastLoadedBusinessDateRef.current) {
-          lastLoadedRevisionRef.current = localDataRevision;
+          lastLoadedRevisionRef.current = LocalDataEvents.getRevision();
           loadData();
         }
       }, 60_000);
-      return () => clearInterval(intervalId);
-    }, [localDataRevision, loadData, resolveBusinessDate]),
+      return () => {
+        isFocusedRef.current = false;
+        clearInterval(intervalId);
+      };
+    }, [loadData, resolveBusinessDate]),
   );
 
   useEffect(() => {
+    if (!isFocusedRef.current) return;
     if (localDataRevision > 0 && lastLoadedRevisionRef.current !== localDataRevision) {
       lastLoadedRevisionRef.current = localDataRevision;
       loadData();

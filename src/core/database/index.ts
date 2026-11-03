@@ -1268,6 +1268,93 @@ export const MIGRATIONS: Migration[] = [
       db.execSync("ALTER TABLE centers ADD COLUMN time_zone TEXT;");
     },
   },
+  {
+    version: 31,
+    name: "conflict_resolution_audit",
+    up: (db: SqlDatabase) => {
+      try {
+        db.execSync("ALTER TABLE sync_conflicts ADD COLUMN resolved_by TEXT;");
+      } catch {}
+      try {
+        db.execSync("ALTER TABLE sync_conflicts ADD COLUMN resolution_note TEXT;");
+      } catch {}
+    },
+  },
+  {
+    version: 32,
+    name: "safe_conflict_retry_tracking",
+    up: (db: SqlDatabase) => {
+      try {
+        db.execSync("ALTER TABLE sync_conflicts ADD COLUMN safe_retry_count INTEGER DEFAULT 0;");
+      } catch {}
+      try {
+        db.execSync("ALTER TABLE sync_conflicts ADD COLUMN last_safe_retry_at TEXT;");
+      } catch {}
+    },
+  },
+  {
+    version: 33,
+    name: "group_payment_requests_and_obligations",
+    up: (db: SqlDatabase) => {
+      db.execSync(`
+        CREATE TABLE IF NOT EXISTS group_payment_requests (
+          id TEXT PRIMARY KEY,
+          operation_id TEXT NOT NULL UNIQUE,
+          center_id TEXT NOT NULL,
+          group_id TEXT NOT NULL,
+          name TEXT NOT NULL,
+          amount REAL NOT NULL,
+          reference_month TEXT,
+          status TEXT NOT NULL DEFAULT 'active',
+          created_by TEXT NOT NULL,
+          created_by_name TEXT,
+          updated_by TEXT,
+          updated_by_name TEXT,
+          archived_by TEXT,
+          archived_at TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_payment_requests_center_group
+          ON group_payment_requests(center_id, group_id, status);
+
+        CREATE TABLE IF NOT EXISTS student_payment_request_obligations (
+          id TEXT PRIMARY KEY,
+          operation_id TEXT NOT NULL UNIQUE,
+          center_id TEXT NOT NULL,
+          request_id TEXT NOT NULL,
+          group_id TEXT NOT NULL,
+          student_id TEXT NOT NULL,
+          amount_due REAL NOT NULL,
+          amount_paid REAL NOT NULL DEFAULT 0,
+          status TEXT NOT NULL DEFAULT 'unpaid',
+          payment_id TEXT,
+          paid_at TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT,
+          cancelled_at TEXT,
+          CONSTRAINT uq_payment_request_obligation UNIQUE (center_id, request_id, student_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_payment_req_obligations_request
+          ON student_payment_request_obligations(center_id, request_id, status);
+        CREATE INDEX IF NOT EXISTS idx_payment_req_obligations_student
+          ON student_payment_request_obligations(center_id, student_id, status);
+        CREATE INDEX IF NOT EXISTS idx_payment_req_obligations_group
+          ON student_payment_request_obligations(center_id, group_id, status);
+      `);
+      try {
+        db.execSync("ALTER TABLE payments ADD COLUMN payment_request_obligation_id TEXT;");
+      } catch {}
+      try {
+        db.execSync("ALTER TABLE payments ADD COLUMN payment_request_id TEXT;");
+      } catch {}
+      try {
+        db.execSync(
+          "CREATE INDEX IF NOT EXISTS idx_payments_request_obligation ON payments(center_id, payment_request_obligation_id);",
+        );
+      } catch {}
+    },
+  },
 ];
 
 // In-Memory SQLite Mock for Jest / Test environments
@@ -1298,6 +1385,8 @@ class InMemorySqliteMock implements SqlDatabase {
     this.tables.set("payment_reversals", []);
     this.tables.set("debt_adjustments", []);
     this.tables.set("payments", []);
+    this.tables.set("group_payment_requests", []);
+    this.tables.set("student_payment_request_obligations", []);
     this.tables.set("sync_operations", []);
     this.tables.set("sync_conflicts", []);
     this.tables.set("audit_logs", []);
@@ -1398,9 +1487,16 @@ class InMemorySqliteMock implements SqlDatabase {
         if (
           (trimmed.toUpperCase().includes("ON CONFLICT") ||
             trimmed.toUpperCase().includes("OR REPLACE")) &&
-          (row.id != null || row.center_id != null)
+          (row.id != null ||
+            row.center_id != null ||
+            (tableName === "sync_conflicts" && row.operation_id != null))
         ) {
-          const keyField = row.id != null ? "id" : "center_id";
+          const keyField =
+            tableName === "sync_conflicts" && row.operation_id != null
+              ? "operation_id"
+              : row.id != null
+                ? "id"
+                : "center_id";
           const existingIndex = list.findIndex(
             (r) => r[keyField] === row[keyField],
           );
@@ -1585,6 +1681,40 @@ class InMemorySqliteMock implements SqlDatabase {
           const exists = list.some((r) => r.operation_id === row.operation_id);
           if (exists) {
             throw new Error("UNIQUE constraint failed: payments.operation_id");
+          }
+        }
+        if (tableName === "group_payment_requests") {
+          const opExists = list.some(
+            (r) => r.operation_id === row.operation_id,
+          );
+          if (opExists) {
+            throw new Error(
+              "UNIQUE constraint failed: group_payment_requests.operation_id",
+            );
+          }
+        }
+        if (tableName === "student_payment_request_obligations") {
+          const opExists = list.some(
+            (r) => r.operation_id === row.operation_id,
+          );
+          if (opExists) {
+            throw new Error(
+              "UNIQUE constraint failed: student_payment_request_obligations.operation_id",
+            );
+          }
+          const relExists = list.some(
+            (r) =>
+              r.center_id === row.center_id &&
+              r.request_id === row.request_id &&
+              r.student_id === row.student_id,
+          );
+          if (relExists && isIgnoreInsert) {
+            return { lastInsertRowId: 0, changes: 0 };
+          }
+          if (relExists) {
+            throw new Error(
+              "UNIQUE constraint failed: student_payment_request_obligations.center_id, student_payment_request_obligations.request_id, student_payment_request_obligations.student_id",
+            );
           }
         }
         if (tableName === "package_subjects") {
@@ -1787,7 +1917,8 @@ class InMemorySqliteMock implements SqlDatabase {
           const isRetryInc = trimmed.includes("retry_count = retry_count + 1");
           if (
             trimmed.includes("WHERE center_id = ?") &&
-            trimmed.includes("status = 'conflict'")
+            trimmed.includes("status = 'conflict'") &&
+            !trimmed.includes("operation_id = ?")
           ) {
             const centerId = params[0];
             const matchingRows = list.filter(
@@ -1802,23 +1933,67 @@ class InMemorySqliteMock implements SqlDatabase {
             });
           } else {
             const opId = params[params.length - 1];
-            const row = list.find((r) => r.operation_id === opId);
+            const row = list.find(
+              (r) => r.operation_id === opId || r.id === opId,
+            );
             if (row) {
-              if (statusMatch) row.status = statusMatch[1];
-              if (isRetryInc) row.retry_count = (row.retry_count || 0) + 1;
-              if (params.length >= 2 && trimmed.includes("last_error = ?")) {
-                row.last_error = params[0];
-              }
-              if (trimmed.includes("next_retry_at = NULL")) {
-                row.next_retry_at = null;
-              } else if (trimmed.includes("next_retry_at = ?")) {
-                row.next_retry_at = params[1];
-              }
-              if (params.length >= 2 && trimmed.includes("synced_at = ?")) {
-                row.synced_at = params[0];
+              const setClause = trimmed
+                .split(/\bWHERE\b/i)[0]
+                .replace(/^UPDATE\s+\w+\s+SET\s+/i, "");
+              const assignments = setClause.split(",").map((s) => s.trim());
+              let pIdx = 0;
+              for (const assign of assignments) {
+                const [colRaw, valRaw] = assign.split("=").map((s) => s.trim());
+                const col = colRaw?.toLowerCase();
+                if (!col || !valRaw) continue;
+                if (valRaw === "?") {
+                  row[col] = params[pIdx++];
+                } else if (valRaw.toUpperCase() === "NULL") {
+                  row[col] = null;
+                } else if (valRaw.startsWith("'") && valRaw.endsWith("'")) {
+                  row[col] = valRaw.slice(1, -1);
+                } else if (/retry_count\s*\+\s*1/i.test(valRaw)) {
+                  row.retry_count = (row.retry_count || 0) + 1;
+                } else if (!isNaN(Number(valRaw))) {
+                  row[col] = Number(valRaw);
+                }
               }
             }
           }
+        } else if (tableName === "sync_conflicts") {
+          const opId = params[params.length - 1];
+          const centerId =
+            params.length >= 2 ? params[params.length - 2] : undefined;
+          const matchingRows = list.filter(
+            (r) =>
+              (r.operation_id === opId || r.id === opId) &&
+              (!centerId ||
+                !trimmed.toLowerCase().includes("center_id = ?") ||
+                r.center_id === centerId),
+          );
+          const setClause = trimmed
+            .split(/\bWHERE\b/i)[0]
+            .replace(/^UPDATE\s+\w+\s+SET\s+/i, "");
+          const assignments = setClause.split(",").map((s) => s.trim());
+          matchingRows.forEach((row) => {
+            let pIdx = 0;
+            for (const assign of assignments) {
+              const [colRaw, valRaw] = assign.split("=").map((s) => s.trim());
+              const col = colRaw?.toLowerCase();
+              if (!col || !valRaw) continue;
+              if (valRaw === "?") {
+                row[col] = params[pIdx++];
+              } else if (valRaw.toUpperCase() === "NULL") {
+                row[col] = null;
+              } else if (valRaw.startsWith("'") && valRaw.endsWith("'")) {
+                row[col] = valRaw.slice(1, -1);
+              } else if (/safe_retry_count.*\+\s*1/i.test(valRaw)) {
+                row.safe_retry_count = (row.safe_retry_count || 0) + 1;
+              } else if (!isNaN(Number(valRaw))) {
+                row[col] = Number(valRaw);
+              }
+            }
+          });
         } else if (tableName === "student_notes") {
           const id = params[params.length - 1];
           const row = list.find(
@@ -2355,6 +2530,91 @@ class InMemorySqliteMock implements SqlDatabase {
               row.updated_at = params[1];
             }
           }
+        } else if (tableName === "group_payment_requests") {
+          const id = params[params.length - 1];
+          const centerId = params[params.length - 2];
+          const row = list.find((r) => r.id === id && r.center_id === centerId);
+          if (row) {
+            const setClause = trimmed
+              .split(/\bWHERE\b/i)[0]
+              .replace(/^UPDATE\s+\w+\s+SET\s+/i, "");
+            const assignments = setClause.split(",").map((s) => s.trim());
+            let pIdx = 0;
+            for (const assign of assignments) {
+              const [colRaw, valRaw] = assign.split("=").map((s) => s.trim());
+              const col = colRaw?.toLowerCase();
+              if (!col || !valRaw) continue;
+              if (valRaw === "?") {
+                row[col] = params[pIdx++];
+              } else if (valRaw.toUpperCase() === "NULL") {
+                row[col] = null;
+              } else if (valRaw.startsWith("'") && valRaw.endsWith("'")) {
+                row[col] = valRaw.slice(1, -1);
+              } else if (!isNaN(Number(valRaw))) {
+                row[col] = Number(valRaw);
+              }
+            }
+          }
+        } else if (tableName === "student_payment_request_obligations") {
+          const setClause = trimmed
+            .split(/\bWHERE\b/i)[0]
+            .replace(/^UPDATE\s+\w+\s+SET\s+/i, "");
+          const whereClause = trimmed.split(/\bWHERE\b/i)[1] || "";
+          const assignments = setClause.split(",").map((s) => s.trim());
+          const setParamCount = assignments.filter((a) =>
+            a.endsWith("= ?") || a.endsWith("=?"),
+          ).length;
+          const whereParams = params.slice(setParamCount);
+          let matchingRows: any[] = [];
+          if (
+            whereClause.includes("center_id = ?") &&
+            whereClause.includes("request_id = ?") &&
+            whereClause.includes("status = 'unpaid'")
+          ) {
+            const [cId, reqId] = whereParams;
+            matchingRows = list.filter(
+              (r) =>
+                r.center_id === cId &&
+                r.request_id === reqId &&
+                r.status === "unpaid",
+            );
+          } else if (
+            whereClause.includes("center_id = ?") &&
+            whereClause.includes("payment_id = ?")
+          ) {
+            const [cId, payId] = whereParams;
+            matchingRows = list.filter(
+              (r) => r.center_id === cId && r.payment_id === payId,
+            );
+          } else if (
+            whereClause.includes("center_id = ?") &&
+            whereClause.includes("id = ?")
+          ) {
+            const [cId, obId] = whereParams;
+            matchingRows = list.filter(
+              (r) => r.center_id === cId && r.id === obId,
+            );
+          } else if (whereClause.includes("id = ?")) {
+            const [obId] = whereParams;
+            matchingRows = list.filter((r) => r.id === obId);
+          }
+          matchingRows.forEach((row) => {
+            let pIdx = 0;
+            for (const assign of assignments) {
+              const [colRaw, valRaw] = assign.split("=").map((s) => s.trim());
+              const col = colRaw?.toLowerCase();
+              if (!col || !valRaw) continue;
+              if (valRaw === "?") {
+                row[col] = params[pIdx++];
+              } else if (valRaw.toUpperCase() === "NULL") {
+                row[col] = null;
+              } else if (valRaw.startsWith("'") && valRaw.endsWith("'")) {
+                row[col] = valRaw.slice(1, -1);
+              } else if (!isNaN(Number(valRaw))) {
+                row[col] = Number(valRaw);
+              }
+            }
+          });
         }
         return { lastInsertRowId: 0, changes: 1 };
       }
@@ -3938,9 +4198,47 @@ class InMemorySqliteMock implements SqlDatabase {
           (r) => r.centerId === params[0] && r.sessionId === params[1],
         ) as T[];
       }
+      if (
+        params.length === 2 &&
+        trimmed.includes("center_id = ? AND operation_id = ?")
+      ) {
+        return mapped.filter(
+          (r) => r.centerId === params[0] && r.operationId === params[1],
+        ) as T[];
+      }
+      if (
+        params.length === 5 &&
+        trimmed.includes("JOIN sessions s") &&
+        trimmed.includes("a.status IN ('present', 'late')") &&
+        trimmed.includes("s.session_date >= ? AND s.session_date <= ?")
+      ) {
+        const [centerId, studentId, groupId, weekStart, weekEnd] = params;
+        const sessions = this.tables.get("sessions") || [];
+        return mapped.filter((r) => {
+          if (r.centerId !== centerId || r.studentId !== studentId) {
+            return false;
+          }
+          if (r.status !== "present" && r.status !== "late") {
+            return false;
+          }
+          const session = sessions.find(
+            (s) => s.id === r.sessionId && s.center_id === centerId,
+          );
+          if (!session) return false;
+          return (
+            session.group_id === groupId &&
+            session.session_date >= weekStart &&
+            session.session_date <= weekEnd
+          );
+        }) as T[];
+      }
       if (params.length >= 2 && trimmed.includes("student_id = ?")) {
         return mapped.filter(
-          (r) => r.centerId === params[0] && r.studentId === params[1],
+          (r) =>
+            r.centerId === params[0] &&
+            r.studentId === params[1] &&
+            (!trimmed.includes("attendance_type = 'makeup'") ||
+              r.attendanceType === "makeup"),
         ) as T[];
       }
       if (params.length >= 1 && trimmed.includes("is_external = 1")) {
@@ -4109,6 +4407,8 @@ class InMemorySqliteMock implements SqlDatabase {
           }
           return (
             payment.payment_type !== "session" &&
+            payment.payment_type !== "payment_request" &&
+            !payment.payment_request_obligation_id &&
             (!payment.debt_cycle_id ||
               !isPerSessionCycle(payment.debt_cycle_id)) &&
             (Boolean(payment.debt_cycle_id) ||
@@ -4402,6 +4702,8 @@ class InMemorySqliteMock implements SqlDatabase {
           subscriptionId: r.subscription_id || null,
           debtCycleId: r.debt_cycle_id || null,
           sessionId: r.session_id || null,
+          paymentRequestObligationId: r.payment_request_obligation_id || null,
+          paymentRequestId: r.payment_request_id || null,
           amount: Number(r.amount) || 0,
           paymentType: pType,
           paymentMethod: pMethod,
@@ -4419,6 +4721,8 @@ class InMemorySqliteMock implements SqlDatabase {
           subscription_id: r.subscription_id || null,
           debt_cycle_id: r.debt_cycle_id || null,
           session_id: r.session_id || null,
+          payment_request_obligation_id: r.payment_request_obligation_id || null,
+          payment_request_id: r.payment_request_id || null,
           payment_type: pType,
           payment_method: pMethod,
           payment_date:
@@ -4429,6 +4733,29 @@ class InMemorySqliteMock implements SqlDatabase {
           updated_at: r.updated_at || null,
         };
       });
+      if (
+        params.length >= 2 &&
+        trimmed.includes("payment_request_obligation_id = ?")
+      ) {
+        const results = mapped.filter(
+          (r) =>
+            r.centerId === params[0] &&
+            r.paymentRequestObligationId === params[1],
+        );
+        if (trimmed.includes("is_reversed = 0")) {
+          return results.filter((r) => !r.isReversed) as T[];
+        }
+        return results as T[];
+      }
+      if (params.length >= 2 && trimmed.includes("payment_request_id = ?")) {
+        const results = mapped.filter(
+          (r) => r.centerId === params[0] && r.paymentRequestId === params[1],
+        );
+        if (trimmed.includes("is_reversed = 0")) {
+          return results.filter((r) => !r.isReversed) as T[];
+        }
+        return results as T[];
+      }
       if (
         params.length >= 3 &&
         trimmed.includes("student_id = ?") &&
@@ -4499,36 +4826,87 @@ class InMemorySqliteMock implements SqlDatabase {
 
     if (trimmed.includes("FROM sync_operations")) {
       const list = this.tables.get("sync_operations") || [];
-      const mapped = list.map((r) => ({
-        id: r.id,
-        operationId: r.operation_id,
-        centerId: r.center_id,
-        userId: r.user_id,
-        deviceId: r.device_id,
-        operationType: r.operation_type,
-        entityType: r.entity_type,
-        entityId: r.entity_id,
-        payload: r.payload,
-        status: r.status,
-        createdAt: r.created_at,
-        syncedAt: r.synced_at,
-        retryCount: r.retry_count,
-        lastError: r.last_error,
-        nextRetryAt: r.next_retry_at || null,
-        // snake_case
-        operation_id: r.operation_id,
-        center_id: r.center_id,
-        user_id: r.user_id,
-        device_id: r.device_id,
-        operation_type: r.operation_type,
-        entity_type: r.entity_type,
-        entity_id: r.entity_id,
-        created_at: r.created_at,
-        synced_at: r.synced_at,
-        retry_count: r.retry_count,
-        last_error: r.last_error !== undefined ? r.last_error : null,
-        next_retry_at: r.next_retry_at !== undefined ? r.next_retry_at : null,
-      }));
+      const conflicts = this.tables.get("sync_conflicts") || [];
+      const mapped = list.map((r) => {
+        const conflict = conflicts.find(
+          (c) => c.operation_id === r.operation_id,
+        );
+        return {
+          id: r.id,
+          operationId: r.operation_id,
+          centerId: r.center_id,
+          userId: r.user_id,
+          deviceId: r.device_id,
+          operationType: r.operation_type,
+          entityType: r.entity_type,
+          entityId: r.entity_id,
+          payload: r.payload,
+          status: r.status,
+          createdAt: r.created_at,
+          syncedAt: r.synced_at,
+          retryCount: r.retry_count,
+          lastError: r.last_error,
+          nextRetryAt: r.next_retry_at || null,
+          safeRetryCount: conflict?.safe_retry_count ?? 0,
+          lastSafeRetryAt: conflict?.last_safe_retry_at || null,
+          conflictId: conflict?.id || null,
+          conflictStatus: conflict?.status || null,
+          reasonCode: conflict?.reason_code || null,
+          serverReason: conflict?.server_reason || null,
+          resolvedBy: conflict?.resolved_by || null,
+          resolutionNote: conflict?.resolution_note || null,
+          // snake_case
+          operation_id: r.operation_id,
+          center_id: r.center_id,
+          user_id: r.user_id,
+          device_id: r.device_id,
+          operation_type: r.operation_type,
+          entity_type: r.entity_type,
+          entity_id: r.entity_id,
+          created_at: r.created_at,
+          synced_at: r.synced_at,
+          retry_count: r.retry_count,
+          last_error: r.last_error !== undefined ? r.last_error : null,
+          next_retry_at: r.next_retry_at !== undefined ? r.next_retry_at : null,
+          safe_retry_count: conflict?.safe_retry_count ?? 0,
+          last_safe_retry_at: conflict?.last_safe_retry_at || null,
+          conflict_id: conflict?.id || null,
+          conflict_status: conflict?.status || null,
+          reason_code: conflict?.reason_code || null,
+          server_reason: conflict?.server_reason || null,
+          resolved_by: conflict?.resolved_by || null,
+          resolution_note: conflict?.resolution_note || null,
+        };
+      });
+
+      if (
+        trimmed.includes("JOIN sync_conflicts") &&
+        trimmed.includes("operation_id = ?")
+      ) {
+        const centerId = params[0];
+        const opId = params[1];
+        return mapped.filter(
+          (r) =>
+            r.centerId === centerId &&
+            r.operationId === opId &&
+            r.conflictId != null,
+        ) as T[];
+      }
+
+      if (
+        params.length >= 2 &&
+        trimmed.includes("center_id = ?") &&
+        trimmed.includes("entity_id = ?") &&
+        trimmed.includes("status = 'conflict'")
+      ) {
+        const [centerId, entityId] = params;
+        return mapped.filter(
+          (r) =>
+            r.centerId === centerId &&
+            r.entityId === entityId &&
+            r.status === "conflict",
+        ) as T[];
+      }
 
       // Support the diagnostic queries used by Sync Debug in the in-memory
       // database as well as native SQLite (status filters, ordering and
@@ -4598,6 +4976,68 @@ class InMemorySqliteMock implements SqlDatabase {
             result = result.slice(0, limit);
         }
         return result as T[];
+      }
+      return mapped as T[];
+    }
+
+    if (trimmed.includes("FROM sync_conflicts")) {
+      const list = this.tables.get("sync_conflicts") || [];
+      const ops = this.tables.get("sync_operations") || [];
+      const mapped = list.map((r) => {
+        const op = ops.find((o) => o.operation_id === r.operation_id);
+        return {
+          id: r.id,
+          operationId: r.operation_id,
+          centerId: r.center_id,
+          entityType: r.entity_type || op?.entity_type || null,
+          entityId: r.entity_id || op?.entity_id || null,
+          operationType: op?.operation_type || null,
+          reasonCode: r.reason_code || null,
+          serverReason: r.server_reason || null,
+          localPayload: r.local_payload || op?.payload || null,
+          serverState: r.server_state || null,
+          status: r.status || "open",
+          resolvedAt: r.resolved_at || null,
+          resolvedBy: r.resolved_by || null,
+          resolutionNote: r.resolution_note || null,
+          safeRetryCount: r.safe_retry_count ?? 0,
+          lastSafeRetryAt: r.last_safe_retry_at || null,
+          createdAt: r.created_at,
+          operation_id: r.operation_id,
+          center_id: r.center_id,
+          entity_type: r.entity_type || op?.entity_type || null,
+          entity_id: r.entity_id || op?.entity_id || null,
+          operation_type: op?.operation_type || null,
+          reason_code: r.reason_code || null,
+          server_reason: r.server_reason || null,
+          local_payload: r.local_payload || op?.payload || null,
+          server_state: r.server_state || null,
+          resolved_at: r.resolved_at || null,
+          resolved_by: r.resolved_by || null,
+          resolution_note: r.resolution_note || null,
+          safe_retry_count: r.safe_retry_count ?? 0,
+          last_safe_retry_at: r.last_safe_retry_at || null,
+          created_at: r.created_at,
+        };
+      });
+      if (
+        params.length >= 2 &&
+        trimmed.includes("center_id = ?") &&
+        trimmed.includes("operation_id = ?")
+      ) {
+        return mapped.filter(
+          (r) => r.centerId === params[0] && r.operationId === params[1],
+        ) as T[];
+      }
+      if (params.length >= 1 && trimmed.includes("operation_id = ?")) {
+        return mapped.filter((r) => r.operationId === params[0]) as T[];
+      }
+      if (params.length >= 1 && trimmed.includes("center_id = ?")) {
+        let res = mapped.filter((r) => r.centerId === params[0]);
+        if (trimmed.includes("status = 'open'")) {
+          res = res.filter((r) => r.status === "open");
+        }
+        return res as T[];
       }
       return mapped as T[];
     }
@@ -5373,6 +5813,265 @@ class InMemorySqliteMock implements SqlDatabase {
       }));
       if (params.length >= 1 && trimmed.includes("center_id = ?")) {
         return mapped.filter((r) => r.centerId === params[0]) as T[];
+      }
+      return mapped as T[];
+    }
+
+    if (trimmed.includes("FROM student_payment_request_obligations")) {
+      const list = this.tables.get("student_payment_request_obligations") || [];
+      const requests = this.tables.get("group_payment_requests") || [];
+      const students = this.tables.get("students") || [];
+      const groups = this.tables.get("groups") || [];
+      const mapped = list.map((r) => {
+        const req = requests.find((rq) => rq.id === r.request_id);
+        const std = students.find((s) => s.id === r.student_id);
+        const grp = groups.find((g) => g.id === r.group_id);
+        return {
+          id: r.id,
+          operationId: r.operation_id,
+          centerId: r.center_id,
+          requestId: r.request_id,
+          groupId: r.group_id,
+          studentId: r.student_id,
+          amountDue: Number(r.amount_due) || 0,
+          amountPaid: Number(r.amount_paid) || 0,
+          status: r.status || "unpaid",
+          paymentId: r.payment_id || null,
+          paidAt: r.paid_at || null,
+          createdAt: r.created_at,
+          updatedAt: r.updated_at || null,
+          cancelledAt: r.cancelled_at || null,
+          requestName: req ? req.name : "",
+          referenceMonth: req ? req.reference_month || null : null,
+          requestStatus: req ? req.status || "active" : "active",
+          groupName: grp ? grp.name : "",
+          studentName: std ? std.full_name : "",
+          studentCode: std ? std.student_code : "",
+          cardCode: std ? std.card_code || null : null,
+          // snake_case
+          operation_id: r.operation_id,
+          center_id: r.center_id,
+          request_id: r.request_id,
+          group_id: r.group_id,
+          student_id: r.student_id,
+          amount_due: Number(r.amount_due) || 0,
+          amount_paid: Number(r.amount_paid) || 0,
+          payment_id: r.payment_id || null,
+          paid_at: r.paid_at || null,
+          created_at: r.created_at,
+          updated_at: r.updated_at || null,
+          cancelled_at: r.cancelled_at || null,
+          request_name: req ? req.name : "",
+          reference_month: req ? req.reference_month || null : null,
+          request_status: req ? req.status || "active" : "active",
+          group_name: grp ? grp.name : "",
+          student_name: std ? std.full_name : "",
+          student_code: std ? std.student_code : "",
+          card_code: std ? std.card_code || null : null,
+        };
+      });
+      if (
+        params.length >= 1 &&
+        trimmed.includes("operation_id = ?") &&
+        !trimmed.includes("center_id = ?")
+      ) {
+        return mapped.filter((r) => r.operationId === params[0]) as T[];
+      }
+      if (
+        params.length >= 2 &&
+        trimmed.includes("center_id = ?") &&
+        trimmed.includes("operation_id = ?")
+      ) {
+        return mapped.filter(
+          (r) => r.centerId === params[0] && r.operationId === params[1],
+        ) as T[];
+      }
+      if (
+        params.length >= 3 &&
+        trimmed.includes("request_id = ?") &&
+        trimmed.includes("student_id = ?")
+      ) {
+        return mapped.filter(
+          (r) =>
+            r.centerId === params[0] &&
+            r.requestId === params[1] &&
+            r.studentId === params[2],
+        ) as T[];
+      }
+      if (
+        params.length >= 2 &&
+        trimmed.includes("payment_id = ?")
+      ) {
+        return mapped.filter(
+          (r) => r.centerId === params[0] && r.paymentId === params[1],
+        ) as T[];
+      }
+      if (
+        params.length >= 2 &&
+        trimmed.includes("request_id = ?")
+      ) {
+        let results = mapped.filter(
+          (r) => r.centerId === params[0] && r.requestId === params[1],
+        );
+        if (trimmed.includes("status = 'paid'")) {
+          results = results.filter((r) => r.status === "paid");
+        } else if (trimmed.includes("status = 'unpaid'")) {
+          results = results.filter((r) => r.status === "unpaid");
+        } else if (trimmed.includes("status = ?") && params.length >= 3) {
+          results = results.filter((r) => r.status === params[2]);
+        }
+        if (trimmed.includes("status != 'cancelled'")) {
+          results = results.filter((r) => r.status !== "cancelled");
+        }
+        return results as T[];
+      }
+      if (
+        params.length >= 2 &&
+        trimmed.includes("student_id = ?")
+      ) {
+        let results = mapped.filter(
+          (r) => r.centerId === params[0] && r.studentId === params[1],
+        );
+        if (trimmed.includes("group_id = ?") && params.length >= 3) {
+          results = results.filter((r) => r.groupId === params[2]);
+        }
+        if (trimmed.includes("status != 'cancelled'")) {
+          results = results.filter((r) => r.status !== "cancelled");
+        }
+        if (trimmed.includes("status = 'unpaid'")) {
+          results = results.filter((r) => r.status === "unpaid");
+        }
+        return results as T[];
+      }
+      if (
+        params.length >= 2 &&
+        trimmed.includes("group_id = ?")
+      ) {
+        return mapped.filter(
+          (r) => r.centerId === params[0] && r.groupId === params[1],
+        ) as T[];
+      }
+      if (
+        params.length >= 2 &&
+        (trimmed.includes("AND id = ?") ||
+          trimmed.includes("WHERE id = ?") ||
+          trimmed.includes("o.id = ?"))
+      ) {
+        return mapped.filter(
+          (r) => r.centerId === params[0] && r.id === params[1],
+        ) as T[];
+      }
+      if (params.length >= 1 && trimmed.includes("center_id = ?")) {
+        return mapped.filter((r) => r.centerId === params[0]) as T[];
+      }
+      return mapped as T[];
+    }
+
+    if (trimmed.includes("FROM group_payment_requests")) {
+      const list = this.tables.get("group_payment_requests") || [];
+      const groups = this.tables.get("groups") || [];
+      const obligations =
+        this.tables.get("student_payment_request_obligations") || [];
+      const mapped = list.map((r) => {
+        const grp = groups.find((g) => g.id === r.group_id);
+        const reqObligations = obligations.filter(
+          (ob) => ob.center_id === r.center_id && ob.request_id === r.id,
+        );
+        const paidCount = reqObligations.filter(
+          (ob) => ob.status === "paid",
+        ).length;
+        const unpaidCount = reqObligations.filter(
+          (ob) => ob.status === "unpaid",
+        ).length;
+        const cancelledCount = reqObligations.filter(
+          (ob) => ob.status === "cancelled",
+        ).length;
+        return {
+          id: r.id,
+          operationId: r.operation_id,
+          centerId: r.center_id,
+          groupId: r.group_id,
+          groupName: grp ? grp.name : "",
+          name: r.name,
+          amount: Number(r.amount) || 0,
+          referenceMonth: r.reference_month || null,
+          status: r.status || "active",
+          createdBy: r.created_by,
+          createdByName: r.created_by_name || null,
+          updatedBy: r.updated_by || null,
+          updatedByName: r.updated_by_name || null,
+          archivedBy: r.archived_by || null,
+          archivedAt: r.archived_at || null,
+          createdAt: r.created_at,
+          updatedAt: r.updated_at || null,
+          paidCount,
+          unpaidCount,
+          cancelledCount,
+          totalObligationsCount: reqObligations.length,
+          // snake_case
+          operation_id: r.operation_id,
+          center_id: r.center_id,
+          group_id: r.group_id,
+          group_name: grp ? grp.name : "",
+          reference_month: r.reference_month || null,
+          created_by: r.created_by,
+          created_by_name: r.created_by_name || null,
+          updated_by: r.updated_by || null,
+          updated_by_name: r.updated_by_name || null,
+          archived_by: r.archived_by || null,
+          archived_at: r.archived_at || null,
+          created_at: r.created_at,
+          updated_at: r.updated_at || null,
+          paid_count: paidCount,
+          unpaid_count: unpaidCount,
+          cancelled_count: cancelledCount,
+          total_obligations_count: reqObligations.length,
+        };
+      });
+      if (
+        params.length >= 1 &&
+        trimmed.includes("operation_id = ?") &&
+        !trimmed.includes("center_id = ?")
+      ) {
+        return mapped.filter((r) => r.operationId === params[0]) as T[];
+      }
+      if (
+        params.length >= 2 &&
+        trimmed.includes("center_id = ?") &&
+        trimmed.includes("operation_id = ?")
+      ) {
+        return mapped.filter(
+          (r) => r.centerId === params[0] && r.operationId === params[1],
+        ) as T[];
+      }
+      if (
+        params.length >= 2 &&
+        (trimmed.includes("AND id = ?") ||
+          trimmed.includes("WHERE id = ?") ||
+          trimmed.includes("r.id = ?"))
+      ) {
+        return mapped.filter(
+          (r) => r.centerId === params[0] && r.id === params[1],
+        ) as T[];
+      }
+      if (params.length >= 2 && trimmed.includes("group_id = ?")) {
+        let results = mapped.filter(
+          (r) => r.centerId === params[0] && r.groupId === params[1],
+        );
+        if (trimmed.includes("status = 'active'")) {
+          results = results.filter((r) => r.status === "active");
+        }
+        results.sort((a, b) =>
+          String(b.createdAt || "").localeCompare(String(a.createdAt || "")),
+        );
+        return results as T[];
+      }
+      if (params.length >= 1 && trimmed.includes("center_id = ?")) {
+        let results = mapped.filter((r) => r.centerId === params[0]);
+        if (trimmed.includes("status = 'active'")) {
+          results = results.filter((r) => r.status === "active");
+        }
+        return results as T[];
       }
       return mapped as T[];
     }

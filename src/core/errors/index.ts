@@ -80,11 +80,11 @@ export class ConflictError extends AppError {
 }
 
 export class DuplicateAttendanceError extends ConflictError {
-  constructor() {
-    super(
-      "تم تحضير الطالب مسبقًا",
-      "تم تحضير الطالب مسبقًا",
-    );
+  constructor(
+    message = "تم تحضير الطالب مسبقًا",
+    userMessage = message,
+  ) {
+    super(message, userMessage);
     this.name = "DuplicateAttendanceError";
   }
 }

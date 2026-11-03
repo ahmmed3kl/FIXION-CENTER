@@ -14,6 +14,7 @@ import { SyncEngine, SyncRepository } from "../../core/sync";
 import { Attendance, AttendanceType, StudentGroupAttendanceSummary } from "../../shared/types";
 import {
   DEFAULT_TEACHER_WEEK_START_DAY,
+  getTeacherWeekBounds,
   isTeacherMakeupCycleOpen,
   TEACHER_MAKEUP_CYCLE_EXPIRED_ERROR,
   TEACHER_MAKEUP_CYCLE_EXPIRED_MESSAGE,
@@ -59,6 +60,16 @@ export class AttendanceRepository {
   static isAlreadyAttended(sessionId: string, studentId: string): boolean {
     const attendance = this.getStudentAttendanceInSession(sessionId, studentId);
     return Boolean(attendance && !this.isSessionStartAbsenceRecord(attendance));
+  }
+
+  static isAlreadyRegisteredAsMakeup(sessionId: string, studentId: string): boolean {
+    const attendance = this.getStudentAttendanceInSession(sessionId, studentId);
+    return Boolean(
+      attendance &&
+      !this.isSessionStartAbsenceRecord(attendance) &&
+      (attendance.status === "present" || attendance.status === "late") &&
+      attendance.attendanceType === "makeup",
+    );
   }
 
   static isSessionStartAbsenceRecord(
@@ -110,6 +121,7 @@ export class AttendanceRepository {
     /** Scanner flows must record payment separately after an explicit payment confirmation. */
     suppressExternalPayment?: boolean;
     checkInTime?: string;
+    operationId?: string;
   }): Promise<Attendance> {
     const { centerId, user } = this.getActiveContext();
 
@@ -166,6 +178,49 @@ export class AttendanceRepository {
     }
     if (session?.status === "cancelled") {
       throw new ConflictError("لا يمكن تسجيل الحضور في حصة ملغاة.");
+    }
+
+    const requestedOperationId = params.operationId?.trim();
+    if (requestedOperationId) {
+      const existingByOperation = db.getFirstSync<any>(
+        `SELECT id, center_id as centerId, student_id as studentId,
+                session_id as sessionId, check_in_time as checkInTime,
+                status, is_late as isLate, attendance_type as attendanceType,
+                original_absence_id as originalAbsenceId,
+                is_external as isExternal, operation_id as operationId
+         FROM attendance
+         WHERE center_id = ? AND operation_id = ?`,
+        [centerId, requestedOperationId],
+      );
+      if (existingByOperation && !this.isSessionStartAbsenceRecord(existingByOperation)) {
+        return {
+          ...existingByOperation,
+          isLate: Boolean(existingByOperation.isLate),
+          isExternal: Boolean(existingByOperation.isExternal),
+          attendanceType: existingByOperation.attendanceType || "present",
+        } as Attendance;
+      }
+    }
+
+    const existingAttendance = this.getStudentAttendanceInSession(
+      params.sessionId,
+      params.studentId,
+    );
+    if (
+      existingAttendance &&
+      !this.isSessionStartAbsenceRecord(existingAttendance)
+    ) {
+      if (
+        requestedOperationId &&
+        existingAttendance.operationId === requestedOperationId
+      ) {
+        return existingAttendance;
+      }
+      throw new DuplicateAttendanceError(
+        existingAttendance.attendanceType === "makeup"
+          ? "الطالب مسجل تعويض بالفعل وتم تسجيل حضوره مسبقًا في هذه الحصة"
+          : undefined,
+      );
     }
 
     let canonicalOriginalAbsenceId = params.originalAbsenceId?.trim() || null;
@@ -326,6 +381,26 @@ export class AttendanceRepository {
       if (!eligibleGroup) {
         throw new ConflictError("الطالب غير مسجل في أي مجموعة مؤهلة للتعويض لنفس المدرس والمرحلة الدراسية.");
       }
+      const teacherWeek = db.getFirstSync<{ weekStartDay?: number | null }>(
+        "SELECT week_start_day as weekStartDay FROM teachers WHERE center_id = ? AND id = ?",
+        [centerId, session.teacherId],
+      );
+      const weekStartDay = teacherWeek?.weekStartDay ?? DEFAULT_TEACHER_WEEK_START_DAY;
+      const weekBounds = getTeacherWeekBounds(session.sessionDate, weekStartDay);
+      const alreadyAttendedTeacherInCycle = db.getFirstSync<any>(
+        `SELECT a.id
+         FROM attendance a
+         JOIN sessions s ON s.center_id = a.center_id AND s.id = a.session_id
+         JOIN groups g ON g.center_id = s.center_id AND g.id = s.group_id
+         WHERE a.center_id = ? AND a.student_id = ?
+           AND a.status IN ('present', 'late')
+           AND COALESCE(s.teacher_id, g.teacher_id) = ?
+           AND s.session_date >= ? AND s.session_date <= ?`,
+        [centerId, params.studentId, session.teacherId, weekBounds.startDate, weekBounds.endDate],
+      );
+      if (alreadyAttendedTeacherInCycle) {
+        throw new ConflictError("تم استنفاد فرصة التعويض لهذا الأسبوع مع نفس المدرس.");
+      }
     }
 
     // Do not rely only on the scanner UI for eligibility. Attendance can also
@@ -341,19 +416,8 @@ export class AttendanceRepository {
       throw new ConflictError("الطالب غير متوقع في المجموعة/الحصة الحالية.");
     }
 
-    const existingAttendance = this.getStudentAttendanceInSession(
-      params.sessionId,
-      params.studentId,
-    );
-    if (
-      existingAttendance &&
-      !this.isSessionStartAbsenceRecord(existingAttendance)
-    ) {
-      throw new DuplicateAttendanceError();
-    }
-
     const attendanceId = existingAttendance?.id || `att-${generateUUID()}`;
-    const operationId = `op-att-${generateUUID()}`;
+    const operationId = requestedOperationId || `op-att-${generateUUID()}`;
     const deviceId = await DeviceService.getDeviceId();
 
     const now = new Date();
@@ -928,6 +992,23 @@ export class AttendanceRepository {
       return summary;
     };
     const countedAttendance = new Set<string>();
+    let coveredTargetSessionIds: Set<string> | null = null;
+    const isCoveredSession = (sessionId: string): boolean => {
+      if (!coveredTargetSessionIds) {
+        const rows = db.getAllSync<{ targetFutureSessionId?: string | null }>(
+          `SELECT target_future_session_id as targetFutureSessionId
+           FROM advance_coverages
+           WHERE center_id = ? AND student_id = ?`,
+          [centerId, studentId],
+        );
+        coveredTargetSessionIds = new Set(
+          rows
+            .map((r) => String(r.targetFutureSessionId || "").trim())
+            .filter(Boolean),
+        );
+      }
+      return coveredTargetSessionIds.has(sessionId);
+    };
 
     for (const row of expectedRows) {
       const summary = ensure(row);
@@ -943,12 +1024,7 @@ export class AttendanceRepository {
         }
         continue;
       }
-      const covered = db.getFirstSync<any>(
-        `SELECT id FROM advance_coverages
-         WHERE center_id = ? AND student_id = ? AND target_future_session_id = ? LIMIT 1`,
-        [centerId, studentId, row.sessionId],
-      );
-      if (!covered) {
+      if (!isCoveredSession(row.sessionId)) {
         if (row.sessionStatus === "open" || row.sessionStatus === "closed") {
           summary.absentCount += 1;
         } else {

@@ -450,6 +450,86 @@ export interface DebtCycle {
   packageName?: string;
 }
 
+export type PaymentRequestStatus = "active" | "archived";
+export type PaymentRequestObligationStatus = "unpaid" | "paid" | "cancelled";
+
+export interface GroupPaymentRequest {
+  id: string;
+  operationId: string;
+  centerId: string;
+  groupId: string;
+  groupName?: string;
+  name: string;
+  amount: number;
+  referenceMonth?: string | null;
+  status: PaymentRequestStatus;
+  createdBy: string;
+  createdByName?: string | null;
+  updatedBy?: string | null;
+  updatedByName?: string | null;
+  archivedBy?: string | null;
+  archivedAt?: string | null;
+  createdAt: string;
+  updatedAt?: string | null;
+  paidCount?: number;
+  unpaidCount?: number;
+  cancelledCount?: number;
+  totalObligationsCount?: number;
+  totalCollectedAmount?: number;
+  totalOutstandingAmount?: number;
+  collectionPercentage?: number;
+}
+
+export interface StudentPaymentRequestObligation {
+  id: string;
+  operationId: string;
+  centerId: string;
+  requestId: string;
+  requestName?: string;
+  referenceMonth?: string | null;
+  requestStatus?: PaymentRequestStatus;
+  groupId: string;
+  groupName?: string;
+  studentId: string;
+  studentName?: string;
+  studentCode?: string;
+  cardCode?: string | null;
+  amountDue: number;
+  amountPaid: number;
+  amountOwed?: number;
+  confirmedAmountPaid?: number;
+  isPaid?: boolean;
+  isPartiallyPaid?: boolean;
+  status: PaymentRequestObligationStatus;
+  paymentId?: string | null;
+  paidAt?: string | null;
+  createdAt: string;
+  updatedAt?: string | null;
+  cancelledAt?: string | null;
+}
+
+export type PaymentRequestFilterType = "all" | "paid" | "unpaid";
+
+export interface PaymentRequestCollectionStatistics {
+  totalStudents: number;
+  paidStudentsCount: number;
+  unpaidStudentsCount: number;
+  totalExpectedAmount: number;
+  totalCollectedAmount: number;
+  totalOutstandingAmount: number;
+  collectionPercentage: number;
+}
+
+export interface PaymentRequestDetailsResult {
+  request: GroupPaymentRequest;
+  statistics: PaymentRequestCollectionStatistics;
+  students: StudentPaymentRequestObligation[];
+  obligations: StudentPaymentRequestObligation[];
+  allStudents: StudentPaymentRequestObligation[];
+  activeFilter: PaymentRequestFilterType;
+  displayedCount: number;
+}
+
 export interface PaymentEvent {
   id: string;
   operationId: string;
@@ -458,8 +538,10 @@ export interface PaymentEvent {
   subscriptionId?: string;
   debtCycleId?: string;
   sessionId?: string;
+  paymentRequestObligationId?: string;
+  paymentRequestId?: string;
   amount: number;
-  paymentType: "monthly" | "session" | "partial" | "full";
+  paymentType: "monthly" | "session" | "partial" | "full" | "payment_request";
   paymentMethod?: "cash" | string;
   paymentDate?: string;
   notes?: string | null;
@@ -529,6 +611,12 @@ export interface DetailedStudentFinancialStatus extends StudentFinancialStatus {
   currentPeriodDebt?: number;
   /** Unallocated overpayment carried into a future cycle. */
   creditBalance?: number;
+  /** Independent group payment request obligations for this student. */
+  paymentRequestObligations?: StudentPaymentRequestObligation[];
+  paymentRequestsTotalDue?: number;
+  paymentRequestsTotalPaid?: number;
+  paymentRequestsRemainingDebt?: number;
+  paymentRequestPayments?: PaymentEvent[];
 }
 
 export interface SessionPaymentCandidate {
@@ -578,6 +666,29 @@ export interface SyncOperation {
   syncedAt?: string;
   retryCount: number;
   lastError?: string;
+}
+
+export interface SyncConflict {
+  id: string;
+  operationId: string;
+  centerId: string;
+  entityType: string;
+  entityId: string;
+  reason: string;
+  localPayload?: string | null;
+  serverPayload?: string | null;
+  createdAt: string;
+  resolvedAt?: string | null;
+  resolvedBy?: string | null;
+  resolutionNote?: string | null;
+  entityName?: string | null;
+  groupName?: string | null;
+  teacherName?: string | null;
+  studentName?: string | null;
+  friendlyReason?: string;
+  isFinancial?: boolean;
+  safeRetryCount?: number;
+  lastSafeRetryAt?: string | null;
 }
 
 export interface AuditLog {

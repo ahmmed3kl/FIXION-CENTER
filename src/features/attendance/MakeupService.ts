@@ -3,6 +3,7 @@ import { DatabaseService } from "../../core/database";
 import { DeviceService } from "../../core/device";
 import {
     ConflictError,
+    DuplicateAttendanceError,
     ForbiddenError,
     NotFoundError,
     UnauthorizedError,
@@ -41,6 +42,7 @@ function generateUUID(): string {
 
 export interface MakeupEligibility {
   eligible: boolean;
+  alreadyRegistered?: boolean;
   sourceGroupId?: string;
   sourceGroupName?: string;
   teacherName?: string;
@@ -437,11 +439,19 @@ export class MakeupService {
       return { eligible: false };
     }
     const hostAttendance = db.getFirstSync<any>(
-      `SELECT status, attendance_type as attendanceType FROM attendance
+      `SELECT status, attendance_type as attendanceType, original_absence_id as originalAbsenceId FROM attendance
        WHERE center_id = ? AND session_id = ? AND student_id = ?`,
       [centerId, sessionId, studentId],
     );
     if (hostAttendance && (hostAttendance.status === "present" || hostAttendance.status === "late")) {
+      if (hostAttendance.attendanceType === "makeup") {
+        return {
+          eligible: false,
+          alreadyRegistered: true,
+          teacherName: host.teacherName,
+          originalAbsenceId: hostAttendance.originalAbsenceId || undefined,
+        };
+      }
       return { eligible: false };
     }
     const weekStart = db.getFirstSync<{ weekStartDay?: number | null }>(
@@ -673,7 +683,29 @@ export class MakeupService {
     originalAbsenceId?: string;
     isLate?: boolean;
     checkInTime?: string;
+    operationId?: string;
   }): Promise<Attendance> {
+    const existingAttendance = AttendanceRepository.getStudentAttendanceInSession(
+      params.sessionId,
+      params.studentId,
+    );
+    if (
+      existingAttendance &&
+      !AttendanceRepository.isSessionStartAbsenceRecord(existingAttendance)
+    ) {
+      if (
+        params.operationId &&
+        existingAttendance.operationId === params.operationId.trim()
+      ) {
+        return existingAttendance;
+      }
+      throw new DuplicateAttendanceError(
+        existingAttendance.attendanceType === "makeup"
+          ? "الطالب مسجل تعويض بالفعل وتم تسجيل حضوره مسبقًا في هذه الحصة"
+          : "تم تحضير الطالب مسبقًا",
+      );
+    }
+
     if (params.originalAbsenceId) {
       const originalSession = SessionRepository.findById(params.originalAbsenceId);
       if (originalSession) {
@@ -692,21 +724,6 @@ export class MakeupService {
       }
     }
 
-    const existingAttendance = AttendanceRepository.getStudentAttendanceInSession(
-      params.sessionId,
-      params.studentId,
-    );
-    if (
-      existingAttendance &&
-      !AttendanceRepository.isSessionStartAbsenceRecord(existingAttendance)
-    ) {
-      throw new ConflictError(
-        existingAttendance.attendanceType === "makeup"
-          ? "تم تسجيل حضور الطالب كتعويض مسبقًا."
-          : "تم تسجيل حضور الطالب مسبقًا لهذه الحصة.",
-      );
-    }
-
     // Prefer the shared session-scoped eligibility query. It resolves legacy
     // sessions whose teacher/subject snapshot columns are missing and keeps
     // package students eligible when the source absence was real. Retain the
@@ -723,7 +740,7 @@ export class MakeupService {
     const nextEligible =
       (sharedEligibility.eligible && (!params.originalAbsenceId || sharedEligibility.originalAbsenceId === params.originalAbsenceId)) ||
       (strictEligibility.eligible && (!params.originalAbsenceId || strictEligibility.originalAbsenceId === params.originalAbsenceId)) ||
-      (params.originalAbsenceId ? this.getNextEligibleSession(params.studentId, params.originalAbsenceId, params.sessionId)?.id === params.sessionId : false);
+      (params.originalAbsenceId ? this.getNextEligibleSession(studentIdFromParams(params), params.originalAbsenceId, params.sessionId)?.id === params.sessionId : false);
     if (!nextEligible) {
       throw new ValidationError(
         "الحصة المحددة ليست الحصة التالية المؤهلة للتعويض أو انتهت صلاحية فرصة التعويض.",
@@ -738,6 +755,11 @@ export class MakeupService {
       attendanceType: "makeup",
       originalAbsenceId: params.originalAbsenceId,
       checkInTime: params.checkInTime,
+      operationId: params.operationId,
     });
   }
+}
+
+function studentIdFromParams(params: { studentId: string }): string {
+  return params.studentId;
 }

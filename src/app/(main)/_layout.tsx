@@ -14,6 +14,11 @@ export const unstable_settings = {
   anchor: "dashboard",
 } as const;
 
+const hiddenTabOptions = {
+  tabBarItemStyle: { display: "none" as const },
+  tabBarButton: () => null,
+};
+
 export default function MainLayout() {
   const router = useRouter();
   const segments = useSegments();
@@ -36,8 +41,7 @@ export default function MainLayout() {
 
   return (
     <Tabs
-      initialRouteName="dashboard"
-      backBehavior="history"
+      backBehavior="initialRoute"
       screenOptions={{
         headerShown: false,
         tabBarActiveTintColor: colors.primary,
@@ -68,7 +72,7 @@ export default function MainLayout() {
         name="more"
         options={{
           title: Strings.tabMore,
-          tabBarIcon: ({ color, size }) => <Ionicons name="menu-outline" size={size} color={color} />,
+          tabBarIcon: ({ color, size }) => <Ionicons name="menu-outline" size={size} color={color as string} />,
         }}
       />
       <Tabs.Screen
@@ -77,7 +81,7 @@ export default function MainLayout() {
           title: Strings.tabDashboard,
           tabBarIcon: ({ focused, color, size }) => (
             <View style={[styles.homeTabIcon, focused ? { backgroundColor: colors.primaryLight } : null]}>
-              <Ionicons name={focused ? "home" : "home-outline"} size={size} color={color} />
+              <Ionicons name={focused ? "home" : "home-outline"} size={size} color={color as string} />
             </View>
           ),
         }}
@@ -86,9 +90,9 @@ export default function MainLayout() {
         name="scanner"
         options={{
           // Scanner remains available from the dashboard/more menu, but is not a primary tab.
-          href: null,
+          ...hiddenTabOptions,
           title: Strings.tabScanner,
-          tabBarIcon: ({ color, size }) => <Ionicons name="qr-code-outline" size={size} color={color} />,
+          tabBarIcon: ({ color, size }) => <Ionicons name="qr-code-outline" size={size} color={color as string} />,
         }}
       />
       <Tabs.Screen
@@ -96,67 +100,68 @@ export default function MainLayout() {
         options={{
           title: Strings.tabStudents,
           tabBarIcon: ({ color, size }) => (
-            <Ionicons name="people-outline" size={size} color={color} />
+            <Ionicons name="people-outline" size={size} color={color as string} />
           ),
         }}
       />
-      <Tabs.Screen name="deleted-students" options={{ href: null, title: "الطلاب المحذوفون" }} />
-      <Tabs.Screen name="homework-evaluations" options={{ href: null, title: "تقييم الواجب" }} />
+      <Tabs.Screen name="deleted-students" options={{ ...hiddenTabOptions, title: "الطلاب المحذوفون" }} />
+      <Tabs.Screen name="homework-evaluations" options={{ ...hiddenTabOptions, title: "تقييم الواجب" }} />
       <Tabs.Screen
         name="academic"
         options={{
-          href: null,
+          ...hiddenTabOptions,
           title: Strings.tabAcademic,
           tabBarIcon: ({ color, size }) => (
-            <Ionicons name="school-outline" size={size} color={color} />
+            <Ionicons name="school-outline" size={size} color={color as string} />
           ),
         }}
       />
       <Tabs.Screen
         name="closing"
         options={{
-          href: null,
+          ...hiddenTabOptions,
           title: "الإغلاق",
           tabBarIcon: ({ color, size }) => (
-            <Ionicons name="lock-closed-outline" size={size} color={color} />
+            <Ionicons name="lock-closed-outline" size={size} color={color as string} />
           ),
         }}
       />
       <Tabs.Screen
         name="notifications"
         options={{
-          href: null,
+          ...hiddenTabOptions,
           title: "الإشعارات",
           tabBarIcon: ({ color, size }) => (
-            <Ionicons name="notifications-outline" size={size} color={color} />
+            <Ionicons name="notifications-outline" size={size} color={color as string} />
           ),
         }}
       />
       <Tabs.Screen
         name="reports"
         options={{
-          href: null,
+          ...hiddenTabOptions,
           title: "التقارير",
           tabBarIcon: ({ color, size }) => (
-            <Ionicons name="bar-chart-outline" size={size} color={color} />
+            <Ionicons name="bar-chart-outline" size={size} color={color as string} />
           ),
         }}
       />
       {/* Internal route opened from academic/group screens; never show as a bottom tab. */}
-      <Tabs.Screen name="group-details" options={{ href: null }} />
-      <Tabs.Screen name="groups" options={{ href: null }} />
-      <Tabs.Screen name="grade-groups" options={{ href: null }} />
-      <Tabs.Screen name="center-accounts" options={{ href: null }} />
-      <Tabs.Screen name="center-account-permissions" options={{ href: null, title: "صلاحيات الحساب" }} />
-      <Tabs.Screen name="absence-reports" options={{ href: null }} />
-      <Tabs.Screen name="absence-group" options={{ href: null }} />
-      <Tabs.Screen name="packages" options={{ href: null }} />
-      <Tabs.Screen name="grades" options={{ href: null }} />
-      <Tabs.Screen name="center-switch" options={{ href: null }} />
-      <Tabs.Screen name="sync-debug" options={{ href: null }} />
-      <Tabs.Screen name="financial-reports" options={{ href: null }} />
-      <Tabs.Screen name="opening-balance" options={{ href: null }} />
-      <Tabs.Screen name="debt-adjustments" options={{ href: null }} />
+      <Tabs.Screen name="group-details" options={hiddenTabOptions} />
+      <Tabs.Screen name="groups" options={hiddenTabOptions} />
+      <Tabs.Screen name="grade-groups" options={hiddenTabOptions} />
+      <Tabs.Screen name="center-accounts" options={hiddenTabOptions} />
+      <Tabs.Screen name="center-account-permissions" options={{ ...hiddenTabOptions, title: "صلاحيات الحساب" }} />
+      <Tabs.Screen name="absence-reports" options={hiddenTabOptions} />
+      <Tabs.Screen name="absence-group" options={hiddenTabOptions} />
+      <Tabs.Screen name="packages" options={hiddenTabOptions} />
+      <Tabs.Screen name="grades" options={hiddenTabOptions} />
+      <Tabs.Screen name="center-switch" options={hiddenTabOptions} />
+      <Tabs.Screen name="sync-debug" options={hiddenTabOptions} />
+      <Tabs.Screen name="financial-reports" options={hiddenTabOptions} />
+      <Tabs.Screen name="opening-balance" options={hiddenTabOptions} />
+      <Tabs.Screen name="debt-adjustments" options={hiddenTabOptions} />
+      <Tabs.Screen name="payment-requests" options={{ ...hiddenTabOptions, title: "متطالبات الدفع" }} />
     </Tabs>
   );
 }

@@ -1,11 +1,22 @@
-import { useSyncExternalStore } from "react";
+import { useCallback, useSyncExternalStore } from "react";
 import { LocalDataEvents } from "./localDataEvents";
 
 /**
  * Re-renders a repository-driven screen whenever a local SQLite mutation is
- * committed. The caller decides which query to reload when the revision
- * changes; no polling or navigation remount is involved.
+ * committed. Callers may optionally filter by `entityTypes` so unrelated
+ * mutations do not trigger unnecessary screen re-renders.
  */
-export function useLocalDataRevision(): number {
-  return useSyncExternalStore(LocalDataEvents.subscribe, LocalDataEvents.getRevision, LocalDataEvents.getRevision);
+export function useLocalDataRevision(
+  entityTypes?: string | readonly string[],
+): number {
+  const normalizedKey = Array.isArray(entityTypes)
+    ? entityTypes.join("|")
+    : typeof entityTypes === "string"
+      ? entityTypes
+      : "";
+  const getSnapshot = useCallback(() => {
+    if (!normalizedKey) return LocalDataEvents.getRevision();
+    return LocalDataEvents.getRevisionForEntities(normalizedKey.split("|"));
+  }, [normalizedKey]);
+  return useSyncExternalStore(LocalDataEvents.subscribe, getSnapshot, getSnapshot);
 }

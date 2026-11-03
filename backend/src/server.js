@@ -73,9 +73,98 @@ app.use((req, res) => {
 // Centralized error handling
 app.use(errorHandler);
 
+const SMS_RECOVERY_INTERVAL_MS = 60 * 1000;
+const SMS_RECOVERY_BATCH_LIMIT = 10;
+
+function createSmsRecoveryWorker(options = {}) {
+  const SyncProcessor = require("./services/SyncProcessor");
+  const sweepFn =
+    typeof options.sweepFn === "function"
+      ? options.sweepFn
+      : (limit) => SyncProcessor.sweepPendingSmsDeliveries(limit);
+  const intervalMs = Number.isFinite(options.intervalMs)
+    ? Math.max(1, Number(options.intervalMs))
+    : SMS_RECOVERY_INTERVAL_MS;
+  const batchLimit = Number.isFinite(options.batchLimit)
+    ? Math.max(1, Number(options.batchLimit))
+    : SMS_RECOVERY_BATCH_LIMIT;
+  const setTimer = options.setTimer || setTimeout;
+  const clearTimer = options.clearTimer || clearTimeout;
+
+  let timer = null;
+  let shuttingDown = false;
+  let activeCyclePromise = null;
+
+  const scheduleNextCycle = () => {
+    if (shuttingDown || timer !== null || activeCyclePromise !== null) return;
+    timer = setTimer(() => {
+      timer = null;
+      void runCycle();
+    }, intervalMs);
+    if (timer && typeof timer.unref === "function") {
+      timer.unref();
+    }
+  };
+
+  const runCycle = () => {
+    if (shuttingDown) return Promise.resolve(null);
+    if (activeCyclePromise) return activeCyclePromise;
+
+    activeCyclePromise = Promise.resolve()
+      .then(() => sweepFn(batchLimit))
+      .catch((err) => {
+        console.warn("SMS recovery sweep failed:", err?.message || String(err));
+        return null;
+      })
+      .finally(() => {
+        activeCyclePromise = null;
+        if (!shuttingDown) {
+          scheduleNextCycle();
+        }
+      });
+
+    return activeCyclePromise;
+  };
+
+  return {
+    start() {
+      if (shuttingDown) return Promise.resolve(null);
+      return runCycle();
+    },
+    async stop() {
+      shuttingDown = true;
+      if (timer !== null) {
+        clearTimer(timer);
+        timer = null;
+      }
+      if (activeCyclePromise) {
+        try {
+          await activeCyclePromise;
+        } catch {
+          // Sweep errors are already handled inside runCycle.
+        }
+      }
+    },
+    isShuttingDown() {
+      return shuttingDown;
+    },
+    hasScheduledTimer() {
+      return timer !== null;
+    },
+    isCycleRunning() {
+      return activeCyclePromise !== null;
+    },
+  };
+}
+
+app.createSmsRecoveryWorker = createSmsRecoveryWorker;
+
 // Only listen if started directly (allows importing in integration tests)
 if (require.main === module) {
   let server;
+  let smsRecoveryWorker = null;
+  let shuttingDown = false;
+
   ensureSchemaCompatibility()
     .then(() => {
       server = app.listen(config.port, "0.0.0.0", () => {
@@ -87,6 +176,8 @@ if (require.main === module) {
           " Note: When connecting from physical mobile device, use your PC LAN IP.",
         );
         console.log("====================================================");
+        smsRecoveryWorker = createSmsRecoveryWorker();
+        void smsRecoveryWorker.start();
       });
     })
     .catch((err) => {
@@ -94,16 +185,25 @@ if (require.main === module) {
       process.exit(1);
     });
 
-  const shutdown = (signal) => {
+  const shutdown = async (signal) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     console.log(`${signal} signal received. Closing HTTP server gracefully...`);
-    server.close(() => {
-      console.log("HTTP server closed.");
+    if (smsRecoveryWorker) {
+      await smsRecoveryWorker.stop();
+    }
+    if (server) {
+      server.close(() => {
+        console.log("HTTP server closed.");
+        process.exit(0);
+      });
+    } else {
       process.exit(0);
-    });
+    }
   };
 
-  process.on("SIGTERM", () => shutdown("SIGTERM"));
-  process.on("SIGINT", () => shutdown("SIGINT"));
+  process.on("SIGTERM", () => void shutdown("SIGTERM"));
+  process.on("SIGINT", () => void shutdown("SIGINT"));
 }
 
 module.exports = app;

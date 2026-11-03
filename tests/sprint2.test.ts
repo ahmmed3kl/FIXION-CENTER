@@ -6,6 +6,7 @@ import {
     ValidationError,
 } from "../src/core/errors";
 import { useAuthStore } from "../src/features/auth/useAuthStore";
+import { CardRangeRepository } from "../src/features/students/CardRangeRepository";
 import { EnrollmentRepository } from "../src/features/enrollments/EnrollmentRepository";
 import { GroupRepository } from "../src/features/groups/GroupRepository";
 import { GroupScheduleRepository } from "../src/features/groups/GroupScheduleRepository";
@@ -25,6 +26,10 @@ describe("Sprint 2 - FIXION Academic Core", () => {
     // Login as Demo Admin for test setup
     await useAuthStore.getState().login("01000000001", "123456");
     await useAuthStore.getState().selectCenter("center-1");
+    CardRangeRepository.replaceCenterRanges("center-1", [
+      { id: "test-card-range-sprint2-5", startCode: "00000", endCode: "99999" },
+      { id: "test-card-range-sprint2-6", startCode: "000000", endCode: "999999" },
+    ]);
   });
 
   describe("1. External Student Code & Student Creation", () => {

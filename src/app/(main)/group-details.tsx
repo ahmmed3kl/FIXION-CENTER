@@ -3,6 +3,7 @@ import { useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FlatList, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { LocalDataEvents } from "../../core/database/localDataEvents";
 import { useLocalDataRevision } from "../../core/database/useLocalDataRevision";
 import { Colors, Spacing, Typography, useTheme } from "../../core/theme";
 import { EnrollmentRepository } from "../../features/enrollments/EnrollmentRepository";
@@ -24,6 +25,7 @@ export default function GroupDetailsScreen() {
   const localDataRevision = useLocalDataRevision();
   const lastLoadedRevisionRef = useRef(localDataRevision);
   const hasInitialLoadedRef = useRef(false);
+  const isFocusedRef = useRef(true);
   const [group, setGroup] = useState<Group | null>(null);
   const [students, setStudents] = useState<Student[]>([]);
   const [query, setQuery] = useState("");
@@ -44,21 +46,27 @@ export default function GroupDetailsScreen() {
   useEffect(() => {
     loadGroupData();
     hasInitialLoadedRef.current = true;
-    lastLoadedRevisionRef.current = localDataRevision;
+    lastLoadedRevisionRef.current = LocalDataEvents.getRevision();
   }, [groupId]);
 
   // Refresh when returning from another screen (student enrollment, schedule edit, etc.)
   useFocusEffect(
     useCallback(() => {
-      if (hasInitialLoadedRef.current && lastLoadedRevisionRef.current !== localDataRevision) {
-        lastLoadedRevisionRef.current = localDataRevision;
+      isFocusedRef.current = true;
+      const currentRevision = LocalDataEvents.getRevision();
+      if (hasInitialLoadedRef.current && lastLoadedRevisionRef.current !== currentRevision) {
+        lastLoadedRevisionRef.current = currentRevision;
         loadGroupData();
       }
-    }, [localDataRevision, loadGroupData]),
+      return () => {
+        isFocusedRef.current = false;
+      };
+    }, [loadGroupData]),
   );
 
   // React to local DB changes while this screen is visible
   useEffect(() => {
+    if (!isFocusedRef.current) return;
     if (localDataRevision > 0 && lastLoadedRevisionRef.current !== localDataRevision) {
       lastLoadedRevisionRef.current = localDataRevision;
       loadGroupData();

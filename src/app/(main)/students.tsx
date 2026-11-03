@@ -16,6 +16,7 @@ import {
     useWindowDimensions,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { LocalDataEvents } from "../../core/database/localDataEvents";
 import { useLocalDataRevision } from "../../core/database/useLocalDataRevision";
 import { getUserErrorMessage } from "../../core/errors";
 import { formatCurrency, formatTimeArabic, Strings } from "../../core/localization";
@@ -130,6 +131,7 @@ export default function StudentsScreen() {
   const localDataRevision = useLocalDataRevision();
   const lastLoadedRevisionRef = useRef(localDataRevision);
   const hasInitialLoadedRef = useRef(false);
+  const isFocusedRef = useRef(true);
   const { colors } = useTheme();
   const { width: screenWidth, height: screenHeight, gutter, isTablet, isLandscape } = useResponsiveLayout();
   const styles = useMemo(() => createStyles(screenWidth, screenHeight, gutter, isTablet, isLandscape), [colors, screenWidth, screenHeight, gutter, isTablet, isLandscape]);
@@ -155,7 +157,21 @@ export default function StudentsScreen() {
 
   const [students, setStudents] = useState<Student[]>([]);
   const [searchQuery, setSearchQuery] = useState("");
+  const [debouncedSearchQuery, setDebouncedSearchQuery] = useState("");
   const [gradeFilter, setGradeFilter] = useState("");
+
+  useEffect(() => {
+    const trimmed = searchQuery.trim();
+    if (!trimmed) {
+      setDebouncedSearchQuery("");
+      return;
+    }
+    const timer = setTimeout(() => {
+      setDebouncedSearchQuery(searchQuery);
+    }, 180);
+    return () => clearTimeout(timer);
+  }, [searchQuery]);
+
   const [filterOpen, setFilterOpen] = useState(false);
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedStudentIds, setSelectedStudentIds] = useState<string[]>([]);
@@ -321,6 +337,7 @@ export default function StudentsScreen() {
     if (!code) return;
     setCardScannerOpen(false);
     setSearchQuery(code);
+    setDebouncedSearchQuery(code);
     const found = StudentRepository.findByCardCode(code);
     if (found) openStudentDetails(found);
     else Alert.alert("لم يتم العثور", "لا يوجد طالب مرتبط بهذا الكارت في المركز الحالي.");
@@ -403,26 +420,32 @@ export default function StudentsScreen() {
     }
     if (add === "1") setIsAddStudentOpen(true);
     hasInitialLoadedRef.current = true;
-    lastLoadedRevisionRef.current = localDataRevision;
+    lastLoadedRevisionRef.current = LocalDataEvents.getRevision();
   }, [activeCenterId, studentId, add]);
 
   // Refresh student list AND the active student profile (if open) when focus returns.
   useFocusEffect(
     useCallback(() => {
-      if (hasInitialLoadedRef.current && lastLoadedRevisionRef.current !== localDataRevision) {
-        lastLoadedRevisionRef.current = localDataRevision;
+      isFocusedRef.current = true;
+      const currentRevision = LocalDataEvents.getRevision();
+      if (hasInitialLoadedRef.current && lastLoadedRevisionRef.current !== currentRevision) {
+        lastLoadedRevisionRef.current = currentRevision;
         loadData();
         if (selectedStudent) {
           const refreshed = StudentRepository.findById(selectedStudent.id);
           if (refreshed) openStudentDetails(refreshed);
         }
       }
-    }, [localDataRevision, selectedStudent]),
+      return () => {
+        isFocusedRef.current = false;
+      };
+    }, [selectedStudent]),
   );
 
   // React to local DB changes (attendance, enrollments, payments, etc.)
-  // Refreshes the student list AND the active student profile.
+  // Refreshes the student list AND the active student profile while focused.
   useEffect(() => {
+    if (!isFocusedRef.current) return;
     if (localDataRevision > 0 && lastLoadedRevisionRef.current !== localDataRevision) {
       lastLoadedRevisionRef.current = localDataRevision;
       loadData();
@@ -810,6 +833,8 @@ export default function StudentsScreen() {
           FinancialCalculationService.getStudentFinancialStatusForGroup(
             selectedStudent.id,
             groupId,
+            undefined,
+            financialStatus ?? undefined,
           ),
         );
       } catch (error: any) {
@@ -1124,17 +1149,32 @@ export default function StudentsScreen() {
     );
   };
 
-  const searchedStudents = smartSearch(students, searchQuery, [
-    { get: (s) => s.fullName, weight: 1.2 },
-    { get: (s) => s.studentCode, weight: 1.1 },
-    { get: (s) => s.cardCode, weight: 1.1 },
-    { get: (s) => s.phone },
-    { get: (s) => s.parentPhone },
-  ]);
-  const filteredStudents = gradeFilter
-    ? searchedStudents.filter((student) => student.grade === gradeFilter)
-    : searchedStudents;
-  const gradeOptions = Array.from(new Set(students.map((student) => student.grade).filter(Boolean))).sort();
+  const searchedStudents = useMemo(
+    () =>
+      smartSearch(students, debouncedSearchQuery, [
+        { get: (s) => s.fullName, weight: 1.2 },
+        { get: (s) => s.studentCode, weight: 1.1 },
+        { get: (s) => s.cardCode, weight: 1.1 },
+        { get: (s) => s.phone },
+        { get: (s) => s.parentPhone },
+      ]),
+    [students, debouncedSearchQuery],
+  );
+  const filteredStudents = useMemo(
+    () =>
+      gradeFilter
+        ? searchedStudents.filter((student) => student.grade === gradeFilter)
+        : searchedStudents,
+    [searchedStudents, gradeFilter],
+  );
+  const gradeOptions = useMemo(
+    () => Array.from(new Set(students.map((student) => student.grade).filter(Boolean))).sort(),
+    [students],
+  );
+  const selectedStudentIdSet = useMemo(
+    () => new Set(selectedStudentIds),
+    [selectedStudentIds],
+  );
 
   const canCreate = PermissionService.hasPermission(
     permissions,
@@ -1150,20 +1190,27 @@ export default function StudentsScreen() {
   );
   const canUpdateStudent = PermissionService.hasPermission(permissions, "students.update");
   const canViewPackages = PermissionService.hasPermission(permissions, "packages.view");
-  const eligibleEnrollmentGroups = availableGroups
-    .filter(
-      (group) =>
-        group.status === "active" &&
-        (!selectedStudent?.grade || group.grade === selectedStudent.grade || group.grade === "كل الصفوف"),
-    )
-    .filter((group) => {
-      const query = enrollGroupSearch.trim().toLocaleLowerCase();
-      if (!query) return true;
-      return [group.name, group.teacherName, group.subjectName, group.grade]
-        .filter(Boolean)
-        .some((value) => String(value).toLocaleLowerCase().includes(query));
-    });
-  const selectedGrades = new Set(students.filter((student) => selectedStudentIds.includes(student.id)).map((student) => student.grade));
+  const eligibleEnrollmentGroups = useMemo(
+    () =>
+      availableGroups
+        .filter(
+          (group) =>
+            group.status === "active" &&
+            (!selectedStudent?.grade || group.grade === selectedStudent.grade || group.grade === "كل الصفوف"),
+        )
+        .filter((group) => {
+          const query = enrollGroupSearch.trim().toLocaleLowerCase();
+          if (!query) return true;
+          return [group.name, group.teacherName, group.subjectName, group.grade]
+            .filter(Boolean)
+            .some((value) => String(value).toLocaleLowerCase().includes(query));
+        }),
+    [availableGroups, selectedStudent?.grade, enrollGroupSearch],
+  );
+  const selectedGrades = useMemo(
+    () => new Set(students.filter((student) => selectedStudentIdSet.has(student.id)).map((student) => student.grade)),
+    [students, selectedStudentIdSet],
+  );
   const bulkEligibleGroups = eligibleEnrollmentGroups.filter((group) => selectedGrades.size === 0 || (selectedGrades.size === 1 && (selectedGrades.has(group.grade) || group.grade === "كل الصفوف")));
   const bulkGrade = selectedGrades.size === 1 ? Array.from(selectedGrades)[0] : "";
   const bulkSubjects = Array.from(new Set(bulkEligibleGroups.map((group) => group.subjectId))).map((id) => ({ id, name: bulkEligibleGroups.find((group) => group.subjectId === id)?.subjectName || "المادة" }));
@@ -1443,54 +1490,62 @@ export default function StudentsScreen() {
         <FlatList
           data={filteredStudents}
           keyExtractor={(item) => item.id}
+          initialNumToRender={12}
+          maxToRenderPerBatch={10}
+          windowSize={5}
+          removeClippedSubviews={Platform.OS === "android"}
           ListEmptyComponent={
             <EmptyState message="لا يوجد طلاب مطابقين للبحث الحالي" />
           }
-          renderItem={({ item }) => (
-            <TouchableOpacity
-              activeOpacity={0.75}
-              onPress={() => selectionMode ? toggleStudentSelection(item.id) : openStudentDetails(item)}
-              onLongPress={!selectionMode && canChangeStudentColor ? () => setStudentActionTarget(item) : undefined}
-              delayLongPress={450}
-            >
-              <AppCard style={[
-                styles.studentCard,
-                getStudentColorPresentation(item.studentColor).backgroundColor
-                  ? { backgroundColor: getStudentColorPresentation(item.studentColor).backgroundColor, borderColor: getStudentColorPresentation(item.studentColor).accentColor, borderWidth: 1 }
-                  : null,
-                selectedStudentIds.includes(item.id) && styles.studentCardSelected,
-              ]}>
-                {selectionMode && <Ionicons name={selectedStudentIds.includes(item.id) ? "checkmark-circle" : "ellipse-outline"} size={24} color={selectedStudentIds.includes(item.id) ? Colors.primary : Colors.slate400} style={styles.selectionIcon} />}
-                <View style={styles.studentInfo}>
-                  <Text style={styles.studentName}>{item.fullName}</Text>
-                  <View style={styles.badgeRow}>
-                    <Text style={styles.codeBadge}>
-                      كود: {formatDisplayIdentifier(item.studentCode)}
-                    </Text>
-                    {item.cardCode ? (
-                      <Text style={styles.cardBadge}>
-                        كارت: {formatDisplayIdentifier(item.cardCode)}
+          renderItem={({ item }) => {
+            const colorPresentation = getStudentColorPresentation(item.studentColor);
+            const isSelected = selectedStudentIdSet.has(item.id);
+            return (
+              <TouchableOpacity
+                activeOpacity={0.75}
+                onPress={() => selectionMode ? toggleStudentSelection(item.id) : openStudentDetails(item)}
+                onLongPress={!selectionMode && canChangeStudentColor ? () => setStudentActionTarget(item) : undefined}
+                delayLongPress={450}
+              >
+                <AppCard style={[
+                  styles.studentCard,
+                  colorPresentation.backgroundColor
+                    ? { backgroundColor: colorPresentation.backgroundColor, borderColor: colorPresentation.accentColor, borderWidth: 1 }
+                    : null,
+                  isSelected && styles.studentCardSelected,
+                ]}>
+                  {selectionMode && <Ionicons name={isSelected ? "checkmark-circle" : "ellipse-outline"} size={24} color={isSelected ? Colors.primary : Colors.slate400} style={styles.selectionIcon} />}
+                  <View style={styles.studentInfo}>
+                    <Text style={styles.studentName}>{item.fullName}</Text>
+                    <View style={styles.badgeRow}>
+                      <Text style={styles.codeBadge}>
+                        كود: {formatDisplayIdentifier(item.studentCode)}
                       </Text>
-                    ) : (
-                      <Text style={styles.noCardBadge}>بدون كارت</Text>
-                    )}
+                      {item.cardCode ? (
+                        <Text style={styles.cardBadge}>
+                          كارت: {formatDisplayIdentifier(item.cardCode)}
+                        </Text>
+                      ) : (
+                        <Text style={styles.noCardBadge}>بدون كارت</Text>
+                      )}
+                    </View>
+                    <Text style={styles.studentMeta}>
+                      {item.grade} • {item.phone}
+                    </Text>
                   </View>
-                  <Text style={styles.studentMeta}>
-                    {item.grade} • {item.phone}
-                  </Text>
-                </View>
 
-                <View style={styles.cardActions}>
-                  <Ionicons
-                    name="chevron-back"
-                    size={20}
-                    color={Colors.slate400}
-                    style={{ marginTop: Spacing.sm }}
-                  />
-                </View>
-              </AppCard>
-            </TouchableOpacity>
-          )}
+                  <View style={styles.cardActions}>
+                    <Ionicons
+                      name="chevron-back"
+                      size={20}
+                      color={Colors.slate400}
+                      style={{ marginTop: Spacing.sm }}
+                    />
+                  </View>
+                </AppCard>
+              </TouchableOpacity>
+            );
+          }}
         />
       </View>
 
