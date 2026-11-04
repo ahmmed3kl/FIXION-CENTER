@@ -1766,6 +1766,53 @@ function ScannerContent() {
                         </View>
                       );
                     }) : <Text style={styles.attendanceFinanceEmpty}>لا توجد اشتراكات شهرية أو باقات مسجلة.</Text>}
+                  {financialStatus.paymentRequestObligations && financialStatus.paymentRequestObligations.length > 0 ? (
+                    <>
+                      <Text style={styles.attendanceFinanceSubsection}>متطلبات الدفع (مذكرات وبوكليت)</Text>
+                      {financialStatus.paymentRequestObligations.map((ob) => {
+                        const due = Number(ob.amountDue) || 0;
+                        const paid = Number(ob.amountPaid) || 0;
+                        const owed = ob.amountOwed !== undefined ? Number(ob.amountOwed) : Math.max(0, due - paid);
+                        const statusLabel =
+                          ob.status === "cancelled"
+                            ? "ملغي"
+                            : ob.isPaid || ob.status === "paid" || owed === 0
+                              ? Strings.cycleStatusPaid
+                              : paid > 0
+                                ? Strings.cycleStatusPartial
+                                : Strings.cycleStatusOpen;
+                        const statusType =
+                          ob.status === "cancelled"
+                            ? ("neutral" as const)
+                            : ob.isPaid || ob.status === "paid" || owed === 0
+                              ? ("success" as const)
+                              : paid > 0
+                                ? ("info" as const)
+                                : ("warning" as const);
+                        return (
+                          <View key={ob.id} style={styles.attendanceDebtCycleCard}>
+                            <View style={styles.attendanceFinanceCardHeading}>
+                              <View style={styles.attendanceFinanceRowCopy}>
+                                <Text style={styles.attendanceFinanceRowTitle}>
+                                  مطلب دفع · {ob.requestName || "متطلب دفع"}
+                                </Text>
+                                <Text style={styles.attendanceFinanceMeta}>
+                                  {ob.groupName ? `${ob.groupName} • ` : ""}
+                                  {ob.referenceMonth ? `شهر: ${ob.referenceMonth}` : ""}
+                                </Text>
+                              </View>
+                              <StatusBadge text={statusLabel} type={statusType} />
+                            </View>
+                            <View style={styles.attendanceCycleMetrics}>
+                              <View><Text style={styles.attendanceCycleMetricLabel}>قيمة الالتزام</Text><Text style={styles.attendanceCycleMetricValue}>{formatCurrency(due)}</Text></View>
+                              <View><Text style={styles.attendanceCycleMetricLabel}>المدفوع</Text><Text style={[styles.attendanceCycleMetricValue, { color: Colors.primary }]}>{formatCurrency(paid)}</Text></View>
+                              <View><Text style={styles.attendanceCycleMetricLabel}>المتبقي</Text><Text style={[styles.attendanceCycleMetricValue, { color: owed > 0 ? Colors.dangerText : Colors.successText }]}>{formatCurrency(owed)}</Text></View>
+                            </View>
+                          </View>
+                        );
+                      })}
+                    </>
+                  ) : null}
                   <Text style={styles.attendanceFinanceSubsection}>سجل المدفوعات</Text>
                   {financialStatus.payments.length ? financialStatus.payments.map((payment) => {
                     const cycle = payment.debtCycleId

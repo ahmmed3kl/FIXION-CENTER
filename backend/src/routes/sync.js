@@ -127,6 +127,20 @@ router.get(
           "SELECT * FROM debt_adjustments WHERE center_id = $1",
           [centerId],
         );
+        const paymentRequestsRes = await withBootstrapQueryContext(
+          client.query(
+            "SELECT * FROM group_payment_requests WHERE center_id = $1",
+            [centerId],
+          ),
+          "group_payment_requests",
+        );
+        const paymentRequestObligationsRes = await withBootstrapQueryContext(
+          client.query(
+            "SELECT * FROM student_payment_request_obligations WHERE center_id = $1",
+            [centerId],
+          ),
+          "student_payment_request_obligations",
+        );
         const packagesRes = await client.query(
           "SELECT * FROM packages WHERE center_id = $1",
           [centerId],
@@ -229,6 +243,8 @@ router.get(
         payments: paymentsRes.rows,
         paymentReversals: paymentReversalsRes.rows,
         debtAdjustments: debtAdjustmentsRes.rows,
+        paymentRequests: paymentRequestsRes.rows,
+        paymentRequestObligations: paymentRequestObligationsRes.rows,
         packages: packagesRes.rows,
         packageSubjects: packageSubjectsRes.rows,
         packageSubscriptions: packageSubscriptionsRes.rows,
@@ -295,7 +311,9 @@ router.post("/reset", authMiddleware, deviceGuard, requirePermission("center.res
         "session_closing_records", "daily_closing_summaries",
         "session_homework_evaluations", "homework_evaluation_statuses",
         "notification_deliveries", "notification_events", "notification_templates",
-        "payment_reversals", "payments", "debt_adjustments", "advance_coverages",
+        "payment_reversals", "payments", "debt_adjustments",
+        "student_payment_request_obligations", "group_payment_requests",
+        "advance_coverages",
         "absence_notes", "attendance", "session_expected_students", "sessions", "debt_cycles",
         "package_subject_teacher_overrides", "student_package_subscriptions",
         "package_subjects", "packages", "student_group_enrollments",

@@ -360,6 +360,53 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_debt_cycles_natural
     ON debt_cycles(center_id, COALESCE(enrollment_id, package_subscription_id), cycle_number)
     WHERE cycle_number IS NOT NULL;
 
+-- Group Payment Requests (Additional group-level material/sheet obligations)
+CREATE TABLE IF NOT EXISTS group_payment_requests (
+    id VARCHAR(64) PRIMARY KEY,
+    operation_id VARCHAR(64) NOT NULL UNIQUE,
+    center_id VARCHAR(64) NOT NULL REFERENCES centers(id) ON DELETE CASCADE,
+    group_id VARCHAR(64) NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+    name VARCHAR(255) NOT NULL,
+    amount NUMERIC(12, 2) NOT NULL CHECK (amount > 0),
+    reference_month VARCHAR(64),
+    status VARCHAR(32) NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived')),
+    created_by VARCHAR(64) NOT NULL,
+    created_by_name VARCHAR(255),
+    updated_by VARCHAR(64),
+    updated_by_name VARCHAR(255),
+    archived_by VARCHAR(64),
+    archived_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_payment_requests_center_group
+    ON group_payment_requests(center_id, group_id, status);
+
+-- Student Payment Request Obligations
+CREATE TABLE IF NOT EXISTS student_payment_request_obligations (
+    id VARCHAR(64) PRIMARY KEY,
+    operation_id VARCHAR(64) NOT NULL UNIQUE,
+    center_id VARCHAR(64) NOT NULL REFERENCES centers(id) ON DELETE CASCADE,
+    request_id VARCHAR(64) NOT NULL REFERENCES group_payment_requests(id) ON DELETE CASCADE,
+    group_id VARCHAR(64) NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+    student_id VARCHAR(64) NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+    amount_due NUMERIC(12, 2) NOT NULL CHECK (amount_due >= 0),
+    amount_paid NUMERIC(12, 2) NOT NULL DEFAULT 0 CHECK (amount_paid >= 0),
+    status VARCHAR(32) NOT NULL DEFAULT 'unpaid' CHECK (status IN ('unpaid', 'paid', 'cancelled')),
+    payment_id VARCHAR(64),
+    paid_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ,
+    cancelled_at TIMESTAMPTZ,
+    CONSTRAINT uq_payment_request_obligation UNIQUE (center_id, request_id, student_id)
+);
+CREATE INDEX IF NOT EXISTS idx_payment_req_obligations_request
+    ON student_payment_request_obligations(center_id, request_id, status);
+CREATE INDEX IF NOT EXISTS idx_payment_req_obligations_student
+    ON student_payment_request_obligations(center_id, student_id, status);
+CREATE INDEX IF NOT EXISTS idx_payment_req_obligations_group
+    ON student_payment_request_obligations(center_id, group_id, status);
+
 -- Payments (Immutable cash-flow events)
 CREATE TABLE IF NOT EXISTS payments (
     id VARCHAR(64) PRIMARY KEY,
@@ -369,15 +416,21 @@ CREATE TABLE IF NOT EXISTS payments (
     debt_cycle_id VARCHAR(64) REFERENCES debt_cycles(id) ON DELETE SET NULL,
     session_id VARCHAR(64) REFERENCES sessions(id) ON DELETE SET NULL,
     subscription_id VARCHAR(64),
+    payment_request_obligation_id VARCHAR(64),
+    payment_request_id VARCHAR(64),
     amount NUMERIC(12, 2) NOT NULL CHECK (amount > 0),
-    payment_method VARCHAR(32) NOT NULL DEFAULT 'cash' CHECK (payment_method IN ('cash', 'card', 'vodafone_cash', 'bank_transfer', 'other')),
-    payment_type VARCHAR(32) NOT NULL DEFAULT 'session' CHECK (payment_type IN ('monthly', 'partial', 'session')),
+    payment_method VARCHAR(32) NOT NULL DEFAULT 'cash' CHECK (payment_method IN ('cash', 'card', 'vodafone_cash', 'wallet', 'instapay', 'bank_transfer', 'other')),
+    payment_type VARCHAR(32) NOT NULL DEFAULT 'session' CHECK (payment_type IN ('monthly', 'partial', 'session', 'payment_request', 'full')),
     payment_date DATE,
     notes TEXT,
     is_reversed BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     user_id VARCHAR(64) NOT NULL REFERENCES users(id) ON DELETE RESTRICT
 );
+ALTER TABLE payments ADD COLUMN IF NOT EXISTS payment_request_obligation_id VARCHAR(64);
+ALTER TABLE payments ADD COLUMN IF NOT EXISTS payment_request_id VARCHAR(64);
+CREATE INDEX IF NOT EXISTS idx_payments_request_obligation
+    ON payments(center_id, payment_request_obligation_id);
 
 -- Payment Reversals (Audited refunds / cancellations)
 CREATE TABLE IF NOT EXISTS payment_reversals (

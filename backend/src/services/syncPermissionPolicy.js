@@ -109,7 +109,13 @@ function requiredPermission(operation) {
   if (entity === "absence_note") return "attendance.edit";
   if (entity === "payment_reversal") return "payments.reverse";
   if (entity === "debt_adjustment") return "payments.adjust";
-  if (entity === "payment" || entity === "payment_collected" || entity === "debt_cycle") {
+  if (
+    entity === "payment" ||
+    entity === "payment_collected" ||
+    entity === "debt_cycle" ||
+    entity === "payment_request" ||
+    entity === "payment_request_obligation"
+  ) {
     return "payments.create";
   }
   if (entity === "package_subscription") return "packages.subscribe";
@@ -156,6 +162,16 @@ function assertSyncPermission(req, operation) {
       "FORBIDDEN",
       "Missing required homework evaluation permission.",
       "ليس لديك الصلاحية الكافية لمزامنة تقييم الواجب.",
+      403,
+    );
+  }
+  if (entity === "payment_request" || entity === "payment_request_obligation") {
+    const allowed = ["payments.create", "payments.edit", "payments.adjust"];
+    if (allowed.some((candidate) => hasPermission(permissions, candidate))) return;
+    throw new AppError(
+      "FORBIDDEN",
+      "Missing required payment request permission.",
+      "ليس لديك الصلاحية الكافية لمزامنة متطالبات الدفع.",
       403,
     );
   }
@@ -225,8 +241,8 @@ function canReadSyncEntity(entityType, user) {
                   ? ["attendance.view"]
                   : entity === "absence_note"
                     ? ["attendance.view", "reports.attendance.view", "reports.view"]
-                  : ["payment", "payment_collected", "payment_reversal", "debt_adjustment", "debt_cycle", "advance_coverage"].includes(entity)
-                    ? ["payments.view", "payments.debt.view", "reports.financial.view"]
+                  : ["payment", "payment_collected", "payment_reversal", "debt_adjustment", "debt_cycle", "advance_coverage", "payment_request", "payment_request_obligation"].includes(entity)
+                    ? ["payments.view", "payments.create", "payments.edit", "payments.adjust", "payments.debt.view", "reports.financial.view"]
                     : entity === "package" || entity.startsWith("package_")
                       ? ["packages.view"]
                       : entity === "grade_exam" || entity === "grade_score"
@@ -266,6 +282,8 @@ function filterBootstrapSnapshot(snapshot, user) {
     payments: "payment",
     paymentReversals: "payment_reversal",
     debtAdjustments: "debt_adjustment",
+    paymentRequests: "payment_request",
+    paymentRequestObligations: "payment_request_obligation",
     packages: "package",
     packageSubjects: "package_subject",
     packageSubscriptions: "package_subscription",

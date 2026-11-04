@@ -1182,7 +1182,17 @@ export const MIGRATIONS: Migration[] = [
     version: 25,
     name: "student_custom_color",
     up: (db: SqlDatabase) => {
-      db.execSync("ALTER TABLE students ADD COLUMN student_color TEXT;");
+      try {
+        db.execSync("ALTER TABLE students ADD COLUMN student_color TEXT;");
+      } catch (error) {
+        if (
+          !String((error as any)?.message || error)
+            .toLowerCase()
+            .includes("duplicate column")
+        ) {
+          throw error;
+        }
+      }
     },
   },
   {
@@ -1265,7 +1275,17 @@ export const MIGRATIONS: Migration[] = [
     version: 30,
     name: "center_session_time_zone",
     up: (db: SqlDatabase) => {
-      db.execSync("ALTER TABLE centers ADD COLUMN time_zone TEXT;");
+      try {
+        db.execSync("ALTER TABLE centers ADD COLUMN time_zone TEXT;");
+      } catch (error) {
+        if (
+          !String((error as any)?.message || error)
+            .toLowerCase()
+            .includes("duplicate column")
+        ) {
+          throw error;
+        }
+      }
     },
   },
   {
@@ -1315,9 +1335,12 @@ export const MIGRATIONS: Migration[] = [
           created_at TEXT NOT NULL,
           updated_at TEXT
         );
+      `);
+      db.execSync(`
         CREATE INDEX IF NOT EXISTS idx_payment_requests_center_group
           ON group_payment_requests(center_id, group_id, status);
-
+      `);
+      db.execSync(`
         CREATE TABLE IF NOT EXISTS student_payment_request_obligations (
           id TEXT PRIMARY KEY,
           operation_id TEXT NOT NULL UNIQUE,
@@ -1335,27 +1358,71 @@ export const MIGRATIONS: Migration[] = [
           cancelled_at TEXT,
           CONSTRAINT uq_payment_request_obligation UNIQUE (center_id, request_id, student_id)
         );
+      `);
+      db.execSync(`
         CREATE INDEX IF NOT EXISTS idx_payment_req_obligations_request
           ON student_payment_request_obligations(center_id, request_id, status);
+      `);
+      db.execSync(`
         CREATE INDEX IF NOT EXISTS idx_payment_req_obligations_student
           ON student_payment_request_obligations(center_id, student_id, status);
+      `);
+      db.execSync(`
         CREATE INDEX IF NOT EXISTS idx_payment_req_obligations_group
           ON student_payment_request_obligations(center_id, group_id, status);
       `);
       try {
         db.execSync("ALTER TABLE payments ADD COLUMN payment_request_obligation_id TEXT;");
-      } catch {}
+      } catch (error) {
+        if (
+          !String((error as any)?.message || error)
+            .toLowerCase()
+            .includes("duplicate column")
+        ) {
+          throw error;
+        }
+      }
       try {
         db.execSync("ALTER TABLE payments ADD COLUMN payment_request_id TEXT;");
-      } catch {}
+      } catch (error) {
+        if (
+          !String((error as any)?.message || error)
+            .toLowerCase()
+            .includes("duplicate column")
+        ) {
+          throw error;
+        }
+      }
+      db.execSync(
+        "CREATE INDEX IF NOT EXISTS idx_payments_request_obligation ON payments(center_id, payment_request_obligation_id);",
+      );
+    },
+  },
+  {
+    version: 34,
+    name: "per_group_student_pricing",
+    up: (db: SqlDatabase) => {
+      // Non-destructively initialize existing student enrollments that have
+      // NULL special_monthly_price using the group's normal monthly price.
+      // This preserves all historical records and existing debt cycles.
       try {
-        db.execSync(
-          "CREATE INDEX IF NOT EXISTS idx_payments_request_obligation ON payments(center_id, payment_request_obligation_id);",
-        );
+        db.execSync(`
+          UPDATE student_group_enrollments
+          SET special_monthly_price = (
+            SELECT COALESCE(g.monthly_price, g.default_fee, 0)
+            FROM groups g
+            WHERE g.id = student_group_enrollments.group_id
+              AND g.center_id = student_group_enrollments.center_id
+          )
+          WHERE special_monthly_price IS NULL;
+        `);
       } catch {}
     },
   },
 ];
+
+const LATEST_MIGRATION_VERSION =
+  MIGRATIONS[MIGRATIONS.length - 1]?.version ?? 0;
 
 // In-Memory SQLite Mock for Jest / Test environments
 class InMemorySqliteMock implements SqlDatabase {
@@ -1441,6 +1508,21 @@ class InMemorySqliteMock implements SqlDatabase {
       const match = trimmed.match(/PRAGMA\s+user_version\s*=\s*(\d+)/i);
       if (match) {
         this.userVersion = parseInt(match[1], 10);
+      }
+    }
+    const dropMatches = trimmed.matchAll(
+      /DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?(\w+)/gi,
+    );
+    for (const match of dropMatches) {
+      this.tables.delete(match[1].toLowerCase());
+    }
+    const createMatches = trimmed.matchAll(
+      /CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(\w+)/gi,
+    );
+    for (const match of createMatches) {
+      const tableName = match[1].toLowerCase();
+      if (!this.tables.has(tableName)) {
+        this.tables.set(tableName, []);
       }
     }
   }
@@ -5818,6 +5900,11 @@ class InMemorySqliteMock implements SqlDatabase {
     }
 
     if (trimmed.includes("FROM student_payment_request_obligations")) {
+      if (!this.tables.has("student_payment_request_obligations")) {
+        throw new Error(
+          "Error code 1: no such table: student_payment_request_obligations",
+        );
+      }
       const list = this.tables.get("student_payment_request_obligations") || [];
       const requests = this.tables.get("group_payment_requests") || [];
       const students = this.tables.get("students") || [];
@@ -5968,6 +6055,11 @@ class InMemorySqliteMock implements SqlDatabase {
     }
 
     if (trimmed.includes("FROM group_payment_requests")) {
+      if (!this.tables.has("group_payment_requests")) {
+        throw new Error(
+          "Error code 1: no such table: group_payment_requests",
+        );
+      }
       const list = this.tables.get("group_payment_requests") || [];
       const groups = this.tables.get("groups") || [];
       const obligations =
@@ -6087,6 +6179,9 @@ class InMemorySqliteMock implements SqlDatabase {
 
 export class DatabaseService {
   private static db: SqlDatabase | null = null;
+  private static initializedDbInstance: SqlDatabase | null = null;
+  private static initializedMigrationVersion = 0;
+  private static ensuringSchema = false;
   private static transactionDepth = 0;
   private static pendingLocalChanges: Array<{
     centerId?: string;
@@ -6098,12 +6193,28 @@ export class DatabaseService {
   static getDb(): SqlDatabase {
     if (!this.db) {
       this.init();
+    } else if (
+      !this.ensuringSchema &&
+      (this.initializedDbInstance !== this.db ||
+        this.initializedMigrationVersion < LATEST_MIGRATION_VERSION)
+    ) {
+      this.ensuringSchema = true;
+      try {
+        this.runMigrations(this.db);
+        this.ensurePaymentRequestsSchema(this.db);
+        this.initializedDbInstance = this.db;
+        this.initializedMigrationVersion = LATEST_MIGRATION_VERSION;
+      } finally {
+        this.ensuringSchema = false;
+      }
     }
     return this.db!;
   }
 
   static setMockDb(mock: SqlDatabase) {
     this.db = mock;
+    this.initializedDbInstance = mock;
+    this.initializedMigrationVersion = LATEST_MIGRATION_VERSION;
   }
 
   static isInTransaction(): boolean {
@@ -6127,6 +6238,8 @@ export class DatabaseService {
     this.reinitializing = true;
     try {
       this.db = null;
+      this.initializedDbInstance = null;
+      this.initializedMigrationVersion = 0;
       this.transactionDepth = 0;
       this.init();
     } finally {
@@ -6223,6 +6336,9 @@ export class DatabaseService {
   static init(): void {
     const hasNativeSQLite = typeof SQLite?.openDatabaseSync === "function";
     this.db = null;
+    this.initializedDbInstance = null;
+    this.initializedMigrationVersion = 0;
+    this.ensuringSchema = true;
     try {
       if (hasNativeSQLite) {
         let nativeDb: any = null;
@@ -6258,10 +6374,13 @@ export class DatabaseService {
         this.db = new InMemorySqliteMock();
       }
 
-      this.runMigrations();
-      this.ensureSyncMetadataSchema();
+      this.runMigrations(this.db);
+      this.ensureSyncMetadataSchema(this.db);
       this.seedData();
       this.ensureAcademicSchema();
+      this.ensurePaymentRequestsSchema(this.db);
+      this.initializedDbInstance = this.db;
+      this.initializedMigrationVersion = LATEST_MIGRATION_VERSION;
 
       // Validate data integrity after initialization
       this.validateDataIntegrity();
@@ -6282,10 +6401,15 @@ export class DatabaseService {
         e?.message,
       );
       this.db = new InMemorySqliteMock();
-      this.runMigrations();
-      this.ensureSyncMetadataSchema();
+      this.runMigrations(this.db);
+      this.ensureSyncMetadataSchema(this.db);
       this.seedData();
       this.ensureAcademicSchema();
+      this.ensurePaymentRequestsSchema(this.db);
+      this.initializedDbInstance = this.db;
+      this.initializedMigrationVersion = LATEST_MIGRATION_VERSION;
+    } finally {
+      this.ensuringSchema = false;
     }
   }
 
@@ -6372,7 +6496,7 @@ export class DatabaseService {
    * protecting against partial migration runs or legacy SQLite state.
    */
   static ensureAcademicSchema(): void {
-    const db = this.getDb();
+    const db = this.db || this.getDb();
     const defensiveStatements = [
       // 1. Teachers
       "ALTER TABLE teachers ADD COLUMN status TEXT NOT NULL DEFAULT 'active';",
@@ -6431,6 +6555,70 @@ export class DatabaseService {
   }
 
   /**
+   * Unconditionally guarantees Payment Requests tables, columns, and indexes
+   * exist in local SQLite, protecting against partial migrations or hot-reloaded
+   * database handles on existing installations.
+   */
+  static ensurePaymentRequestsSchema(database?: SqlDatabase): void {
+    const db = database || this.db || this.getDb();
+    const defensiveStatements = [
+      `CREATE TABLE IF NOT EXISTS group_payment_requests (
+        id TEXT PRIMARY KEY,
+        operation_id TEXT NOT NULL UNIQUE,
+        center_id TEXT NOT NULL,
+        group_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        amount REAL NOT NULL,
+        reference_month TEXT,
+        status TEXT NOT NULL DEFAULT 'active',
+        created_by TEXT NOT NULL,
+        created_by_name TEXT,
+        updated_by TEXT,
+        updated_by_name TEXT,
+        archived_by TEXT,
+        archived_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT
+      );`,
+      `CREATE INDEX IF NOT EXISTS idx_payment_requests_center_group
+        ON group_payment_requests(center_id, group_id, status);`,
+      `CREATE TABLE IF NOT EXISTS student_payment_request_obligations (
+        id TEXT PRIMARY KEY,
+        operation_id TEXT NOT NULL UNIQUE,
+        center_id TEXT NOT NULL,
+        request_id TEXT NOT NULL,
+        group_id TEXT NOT NULL,
+        student_id TEXT NOT NULL,
+        amount_due REAL NOT NULL,
+        amount_paid REAL NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'unpaid',
+        payment_id TEXT,
+        paid_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT,
+        cancelled_at TEXT,
+        CONSTRAINT uq_payment_request_obligation UNIQUE (center_id, request_id, student_id)
+      );`,
+      `CREATE INDEX IF NOT EXISTS idx_payment_req_obligations_request
+        ON student_payment_request_obligations(center_id, request_id, status);`,
+      `CREATE INDEX IF NOT EXISTS idx_payment_req_obligations_student
+        ON student_payment_request_obligations(center_id, student_id, status);`,
+      `CREATE INDEX IF NOT EXISTS idx_payment_req_obligations_group
+        ON student_payment_request_obligations(center_id, group_id, status);`,
+      "ALTER TABLE payments ADD COLUMN payment_request_obligation_id TEXT;",
+      "ALTER TABLE payments ADD COLUMN payment_request_id TEXT;",
+      "CREATE INDEX IF NOT EXISTS idx_payments_request_obligation ON payments(center_id, payment_request_obligation_id);",
+    ];
+    for (const sql of defensiveStatements) {
+      try {
+        db.execSync(sql);
+      } catch {
+        // Safe to ignore if column/table/index already exists
+      }
+    }
+  }
+
+  /**
    * Real Migration Runner:
    * 1. Creates schema_migrations table if absent.
    * 2. Reads applied versions without touching existing data.
@@ -6438,7 +6626,7 @@ export class DatabaseService {
    * 4. Updates schema_migrations and PRAGMA user_version.
    */
   static runMigrations(database?: SqlDatabase): void {
-    const db = database || this.getDb();
+    const db = database || this.db || this.getDb();
 
     db.execSync(`
       CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -6466,6 +6654,10 @@ export class DatabaseService {
           // safe fallback
         }
       }
+    }
+    if (db === this.db) {
+      this.initializedDbInstance = db;
+      this.initializedMigrationVersion = LATEST_MIGRATION_VERSION;
     }
   }
 

@@ -42,6 +42,8 @@ export interface BootstrapResponse {
   absenceNotes?: any[];
   payments?: any[];
   paymentReversals?: any[];
+  paymentRequests?: any[];
+  paymentRequestObligations?: any[];
   debtAdjustments?: any[];
   packages?: any[];
   packageSubjects?: any[];

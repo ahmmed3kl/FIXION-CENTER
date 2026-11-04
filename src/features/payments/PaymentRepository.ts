@@ -829,6 +829,136 @@ export class PaymentRepository {
   }
 
   /**
+   * Collects one or multiple financial obligations (payment requests, subscriptions, sessions)
+   * in a single atomic transaction.
+   * - Preserves the identity, target obligation ID, and exact amount of every obligation.
+   * - Records distinct payment entries in the ledger to maintain accurate audit and reversal history.
+   * - Rejects duplicate collections if an obligation is already paid.
+   * - Immediately recalculates and refreshes student financial status.
+   */
+  static async collectMultipleObligations(params: {
+    studentId: string;
+    items: Array<{
+      type: "payment_request" | "subscription" | "session";
+      id: string;
+      amount?: number;
+      notes?: string;
+      debtCycleId?: string;
+      sessionId?: string;
+      paymentRequestObligationId?: string;
+    }>;
+    paymentMethod?: string;
+    paymentDate?: string;
+    batchNotes?: string;
+    operationId?: string;
+  }): Promise<{ payments: PaymentEvent[]; totalCollected: number }> {
+    const { centerId, user } = this.getActiveContext();
+    if (!PermissionService.hasPermission(user.permissions, "payments.create")) {
+      throw new ForbiddenError("ليس لديك صلاحية تسجيل المدفوعات.");
+    }
+    if (!params.items || params.items.length === 0) {
+      throw new ValidationError("يجب تحديد التزام واحد على الأقل للتحصيل.");
+    }
+
+    const recordedPayments: PaymentEvent[] = [];
+    let totalCollected = 0;
+
+    await DatabaseService.runInTransaction(async () => {
+      for (let i = 0; i < params.items.length; i++) {
+        const item = params.items[i];
+        const itemOpId = params.operationId
+          ? `${params.operationId}-item-${i}`
+          : undefined;
+
+        let payment: PaymentEvent;
+        if (item.type === "payment_request") {
+          const obligationId =
+            item.paymentRequestObligationId || item.id.replace(/^pr-/, "");
+          let paymentAmount = item.amount;
+          if (paymentAmount === undefined) {
+            const db = DatabaseService.getDb();
+            const ob = db.getFirstSync<any>(
+              `SELECT amount_due as amountDue, amount_paid as amountPaid FROM student_payment_request_obligations WHERE center_id = ? AND id = ?`,
+              [centerId, obligationId],
+            );
+            if (!ob) throw new NotFoundError("المطالبة المالية غير موجودة.");
+            paymentAmount = Math.max(0, (Number(ob.amountDue) || 0) - (Number(ob.amountPaid) || 0));
+          }
+          if (paymentAmount <= 0) {
+            throw new ConflictError("تم سداد هذه المطالبة مسبقًا لهذا الطالب.");
+          }
+          payment = await this.recordPayment({
+            studentId: params.studentId,
+            amount: paymentAmount,
+            paymentType: "payment_request",
+            paymentRequestObligationId: obligationId,
+            paymentMethod: params.paymentMethod,
+            paymentDate: params.paymentDate,
+            notes: item.notes || params.batchNotes,
+            operationId: itemOpId,
+          });
+          totalCollected = Math.round((totalCollected + paymentAmount) * 100) / 100;
+        } else if (item.type === "subscription") {
+          const cycleId = item.debtCycleId || item.id.replace(/^cycle-/, "");
+          let paymentAmount = item.amount;
+          if (paymentAmount === undefined) {
+            const db = DatabaseService.getDb();
+            const cyc = db.getFirstSync<any>(
+              `SELECT cycle_price as cyclePrice, remaining_debt as remainingDebt FROM debt_cycles WHERE center_id = ? AND id = ?`,
+              [centerId, cycleId],
+            );
+            if (!cyc) throw new NotFoundError("دورة المديونية غير موجودة.");
+            paymentAmount = Math.max(0, Number(cyc.remainingDebt ?? cyc.cyclePrice) || 0);
+          }
+          if (paymentAmount <= 0) {
+            throw new ConflictError("تم سداد هذه الدورة مسبقًا لهذا الطالب.");
+          }
+          payment = await this.recordPayment({
+            studentId: params.studentId,
+            amount: paymentAmount,
+            paymentType: "monthly",
+            debtCycleId: cycleId,
+            paymentMethod: params.paymentMethod,
+            paymentDate: params.paymentDate,
+            notes: item.notes || params.batchNotes,
+            operationId: itemOpId,
+          });
+          totalCollected = Math.round((totalCollected + paymentAmount) * 100) / 100;
+        } else if (item.type === "session") {
+          const sessId = item.sessionId || item.id.replace(/^session-/, "");
+          let paymentAmount = item.amount;
+          if (paymentAmount === undefined || paymentAmount <= 0) {
+            throw new ValidationError("مبلغ دفع الحصة مطلوب.");
+          }
+          payment = await this.recordPayment({
+            studentId: params.studentId,
+            amount: paymentAmount,
+            paymentType: "session",
+            sessionId: sessId,
+            debtCycleId: item.debtCycleId,
+            paymentMethod: params.paymentMethod,
+            paymentDate: params.paymentDate,
+            notes: item.notes || params.batchNotes,
+            operationId: itemOpId,
+          });
+          totalCollected = Math.round((totalCollected + paymentAmount) * 100) / 100;
+        } else {
+          throw new ValidationError(`نوع الالتزام غير معروف: ${(item as any).type}`);
+        }
+
+        recordedPayments.push(payment);
+      }
+    });
+
+    FinancialCalculationService.getStudentFinancialStatus(
+      params.studentId,
+      params.paymentDate,
+    );
+
+    return { payments: recordedPayments, totalCollected };
+  }
+
+  /**
    * Reverses an existing payment.
    * - Sets is_reversed = 1 on payments table (never hard deletes).
    * - Inserts an event into payment_reversals table.

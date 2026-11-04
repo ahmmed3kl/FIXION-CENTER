@@ -64,6 +64,7 @@ import { StudentCardRepository } from "../../features/students/StudentCardReposi
 import { StudentColorRepository } from "../../features/students/StudentColorRepository";
 import { StudentRepository } from "../../features/students/StudentRepository";
 import { SessionRepository } from "../../features/sessions/SessionRepository";
+import { SessionDateService } from "../../features/sessions/SessionDateService";
 import { getStudentColorPresentation, STUDENT_COLOR_OPTIONS, StudentColor } from "../../features/students/studentColor";
 import { smartSearch } from "../../shared/utils/smartSearch";
 import { useResponsiveLayout } from "../../shared/utils/responsive";
@@ -88,6 +89,7 @@ import {
   StudentGroupAttendanceSummary,
     Package,
     PackageSubject,
+    UnifiedFinancialObligation,
 } from "../../shared/types";
 import { formatDisplayIdentifier } from "../../shared/utils/formatters";
 import { isPerSessionBillingMode } from "../../shared/utils/billingMode";
@@ -232,6 +234,8 @@ export default function StudentsScreen() {
   const [isCardModalOpen, setIsCardModalOpen] = useState(false);
   const [isEnrollModalOpen, setIsEnrollModalOpen] = useState(false);
   const [isPaymentModalOpen, setIsPaymentModalOpen] = useState(false);
+  const [selectedObligationIds, setSelectedObligationIds] = useState<string[]>([]);
+  const [obligationsFilter, setObligationsFilter] = useState<"all" | "unpaid" | "paid">("all");
   const [sessionBillingCycle, setSessionBillingCycle] = useState<DebtCycle | null>(null);
   const [sessionBillingError, setSessionBillingError] = useState<string | null>(null);
   const [isChangingSessionBillingMode, setIsChangingSessionBillingMode] = useState(false);
@@ -273,7 +277,9 @@ export default function StudentsScreen() {
   const paymentOperationIdentityRef = useRef<PaymentOperationIdentity | null>(null);
   const hasPaymentDue = Boolean(
     financialStatus &&
-    (Number(financialStatus.monthlyRemainingDebt || 0) > 0 ||
+    (Number(financialStatus.totalRemainingDebt || 0) > 0 ||
+      Number(financialStatus.monthlyRemainingDebt || 0) > 0 ||
+      Number(financialStatus.paymentRequestsRemainingDebt || 0) > 0 ||
       hasPayableSessionDebt(financialStatus)),
   );
   const getSessionOutstandingForCycle = useCallback((
@@ -314,6 +320,14 @@ export default function StudentsScreen() {
   );
   const [enrollSpecialPrice, setEnrollSpecialPrice] = useState("");
   const [enrollGroupSearch, setEnrollGroupSearch] = useState("");
+  const [editPriceEnrollment, setEditPriceEnrollment] = useState<{
+    enrollmentId: string;
+    groupName: string;
+    normalPrice: number;
+    currentPrice: number;
+  } | null>(null);
+  const [newEnrollmentPrice, setNewEnrollmentPrice] = useState("");
+  const [isUpdatingEnrollmentPrice, setIsUpdatingEnrollmentPrice] = useState(false);
 
   const openCardScanner = () => {
     setCardScannerOpen(true);
@@ -518,7 +532,11 @@ export default function StudentsScreen() {
     paymentAmount,
   ]);
 
-  const openPaymentModal = (advance = false, requestedType?: "monthly" | "session") => {
+  const openPaymentModal = (
+    advance = false,
+    requestedType?: "monthly" | "session",
+    targetObligationIds?: string[],
+  ) => {
     let latest = financialStatus;
     try {
       if (!selectedStudent) return;
@@ -534,6 +552,12 @@ export default function StudentsScreen() {
     if (!latest) return;
     const sessionCandidates = getPayableSessionPaymentCandidates(latest);
     const sessionPaymentAvailable = sessionCandidates.length > 0;
+    const hasAnyDebt =
+      Number(latest.totalRemainingDebt || 0) > 0 ||
+      Number(latest.monthlyRemainingDebt || 0) > 0 ||
+      Number(latest.paymentRequestsRemainingDebt || 0) > 0 ||
+      sessionPaymentAvailable;
+
     if (!advance && requestedType === "session" && !sessionPaymentAvailable) {
       setPaymentNotice({
         title: "لا توجد رسوم حصص مستحقة",
@@ -542,11 +566,7 @@ export default function StudentsScreen() {
       });
       return;
     }
-    if (
-      !advance &&
-      Number(latest.monthlyRemainingDebt || 0) <= 0 &&
-      !sessionPaymentAvailable
-    ) {
+    if (!advance && !hasAnyDebt) {
       setPaymentNotice({
         title: "لا يوجد مبلغ مستحق",
         message: "تم سداد الالتزامات الحالية. لا يمكن تسجيل دفعة عادية إضافية.",
@@ -554,6 +574,24 @@ export default function StudentsScreen() {
       return;
     }
 
+    if (targetObligationIds && targetObligationIds.length > 0) {
+      setSelectedObligationIds(targetObligationIds);
+      const selectedItems = (latest.unifiedObligations || []).filter((item) =>
+        targetObligationIds.includes(item.id),
+      );
+      const totalSelectedDue = selectedItems.reduce((sum, item) => sum + item.amountOwed, 0);
+      setPaymentDueAmount(totalSelectedDue);
+      setPaymentAmount(totalSelectedDue > 0 ? String(totalSelectedDue) : "");
+      setPaymentNotes("");
+      setPaymentCycleId("");
+      setPaymentSessionId("");
+      setPaymentAdvanceMode(false);
+      setPaymentFormError("");
+      setIsPaymentModalOpen(true);
+      return;
+    }
+
+    setSelectedObligationIds([]);
     setPaymentAmount("");
     const initialType = advance
       ? "monthly"
@@ -583,8 +621,8 @@ export default function StudentsScreen() {
     setPaymentDueAmount(initialDue);
     setPaymentAmount(initialDue > 0 && initialCycles.length <= 1 ? String(initialDue) : "");
     setPaymentNotes("");
-    setPaymentFormError("");
     setPaymentAdvanceMode(advance);
+    setPaymentFormError("");
     setIsPaymentModalOpen(true);
   };
 
@@ -900,6 +938,50 @@ export default function StudentsScreen() {
         selectedStudent.id,
       );
       setFinancialStatus(latestFinancialStatus);
+
+      // Multi-obligation or targeted single obligation collection
+      if (selectedObligationIds.length > 0) {
+        const itemsToPay = (latestFinancialStatus.unifiedObligations || []).filter(
+          (item) => selectedObligationIds.includes(item.id) && item.amountOwed > 0,
+        );
+        if (itemsToPay.length > 0) {
+          const collectResult = await PaymentRepository.collectMultipleObligations({
+            studentId: selectedStudent.id,
+            items: itemsToPay.map((item) => ({
+              type: item.type,
+              id: item.id,
+              amount: item.amountOwed,
+              notes: paymentNotes.trim() || undefined,
+              debtCycleId: item.debtCycleId,
+              sessionId: item.sessionId,
+              paymentRequestObligationId: item.paymentRequestObligationId,
+            })),
+            paymentMethod: "cash",
+            paymentDate: SessionDateService.getCurrentSessionDate(activeCenterId || selectedStudent.centerId),
+            batchNotes: paymentNotes.trim() || undefined,
+            operationId: paymentOperationIdentityRef.current?.operationId,
+          });
+
+          setIsPaymentModalOpen(false);
+          setSelectedObligationIds([]);
+          setPaymentAmount("");
+          setPaymentNotes("");
+          setPaymentCycleId("");
+          setPaymentSessionId("");
+          setPaymentAdvanceMode(false);
+          paymentOperationIdentityRef.current = null;
+          setPaymentNotice({
+            title: "تم تسجيل الدفعة",
+            message: `تم تحصيل ${collectResult.payments.length} التزام بنجاح بإجمالي ${formatCurrency(collectResult.totalCollected)}.`,
+            success: true,
+          });
+          openStudentDetails(selectedStudent);
+          const updatedFin = FinancialCalculationService.getStudentFinancialStatus(selectedStudent.id);
+          setFinancialStatus(updatedFin);
+          return;
+        }
+      }
+
       const sessionPayment = paymentType === "session";
       const payableSessions = sessionPayment
         ? getPayableSessionPaymentCandidates(latestFinancialStatus)
@@ -1082,13 +1164,18 @@ export default function StudentsScreen() {
         // cycle) when transferring between groups.
         EnrollmentRepository.transferEnrollment(transferFromEnrollmentId, enrollGroupId);
       } else {
+        const selectedGrp = availableGroups.find((g) => g.id === enrollGroupId);
+        const normalPrice = Number(selectedGrp?.monthlyPrice ?? selectedGrp?.defaultFee ?? 0);
+        const parsedPrice = enrollSpecialPrice !== "" ? parseFloat(enrollSpecialPrice) : normalPrice;
+        if (isNaN(parsedPrice) || parsedPrice < 0) {
+          Alert.alert("خطأ في المبلغ الشهري", "المبلغ الشهري يجب أن يكون رقمًا غير سالب.");
+          return;
+        }
         EnrollmentRepository.enrollStudent({
           studentId: selectedStudent.id,
           groupId: enrollGroupId,
           startDate: enrollStartDate || getLocalDateOnly(),
-          specialMonthlyPrice: enrollSpecialPrice
-            ? parseFloat(enrollSpecialPrice)
-            : undefined,
+          specialMonthlyPrice: parsedPrice,
         });
       }
 
@@ -1101,6 +1188,30 @@ export default function StudentsScreen() {
       loadData();
     } catch (e: any) {
       Alert.alert("خطأ", e?.message || "فشل تسجيل الطالب في المجموعة");
+    }
+  };
+
+  const handleUpdateEnrollmentPrice = () => {
+    if (!editPriceEnrollment) return;
+    const parsed = parseFloat(newEnrollmentPrice);
+    if (isNaN(parsed) || parsed < 0) {
+      Alert.alert("خطأ في المبلغ الشهري", "المبلغ الشهري يجب أن يكون رقمًا غير سالب.");
+      return;
+    }
+    setIsUpdatingEnrollmentPrice(true);
+    try {
+      EnrollmentRepository.updateMonthlyPrice(editPriceEnrollment.enrollmentId, parsed);
+      Alert.alert("تم التحديث", "تم تحديث المبلغ الشهري بنجاح. سيتم تطبيقه على الدورات القادمة.");
+      setEditPriceEnrollment(null);
+      setNewEnrollmentPrice("");
+      if (selectedStudent) {
+        openStudentDetails(StudentRepository.findById(selectedStudent.id) || selectedStudent);
+      }
+      loadData();
+    } catch (e: any) {
+      Alert.alert("خطأ", e?.message || "فشل تحديث المبلغ الشهري");
+    } finally {
+      setIsUpdatingEnrollmentPrice(false);
     }
   };
 
@@ -1988,105 +2099,230 @@ export default function StudentsScreen() {
                           </View>
                         );
                       }) : null}
-                      <Text style={styles.profileSubsectionTitle}>الاشتراكات الشهرية والباقات</Text>
-                      {financialStatus.cycles.filter((cycle) => !isPerSessionBillingMode(cycle.billingMode, cycle.cycleType)).length
-                        ? financialStatus.cycles
-                          .filter((cycle) => !isPerSessionBillingMode(cycle.billingMode, cycle.cycleType))
-                          .map((cycle) => {
-                            const due = Math.max(0, Number(cycle.effectivePrice ?? cycle.effectiveDue ?? cycle.cyclePrice ?? 0));
-                            const paid = Math.max(0, Number(cycle.paidAmount ?? cycle.totalPaid ?? 0));
-                            const remaining = Math.max(0, Number(cycle.remainingDebt ?? 0));
-                            const progress = due > 0 ? Math.min(100, (paid / due) * 100) : 100;
-                            const period = getDebtCyclePeriodLabel(cycle);
-                            const statusLabel = cycle.status === "cancelled"
-                              ? "ملغي"
-                              : due === 0
-                                ? "مجاني"
-                                : remaining === 0
-                                  ? Strings.cycleStatusPaid
-                                  : paid > 0
-                                    ? Strings.cycleStatusPartial
-                                    : Strings.cycleStatusOpen;
-                            const statusType = cycle.status === "cancelled" ? "neutral" as const
-                              : due === 0 || remaining === 0 ? "success" as const
-                                : paid > 0 ? "info" as const : "warning" as const;
-                            const hasSpecialMonthlyPrice = studentEnrollments.some(
-                              (enrollment) =>
-                                enrollment.id === cycle.enrollmentId &&
-                                enrollment.specialMonthlyPrice != null,
-                            );
-                            const hasCycleAdjustment = financialStatus.adjustments.some(
-                              (adjustment) => adjustment.debtCycleId === cycle.id,
-                            );
+                      {/* Unified Financial Obligations List (Sorted by Recency) */}
+                      <View style={{ marginTop: 14 }}>
+                        <View style={styles.profileSectionHeader}>
+                          <View style={{ flex: 1 }}>
+                            <Text style={styles.profileSubsectionTitle}>الالتزامات المالية (الأحدث أولاً)</Text>
+                            <Text style={styles.profileSectionCaption}>جميع الاشتراكات الشهرية، متطلبات الدفع، ورسوم الحصص</Text>
+                          </View>
+                          <View style={{ flexDirection: "row-reverse", gap: 5 }}>
+                            {(["all", "unpaid", "paid"] as const).map((mode) => (
+                              <TouchableOpacity
+                                key={mode}
+                                onPress={() => setObligationsFilter(mode)}
+                                style={[
+                                  styles.profileTypeBadge,
+                                  obligationsFilter === mode && styles.profileTypeBadgeActive,
+                                ]}
+                              >
+                                <Text
+                                  style={[
+                                    styles.profileTypeBadgeText,
+                                    obligationsFilter === mode && styles.profileTypeBadgeTextActive,
+                                  ]}
+                                >
+                                  {mode === "all"
+                                    ? `الكل (${financialStatus.unifiedObligations?.length || 0})`
+                                    : mode === "unpaid"
+                                      ? `المستحقة (${financialStatus.outstandingObligations?.length || 0})`
+                                      : `المسددة (${((financialStatus.unifiedObligations || []).filter(o => o.status === "paid" || o.amountOwed === 0)).length})`}
+                                </Text>
+                              </TouchableOpacity>
+                            ))}
+                          </View>
+                        </View>
+
+                        {/* Multi-Collect Banner when items are selected */}
+                        {selectedObligationIds.length > 0 && (
+                          <View style={styles.profileMultiCollectBar}>
+                            <View style={{ flexDirection: "row-reverse", alignItems: "center", gap: 8, flex: 1 }}>
+                              <TouchableOpacity
+                                onPress={() => setSelectedObligationIds([])}
+                                style={{ padding: 4 }}
+                              >
+                                <Ionicons name="close-circle" size={20} color={Colors.primary} />
+                              </TouchableOpacity>
+                              <Text style={styles.profileMultiCollectText}>
+                                تم تحديد {selectedObligationIds.length} التزام • إجمالي:{" "}
+                                {formatCurrency(
+                                  (financialStatus.unifiedObligations || [])
+                                    .filter((o) => selectedObligationIds.includes(o.id))
+                                    .reduce((sum, o) => sum + o.amountOwed, 0),
+                                )}
+                              </Text>
+                            </View>
+                            {canCreatePayment && (
+                              <TouchableOpacity
+                                style={styles.profileInlineAction}
+                                onPress={() => openPaymentModal(false, undefined, selectedObligationIds)}
+                              >
+                                <Ionicons name="cash-outline" size={16} color={Colors.primary} />
+                                <Text style={styles.profileInlineActionText}>تحصيل المحددة</Text>
+                              </TouchableOpacity>
+                            )}
+                          </View>
+                        )}
+
+                        {/* List of obligations */}
+                        {(() => {
+                          const allObs = financialStatus.unifiedObligations || [];
+                          const displayedObs = allObs.filter((o) => {
+                            if (obligationsFilter === "unpaid") return o.amountOwed > 0 && o.status !== "cancelled";
+                            if (obligationsFilter === "paid") return o.status === "paid" || o.amountOwed === 0;
+                            return true;
+                          });
+
+                          if (displayedObs.length === 0) {
                             return (
-                              <View key={cycle.id} style={styles.profileDebtCycleCard}>
-                                <View style={styles.profileFinanceCardHeading}>
-                                  <View style={styles.profileRowCopy}>
-                                    <Text style={styles.profileRowTitle}>
-                                      {cycle.cycleType === "package"
-                                        ? "باقة"
-                                        : cycle.billingMode === "pending"
-                                          ? "نظام فوترة غير محدد"
-                                          : "اشتراك شهري"} · {period || `${Strings.cycleNumberPrefix} ${cycle.cycleNumber}`}
-                                    </Text>
-                                    <Text style={styles.profileRowMeta}>{cycle.packageName || cycle.groupName || "التزام مالي"}</Text>
-                                  </View>
-                                  <View style={styles.profilePaymentActions}>
-                                    <StatusBadge text={statusLabel} type={statusType} />
-                                    {canAdjustDebt && cycle.status !== "cancelled" && (
-                                      <TouchableOpacity accessibilityRole="button" accessibilityLabel="تعديل الاستحقاق" onPress={() => { setTargetCycleForAdj(cycle); setAdjAmount(""); setAdjReason(""); setIsAdjModalOpen(true); }}>
-                                        <Ionicons name="create-outline" size={18} color={Colors.primary} />
+                              <Text style={styles.profileEmptyText}>
+                                {obligationsFilter === "unpaid"
+                                  ? "لا توجد التزامات مالية مستحقة حالياً."
+                                  : "لا توجد التزامات مالية مسجلة."}
+                              </Text>
+                            );
+                          }
+
+                          return displayedObs.map((ob) => {
+                            const isSelected = selectedObligationIds.includes(ob.id);
+                            const isPayable = canCreatePayment && ob.amountOwed > 0 && ob.status !== "cancelled";
+
+                            const statusLabel =
+                              ob.status === "cancelled"
+                                ? "ملغي"
+                                : ob.status === "paid" || ob.amountOwed === 0
+                                  ? "تم السداد"
+                                  : ob.status === "partial"
+                                    ? "مسدد جزئياً"
+                                    : "مستحق";
+                            const statusType =
+                              ob.status === "cancelled"
+                                ? "neutral"
+                                : ob.status === "paid" || ob.amountOwed === 0
+                                  ? "success"
+                                  : ob.status === "partial"
+                                    ? "warning"
+                                    : "danger";
+
+                            const typeLabel =
+                              ob.type === "payment_request"
+                                ? "مطلب دفع"
+                                : ob.type === "subscription"
+                                  ? "اشتراك شهري"
+                                  : "حصة";
+
+                            return (
+                              <View
+                                key={ob.id}
+                                style={[
+                                  styles.profileObligationCard,
+                                  isSelected && styles.profileObligationCardSelected,
+                                ]}
+                              >
+                                <View style={styles.profileObligationHeader}>
+                                  <View style={styles.profileObligationTitleRow}>
+                                    {isPayable && (
+                                      <TouchableOpacity
+                                        onPress={() => {
+                                          setSelectedObligationIds((prev) =>
+                                            prev.includes(ob.id)
+                                              ? prev.filter((i) => i !== ob.id)
+                                              : [...prev, ob.id],
+                                          );
+                                        }}
+                                        style={{ padding: 2 }}
+                                      >
+                                        <Ionicons
+                                          name={isSelected ? "checkbox" : "square-outline"}
+                                          size={20}
+                                          color={isSelected ? Colors.primary : Colors.slate400}
+                                        />
                                       </TouchableOpacity>
                                     )}
+                                    <View style={{ flex: 1 }}>
+                                      <View style={{ flexDirection: "row-reverse", alignItems: "center", gap: 6 }}>
+                                        <Text style={styles.profileRowTitle}>{ob.name}</Text>
+                                        <View style={styles.profileObligationTypeTag}>
+                                          <Text style={styles.profileObligationTypeTagText}>{typeLabel}</Text>
+                                        </View>
+                                      </View>
+                                      <Text style={styles.profileRowMeta}>
+                                        {ob.groupName ? `${ob.groupName} • ` : ""}
+                                        {ob.referenceMonth ? `شهر: ${ob.referenceMonth} • ` : ""}
+                                        {ob.createdAt ? `تاريخ الإضافة: ${formatLocalDate(ob.createdAt.slice(0, 10))}` : ""}
+                                      </Text>
+                                    </View>
+                                  </View>
+                                  <StatusBadge text={statusLabel} type={statusType} />
+                                </View>
+
+                                <View style={styles.profileCycleMetrics}>
+                                  <View>
+                                    <Text style={styles.profileCycleMetricLabel}>قيمة الالتزام</Text>
+                                    <Text style={styles.profileCycleMetricValue}>{formatCurrency(ob.amount)}</Text>
+                                  </View>
+                                  <View>
+                                    <Text style={styles.profileCycleMetricLabel}>المدفوع</Text>
+                                    <Text style={[styles.profileCycleMetricValue, { color: Colors.primary }]}>
+                                      {formatCurrency(ob.amountPaid)}
+                                    </Text>
+                                  </View>
+                                  <View>
+                                    <Text style={styles.profileCycleMetricLabel}>المتبقي</Text>
+                                    <Text
+                                      style={[
+                                        styles.profileCycleMetricValue,
+                                        { color: ob.amountOwed > 0 ? Colors.dangerText : Colors.successText },
+                                      ]}
+                                    >
+                                      {formatCurrency(ob.amountOwed)}
+                                    </Text>
                                   </View>
                                 </View>
-                                <View style={styles.profileCycleMetrics}>
-                                  <View><Text style={styles.profileCycleMetricLabel}>قيمة الالتزام</Text><Text style={styles.profileCycleMetricValue}>{formatCurrency(due)}</Text></View>
-                                  <View><Text style={styles.profileCycleMetricLabel}>المدفوع</Text><Text style={[styles.profileCycleMetricValue, { color: Colors.primary }]}>{formatCurrency(paid)}</Text></View>
-                                  <View><Text style={styles.profileCycleMetricLabel}>المتبقي</Text><Text style={[styles.profileCycleMetricValue, { color: remaining > 0 ? Colors.dangerText : Colors.successText }]}>{formatCurrency(remaining)}</Text></View>
-                                </View>
-                                <View style={styles.profileCycleProgressTrack}>
-                                  <View style={[styles.profileCycleProgress, { width: `${progress}%`, backgroundColor: remaining > 0 ? Colors.primary : Colors.success }]} />
-                                </View>
-                                {period ? <Text style={styles.profileCycleDates}>{formatLocalDate(cycle.startDate)} — {formatLocalDate(cycle.endDate)}</Text> : null}
-                                {cycle.billingMode === "pending" ? (
-                                  <>
-                                    <Text style={styles.profileRowMeta}>
-                                      لم يُحدد نظام الفوترة لهذه الدورة؛ لن يُسجل دفع بالحصة قبل تحديده صراحةً.
-                                    </Text>
-                                    {hasSpecialMonthlyPrice ? (
-                                      <Text style={styles.profileRowMeta}>
-                                        لهذا التسجيل سعر شهري خاص؛ لا يمكن تحويله إلى الدفع بالحصة لأن النظام لا يحدد خصمًا لكل حصة.
-                                      </Text>
-                                    ) : null}
-                                    {hasCycleAdjustment ? (
-                                      <Text style={styles.profileRowMeta}>
-                                        تحتوي هذه الدورة على خصم أو تعديل محفوظ؛ لا يمكن تحويلها إلى الدفع بالحصة دون تغيير ذلك الاستحقاق.
-                                      </Text>
-                                    ) : null}
-                                    {canAdjustDebt &&
-                                    cycle.cycleType !== "package" &&
-                                    !cycle.packageSubscriptionId &&
-                                    !hasSpecialMonthlyPrice &&
-                                    !hasCycleAdjustment &&
-                                    cycle.status !== "cancelled" &&
-                                    cycle.status !== "paid" ? (
+
+                                <View style={{ flexDirection: "row-reverse", justifyContent: "flex-end", marginTop: 10, gap: 8, flexWrap: "wrap" }}>
+                                  {isPayable && (
+                                    <TouchableOpacity
+                                      style={styles.profileInlineAction}
+                                      onPress={() => openPaymentModal(false, undefined, [ob.id])}
+                                    >
+                                      <Ionicons name="cash-outline" size={15} color={Colors.primary} />
+                                      <Text style={styles.profileInlineActionText}>تحصيل مستقل</Text>
+                                    </TouchableOpacity>
+                                  )}
+                                  {ob.type === "subscription" && ob.debtCycleId && canAdjustDebt && (() => {
+                                    const cycle = financialStatus.cycles.find((c) => c.id === ob.debtCycleId);
+                                    if (!cycle || cycle.status === "cancelled" || cycle.status === "paid") return null;
+                                    return (
                                       <TouchableOpacity
-                                        accessibilityRole="button"
-                                        accessibilityLabel="تحديد نظام الفوترة للدفع بالحصة"
+                                        style={styles.profileInlineAction}
+                                        onPress={() => { setTargetCycleForAdj(cycle); setAdjAmount(""); setAdjReason(""); setIsAdjModalOpen(true); }}
+                                      >
+                                        <Ionicons name="create-outline" size={15} color={Colors.primary} />
+                                        <Text style={styles.profileInlineActionText}>تعديل الاستحقاق</Text>
+                                      </TouchableOpacity>
+                                    );
+                                  })()}
+                                  {ob.type === "subscription" && ob.debtCycleId && (() => {
+                                    const cycle = financialStatus.cycles.find((c) => c.id === ob.debtCycleId);
+                                    if (!cycle || cycle.billingMode !== "pending" || cycle.cycleType === "package" || cycle.packageSubscriptionId || cycle.status === "cancelled" || cycle.status === "paid" || !canAdjustDebt) return null;
+                                    return (
+                                      <TouchableOpacity
                                         style={styles.profileInlineAction}
                                         onPress={() => openSessionBillingModeConfirmation(cycle)}
                                       >
-                                        <Ionicons name="cash-outline" size={17} color={Colors.primary} />
+                                        <Ionicons name="cash-outline" size={15} color={Colors.primary} />
                                         <Text style={styles.profileInlineActionText}>تحديد الدفع بالحصة</Text>
                                       </TouchableOpacity>
-                                    ) : null}
-                                  </>
-                                ) : null}
+                                    );
+                                  })()}
+                                </View>
                               </View>
                             );
-                          })
-                        : <Text style={styles.profileEmptyText}>لا توجد اشتراكات شهرية أو باقات مسجلة.</Text>}
+                          });
+                        })()}
+                      </View>
+
                       <Text style={styles.profileSubsectionTitle}>سجل المدفوعات</Text>
                       {financialStatus.payments.length ? financialStatus.payments.map((payment) => {
                         const cycle = payment.debtCycleId
@@ -2362,20 +2598,58 @@ export default function StudentsScreen() {
                         ? selectedGroupPanel.panel
                         : null;
                       const groupFinancial = panel === "finance" ? groupFinancialStatus : null;
+                      const normalPrice = Number(group?.monthlyPrice ?? group?.defaultFee ?? 0);
+                      const studentPrice = enr.specialMonthlyPrice != null ? Number(enr.specialMonthlyPrice) : normalPrice;
+                      const isFree = studentPrice === 0;
+                      const isDiscounted = studentPrice < normalPrice && !isFree;
+                      const pricingLabel = isFree ? "مجاني" : isDiscounted ? "مخفض" : "منتظم";
+                      const pricingColor = isFree ? Colors.successText : isDiscounted ? Colors.warningText : Colors.primary;
+                      const pricingBg = isFree ? "#ECFDF5" : isDiscounted ? "#FFFBEB" : "#EFF6FF";
                       return (
                         <View key={enr.id} style={styles.groupCard}>
                           <View style={styles.groupCardHeader}>
                             <View style={{ flex: 1 }}>
-                              <Text style={styles.groupCardName}>{enr.groupName || group?.name || "المجموعة"}</Text>
+                              <View style={{ flexDirection: "row-reverse", alignItems: "center", gap: 8, marginBottom: 4 }}>
+                                <Text style={styles.groupCardName}>{enr.groupName || group?.name || "المجموعة"}</Text>
+                                <View style={{ backgroundColor: pricingBg, paddingHorizontal: 7, paddingVertical: 2, borderRadius: 6 }}>
+                                  <Text style={{ fontSize: 11, fontWeight: "800", color: pricingColor }}>{pricingLabel}</Text>
+                                </View>
+                              </View>
                               <Text style={styles.groupCardMeta}>
-                                {[group?.subjectName, group?.teacherName, group?.grade].filter(Boolean).join(" • ")}{group ? " • " : ""}بدء: {enr.startDate}{enr.specialMonthlyPrice ? ` • ${enr.specialMonthlyPrice} ج.م` : ""}
+                                {[group?.subjectName, group?.teacherName, group?.grade].filter(Boolean).join(" • ")}{group ? " • " : ""}بدء: {enr.startDate}
                               </Text>
+                              <View style={{ flexDirection: "row-reverse", alignItems: "center", gap: 10, marginTop: 4 }}>
+                                <Text style={{ fontSize: 12, color: Colors.slate600 }}>
+                                  السعر العادي: <Text style={{ fontWeight: "700" }}>{formatCurrency(normalPrice)}</Text>
+                                </Text>
+                                <Text style={{ fontSize: 12, color: Colors.slate800 }}>
+                                  المبلغ الشهري للطالب: <Text style={{ fontWeight: "800", color: pricingColor }}>{formatCurrency(studentPrice)}</Text>
+                                </Text>
+                              </View>
                             </View>
-                            {canEnroll && enr.status === "active" && (
-                              <TouchableOpacity onPress={() => handleEndEnrollment(enr.id)} style={styles.endEnrollBtn}>
-                                <Text style={styles.endEnrollBtnText}>إنهاء</Text>
-                              </TouchableOpacity>
-                            )}
+                            <View style={{ flexDirection: "column", gap: 6, alignItems: "flex-end" }}>
+                              {canEnroll && enr.status === "active" && (
+                                <TouchableOpacity
+                                  onPress={() => {
+                                    setEditPriceEnrollment({
+                                      enrollmentId: enr.id,
+                                      groupName: enr.groupName || group?.name || "المجموعة",
+                                      normalPrice,
+                                      currentPrice: studentPrice,
+                                    });
+                                    setNewEnrollmentPrice(String(studentPrice));
+                                  }}
+                                  style={[styles.endEnrollBtn, { backgroundColor: "#EFF6FF", borderColor: "#BFDBFE", borderWidth: 1 }]}
+                                >
+                                  <Text style={[styles.endEnrollBtnText, { color: Colors.primary }]}>تعديل المبلغ</Text>
+                                </TouchableOpacity>
+                              )}
+                              {canEnroll && enr.status === "active" && (
+                                <TouchableOpacity onPress={() => handleEndEnrollment(enr.id)} style={styles.endEnrollBtn}>
+                                  <Text style={styles.endEnrollBtnText}>إنهاء</Text>
+                                </TouchableOpacity>
+                              )}
+                            </View>
                           </View>
                           <View style={styles.groupActionRow}>
                             <TouchableOpacity style={[styles.groupActionButton, panel === "attendance" && styles.groupActionButtonActive]} onPress={() => openGroupPanel(enr.groupId, "attendance")}>
@@ -2852,6 +3126,23 @@ export default function StudentsScreen() {
                 {groupFinancialStatus.sessionDebt && <View style={styles.detailSectionCard}><Text style={styles.groupDetailsSubtitle}>تفصيل حصص الشهر</Text><Text style={styles.detailHistoryMeta}>{groupFinancialStatus.sessionDebt.periodStart} - {groupFinancialStatus.sessionDebt.periodEnd}</Text><Text style={styles.detailLine}>حضر ودفع: {groupFinancialStatus.sessionDebt.attendedPaidSessions}</Text><Text style={styles.detailLine}>حضر ولم يدفع: {groupFinancialStatus.sessionDebt.attendedUnpaidSessions}</Text><Text style={styles.detailLine}>الحصص المستقبلية غير المدفوعة: {groupFinancialStatus.sessionDebt.futureUnpaidSessions}</Text><Text style={styles.detailDebtLine}>المديونية الحالية: {formatCurrency(groupFinancialStatus.sessionDebt.currentDebt)}</Text></View>}
                 <Text style={styles.groupDetailsSubtitle}>دورات المديونية</Text>
                 {groupFinancialStatus.cycles.length === 0 ? <Text style={styles.emptyText}>لا توجد دورات مديونية.</Text> : groupFinancialStatus.cycles.map((cycle) => <View key={cycle.id} style={styles.detailSectionCard}><View style={styles.detailHistoryRow}><View><Text style={styles.detailHistoryTitle}>الدورة {cycle.cycleNumber}</Text><Text style={styles.detailHistoryMeta}>{cycle.startDate} - {cycle.endDate}</Text></View><StatusBadge text={cycle.status === "paid" ? "مدفوعة" : cycle.status === "partial" ? "جزئية" : "مفتوحة"} type={cycle.status === "paid" ? "success" : cycle.status === "partial" ? "warning" : "neutral"} /></View><Text style={styles.detailLine}>الرسوم: {formatCurrency(cycle.effectivePrice ?? cycle.cyclePrice)} | المتبقي: {formatCurrency(cycle.remainingDebt ?? 0)}</Text></View>)}
+                {groupFinancialStatus.paymentRequestObligations && groupFinancialStatus.paymentRequestObligations.length > 0 ? (
+                  <>
+                    <Text style={styles.groupDetailsSubtitle}>متطلبات الدفع للمجموعة</Text>
+                    {groupFinancialStatus.paymentRequestObligations.map((ob) => (
+                      <View key={ob.id} style={styles.detailSectionCard}>
+                        <View style={styles.detailHistoryRow}>
+                          <View>
+                            <Text style={styles.detailHistoryTitle}>{ob.requestName || "متطلب دفع"}</Text>
+                            <Text style={styles.detailHistoryMeta}>{ob.referenceMonth ? `شهر: ${ob.referenceMonth}` : "مطلب دفع"}</Text>
+                          </View>
+                          <StatusBadge text={ob.isPaid || ob.status === "paid" ? "مسدد" : ob.isPartiallyPaid || (ob.amountPaid || 0) > 0 ? "جزئي" : "مستحق"} type={ob.isPaid || ob.status === "paid" ? "success" : ob.isPartiallyPaid || (ob.amountPaid || 0) > 0 ? "warning" : "neutral"} />
+                        </View>
+                        <Text style={styles.detailLine}>المبلغ: {formatCurrency(ob.amountDue)} | المتبقي: {formatCurrency(ob.amountOwed ?? (ob.amountDue - (ob.amountPaid || 0)))}</Text>
+                      </View>
+                    ))}
+                  </>
+                ) : null}
                 <Text style={styles.groupDetailsSubtitle}>المدفوعات</Text>
                 {groupFinancialStatus.payments.length === 0 ? <Text style={styles.emptyText}>لا توجد مدفوعات مسجلة.</Text> : groupFinancialStatus.payments.map((payment) => <View key={payment.id} style={styles.detailHistoryRow}><View><Text style={styles.detailHistoryTitle}>{formatCurrency(payment.amount)}</Text><Text style={styles.detailHistoryMeta}>{payment.paymentDate || payment.createdAt.slice(0, 10)}{payment.isReversed ? " • ملغاة" : ""}</Text>{payment.notes ? <Text style={styles.detailHistoryMeta}>ملاحظة: {payment.notes}</Text> : null}</View><Text style={styles.detailHistoryMeta}>{payment.paymentType}</Text></View>)}
               </ScrollView>
@@ -2926,7 +3217,11 @@ export default function StudentsScreen() {
                     styles.groupPickItem,
                     enrollGroupId === g.id && styles.groupPickItemActive,
                   ]}
-                  onPress={() => { setEnrollGroupId(g.id); setEnrollStartDate(firstScheduledDate(g.id)); }}
+                  onPress={() => {
+                    setEnrollGroupId(g.id);
+                    setEnrollStartDate(firstScheduledDate(g.id));
+                    setEnrollSpecialPrice(String(g.monthlyPrice ?? g.defaultFee ?? 0));
+                  }}
                 >
                   <Text style={styles.groupPickSchedule}>{groupScheduleLabel(g.id)}</Text>
                   <Text style={[styles.groupPickText, enrollGroupId === g.id && styles.groupPickTextActive]}>{g.name}</Text>
@@ -2943,14 +3238,41 @@ export default function StudentsScreen() {
               containerStyle={{ marginBottom: Spacing.sm }}
             />
 
+            {enrollGroupId ? (
+              <View style={{ marginBottom: Spacing.xs }}>
+                <Text style={{ fontSize: 12, color: Colors.slate600, textAlign: "right" }}>
+                  السعر العادي للمجموعة: {formatCurrency(Number(availableGroups.find((g) => g.id === enrollGroupId)?.monthlyPrice ?? availableGroups.find((g) => g.id === enrollGroupId)?.defaultFee ?? 0))}
+                </Text>
+              </View>
+            ) : null}
+
             <AppInput
-              label="سعر شهري خاص (اختياري - ج.م)"
-              placeholder="اتركه فارغاً للسعر الافتراضي"
+              label="المبلغ الشهري *"
+              placeholder="المبلغ الشهري للاشتراك"
               value={enrollSpecialPrice}
               onChangeText={setEnrollSpecialPrice}
               keyboardType="numeric"
-              containerStyle={{ marginBottom: Spacing.md }}
+              containerStyle={{ marginBottom: Spacing.xs }}
             />
+
+            {enrollGroupId && (() => {
+              const normalPrice = Number(availableGroups.find((g) => g.id === enrollGroupId)?.monthlyPrice ?? availableGroups.find((g) => g.id === enrollGroupId)?.defaultFee ?? 0);
+              const val = parseFloat(enrollSpecialPrice);
+              const isValid = !isNaN(val) && val >= 0;
+              const isFree = isValid && val === 0;
+              const isDiscounted = isValid && val < normalPrice && !isFree;
+              const label = isFree ? "مجاني" : isDiscounted ? "مخفض" : "منتظم";
+              const badgeColor = isFree ? Colors.successText : isDiscounted ? Colors.warningText : Colors.primary;
+              const badgeBg = isFree ? "#ECFDF5" : isDiscounted ? "#FFFBEB" : "#EFF6FF";
+              return (
+                <View style={{ flexDirection: "row-reverse", alignItems: "center", gap: 6, marginBottom: Spacing.md }}>
+                  <Text style={{ fontSize: 12, color: Colors.slate600 }}>حالة التسعير:</Text>
+                  <View style={{ backgroundColor: badgeBg, paddingHorizontal: 8, paddingVertical: 2, borderRadius: 6 }}>
+                    <Text style={{ fontSize: 11, fontWeight: "800", color: badgeColor }}>{label}</Text>
+                  </View>
+                </View>
+              );
+            })()}
 
             <View style={{ flexDirection: "row", gap: 8 }}>
               <AppButton
@@ -2965,6 +3287,76 @@ export default function StudentsScreen() {
                 style={{ flex: 1 }}
               />
             </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* 4b. Edit Enrollment Monthly Price Modal */}
+      <Modal
+        visible={Boolean(editPriceEnrollment)}
+        animationType="fade"
+        transparent
+        onRequestClose={() => setEditPriceEnrollment(null)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.smallModalCard}>
+            <Text style={styles.modalTitle}>تعديل المبلغ الشهري</Text>
+            {editPriceEnrollment && (
+              <>
+                <Text style={[styles.inputLabel, { marginBottom: Spacing.xs }]}>
+                  المجموعة: {editPriceEnrollment.groupName}
+                </Text>
+                <Text style={{ fontSize: 12, color: Colors.slate500, marginBottom: Spacing.sm }}>
+                  السعر العادي للمجموعة: {formatCurrency(editPriceEnrollment.normalPrice)}
+                </Text>
+
+                <AppInput
+                  label="المبلغ الشهري الجديد *"
+                  placeholder={String(editPriceEnrollment.normalPrice)}
+                  value={newEnrollmentPrice}
+                  onChangeText={setNewEnrollmentPrice}
+                  keyboardType="numeric"
+                  containerStyle={{ marginBottom: Spacing.xs }}
+                />
+
+                {(() => {
+                  const val = parseFloat(newEnrollmentPrice);
+                  const isValid = !isNaN(val) && val >= 0;
+                  const isFree = isValid && val === 0;
+                  const isDiscounted = isValid && val < editPriceEnrollment.normalPrice && !isFree;
+                  const label = isFree ? "مجاني" : isDiscounted ? "مخفض" : "منتظم";
+                  const badgeColor = isFree ? Colors.successText : isDiscounted ? Colors.warningText : Colors.primary;
+                  const badgeBg = isFree ? "#ECFDF5" : isDiscounted ? "#FFFBEB" : "#EFF6FF";
+                  return (
+                    <View style={{ flexDirection: "row-reverse", alignItems: "center", gap: 6, marginBottom: Spacing.sm }}>
+                      <Text style={{ fontSize: 12, color: Colors.slate600 }}>حالة التسعير:</Text>
+                      <View style={{ backgroundColor: badgeBg, paddingHorizontal: 8, paddingVertical: 2, borderRadius: 6 }}>
+                        <Text style={{ fontSize: 11, fontWeight: "800", color: badgeColor }}>{label}</Text>
+                      </View>
+                    </View>
+                  );
+                })()}
+
+                <Text style={{ fontSize: 11, color: Colors.slate500, marginBottom: Spacing.md, lineHeight: 16 }}>
+                  ملاحظة: سيتم تطبيق هذا المبلغ على الدورات الشهرية القادمة فقط دون تعديل الدورات السابقة أو سجل المدفوعات.
+                </Text>
+
+                <View style={{ flexDirection: "row", gap: 8 }}>
+                  <AppButton
+                    title="حفظ التعديل"
+                    onPress={handleUpdateEnrollmentPrice}
+                    loading={isUpdatingEnrollmentPrice}
+                    style={{ flex: 1 }}
+                  />
+                  <AppButton
+                    title="إلغاء"
+                    variant="outline"
+                    onPress={() => setEditPriceEnrollment(null)}
+                    style={{ flex: 1 }}
+                  />
+                </View>
+              </>
+            )}
           </View>
         </View>
       </Modal>
@@ -2984,24 +3376,63 @@ export default function StudentsScreen() {
       >
         <View style={styles.modalOverlay}>
           <View style={styles.smallModalCard}>
-            <Text style={styles.modalTitle}>{paymentAdvanceMode ? "إضافة رصيد مقدم" : "تسجيل دفعة نقدية"}</Text>
-            {paymentAdvanceMode ? <Text style={styles.paymentAdvanceHint}>سيُسجل المبلغ كدفعة شهرية/جزئية ويُرحّل الزائد كرصيد مقدم.</Text> : null}
+            <Text style={styles.modalTitle}>
+              {selectedObligationIds.length > 0
+                ? "تحصيل الالتزامات المحددة"
+                : paymentAdvanceMode
+                  ? "إضافة رصيد مقدم"
+                  : "تسجيل دفعة نقدية"}
+            </Text>
             {paymentFormError ? (
               <View style={styles.paymentFormError}>
                 <Ionicons name="alert-circle-outline" size={18} color={Colors.danger} />
                 <Text style={styles.paymentFormErrorText}>{paymentFormError}</Text>
               </View>
             ) : null}
-            <AppInput
-              label="المبلغ المدفوع (ج.م) *"
-              placeholder="مثال: 400"
-              value={paymentAmount}
-              onChangeText={(value) => { setPaymentAmount(value); setPaymentFormError(""); }}
-              keyboardType="numeric"
-              containerStyle={{ marginVertical: Spacing.sm }}
-            />
 
-            <Text style={styles.inputLabel}>نوع الدفعة:</Text>
+            {selectedObligationIds.length > 0 ? (
+              <View style={styles.profileSelectedModalSection}>
+                <Text style={styles.profileSelectedModalHeading}>الالتزامات المحددة للسداد:</Text>
+                <ScrollView style={{ maxHeight: 180, marginVertical: 4 }}>
+                  {(financialStatus?.unifiedObligations || [])
+                    .filter((o) => selectedObligationIds.includes(o.id))
+                    .map((o) => (
+                      <View key={o.id} style={styles.profileSelectedModalRow}>
+                        <View style={{ flex: 1 }}>
+                          <Text style={styles.profileSelectedModalTitle}>{o.name}</Text>
+                          <Text style={styles.profileRowMeta}>
+                            {o.referenceMonth ? `شهر: ${o.referenceMonth} • ` : ""}
+                            المتبقي: {formatCurrency(o.amountOwed)}
+                          </Text>
+                        </View>
+                        <Text style={styles.profileSelectedModalAmount}>{formatCurrency(o.amountOwed)}</Text>
+                      </View>
+                    ))}
+                </ScrollView>
+                <View style={styles.profileSelectedModalTotalRow}>
+                  <Text style={styles.profileSelectedModalTotalLabel}>الإجمالي المطلوب تحصيله:</Text>
+                  <Text style={styles.profileSelectedModalTotalVal}>
+                    {formatCurrency(
+                      (financialStatus?.unifiedObligations || [])
+                        .filter((o) => selectedObligationIds.includes(o.id))
+                        .reduce((sum, o) => sum + o.amountOwed, 0),
+                    )}
+                  </Text>
+                </View>
+              </View>
+            ) : (
+              <>
+                {paymentAdvanceMode ? <Text style={styles.paymentAdvanceHint}>سيُسجل المبلغ كدفعة شهرية/جزئية ويُرحّل الزائد كرصيد مقدم.</Text> : null}
+                <AppInput
+                  label="المبلغ المدفوع (ج.م) *"
+                  placeholder="مثال: 400"
+                  value={paymentAmount}
+                  onChangeText={(value) => { setPaymentAmount(value); setPaymentFormError(""); }}
+                  keyboardType="numeric"
+                  containerStyle={{ marginVertical: Spacing.sm }}
+                />
+
+                <Text style={styles.inputLabel}>نوع الدفعة:</Text>
             <View
               style={{ flexDirection: "row", gap: 8, marginBottom: Spacing.md }}
             >
@@ -3172,6 +3603,8 @@ export default function StudentsScreen() {
                 })}
               </View>
             ) : null}
+            </>
+            )}
 
             <AppInput
               label="ملاحظات (اختياري)"
@@ -3183,13 +3616,17 @@ export default function StudentsScreen() {
 
             <View style={{ flexDirection: "row", gap: 8 }}>
               <AppButton
-                title="تأكيد الدفع"
+                title={
+                  selectedObligationIds.length > 0
+                    ? `تأكيد تحصيل (${selectedObligationIds.length} التزام)`
+                    : "تأكيد الدفع"
+                }
                 onPress={handleRecordPayment}
                 loading={isRecordingPayment}
                 disabled={
                   isRecordingPayment ||
-                  (!paymentAdvanceMode && paymentDueAmount <= 0) ||
-                  (!paymentAdvanceMode && paymentType === "session" && !selectedPaymentSession)
+                  (selectedObligationIds.length === 0 && !paymentAdvanceMode && paymentDueAmount <= 0) ||
+                  (selectedObligationIds.length === 0 && !paymentAdvanceMode && paymentType === "session" && !selectedPaymentSession)
                 }
                 style={{ flex: 1 }}
               />
@@ -3198,6 +3635,7 @@ export default function StudentsScreen() {
                 variant="outline"
                 onPress={() => {
                   setIsPaymentModalOpen(false);
+                  setSelectedObligationIds([]);
                   setPaymentAdvanceMode(false);
                   setPaymentFormError("");
                   paymentOperationIdentityRef.current = null;
@@ -4579,4 +5017,24 @@ const createStyles = (screenWidth = 390, screenHeight = 844, gutter = Spacing.lg
   editProfileActions: { flexDirection: "row", gap: 9, marginTop: 20 },
   profileInfoNotice: { flexDirection: "row-reverse", alignItems: "flex-start", gap: 7, padding: 11, marginTop: 12, borderRadius: 11, backgroundColor: Colors.slate100 },
   profileInfoNoticeText: { flex: 1, color: Colors.slate600, fontSize: 10, lineHeight: 16, textAlign: "right" },
+  profileObligationCard: { padding: 13, marginTop: 10, borderWidth: 1, borderColor: Colors.slate200, borderRadius: 14, backgroundColor: Colors.white },
+  profileObligationCardSelected: { borderColor: Colors.primary, backgroundColor: Colors.primaryLight + "15" },
+  profileObligationHeader: { flexDirection: "row-reverse", alignItems: "center", justifyContent: "space-between", gap: 8 },
+  profileObligationTitleRow: { flexDirection: "row-reverse", alignItems: "center", gap: 8, flex: 1 },
+  profileObligationTypeTag: { paddingHorizontal: 7, paddingVertical: 2, borderRadius: 6, backgroundColor: Colors.slate100 },
+  profileObligationTypeTagText: { fontSize: 10, fontWeight: "700", color: Colors.slate600 },
+  profileMultiCollectBar: { flexDirection: "row-reverse", alignItems: "center", justifyContent: "space-between", padding: 12, marginTop: 12, borderRadius: 12, backgroundColor: Colors.primaryLight + "30", borderWidth: 1, borderColor: Colors.primary },
+  profileMultiCollectText: { fontSize: 12, fontWeight: "800", color: Colors.primaryDark },
+  profileTypeBadge: { paddingHorizontal: 10, paddingVertical: 5, borderRadius: 8, backgroundColor: Colors.slate100, borderWidth: 1, borderColor: Colors.slate200 },
+  profileTypeBadgeActive: { backgroundColor: Colors.primary, borderColor: Colors.primary },
+  profileTypeBadgeText: { fontSize: 11, fontWeight: "700", color: Colors.slate600 },
+  profileTypeBadgeTextActive: { color: Colors.white },
+  profileSelectedModalSection: { marginVertical: 10, padding: 12, borderRadius: 12, backgroundColor: Colors.slate50, borderWidth: 1, borderColor: Colors.slate200 },
+  profileSelectedModalHeading: { fontSize: 12, fontWeight: "800", color: Colors.slate800, textAlign: "right", marginBottom: 6 },
+  profileSelectedModalRow: { flexDirection: "row-reverse", justifyContent: "space-between", alignItems: "center", paddingVertical: 6, borderBottomWidth: 1, borderBottomColor: Colors.slate200 },
+  profileSelectedModalTitle: { fontSize: 12, fontWeight: "700", color: Colors.slate800, textAlign: "right" },
+  profileSelectedModalAmount: { fontSize: 12, fontWeight: "800", color: Colors.primary },
+  profileSelectedModalTotalRow: { flexDirection: "row-reverse", justifyContent: "space-between", alignItems: "center", marginTop: 8, paddingTop: 8, borderTopWidth: 1, borderTopColor: Colors.slate300 },
+  profileSelectedModalTotalLabel: { fontSize: 13, fontWeight: "800", color: Colors.slate900 },
+  profileSelectedModalTotalVal: { fontSize: 14, fontWeight: "900", color: Colors.primaryDark },
 });

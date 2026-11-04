@@ -575,6 +575,28 @@ function ReportsContent() {
                   </View>
                 </View>
               ))}
+              {studentFinReport.paymentRequestObligations && studentFinReport.paymentRequestObligations.length > 0 ? (
+                <>
+                  <Text style={styles.sectionHeader}>متطلبات الدفع (مذكرات وبوكليت)</Text>
+                  {studentFinReport.paymentRequestObligations.map((ob) => (
+                    <View key={ob.id} style={styles.card}>
+                      <View style={styles.cardHeader}>
+                        <Text style={styles.sessGroup}>{ob.requestName || "متطلب دفع"}</Text>
+                        <Text style={styles.sessDate}>
+                          {ob.groupName ? `${ob.groupName} • ` : ""}
+                          {ob.referenceMonth ? `شهر: ${ob.referenceMonth}` : ""}
+                        </Text>
+                      </View>
+                      <View style={styles.statGrid}>
+                        <Text style={styles.statText}>المبلغ: {ob.amountDue} ج.م</Text>
+                        <Text style={[styles.statText, { color: Colors.successText }]}>المدفوع: {ob.amountPaid || 0} ج.م</Text>
+                        <Text style={[styles.statText, { color: Colors.dangerText }]}>المتبقي: {ob.amountOwed || 0} ج.م</Text>
+                        <Text style={styles.statText}>الحالة: {ob.isPaid || ob.status === "paid" ? "مسدد" : ob.isPartiallyPaid || (ob.amountPaid || 0) > 0 ? "مسدد جزئياً" : "مستحق"}</Text>
+                      </View>
+                    </View>
+                  ))}
+                </>
+              ) : null}
             </View>
           )}
 

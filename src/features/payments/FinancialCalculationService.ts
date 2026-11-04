@@ -10,6 +10,7 @@ import {
     SessionDebtBreakdown,
     StudentPaymentRequestObligation,
     StudentSubscription,
+    UnifiedFinancialObligation,
 } from "../../shared/types";
 import { useAuthStore } from "../auth/useAuthStore";
 import { DebtAdjustmentRepository } from "./DebtAdjustmentRepository";
@@ -515,6 +516,13 @@ export class FinancialCalculationService {
       0,
     );
 
+    const { unifiedObligations, outstandingObligations } =
+      this.buildAndSortUnifiedObligations({
+        cycles: enrichedCycles,
+        paymentRequestObligations,
+        sessionDebt,
+      });
+
     return {
       // Legacy / Sprint 1 fields:
       totalDue,
@@ -550,6 +558,8 @@ export class FinancialCalculationService {
       paymentRequestsTotalPaid,
       paymentRequestsRemainingDebt,
       paymentRequestPayments: activePaymentRequestPayments,
+      unifiedObligations,
+      outstandingObligations,
     };
   }
 
@@ -773,6 +783,205 @@ export class FinancialCalculationService {
       paymentRequestsTotalPaid: scopedRequestsTotalPaid,
       paymentRequestsRemainingDebt: scopedRequestsRemainingDebt,
       paymentRequestPayments: scopedPaymentRequestPayments,
+      ...this.buildAndSortUnifiedObligations({
+        cycles,
+        paymentRequestObligations: scopedObligations,
+        sessionDebt,
+      }),
     };
+  }
+
+  private static readonly ARABIC_MONTH_NAMES: Record<string, string> = {
+    "01": "يناير",
+    "02": "فبراير",
+    "03": "مارس",
+    "04": "إبريل",
+    "05": "مايو",
+    "06": "يونيو",
+    "07": "يوليو",
+    "08": "أغسطس",
+    "09": "سبتمبر",
+    "10": "أكتوبر",
+    "11": "نوفمبر",
+    "12": "ديسمبر",
+  };
+
+  static formatArabicMonth(yearMonthOrDate?: string | null): string {
+    if (!yearMonthOrDate) return "";
+    const prefix = String(yearMonthOrDate).slice(0, 7);
+    const parts = prefix.split("-");
+    if (parts.length === 2) {
+      const monthName = this.ARABIC_MONTH_NAMES[parts[1]] || parts[1];
+      return `${monthName} ${parts[0]}`;
+    }
+    return prefix;
+  }
+
+  /**
+   * Sorts financial obligations strictly by recency:
+   * 1. Independent payment requests: sort by creation timestamp descending.
+   * 2. Monthly subscription debts: sort by reference month descending (e.g. Nov > Oct > Sep).
+   * 3. Session obligations: preserve chronological ordering using session/creation dates descending.
+   * 4. Equal timestamps use a deterministic secondary key (id).
+   */
+  static sortObligationsByRecency(
+    obligations: UnifiedFinancialObligation[],
+  ): UnifiedFinancialObligation[] {
+    return [...obligations].sort((a, b) => {
+      const keyA = String(a.sortKey || a.createdAt || "");
+      const keyB = String(b.sortKey || b.createdAt || "");
+      const cmp = keyB.localeCompare(keyA);
+      if (cmp !== 0) return cmp;
+      return String(a.id).localeCompare(String(b.id));
+    });
+  }
+
+  /**
+   * Builds and sorts unified financial obligations from cycles, payment requests, and session debts.
+   */
+  static buildAndSortUnifiedObligations(params: {
+    cycles: DebtCycle[];
+    paymentRequestObligations?: StudentPaymentRequestObligation[];
+    sessionDebt?: SessionDebtBreakdown;
+  }): {
+    unifiedObligations: UnifiedFinancialObligation[];
+    outstandingObligations: UnifiedFinancialObligation[];
+  } {
+    const list: UnifiedFinancialObligation[] = [];
+
+    // 1. Payment Request Obligations (Booklets, Notes, Materials)
+    for (const ob of params.paymentRequestObligations || []) {
+      const due = Number(ob.amountDue) || 0;
+      const paid = Number(ob.confirmedAmountPaid ?? ob.amountPaid) || 0;
+      const owed =
+        ob.amountOwed !== undefined
+          ? Number(ob.amountOwed) || 0
+          : ob.status === "cancelled" || ob.status === "paid"
+            ? 0
+            : Math.max(0, due - paid);
+      const isPaid =
+        ob.isPaid ??
+        (ob.status === "paid" && paid >= due - 0.000001 && due > 0);
+      const status: "paid" | "partial" | "unpaid" | "cancelled" =
+        ob.status === "cancelled"
+          ? "cancelled"
+          : isPaid
+            ? "paid"
+            : paid > 0
+              ? "partial"
+              : "unpaid";
+
+      // Independent payment requests sort by creation timestamp descending
+      const sortKey = ob.createdAt ? ob.createdAt : new Date(0).toISOString();
+
+      list.push({
+        id: `pr-${ob.id}`,
+        type: "payment_request",
+        name: ob.requestName || "متطلب دفع",
+        amount: due,
+        amountDue: due,
+        amountPaid: paid,
+        amountOwed: Math.round(owed * 100) / 100,
+        status,
+        referenceMonth: ob.referenceMonth || null,
+        createdAt: ob.createdAt || "",
+        sortKey,
+        groupId: ob.groupId,
+        groupName: ob.groupName,
+        paymentRequestObligationId: ob.id,
+        paymentRequestId: ob.requestId,
+      });
+    }
+
+    // 2. Monthly Subscription Debts (Debt Cycles)
+    for (const cycle of params.cycles || []) {
+      // Per-session cycles are represented by attended sessions, not as a monthly debt
+      if (isPerSessionBillingMode(cycle.billingMode, cycle.cycleType)) {
+        continue;
+      }
+      const due = Math.max(
+        0,
+        Number(cycle.effectivePrice ?? cycle.effectiveDue ?? cycle.cyclePrice ?? 0),
+      );
+      const paid = Math.max(
+        0,
+        Number(cycle.paidAmount ?? cycle.totalPaid ?? 0),
+      );
+      const owed = Math.max(0, Number(cycle.remainingDebt ?? 0));
+      if (cycle.status === "cancelled" && owed <= 0 && due <= 0) {
+        continue;
+      }
+
+      const refMonth = cycle.startDate ? cycle.startDate.slice(0, 7) : null;
+      const monthLabel = this.formatArabicMonth(refMonth);
+      const name = cycle.packageName
+        ? `${cycle.packageName}${monthLabel ? ` - ${monthLabel}` : ""}`
+        : monthLabel
+          ? `اشتراك ${monthLabel}`
+          : `اشتراك دورة ${cycle.cycleNumber}${cycle.groupName ? ` (${cycle.groupName})` : ""}`;
+
+      // Monthly subscription debts: sort by reference month descending (e.g. 2026-11 > 2026-10)
+      const sortKey = refMonth
+        ? `${refMonth}-01T00:00:00.000Z`
+        : cycle.startDate
+          ? `${cycle.startDate}T00:00:00.000Z`
+          : cycle.createdAt || new Date(0).toISOString();
+
+      list.push({
+        id: `cycle-${cycle.id}`,
+        type: "subscription",
+        name,
+        amount: due,
+        amountDue: due,
+        amountPaid: paid,
+        amountOwed: Math.round(owed * 100) / 100,
+        status: cycle.status as any,
+        referenceMonth: refMonth,
+        createdAt:
+          cycle.createdAt ||
+          (cycle.startDate ? `${cycle.startDate}T00:00:00.000Z` : ""),
+        sortKey,
+        groupId: cycle.groupId,
+        groupName: cycle.groupName,
+        debtCycleId: cycle.id,
+      });
+    }
+
+    // 3. Session-related Obligations
+    for (const cand of params.sessionDebt?.paymentCandidates || []) {
+      if (cand.packageCovered) continue;
+      const due = Math.max(0, Number(cand.amountDue) || 0);
+      if (due <= 0) continue;
+      const sessionPrice = cand.sessionPrice || due;
+      const sortKey = cand.sessionDate
+        ? `${cand.sessionDate}T12:00:00.000Z`
+        : new Date(0).toISOString();
+
+      list.push({
+        id: `session-${cand.sessionId}`,
+        type: "session",
+        name: `حصة ${cand.groupName || "مجموعة"} (${cand.sessionDate})`,
+        amount: sessionPrice,
+        amountDue: due,
+        amountPaid: 0,
+        amountOwed: Math.round(due * 100) / 100,
+        status: "unpaid",
+        referenceMonth: cand.sessionDate ? cand.sessionDate.slice(0, 7) : null,
+        createdAt: `${cand.sessionDate}T00:00:00.000Z`,
+        sortKey,
+        groupId: cand.groupId,
+        groupName: cand.groupName,
+        sessionId: cand.sessionId,
+        debtCycleId: cand.debtCycleId,
+        sessionPrice: cand.sessionPrice,
+      });
+    }
+
+    const unifiedObligations = this.sortObligationsByRecency(list);
+    const outstandingObligations = unifiedObligations.filter(
+      (item) => item.amountOwed > 0 && item.status !== "cancelled",
+    );
+
+    return { unifiedObligations, outstandingObligations };
   }
 }

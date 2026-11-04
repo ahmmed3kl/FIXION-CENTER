@@ -529,6 +529,66 @@ SELECT s.center_id, s.id, snk.session_id
       ON payment_reversals(payment_id);
   `);
 
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS group_payment_requests (
+      id VARCHAR(64) PRIMARY KEY,
+      operation_id VARCHAR(64) NOT NULL UNIQUE,
+      center_id VARCHAR(64) NOT NULL REFERENCES centers(id) ON DELETE CASCADE,
+      group_id VARCHAR(64) NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+      name VARCHAR(255) NOT NULL,
+      amount NUMERIC(12, 2) NOT NULL CHECK (amount > 0),
+      reference_month VARCHAR(64),
+      status VARCHAR(32) NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived')),
+      created_by VARCHAR(64) NOT NULL,
+      created_by_name VARCHAR(255),
+      updated_by VARCHAR(64),
+      updated_by_name VARCHAR(255),
+      archived_by VARCHAR(64),
+      archived_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ
+    );
+    CREATE INDEX IF NOT EXISTS idx_payment_requests_center_group
+      ON group_payment_requests(center_id, group_id, status);
+
+    CREATE TABLE IF NOT EXISTS student_payment_request_obligations (
+      id VARCHAR(64) PRIMARY KEY,
+      operation_id VARCHAR(64) NOT NULL UNIQUE,
+      center_id VARCHAR(64) NOT NULL REFERENCES centers(id) ON DELETE CASCADE,
+      request_id VARCHAR(64) NOT NULL REFERENCES group_payment_requests(id) ON DELETE CASCADE,
+      group_id VARCHAR(64) NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+      student_id VARCHAR(64) NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+      amount_due NUMERIC(12, 2) NOT NULL CHECK (amount_due >= 0),
+      amount_paid NUMERIC(12, 2) NOT NULL DEFAULT 0 CHECK (amount_paid >= 0),
+      status VARCHAR(32) NOT NULL DEFAULT 'unpaid' CHECK (status IN ('unpaid', 'paid', 'cancelled')),
+      payment_id VARCHAR(64),
+      paid_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ,
+      cancelled_at TIMESTAMPTZ,
+      CONSTRAINT uq_payment_request_obligation UNIQUE (center_id, request_id, student_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_payment_req_obligations_request
+      ON student_payment_request_obligations(center_id, request_id, status);
+    CREATE INDEX IF NOT EXISTS idx_payment_req_obligations_student
+      ON student_payment_request_obligations(center_id, student_id, status);
+    CREATE INDEX IF NOT EXISTS idx_payment_req_obligations_group
+      ON student_payment_request_obligations(center_id, group_id, status);
+
+    ALTER TABLE payments ADD COLUMN IF NOT EXISTS payment_request_obligation_id VARCHAR(64);
+    ALTER TABLE payments ADD COLUMN IF NOT EXISTS payment_request_id VARCHAR(64);
+    CREATE INDEX IF NOT EXISTS idx_payments_request_obligation
+      ON payments(center_id, payment_request_obligation_id);
+
+    ALTER TABLE payments DROP CONSTRAINT IF EXISTS payments_payment_method_check;
+    ALTER TABLE payments ADD CONSTRAINT payments_payment_method_check
+      CHECK (payment_method IN ('cash', 'card', 'vodafone_cash', 'wallet', 'instapay', 'bank_transfer', 'other'));
+
+    ALTER TABLE payments DROP CONSTRAINT IF EXISTS payments_payment_type_check;
+    ALTER TABLE payments ADD CONSTRAINT payments_payment_type_check
+      CHECK (payment_type IN ('monthly', 'partial', 'session', 'payment_request', 'full'));
+  `);
+
   // Client concurrency tokens carry millisecond ISO timestamps. Guarantee
   // that every server update advances beyond the prior millisecond even
   // when two writes land in the same clock tick.

@@ -626,11 +626,12 @@ export class DebtCycleRepository {
       const operationId = `op-dc-${generateUUID()}`;
       const now = new Date().toISOString();
 
+      const initialStatus = cyclePrice === 0 ? "paid" : "open";
       let insertedCycle = { changes: 1 };
       try {
         insertedCycle = db.runSync(
           `INSERT INTO debt_cycles (id, center_id, student_id, enrollment_id, group_id, cycle_number, start_date, end_date, cycle_price, status, cycle_type, billing_mode, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', 'monthly', 'pending', ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'monthly', 'pending', ?)`,
           [
             cycleId,
             centerId,
@@ -641,6 +642,7 @@ export class DebtCycleRepository {
             nextStart,
             cycleEndDate,
             cyclePrice,
+            initialStatus,
             now,
           ],
         );
@@ -680,7 +682,7 @@ export class DebtCycleRepository {
           cyclePrice,
           cycleType: "monthly",
           billingMode: "pending",
-          status: "open",
+          status: initialStatus,
           createdAt: now,
         },
         operationId,

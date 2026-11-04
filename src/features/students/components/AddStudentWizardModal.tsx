@@ -134,6 +134,7 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({
   const [showSubjects, setShowSubjects] = useState(false);
   const [showTeachers, setShowTeachers] = useState(false);
   const [selectedGroupIds, setSelectedGroupIds] = useState<string[]>([]);
+  const [groupMonthlyPrices, setGroupMonthlyPrices] = useState<Record<string, string>>({});
   const [availablePackages, setAvailablePackages] = useState<Package[]>([]);
   const [packageOptions, setPackageOptions] = useState<Record<string, PackageSubject[]>>({});
   const [packageId, setPackageId] = useState("");
@@ -174,6 +175,8 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({
         const initialGroup = allGroups.find((g) => g.id === initialGroupId);
         if (initialGroup) {
           setSelectedGroupIds([initialGroupId]);
+          const normalPrice = Number(initialGroup.monthlyPrice ?? initialGroup.defaultFee ?? 0);
+          setGroupMonthlyPrices({ [initialGroupId]: String(normalPrice) });
           if (initialGroup.grade) {
             setGrade(initialGroup.grade);
             setLevelFilter(initialGroup.grade);
@@ -232,7 +235,7 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({
     setCameraActive(false); setCardCode(""); setStudentCode(""); setScanError(null);
     setFullName(""); setPhone(""); setParentPhone(""); setGrade(""); setNotes(""); setErrors({});
     setPhoneDuplicateWarning(false); setParentPhoneDuplicateWarning(false);
-    setLevelFilter("all"); setSubjectFilter("all"); setTeacherFilter("all"); setTeacherSearch(""); setShowLevels(false); setShowSubjects(false); setShowTeachers(false); setSelectedGroupIds([]);
+    setLevelFilter("all"); setSubjectFilter("all"); setTeacherFilter("all"); setTeacherSearch(""); setShowLevels(false); setShowSubjects(false); setShowTeachers(false); setSelectedGroupIds([]); setGroupMonthlyPrices({});
     setPackageId(""); setPackageOptionIds([]); setPackageTeacherIds({}); setPackageGroupIds({}); setPackageTeacherSearch(""); setSubmitting(false);
   };
 
@@ -320,7 +323,18 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({
     if (packageId) {
       setPackageId(""); setPackageOptionIds([]); setPackageTeacherIds({}); setPackageGroupIds({});
     }
-    setSelectedGroupIds((old) => old.includes(groupId) ? old.filter((id) => id !== groupId) : [...old, groupId]);
+    setSelectedGroupIds((old) => {
+      if (old.includes(groupId)) {
+        return old.filter((id) => id !== groupId);
+      }
+      const group = groups.find((g) => g.id === groupId);
+      const normalPrice = Number(group?.monthlyPrice ?? group?.defaultFee ?? 0);
+      setGroupMonthlyPrices((prev) => ({
+        ...prev,
+        [groupId]: prev[groupId] !== undefined ? prev[groupId] : String(normalPrice),
+      }));
+      return [...old, groupId];
+    });
   };
   const groupTeacherName = (group: Group) => teachers.find((teacher) => teacher.id === group.teacherId)?.name || group.teacherName || "مدرس غير محدد";
   const scheduleText = (groupId: string) => {
@@ -367,6 +381,16 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({
     if (!isEgyptianPhone(parentPhone)) next.parentPhone = ValidationMessages.phone;
     if (!grade) next.grade = "اختر الصف الدراسي.";
     if (packageId && (!packageOptionIds.length || packageOptionIds.some((id) => !packageTeacherIds[id] || !packageGroupIds[id]))) next.package = "اختر مدرساً ومجموعة مناسبة لكل مادة في الباقة.";
+    for (const gId of selectedGroupIds) {
+      const rawPrice = groupMonthlyPrices[gId];
+      if (rawPrice !== undefined && rawPrice.trim() !== "") {
+        const val = parseFloat(rawPrice);
+        if (isNaN(val) || val < 0) {
+          Alert.alert("خطأ في المبلغ الشهري", "المبلغ الشهري لكل مجموعة يجب أن يكون رقماً غير سالب.");
+          return false;
+        }
+      }
+    }
     setErrors(next);
     return !Object.keys(next).length;
   };
@@ -452,7 +476,17 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({
         student = DatabaseService.runInTransaction(() => {
           const created = createStudentRecord();
           for (const groupId of selectedGroupIds) {
-            EnrollmentRepository.enrollStudent({ studentId: created.id, groupId, startDate: firstScheduledDate(groupId) });
+            const group = groups.find((g) => g.id === groupId);
+            const normalPrice = Number(group?.monthlyPrice ?? group?.defaultFee ?? 0);
+            const customPriceRaw = groupMonthlyPrices[groupId];
+            const parsedPrice = customPriceRaw !== undefined && customPriceRaw.trim() !== "" ? parseFloat(customPriceRaw) : normalPrice;
+            const specialMonthlyPrice = !isNaN(parsedPrice) && parsedPrice >= 0 ? parsedPrice : normalPrice;
+            EnrollmentRepository.enrollStudent({
+              studentId: created.id,
+              groupId,
+              startDate: firstScheduledDate(groupId),
+              specialMonthlyPrice,
+            });
           }
           return created;
         });
@@ -517,7 +551,63 @@ export const AddStudentWizardModal: React.FC<AddStudentWizardModalProps> = ({
               {!visibleGroups.length ? <Text style={styles.emptyText}>لا توجد مجموعات متاحة بهذا الفلتر.</Text> : null}
             </Section>
 
-            {selectedGroups.length ? <Section styles={styles} icon="people" title="المجموعات المختارة" badge={String(selectedGroups.length)} tone="slate">{selectedGroups.map((group) => <View key={group.id} style={styles.selectedGroupRow}><TouchableOpacity accessibilityLabel={`إزالة ${group.name}`} style={styles.removeButton} onPress={() => toggleGroup(group.id)}><Ionicons name="close" size={17} color="#17213A" /></TouchableOpacity><View style={styles.selectedGroupCopy}><Text numberOfLines={1} style={styles.selectedGroupName}>{group.name}</Text><Text numberOfLines={1} style={styles.selectedGroupMeta}>{groupTeacherName(group)}  •  {scheduleText(group.id)}</Text></View></View>)}</Section> : null}
+            {selectedGroups.length ? (
+              <Section styles={styles} icon="people" title="المجموعات المختارة" badge={String(selectedGroups.length)} tone="slate">
+                {selectedGroups.map((group) => {
+                  const normalPrice = Number(group.monthlyPrice ?? group.defaultFee ?? 0);
+                  const rawPrice = groupMonthlyPrices[group.id] !== undefined ? groupMonthlyPrices[group.id] : String(normalPrice);
+                  const priceNum = parseFloat(rawPrice);
+                  const isValid = !isNaN(priceNum) && priceNum >= 0;
+                  let statusLabel = "منتظم";
+                  let statusBadgeStyle = styles.priceStatusRegular;
+                  let statusTextStyle = styles.priceStatusRegularText;
+                  if (isValid) {
+                    if (priceNum === 0) {
+                      statusLabel = "مجاني";
+                      statusBadgeStyle = styles.priceStatusFree;
+                      statusTextStyle = styles.priceStatusFreeText;
+                    } else if (priceNum < normalPrice) {
+                      statusLabel = "مخفض";
+                      statusBadgeStyle = styles.priceStatusDiscount;
+                      statusTextStyle = styles.priceStatusDiscountText;
+                    }
+                  }
+
+                  return (
+                    <View key={group.id} style={styles.selectedGroupCard}>
+                      <View style={styles.selectedGroupHeader}>
+                        <TouchableOpacity accessibilityLabel={`إزالة ${group.name}`} style={styles.removeButton} onPress={() => toggleGroup(group.id)}>
+                          <Ionicons name="close" size={17} color="#17213A" />
+                        </TouchableOpacity>
+                        <View style={styles.selectedGroupCopy}>
+                          <Text numberOfLines={1} style={styles.selectedGroupName}>{group.name}</Text>
+                          <Text numberOfLines={1} style={styles.selectedGroupMeta}>{groupTeacherName(group)}  •  {scheduleText(group.id)}</Text>
+                        </View>
+                      </View>
+                      <View style={styles.groupPriceRow}>
+                        <View style={styles.groupPriceInputWrap}>
+                          <Text style={styles.priceFieldLabel}>المبلغ الشهري</Text>
+                          <AppInput
+                            value={rawPrice}
+                            onChangeText={(val) => setGroupMonthlyPrices((prev) => ({ ...prev, [group.id]: val }))}
+                            keyboardType="numeric"
+                            placeholder={String(normalPrice)}
+                            containerStyle={styles.groupPriceInputContainer}
+                            style={styles.compactPriceInput}
+                          />
+                        </View>
+                        <View style={styles.groupPriceMetaWrap}>
+                          <Text style={styles.normalPriceText}>السعر العادي: {formatCurrency(normalPrice)}</Text>
+                          <View style={[styles.statusBadge, statusBadgeStyle]}>
+                            <Text style={[styles.statusBadgeText, statusTextStyle]}>{statusLabel}</Text>
+                          </View>
+                        </View>
+                      </View>
+                    </View>
+                  );
+                })}
+              </Section>
+            ) : null}
 
             <Section styles={styles} icon="gift-outline" title="إضافة باقة (اختياري)" hint="يمكنك إضافتها الآن أو لاحقاً" tone="purple">
               <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.packageList}><TouchableOpacity style={[styles.packageChoice, !packageId && styles.packageChoiceActive]} onPress={() => selectPackage("")}><Text style={[styles.packageChoiceText, !packageId && styles.packageChoiceTextActive]}>بدون باقة</Text></TouchableOpacity>{availablePackages.map((item) => <TouchableOpacity key={item.id} style={[styles.packageChoice, packageId === item.id && styles.packageChoiceActive]} onPress={() => selectPackage(item.id)}><Text numberOfLines={1} style={[styles.packageChoiceText, packageId === item.id && styles.packageChoiceTextActive]}>{item.name}</Text><Text style={[styles.packagePrice, packageId === item.id && styles.packageChoiceTextActive]}>{formatCurrency(item.monthlyPrice ?? item.price)}</Text></TouchableOpacity>)}</ScrollView>
@@ -551,6 +641,23 @@ const createStyles = (colors: typeof Colors, width = 390, height = 844, isTablet
   filtersRow: { flexDirection: "row-reverse", gap: 8 }, filterControl: { flex: 1, height: 49, borderRadius: 11, borderWidth: 1, borderColor: "#D8E1EF", backgroundColor: "#FFF", flexDirection: "row", paddingHorizontal: 10, alignItems: "center", gap: 7 }, filterCopy: { flex: 1, alignItems: "flex-end" }, filterLabel: { color: "#66758D", fontSize: 10 }, filterValue: { color: "#1E293B", fontSize: 13, fontWeight: "700", marginTop: 1 }, optionPanel: { flexDirection: "row-reverse", flexWrap: "wrap", gap: 6, marginTop: 8 }, teacherPanel: { marginTop: 7 }, teacherSearch: { marginBottom: 0 }, optionChip: { paddingVertical: 7, paddingHorizontal: 10, borderRadius: 10, backgroundColor: "#FFF", borderWidth: 1, borderColor: "#D8E1EF" }, optionChipActive: { backgroundColor: "#E7F0FF", borderColor: "#2563EB" }, optionChipText: { fontSize: 11, color: "#526078", fontWeight: "700" }, optionChipTextActive: { color: "#2563EB" }, groupSearch: { marginTop: 9, marginBottom: 0 }, listCaption: { color: "#334155", fontWeight: "800", fontSize: 13, textAlign: "right", marginTop: 11, marginBottom: 6 },
   groupCard: { backgroundColor: colors.cardBackground, borderWidth: 1, borderColor: colors.border, borderRadius: 13, padding: 10, marginBottom: 7, flexDirection: "row-reverse", alignItems: "flex-start", gap: 9 }, groupCardSelected: { borderColor: colors.primary, backgroundColor: colors.primaryMuted }, checkBox: { width: 24, height: 24, borderRadius: 7, borderWidth: 1.5, borderColor: colors.slate400, alignItems: "center", justifyContent: "center", marginTop: 1 }, checkBoxSelected: { backgroundColor: colors.primary, borderColor: colors.primary }, groupInfo: { flex: 1, alignItems: "flex-end" }, groupName: { color: colors.slate900, fontWeight: "800", fontSize: 14, textAlign: "right" }, groupMeta: { color: colors.slate500, fontSize: 11, marginTop: 2, textAlign: "right" }, timeLine: { flexDirection: "row-reverse", alignItems: "center", gap: 4, marginTop: 4 }, timeText: { color: colors.slate500, fontSize: 10 }, emptyText: { color: colors.slate500, textAlign: "center", fontSize: 12, paddingVertical: 9 },
   selectedGroupRow: { backgroundColor: "#FFF", borderRadius: 12, padding: 9, flexDirection: "row-reverse", alignItems: "center", marginBottom: 7, gap: 8 }, removeButton: { width: 32, height: 32, borderRadius: 9, alignItems: "center", justifyContent: "center", backgroundColor: "#F1F5F9" }, selectedGroupCopy: { flex: 1, alignItems: "flex-end" }, selectedGroupName: { color: "#16213B", fontWeight: "800", fontSize: 13 }, selectedGroupMeta: { color: "#65748B", fontSize: 10, marginTop: 2 },
+  selectedGroupCard: { backgroundColor: "#FFF", borderRadius: 13, padding: 10, marginBottom: 8, borderWidth: 1, borderColor: "#E2E8F0" },
+  selectedGroupHeader: { flexDirection: "row-reverse", alignItems: "center", gap: 8 },
+  groupPriceRow: { flexDirection: "row-reverse", alignItems: "center", justifyContent: "space-between", gap: 8, marginTop: 8, borderTopWidth: 1, borderTopColor: "#F1F5F9", paddingTop: 8 },
+  groupPriceInputWrap: { flex: 1, flexDirection: "row-reverse", alignItems: "center", gap: 6 },
+  priceFieldLabel: { fontSize: 11, fontWeight: "700", color: "#334155" },
+  groupPriceInputContainer: { flex: 1, marginBottom: 0 },
+  compactPriceInput: { height: 36, minHeight: 36, borderRadius: 8, paddingHorizontal: 8, fontSize: 13 },
+  groupPriceMetaWrap: { flexDirection: "row-reverse", alignItems: "center", gap: 6 },
+  normalPriceText: { fontSize: 10, color: "#64748B" },
+  statusBadge: { paddingHorizontal: 6, paddingVertical: 2, borderRadius: 6 },
+  statusBadgeText: { fontSize: 10, fontWeight: "800" },
+  priceStatusRegular: { backgroundColor: "#EFF6FF" },
+  priceStatusRegularText: { color: "#2563EB" },
+  priceStatusDiscount: { backgroundColor: "#FFFBEB" },
+  priceStatusDiscountText: { color: "#D97706" },
+  priceStatusFree: { backgroundColor: "#ECFDF5" },
+  priceStatusFreeText: { color: "#059669" },
   packageList: { flexDirection: "row-reverse", gap: 7 }, packageChoice: { maxWidth: 170, minHeight: 53, borderRadius: 11, borderWidth: 1, borderColor: "#D8E1EF", backgroundColor: "#FFF", paddingHorizontal: 11, paddingVertical: 7, justifyContent: "center" }, packageChoiceActive: { borderColor: "#7C3AED", backgroundColor: "#F8F5FF" }, packageChoiceText: { color: "#334155", fontWeight: "800", fontSize: 12, textAlign: "right" }, packageChoiceTextActive: { color: "#6D28D9" }, packagePrice: { color: "#708097", fontSize: 10, marginTop: 2, textAlign: "right" }, packageBody: { marginTop: 11 }, packageRule: { color: "#65748B", fontSize: 11, textAlign: "right", marginBottom: 1 }, subjectCard: { backgroundColor: "#FFF", borderRadius: 12, borderWidth: 1, borderColor: "#E0E7F1", padding: 9, marginTop: 7 }, subjectCardSelected: { borderColor: "#BFD4FF" }, subjectTop: { flexDirection: "row-reverse", gap: 8, alignItems: "center" }, subjectTitleCopy: { alignItems: "flex-end", flex: 1 }, subjectName: { color: "#17213A", fontSize: 13, fontWeight: "800" }, subjectSub: { color: "#718098", fontSize: 10, marginTop: 1 }, teacherPickerLabel: { color: "#64748B", fontSize: 10, textAlign: "right", marginTop: 8, marginBottom: 4 }, teacherChoices: { flexDirection: "row-reverse", gap: 6 }, teacherChoice: { flexDirection: "row-reverse", alignItems: "center", gap: 4, borderRadius: 9, paddingHorizontal: 8, paddingVertical: 6, borderWidth: 1, borderColor: "#D8E1EF", backgroundColor: "#FDFEFF" }, teacherChoiceActive: { borderColor: "#93B7FF", backgroundColor: "#EEF5FF" }, teacherChoiceText: { color: "#506079", fontSize: 11, fontWeight: "700" }, teacherChoiceTextActive: { color: "#2563EB" }, packageGroupList: { flexDirection: "row-reverse", gap: 8, paddingVertical: 3 }, packageGroupChoice: { width: Math.max(160, Math.min(isTablet ? 250 : 220, (width - 32) * 0.72)), minHeight: 92, borderRadius: 13, padding: 10, backgroundColor: "#FFF", borderWidth: 1.5, borderColor: "#D8E1EF" }, packageGroupChoiceActive: { borderColor: "#2563EB", backgroundColor: "#EEF5FF" }, packageGroupChoiceHeader: { flexDirection: "row-reverse", alignItems: "center", justifyContent: "space-between", gap: 5 }, packageGroupName: { flex: 1, color: "#17213A", fontSize: 13, fontWeight: "900", textAlign: "right" }, packageGroupTextActive: { color: "#2563EB" }, packageGroupMeta: { color: "#64748B", fontSize: 10, textAlign: "right", marginTop: 7 }, packageGroupSchedule: { color: "#2563EB", fontSize: 11, fontWeight: "800", textAlign: "right", marginTop: 5 }, subjectSummary: { color: "#526078", fontSize: 10, textAlign: "right", marginTop: 6 }, subscriptionSummary: { backgroundColor: "#EEF4FF", borderRadius: 12, padding: 10, marginTop: 10 }, summaryHeading: { flexDirection: "row-reverse", alignItems: "center", gap: 5, marginBottom: 5 }, summaryTitle: { color: "#173C7A", fontSize: 13, fontWeight: "800" }, summaryLine: { flexDirection: "row-reverse", justifyContent: "space-between", borderTopWidth: 1, borderTopColor: "#D9E6FB", paddingTop: 5, marginTop: 4 }, summaryLabel: { color: "#65748B", fontSize: 11 }, summaryValue: { color: "#233654", fontSize: 11, fontWeight: "700" }, summaryPrice: { color: "#173C7A", fontSize: 12, fontWeight: "800" },
   submitButton: { marginTop: 3, height: 52, borderRadius: 14, backgroundColor: "#2563EB" },
 });

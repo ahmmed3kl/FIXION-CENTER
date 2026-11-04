@@ -1,5 +1,6 @@
 import { AuditService } from "../../core/audit";
 import { DatabaseService } from "../../core/database";
+import { LocalDataEvents } from "../../core/database/localDataEvents";
 import { DeviceService } from "../../core/device";
 import {
     ConflictError,
@@ -166,7 +167,16 @@ export class EnrollmentRepository {
     const enrollmentId = `enr-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
     const now = new Date().toISOString();
     const endDate = dto.endDate || null;
-    const specialPrice = dto.specialMonthlyPrice ?? null;
+    let specialPrice: number | null = null;
+    if (dto.specialMonthlyPrice !== undefined && dto.specialMonthlyPrice !== null) {
+      const parsed = Number(dto.specialMonthlyPrice);
+      if (typeof dto.specialMonthlyPrice !== "number" || !Number.isFinite(parsed) || parsed < 0) {
+        throw new ValidationError("المبلغ الشهري يجب أن يكون رقمًا غير سالب.");
+      }
+      specialPrice = parsed;
+    } else {
+      specialPrice = Number(group.monthlyPrice ?? group.defaultFee ?? 0);
+    }
 
     const deviceId = DeviceService.getDeviceIdSync();
     const operationId = `op-enr-create-${Date.now()}-${enrollmentId}`;
@@ -188,6 +198,13 @@ export class EnrollmentRepository {
         operationType: "CREATE", entityType: "enrollment", entityId: enrollmentId,
         payload: { studentId: dto.studentId, groupId: dto.groupId, startDate: dto.startDate, endDate, specialMonthlyPrice: specialPrice, status: "active", createdAt: now },
       });
+    });
+
+    LocalDataEvents.emit({
+      centerId,
+      entityType: "enrollment",
+      entityId: enrollmentId,
+      entityTypes: ["enrollment", "financial"],
     });
 
     // Create the first financial cycle immediately when the caller also has
@@ -295,6 +312,112 @@ export class EnrollmentRepository {
           payload: { ...cycle, cyclePrice: retainedCyclePrice, status: "cancelled", expectedRevision: Number(cycle.serverRevision || 0), updatedAt: now },
         });
       }
+    });
+
+    LocalDataEvents.emit({
+      centerId,
+      entityType: "enrollment",
+      entityId: enrollmentId,
+      entityTypes: ["enrollment", "financial"],
+    });
+  }
+
+  /**
+   * Updates the monthly amount for a student's enrollment in a specific group.
+   * Applied only to future debt cycles. Existing cycles and payment history are strictly preserved.
+   */
+  static updateMonthlyPrice(
+    enrollmentId: string,
+    specialMonthlyPrice: number,
+  ): void {
+    const { centerId, user } = this.getActiveContext();
+    if (
+      !PermissionService.hasPermission(user.permissions, "enrollments.update") &&
+      !PermissionService.hasPermission(user.permissions, "enrollments.create") &&
+      !PermissionService.hasPermission(user.permissions, "payments.adjust")
+    ) {
+      throw new ForbiddenError("ليس لديك صلاحية تعديل السعر الشهري للاشتراك.");
+    }
+
+    if (
+      typeof specialMonthlyPrice !== "number" ||
+      !Number.isFinite(specialMonthlyPrice) ||
+      specialMonthlyPrice < 0
+    ) {
+      throw new ValidationError("المبلغ الشهري يجب أن يكون رقمًا غير سالب.");
+    }
+
+    const db = DatabaseService.getDb();
+    const enrollment = db.getFirstSync<any>(
+      `SELECT id, center_id as centerId, student_id as studentId, group_id as groupId,
+              start_date as startDate, end_date as endDate, status,
+              special_monthly_price as specialMonthlyPrice
+       FROM student_group_enrollments
+       WHERE center_id = ? AND id = ?`,
+      [centerId, enrollmentId],
+    );
+
+    if (!enrollment) {
+      throw new NotFoundError("سجل التسجيل غير موجود.");
+    }
+
+    if (enrollment.status !== "active") {
+      throw new ValidationError("لا يمكن تعديل السعر لاشتراك غير نشط.");
+    }
+
+    const now = new Date().toISOString();
+    const operationId = `op-enr-price-${Date.now()}-${enrollmentId}`;
+    const deviceId = DeviceService.getDeviceIdSync();
+
+    DatabaseService.runInTransaction(() => {
+      db.runSync(
+        `UPDATE student_group_enrollments
+         SET special_monthly_price = ?, updated_at = ?
+         WHERE center_id = ? AND id = ?`,
+        [specialMonthlyPrice, now, centerId, enrollmentId],
+      );
+
+      AuditService.recordEvent({
+        operationId,
+        centerId,
+        userId: user.id,
+        deviceId,
+        entityType: "enrollment",
+        entityId: enrollmentId,
+        action: "enrollment.update_monthly_price",
+        payload: {
+          studentId: enrollment.studentId,
+          groupId: enrollment.groupId,
+          oldPrice: enrollment.specialMonthlyPrice,
+          newPrice: specialMonthlyPrice,
+        },
+      });
+
+      SyncRepository.enqueueOperation({
+        operationId,
+        centerId,
+        userId: user.id,
+        deviceId,
+        operationType: "UPDATE",
+        entityType: "enrollment",
+        entityId: enrollmentId,
+        payload: {
+          studentId: enrollment.studentId,
+          groupId: enrollment.groupId,
+          startDate: enrollment.startDate,
+          endDate: enrollment.endDate || null,
+          status: enrollment.status,
+          specialMonthlyPrice,
+          updatedAt: now,
+        },
+      });
+    });
+
+    LocalDataEvents.emit({
+      centerId,
+      entityType: "enrollment",
+      entityId: enrollmentId,
+      entityTypes: ["enrollment", "financial"],
     });
   }
 

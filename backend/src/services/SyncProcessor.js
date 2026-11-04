@@ -113,7 +113,13 @@ function normalizePaymentType(value) {
     .trim()
     .toLowerCase();
   if (raw === "full") return "monthly";
-  if (raw === "monthly" || raw === "partial" || raw === "session") return raw;
+  if (
+    raw === "monthly" ||
+    raw === "partial" ||
+    raw === "session" ||
+    raw === "payment_request"
+  )
+    return raw;
   return "session";
 }
 
@@ -168,6 +174,8 @@ const SYNC_ENTITY_PRIORITY = {
   package_subscription: 55,
   package_teacher_override: 60,
   debt_cycle: 70,
+  payment_request: 72,
+  payment_request_obligation: 74,
   session: 80,
   attendance: 90,
   makeup: 90,
@@ -320,6 +328,14 @@ function orderSyncOperations(operations) {
         ],
         ["student", value("studentId", "student_id")],
       );
+    if (entity === "payment_request")
+      refs.push(["group", value("groupId", "group_id")]);
+    if (entity === "payment_request_obligation")
+      refs.push(
+        ["payment_request", value("requestId", "request_id")],
+        ["group", value("groupId", "group_id")],
+        ["student", value("studentId", "student_id")],
+      );
     if (
       entity === "payment" ||
       entity === "payment_reversal" ||
@@ -329,6 +345,14 @@ function orderSyncOperations(operations) {
         ["debt_cycle", value("debtCycleId", "debt_cycle_id")],
         ["session", value("sessionId", "session_id")],
         ["student", value("studentId", "student_id")],
+        [
+          "payment_request_obligation",
+          value("paymentRequestObligationId", "payment_request_obligation_id"),
+        ],
+        [
+          "payment_request",
+          value("paymentRequestId", "payment_request_id"),
+        ],
       );
     if (entity === "payment_reversal")
       refs.push(["payment", value("paymentId", "payment_id")]);
@@ -2897,7 +2921,11 @@ class SyncProcessor {
               centerId,
               studentId,
               enr.group_id || enr.groupId,
-              enr.price_override || enr.priceOverride || null,
+              enr.specialMonthlyPrice ??
+                enr.special_monthly_price ??
+                enr.price_override ??
+                enr.priceOverride ??
+                null,
             ],
           );
         }
@@ -3611,11 +3639,17 @@ class SyncProcessor {
             );
           }
         }
+        const requestedObligationId =
+          pay.payment_request_obligation_id ||
+          pay.paymentRequestObligationId ||
+          null;
+        const requestedPaymentRequestId =
+          pay.payment_request_id || pay.paymentRequestId || null;
         // Append-only ledger insert
         await client.query(
           `INSERT INTO payments 
-           (id, operation_id, center_id, student_id, debt_cycle_id, session_id, subscription_id, amount, payment_method, payment_type, payment_date, notes, is_reversed, created_at, user_id)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, false, NOW(), $13)
+           (id, operation_id, center_id, student_id, debt_cycle_id, session_id, subscription_id, payment_request_obligation_id, payment_request_id, amount, payment_method, payment_type, payment_date, notes, is_reversed, created_at, user_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, false, NOW(), $15)
            ON CONFLICT (operation_id) DO NOTHING;`,
           [
             pay.id,
@@ -3625,6 +3659,8 @@ class SyncProcessor {
             debtCycleId,
             sessionId,
             pay.subscription_id || pay.subscriptionId || null,
+            requestedObligationId,
+            requestedPaymentRequestId,
             parseFloat(pay.amount),
             pay.payment_method || pay.paymentMethod || "cash",
             paymentType,
@@ -3633,6 +3669,18 @@ class SyncProcessor {
             userId,
           ],
         );
+        if (requestedObligationId) {
+          await client.query(
+            `UPDATE student_payment_request_obligations
+                SET amount_paid = amount_due,
+                    status = 'paid',
+                    payment_id = $3,
+                    paid_at = COALESCE(paid_at, NOW()),
+                    updated_at = NOW()
+              WHERE center_id = $1 AND id = $2 AND status != 'cancelled'`,
+            [centerId, requestedObligationId, pay.id],
+          );
+        }
         break;
       }
 
@@ -3640,7 +3688,7 @@ class SyncProcessor {
         const rev = payload;
         const paymentId = rev.payment_id || rev.paymentId;
         const paymentResult = await client.query(
-          `SELECT id, student_id, amount, is_reversed
+          `SELECT id, student_id, amount, is_reversed, payment_request_obligation_id
              FROM payments
             WHERE id = $1 AND center_id = $2
             FOR UPDATE`,
@@ -3679,6 +3727,40 @@ class SyncProcessor {
         if (reversed.rowCount !== 1) {
           throw new Error(
             "PAYMENT_ALREADY_REVERSED: this payment was reversed concurrently.",
+          );
+        }
+        if (payment.payment_request_obligation_id) {
+          await client.query(
+            `UPDATE student_payment_request_obligations o
+                SET amount_paid = COALESCE((
+                      SELECT SUM(p.amount)
+                        FROM payments p
+                       WHERE p.center_id = o.center_id
+                         AND p.payment_request_obligation_id = o.id
+                         AND p.is_reversed = false
+                    ), 0),
+                    status = CASE
+                      WHEN o.status = 'cancelled' THEN 'cancelled'
+                      WHEN COALESCE((
+                        SELECT SUM(p.amount)
+                          FROM payments p
+                         WHERE p.center_id = o.center_id
+                           AND p.payment_request_obligation_id = o.id
+                           AND p.is_reversed = false
+                      ), 0) >= o.amount_due THEN 'paid'
+                      ELSE 'unpaid'
+                    END,
+                    payment_id = CASE
+                      WHEN o.payment_id = $3 THEN NULL
+                      ELSE o.payment_id
+                    END,
+                    paid_at = CASE
+                      WHEN o.payment_id = $3 THEN NULL
+                      ELSE o.paid_at
+                    END,
+                    updated_at = NOW()
+              WHERE o.center_id = $1 AND o.id = $2`,
+            [centerId, payment.payment_request_obligation_id, paymentId],
           );
         }
         break;
@@ -5759,6 +5841,96 @@ class SyncProcessor {
             ),
             reopen ? "reopened" : "closed",
             close.reason || close.notes || null,
+          ],
+        );
+        break;
+      }
+
+      case "payment_request": {
+        const req = payload.paymentRequest || payload;
+        const reqId = req.id || context.entityId;
+        const reqOpId = req.operation_id || req.operationId || operationId || `op-preq-${reqId}`;
+        const groupId = req.group_id || req.groupId;
+        const status =
+          req.status === "archived" ||
+          String(context.operationType || "").toUpperCase().includes("ARCHIVE")
+            ? "archived"
+            : "active";
+        await client.query(
+          `INSERT INTO group_payment_requests
+           (id, operation_id, center_id, group_id, name, amount, reference_month, status, created_by, created_by_name, updated_by, updated_by_name, archived_by, archived_at, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::timestamptz, COALESCE($15::timestamptz, NOW()), $16::timestamptz)
+           ON CONFLICT (id) DO UPDATE SET
+             name = EXCLUDED.name,
+             amount = EXCLUDED.amount,
+             reference_month = EXCLUDED.reference_month,
+             status = EXCLUDED.status,
+             updated_by = COALESCE(EXCLUDED.updated_by, group_payment_requests.updated_by),
+             updated_by_name = COALESCE(EXCLUDED.updated_by_name, group_payment_requests.updated_by_name),
+             updated_at = COALESCE(EXCLUDED.updated_at, NOW()),
+             archived_at = COALESCE(EXCLUDED.archived_at, group_payment_requests.archived_at),
+             archived_by = COALESCE(EXCLUDED.archived_by, group_payment_requests.archived_by)
+           WHERE group_payment_requests.center_id = $3`,
+          [
+            reqId,
+            reqOpId,
+            centerId,
+            groupId,
+            req.name || "متطلب دفع",
+            Number(req.amount || 0),
+            req.reference_month ?? req.referenceMonth ?? null,
+            status,
+            req.created_by || req.createdBy || userId || "system",
+            req.created_by_name || req.createdByName || null,
+            req.updated_by || req.updatedBy || null,
+            req.updated_by_name || req.updatedByName || null,
+            req.archived_by || req.archivedBy || (status === "archived" ? userId : null),
+            req.archived_at || req.archivedAt || (status === "archived" ? new Date().toISOString() : null),
+            req.created_at || req.createdAt || null,
+            req.updated_at || req.updatedAt || null,
+          ],
+        );
+        break;
+      }
+
+      case "payment_request_obligation": {
+        const ob = payload.obligation || payload;
+        const obId = ob.id || context.entityId;
+        const obOpId = ob.operation_id || ob.operationId || operationId || `op-prob-${obId}`;
+        const reqId = ob.request_id || ob.requestId || ob.payment_request_id || ob.paymentRequestId;
+        const groupId = ob.group_id || ob.groupId;
+        const studentId = ob.student_id || ob.studentId;
+        await client.query(
+          `INSERT INTO student_payment_request_obligations
+           (id, operation_id, center_id, request_id, group_id, student_id, amount_due, amount_paid, status, payment_id, paid_at, created_at, updated_at, cancelled_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::timestamptz, COALESCE($12::timestamptz, NOW()), $13::timestamptz, $14::timestamptz)
+           ON CONFLICT (center_id, request_id, student_id) DO UPDATE SET
+             amount_due = EXCLUDED.amount_due,
+             amount_paid = GREATEST(student_payment_request_obligations.amount_paid, EXCLUDED.amount_paid),
+             status = CASE
+               WHEN EXCLUDED.status = 'cancelled' THEN 'cancelled'
+               WHEN student_payment_request_obligations.status = 'paid' OR EXCLUDED.status = 'paid' THEN 'paid'
+               ELSE EXCLUDED.status
+             END,
+             payment_id = COALESCE(EXCLUDED.payment_id, student_payment_request_obligations.payment_id),
+             paid_at = COALESCE(EXCLUDED.paid_at, student_payment_request_obligations.paid_at),
+             updated_at = COALESCE(EXCLUDED.updated_at, NOW()),
+             cancelled_at = COALESCE(EXCLUDED.cancelled_at, student_payment_request_obligations.cancelled_at)`,
+          [
+            obId,
+            obOpId,
+            centerId,
+            reqId,
+            groupId,
+            studentId,
+            Number(ob.amount_due ?? ob.amountDue ?? 0),
+            Number(ob.amount_paid ?? ob.amountPaid ?? 0),
+            ob.status || "unpaid",
+            ob.payment_id || ob.paymentId || null,
+            ob.paid_at || ob.paidAt || null,
+            ob.created_at || ob.createdAt || null,
+            ob.updated_at || ob.updatedAt || null,
+            ob.cancelled_at || ob.cancelledAt || null,
           ],
         );
         break;

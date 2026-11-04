@@ -617,6 +617,34 @@ export interface DetailedStudentFinancialStatus extends StudentFinancialStatus {
   paymentRequestsTotalPaid?: number;
   paymentRequestsRemainingDebt?: number;
   paymentRequestPayments?: PaymentEvent[];
+  /** Unified list of all student obligations sorted by recency */
+  unifiedObligations?: UnifiedFinancialObligation[];
+  /** Outstanding obligations only (amountOwed > 0 and status !== 'cancelled') sorted by recency */
+  outstandingObligations?: UnifiedFinancialObligation[];
+}
+
+export type FinancialObligationType = "subscription" | "payment_request" | "session";
+
+export interface UnifiedFinancialObligation {
+  id: string;
+  type: FinancialObligationType;
+  name: string;
+  amount: number;
+  amountDue: number;
+  amountPaid: number;
+  amountOwed: number;
+  status: "paid" | "partial" | "unpaid" | "cancelled" | "open";
+  referenceMonth?: string | null;
+  createdAt: string;
+  dueDate?: string | null;
+  sortKey: string;
+  groupId?: string;
+  groupName?: string;
+  debtCycleId?: string;
+  paymentRequestObligationId?: string;
+  paymentRequestId?: string;
+  sessionId?: string;
+  sessionPrice?: number | null;
 }
 
 export interface SessionPaymentCandidate {
