@@ -755,6 +755,82 @@ export class SafeConflictRetryService {
       };
     }
 
+    if (normalizedEntityType === "payment_request_obligation") {
+      const requestId =
+        payloadObj?.requestId ||
+        payloadObj?.request_id ||
+        payloadObj?.paymentRequestId ||
+        payloadObj?.payment_request_id;
+      const studentId = payloadObj?.studentId || payloadObj?.student_id;
+
+      if (!requestId || !studentId) {
+        return {
+          eligible: false,
+          reasonCode: "PARENT_NOT_ARRIVED",
+          userMessage: "بيانات متطلب الدفع أو الطالب غير مكتملة في العملية.",
+          entityType: normalizedEntityType,
+          operationId,
+          safeRetryCount: safeRetries,
+        };
+      }
+
+      const reqRow = db.getFirstSync<{ id: string }>(
+        `SELECT id FROM group_payment_requests WHERE id = ? AND center_id = ?`,
+        [requestId, centerId],
+      );
+      const studentRow = db.getFirstSync<{ id: string }>(
+        `SELECT id FROM students WHERE id = ? AND center_id = ?`,
+        [studentId, centerId],
+      );
+
+      if (!reqRow || !studentRow) {
+        return {
+          eligible: false,
+          reasonCode: "PARENT_NOT_ARRIVED",
+          userMessage: "السجل الأب (متطلب الدفع أو الطالب) لم يصل بعد من الخادم.",
+          entityType: normalizedEntityType,
+          operationId,
+          safeRetryCount: safeRetries,
+        };
+      }
+
+      if (
+        !this.isParentConfirmedOnServer(db, centerId, [
+          "payment_request",
+          "group_payment_request",
+        ], requestId)
+      ) {
+        return {
+          eligible: false,
+          reasonCode: "PARENT_UNCONFIRMED_ON_SERVER",
+          userMessage: "متطلب الدفع المرتبط بهذا الالتزام لم يتم تأكيد مزامنته على الخادم بعد.",
+          entityType: normalizedEntityType,
+          operationId,
+          safeRetryCount: safeRetries,
+        };
+      }
+
+      if (!this.isParentConfirmedOnServer(db, centerId, ["student"], studentId)) {
+        return {
+          eligible: false,
+          reasonCode: "PARENT_UNCONFIRMED_ON_SERVER",
+          userMessage: "سجل الطالب المرتبط بهذا الالتزام لم يتم تأكيد مزامنته على الخادم بعد.",
+          entityType: normalizedEntityType,
+          operationId,
+          safeRetryCount: safeRetries,
+        };
+      }
+
+      return {
+        eligible: true,
+        reasonCode: "ELIGIBLE_FOR_RETRY",
+        userMessage: "العملية مؤهلة لإعادة المحاولة بأمان بعد التأكد من تأكيد مزامنة متطلب الدفع والطالب.",
+        entityType: normalizedEntityType,
+        operationId,
+        safeRetryCount: safeRetries,
+      };
+    }
+
     return {
       eligible: false,
       reasonCode: "UNVERIFIED_CONFLICT_TYPE",

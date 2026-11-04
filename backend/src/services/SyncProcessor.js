@@ -5900,6 +5900,23 @@ class SyncProcessor {
         const reqId = ob.request_id || ob.requestId || ob.payment_request_id || ob.paymentRequestId;
         const groupId = ob.group_id || ob.groupId;
         const studentId = ob.student_id || ob.studentId;
+
+        const reqCheck = await client.query(
+          "SELECT id FROM group_payment_requests WHERE center_id = $1 AND id = $2",
+          [centerId, reqId],
+        );
+        if (!reqCheck.rows[0]) {
+          throw new Error(`PAYMENT_REQUEST_NOT_FOUND: Payment request ${reqId} not found for center ${centerId}`);
+        }
+
+        const studentCheck = await client.query(
+          "SELECT id FROM students WHERE center_id = $1 AND id = $2",
+          [centerId, studentId],
+        );
+        if (!studentCheck.rows[0]) {
+          throw new Error(`STUDENT_NOT_FOUND: Student ${studentId} not found for center ${centerId}`);
+        }
+
         await client.query(
           `INSERT INTO student_payment_request_obligations
            (id, operation_id, center_id, request_id, group_id, student_id, amount_due, amount_paid, status, payment_id, paid_at, created_at, updated_at, cancelled_at)

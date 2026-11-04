@@ -552,8 +552,8 @@ SELECT s.center_id, s.id, snk.session_id
       ON group_payment_requests(center_id, group_id, status);
 
     CREATE TABLE IF NOT EXISTS student_payment_request_obligations (
-      id VARCHAR(64) PRIMARY KEY,
-      operation_id VARCHAR(64) NOT NULL UNIQUE,
+      id VARCHAR(255) PRIMARY KEY,
+      operation_id VARCHAR(255) NOT NULL UNIQUE,
       center_id VARCHAR(64) NOT NULL REFERENCES centers(id) ON DELETE CASCADE,
       request_id VARCHAR(64) NOT NULL REFERENCES group_payment_requests(id) ON DELETE CASCADE,
       group_id VARCHAR(64) NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
@@ -575,10 +575,20 @@ SELECT s.center_id, s.id, snk.session_id
     CREATE INDEX IF NOT EXISTS idx_payment_req_obligations_group
       ON student_payment_request_obligations(center_id, group_id, status);
 
-    ALTER TABLE payments ADD COLUMN IF NOT EXISTS payment_request_obligation_id VARCHAR(64);
+    ALTER TABLE payments ADD COLUMN IF NOT EXISTS payment_request_obligation_id VARCHAR(255);
     ALTER TABLE payments ADD COLUMN IF NOT EXISTS payment_request_id VARCHAR(64);
     CREATE INDEX IF NOT EXISTS idx_payments_request_obligation
       ON payments(center_id, payment_request_obligation_id);
+
+    -- Migration: Widen payment_request_obligation and sync operation identifier columns to VARCHAR(255)
+    ALTER TABLE student_payment_request_obligations ALTER COLUMN operation_id TYPE VARCHAR(255);
+    ALTER TABLE student_payment_request_obligations ALTER COLUMN id TYPE VARCHAR(255);
+    ALTER TABLE server_sync_operations ALTER COLUMN operation_id TYPE VARCHAR(255);
+    ALTER TABLE server_sync_operations ALTER COLUMN entity_id TYPE VARCHAR(255);
+    ALTER TABLE audit_logs ALTER COLUMN operation_id TYPE VARCHAR(255);
+    ALTER TABLE audit_logs ALTER COLUMN entity_id TYPE VARCHAR(255);
+    ALTER TABLE sync_checkpoints ALTER COLUMN last_pushed_operation_id TYPE VARCHAR(255);
+    ALTER TABLE payments ALTER COLUMN payment_request_obligation_id TYPE VARCHAR(255);
 
     ALTER TABLE payments DROP CONSTRAINT IF EXISTS payments_payment_method_check;
     ALTER TABLE payments ADD CONSTRAINT payments_payment_method_check

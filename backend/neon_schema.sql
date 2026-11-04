@@ -384,8 +384,8 @@ CREATE INDEX IF NOT EXISTS idx_payment_requests_center_group
 
 -- Student Payment Request Obligations
 CREATE TABLE IF NOT EXISTS student_payment_request_obligations (
-    id VARCHAR(64) PRIMARY KEY,
-    operation_id VARCHAR(64) NOT NULL UNIQUE,
+    id VARCHAR(255) PRIMARY KEY,
+    operation_id VARCHAR(255) NOT NULL UNIQUE,
     center_id VARCHAR(64) NOT NULL REFERENCES centers(id) ON DELETE CASCADE,
     request_id VARCHAR(64) NOT NULL REFERENCES group_payment_requests(id) ON DELETE CASCADE,
     group_id VARCHAR(64) NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
@@ -416,7 +416,7 @@ CREATE TABLE IF NOT EXISTS payments (
     debt_cycle_id VARCHAR(64) REFERENCES debt_cycles(id) ON DELETE SET NULL,
     session_id VARCHAR(64) REFERENCES sessions(id) ON DELETE SET NULL,
     subscription_id VARCHAR(64),
-    payment_request_obligation_id VARCHAR(64),
+    payment_request_obligation_id VARCHAR(255),
     payment_request_id VARCHAR(64),
     amount NUMERIC(12, 2) NOT NULL CHECK (amount > 0),
     payment_method VARCHAR(32) NOT NULL DEFAULT 'cash' CHECK (payment_method IN ('cash', 'card', 'vodafone_cash', 'wallet', 'instapay', 'bank_transfer', 'other')),
@@ -427,10 +427,15 @@ CREATE TABLE IF NOT EXISTS payments (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     user_id VARCHAR(64) NOT NULL REFERENCES users(id) ON DELETE RESTRICT
 );
-ALTER TABLE payments ADD COLUMN IF NOT EXISTS payment_request_obligation_id VARCHAR(64);
+ALTER TABLE payments ADD COLUMN IF NOT EXISTS payment_request_obligation_id VARCHAR(255);
 ALTER TABLE payments ADD COLUMN IF NOT EXISTS payment_request_id VARCHAR(64);
 CREATE INDEX IF NOT EXISTS idx_payments_request_obligation
     ON payments(center_id, payment_request_obligation_id);
+
+-- Widen identifier columns to support composite operation IDs
+ALTER TABLE student_payment_request_obligations ALTER COLUMN operation_id TYPE VARCHAR(255);
+ALTER TABLE student_payment_request_obligations ALTER COLUMN id TYPE VARCHAR(255);
+ALTER TABLE payments ALTER COLUMN payment_request_obligation_id TYPE VARCHAR(255);
 
 -- Payment Reversals (Audited refunds / cancellations)
 CREATE TABLE IF NOT EXISTS payment_reversals (
@@ -655,18 +660,23 @@ CREATE INDEX IF NOT EXISTS idx_audit_action_time ON audit_logs(action, timestamp
 -- Ingested Sync Operations (Monotonic server ledger for offline-first clients)
 CREATE TABLE IF NOT EXISTS server_sync_operations (
     server_seq BIGSERIAL PRIMARY KEY,
-    operation_id VARCHAR(64) NOT NULL UNIQUE,
+    operation_id VARCHAR(255) NOT NULL UNIQUE,
     center_id VARCHAR(64) NOT NULL REFERENCES centers(id) ON DELETE CASCADE,
     user_id VARCHAR(64) REFERENCES users(id) ON DELETE SET NULL,
     device_id VARCHAR(64) REFERENCES devices(id) ON DELETE SET NULL,
     operation_type VARCHAR(64) NOT NULL,
     entity_type VARCHAR(64) NOT NULL,
-    entity_id VARCHAR(64) NOT NULL,
+    entity_id VARCHAR(255) NOT NULL,
     payload JSONB NOT NULL,
     status VARCHAR(32) NOT NULL DEFAULT 'applied' CHECK (status IN ('applied', 'rejected', 'conflict')),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE server_sync_operations ALTER COLUMN operation_id TYPE VARCHAR(255);
+ALTER TABLE server_sync_operations ALTER COLUMN entity_id TYPE VARCHAR(255);
+ALTER TABLE audit_logs ALTER COLUMN operation_id TYPE VARCHAR(255);
+ALTER TABLE audit_logs ALTER COLUMN entity_id TYPE VARCHAR(255);
 
 -- Sync Device Checkpoints (Tracking client cursors)
 CREATE TABLE IF NOT EXISTS sync_checkpoints (
@@ -674,10 +684,12 @@ CREATE TABLE IF NOT EXISTS sync_checkpoints (
     center_id VARCHAR(64) NOT NULL REFERENCES centers(id) ON DELETE CASCADE,
     device_id VARCHAR(64) NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
     last_pulled_seq BIGINT NOT NULL DEFAULT 0,
-    last_pushed_operation_id VARCHAR(64),
+    last_pushed_operation_id VARCHAR(255),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT uq_device_checkpoint UNIQUE (center_id, device_id)
 );
+
+ALTER TABLE sync_checkpoints ALTER COLUMN last_pushed_operation_id TYPE VARCHAR(255);
 
 -- ------------------------------------------------------------------------------
 -- 10. HIGH PERFORMANCE ENTERPRISE INDEXES

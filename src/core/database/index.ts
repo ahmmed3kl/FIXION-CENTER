@@ -1419,6 +1419,17 @@ export const MIGRATIONS: Migration[] = [
       } catch {}
     },
   },
+  {
+    version: 35,
+    name: "widen_sync_operation_identifiers",
+    up: (db: SqlDatabase) => {
+      // In SQLite, columns are TEXT with dynamic length, but ensure defensive
+      // schema integrity for payment requests and obligations.
+      try {
+        DatabaseService.ensurePaymentRequestsSchema(db);
+      } catch {}
+    },
+  },
 ];
 
 const LATEST_MIGRATION_VERSION =
