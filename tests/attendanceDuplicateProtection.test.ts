@@ -268,8 +268,8 @@ describe("attendance duplicate protection", () => {
       return originalGetFirst(sql, params);
     }) as any);
     jest.spyOn(db, "runSync").mockImplementation(((sql: string, params?: any[]) => {
-      if (sql.includes("UPDATE attendance SET status = 'absent'")) {
-        expect(params).toEqual(["center-1", attendance.id, sessionId, "std-1"]);
+      if (sql.includes("UPDATE attendance") && sql.includes("status = 'absent'")) {
+        expect(params?.slice(1)).toEqual(["center-1", attendance.id, sessionId, "std-1"]);
         cancellationApplied = true;
         return { changes: 1 } as any;
       }

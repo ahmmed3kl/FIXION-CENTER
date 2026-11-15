@@ -351,6 +351,16 @@ router.post("/push", authMiddleware, deviceGuard, async (req, res, next) => {
       );
     }
 
+    const MAX_PUSH_OPERATIONS = 200;
+    if (operations.length > MAX_PUSH_OPERATIONS) {
+      throw new AppError(
+        "VALIDATION_ERROR",
+        `operations batch exceeds maximum size of ${MAX_PUSH_OPERATIONS}.`,
+        `عدد العمليات في الدفعة الواحدة يتجاوز الحد الأقصى (${MAX_PUSH_OPERATIONS}).`,
+        400,
+      );
+    }
+
     const serviceCheckCache = new Map();
     for (const operation of operations) {
       assertSyncPermission(req, operation);
@@ -392,33 +402,42 @@ router.get("/pull", authMiddleware, deviceGuard, async (req, res, next) => {
     // A database reset/reseed can make the client's cursor newer than the
     // server stream. Signal this explicitly so the client bootstraps again
     // instead of silently believing all old local rows are synchronized.
-    const latestRes = await db.query(
-      "SELECT COALESCE(MAX(server_seq), 0) AS max_seq FROM server_sync_operations WHERE center_id = $1",
-      [req.centerId],
-    );
-    const resetStateRes = await db.query(
-      "SELECT reset_generation FROM center_data_state WHERE center_id = $1",
-      [req.centerId],
-    );
+    const [latestRes, resetStateRes] = await Promise.all([
+      db.query(
+        "SELECT COALESCE(MAX(server_seq), 0) AS max_seq FROM server_sync_operations WHERE center_id = $1",
+        [req.centerId],
+      ),
+      db.query(
+        "SELECT reset_generation FROM center_data_state WHERE center_id = $1",
+        [req.centerId],
+      ),
+    ]);
     const canReadSessionReferences =
       canReadSyncEntity("session", req.user) ||
       canReadSyncEntity("attendance", req.user) ||
       canReadSyncEntity("payment", req.user) ||
       canReadSyncEntity("advance_coverage", req.user);
-    const sessionMappings = canReadSessionReferences
-      ? await db.withTransaction((client) =>
-          SyncProcessor.getSessionAliasMappings(client, req.centerId),
-        )
-      : [];
     const latestServerSeq = parseInt(latestRes.rows[0]?.max_seq || 0, 10);
     const resetGeneration = Number(resetStateRes.rows[0]?.reset_generation || 0);
     if (cursor > latestServerSeq) {
       return res.json({
         changes: [],
-        sessionMappings,
+        sessionMappings: [],
         nextCursor: "0",
         hasMore: false,
         cursorReset: true,
+        resetGeneration,
+        latestServerSeq,
+        serverTimestamp: new Date().toISOString(),
+      });
+    }
+
+    if (cursor === latestServerSeq && cursor > 0) {
+      return res.json({
+        changes: [],
+        sessionMappings: [],
+        nextCursor: String(cursor),
+        hasMore: false,
         resetGeneration,
         latestServerSeq,
         serverTimestamp: new Date().toISOString(),
@@ -437,6 +456,13 @@ router.get("/pull", authMiddleware, deviceGuard, async (req, res, next) => {
 
     const hasMore = rowsRes.rows.length > limit;
     const returnedRows = hasMore ? rowsRes.rows.slice(0, limit) : rowsRes.rows;
+
+    const sessionMappings =
+      canReadSessionReferences && returnedRows.length > 0
+        ? await db.withTransaction((client) =>
+            SyncProcessor.getSessionAliasMappings(client, req.centerId),
+          )
+        : [];
 
     let nextCursor = String(cursor);
     if (returnedRows.length > 0) {

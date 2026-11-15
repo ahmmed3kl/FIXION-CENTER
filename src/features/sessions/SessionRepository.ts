@@ -290,6 +290,8 @@ export class SessionRepository {
        FROM session_expected_students expected
        JOIN students s ON s.id = expected.student_id AND s.center_id = expected.center_id
        WHERE expected.center_id = ? AND expected.session_id = ?
+         AND s.deleted_at IS NULL
+         AND COALESCE(s.status, 'active') <> 'deleted'
        ORDER BY s.full_name COLLATE NOCASE ASC`,
       [centerId, sessionId],
     );

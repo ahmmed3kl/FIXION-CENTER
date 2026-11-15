@@ -101,7 +101,6 @@ export class AbsenceNoteRepository {
     );
     if (
       existingAttendance &&
-      existingAttendance.attendanceType !== "makeup" &&
       ["present", "late"].includes(String(existingAttendance.status).toLowerCase())
     ) {
       throw new ConflictError("لا يمكن إضافة ملاحظة غياب لطالب مسجل حضوره في هذه الجلسة.");

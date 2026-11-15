@@ -105,8 +105,7 @@ export function calculateAbsenceReportCounts(
         !advancedIds.has(student.id) &&
         !makeupIds.has(student.id),
       );
-  const makeupCount = new Set(attendance.filter((item) => item.attendanceType === "makeup").map((item) => item.studentId)).size;
-  return { total: expected.length, present, absent: absentFinal, compensated: makeupCount + advancedIds.size };
+  return { total: expected.length, present, absent: absentFinal, compensated: makeupIds.size + advancedIds.size };
 }
 
 /** Read-only composition of the existing session, attendance, absence and makeup services. */
@@ -442,6 +441,9 @@ export class AbsenceReportsService {
       if (opportunity) compensation.push({ student, kind: "eligible", opportunity });
     }
 
-    return { session, expected, absent: counts.absent, present, compensation, compensated: compensation.length, attendance, absenceNotes };
+    const compensated = compensation.filter(
+      (item) => item.kind === "completed" || item.kind === "advanced",
+    ).length;
+    return { session, expected, absent: counts.absent, present, compensation, compensated, attendance, absenceNotes };
   }
 }

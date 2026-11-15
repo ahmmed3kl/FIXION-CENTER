@@ -36,7 +36,14 @@ export const routePermissions: Partial<Record<string, Permission[]>> = {
   "opening-balance": ["payments.adjust"],
   "debt-adjustments": ["payments.adjust"],
   "payment-requests": ["payments.view", "payments.create", "payments.adjust", "payments.edit"],
-  "homework-evaluations": ["homework.manage"],
+  "homework-evaluations": [
+    "homework.manage",
+    "grades.view",
+    "grades.manage",
+    "attendance.view",
+    "attendance.create",
+    "attendance.edit",
+  ],
   "sync-debug": ["sync.view", "sync.manage"],
   closing: ["daily_closing.view"],
 };

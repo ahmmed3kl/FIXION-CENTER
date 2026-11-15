@@ -353,6 +353,7 @@ CREATE TABLE IF NOT EXISTS debt_cycles (
     amount_due NUMERIC(12, 2) NOT NULL CHECK (amount_due >= 0),
     status VARCHAR(32) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'partially_paid', 'paid', 'cancelled', 'waived')),
     notes TEXT,
+    server_revision INTEGER NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -561,7 +562,7 @@ CREATE TABLE IF NOT EXISTS advance_coverages (
 
 -- Notification Templates (center-scoped, editable message definitions)
 CREATE TABLE IF NOT EXISTS notification_templates (
-    id VARCHAR(64) PRIMARY KEY,
+    id VARCHAR(255) PRIMARY KEY,
     center_id VARCHAR(64) NOT NULL REFERENCES centers(id) ON DELETE CASCADE,
     event_type VARCHAR(64) NOT NULL,
     channel VARCHAR(32) NOT NULL CHECK (channel IN ('whatsapp', 'sms', 'push')),
@@ -576,10 +577,10 @@ CREATE TABLE IF NOT EXISTS notification_templates (
 
 -- Notification Events (Decoupled from core attendance speed)
 CREATE TABLE IF NOT EXISTS notification_events (
-    id VARCHAR(64) PRIMARY KEY,
+    id VARCHAR(255) PRIMARY KEY,
     center_id VARCHAR(64) NOT NULL REFERENCES centers(id) ON DELETE CASCADE,
-    student_id VARCHAR(64) NOT NULL REFERENCES students(id) ON DELETE CASCADE,
-    session_id VARCHAR(64) REFERENCES sessions(id) ON DELETE SET NULL,
+    student_id VARCHAR(255) NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+    session_id VARCHAR(255) REFERENCES sessions(id) ON DELETE SET NULL,
     event_type VARCHAR(64) NOT NULL,
     recipient_phone VARCHAR(32) NOT NULL,
     channel VARCHAR(32) NOT NULL DEFAULT 'whatsapp' CHECK (channel IN ('whatsapp', 'sms', 'push')),
@@ -591,9 +592,9 @@ CREATE TABLE IF NOT EXISTS notification_events (
 
 -- Notification Deliveries (Provider retry attempts)
 CREATE TABLE IF NOT EXISTS notification_deliveries (
-    id VARCHAR(64) PRIMARY KEY,
+    id VARCHAR(255) PRIMARY KEY,
     center_id VARCHAR(64) NOT NULL REFERENCES centers(id) ON DELETE CASCADE,
-    notification_event_id VARCHAR(64) NOT NULL REFERENCES notification_events(id) ON DELETE CASCADE,
+    notification_event_id VARCHAR(255) NOT NULL REFERENCES notification_events(id) ON DELETE CASCADE,
     provider VARCHAR(64) NOT NULL,
     status VARCHAR(32) NOT NULL CHECK (status IN ('queued', 'sent', 'failed', 'delivered')),
     retry_count INTEGER NOT NULL DEFAULT 0,

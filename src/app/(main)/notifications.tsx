@@ -1,6 +1,6 @@
 import { Ionicons } from "@expo/vector-icons";
 import { useFocusEffect } from "expo-router";
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -13,41 +13,103 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
 import { DatabaseService } from "../../core/database";
 import { formatTimeArabic } from "../../core/localization";
 import { PermissionGate } from "../../core/permissions";
-import { Colors, useTheme } from "../../core/theme";
 import { useServiceVisibility } from "../../core/services/ServiceVisibilityContext";
+import { Colors, Spacing, useTheme } from "../../core/theme";
+import { AttendanceSessionService } from "../../features/attendance/AttendanceSessionService";
 import { useAuthStore } from "../../features/auth/useAuthStore";
-import { NotificationService } from "../../features/notifications/NotificationService";
-import { NotificationTemplateRepository } from "../../features/notifications/NotificationTemplateRepository";
-import { StudentRepository } from "../../features/students/StudentRepository";
-import { Student, Group } from "../../shared/types";
 import { GroupRepository } from "../../features/groups/GroupRepository";
 import { GroupScheduleRepository } from "../../features/groups/GroupScheduleRepository";
-import { AttendanceSessionService } from "../../features/attendance/AttendanceSessionService";
-import { SessionDateService } from "../../features/sessions/SessionDateService";
+import { NotificationService } from "../../features/notifications/NotificationService";
+import { NotificationTemplateRepository } from "../../features/notifications/NotificationTemplateRepository";
 import {
+  computeNotificationCenterStats,
+  DateRangePreset,
+  formatCairoDateTimeArabic,
+  formatUserFailureReason,
+  getCairoDateOnlyFromTimestamp,
+  getCairoTodayDateOnly,
+  getDateRangeForPreset,
+  getDeliveryStatusPresentation,
+  getDisplayMessageBody,
+  isValidDateRange,
+} from "../../features/notifications/notificationStats";
+import { SessionDateService } from "../../features/sessions/SessionDateService";
+import { StudentRepository } from "../../features/students/StudentRepository";
+import {
+  Group,
   NotificationDelivery,
   NotificationEvent,
   NotificationTemplate,
+  Student,
 } from "../../shared/types";
-import { formatLocalDateTime, getLocalDateOnly } from "../../shared/utils/date";
+import { toArabicDigits } from "../../shared/utils/arabicNumerals";
+import { formatLocalDate, parseLocalDateOnly } from "../../shared/utils/date";
 
 const DAYS_OF_WEEK = ["الأحد", "الإثنين", "الثلاثاء", "الأربعاء", "الخميس", "الجمعة", "السبت"];
+const CALENDAR_WEEKDAYS = ["ح", "ن", "ث", "ر", "خ", "ج", "س"];
 
 function groupScheduleLabel(groupId: string): string {
   try {
     const schedules = GroupScheduleRepository.getSchedulesForGroup(groupId);
-    return schedules.slice(0, 2).map((schedule) => `${DAYS_OF_WEEK[schedule.dayOfWeek] || "اليوم"} ${formatTimeArabic(schedule.startTime)} - ${formatTimeArabic(schedule.endTime)}`).join(" · ") || "لم يتم تحديد الموعد";
+    return (
+      schedules
+        .slice(0, 2)
+        .map(
+          (schedule) =>
+            `${DAYS_OF_WEEK[schedule.dayOfWeek] || "اليوم"} ${formatTimeArabic(schedule.startTime)} - ${formatTimeArabic(schedule.endTime)}`,
+        )
+        .join(" · ") || "لم يتم تحديد الموعد"
+    );
   } catch {
     return "لم يتم تحديد الموعد";
   }
 }
 
+function eventTypeLabel(eventType: string): string {
+  switch (eventType) {
+    case "attendance":
+      return "إشعار حضور";
+    case "absence":
+      return "إشعار غياب";
+    case "grades":
+      return "إرسال درجات";
+    case "homework":
+      return "تقييم الواجب";
+    default:
+      return "إشعار مباشر";
+  }
+}
+
+function buildCalendarMonthGrid(year: number, monthIndex: number): (string | null)[] {
+  const firstDay = new Date(year, monthIndex, 1, 12, 0, 0, 0);
+  const daysInMonth = new Date(year, monthIndex + 1, 0, 12, 0, 0, 0).getDate();
+  const leadingEmpty = firstDay.getDay();
+  const cells: (string | null)[] = [];
+  for (let i = 0; i < leadingEmpty; i += 1) cells.push(null);
+  for (let d = 1; d <= daysInMonth; d += 1) {
+    cells.push(
+      `${year}-${String(monthIndex + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`,
+    );
+  }
+  while (cells.length % 7 !== 0) cells.push(null);
+  return cells;
+}
+
+function formatArabicMonthYear(year: number, monthIndex: number): string {
+  return new Intl.DateTimeFormat("ar-EG", {
+    month: "long",
+    year: "numeric",
+    timeZone: "UTC",
+  }).format(new Date(Date.UTC(year, monthIndex, 15, 12, 0, 0)));
+}
+
 export default function NotificationsScreen() {
   const { colors } = useTheme();
-  const styles = useMemo(() => createStyles(), [colors]);
+  const styles = useMemo(() => createStyles(colors), [colors]);
   const services = useServiceVisibility();
   const { currentUser, activeCenterId } = useAuthStore();
   const notificationsEnabled = services.isEnabled("notifications");
@@ -57,18 +119,47 @@ export default function NotificationsScreen() {
   const [templates, setTemplates] = useState<NotificationTemplate[]>([]);
   const [events, setEvents] = useState<NotificationEvent[]>([]);
   const [deliveries, setDeliveries] = useState<Record<string, NotificationDelivery[]>>({});
-  const currentMonth = getLocalDateOnly().slice(0, 7);
-  const previousMonth = (() => { const [year, month] = currentMonth.split("-").map(Number); const date = new Date(year, month - 2, 1); return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`; })();
-  const [statsMonthA, setStatsMonthA] = useState(currentMonth);
-  const [statsMonthB, setStatsMonthB] = useState(previousMonth);
-  const [messageStats, setMessageStats] = useState<Record<string, { absence: number; grades: number; custom: number; total: number }>>({});
   const [students, setStudents] = useState<Student[]>([]);
   const [groups, setGroups] = useState<Group[]>([]);
+
+  // Cairo-local date range filter (default: today)
+  const cairoToday = useMemo(() => getCairoTodayDateOnly(), []);
+  const [datePreset, setDatePreset] = useState<DateRangePreset>("today");
+  const [startDate, setStartDate] = useState<string>(() => getCairoTodayDateOnly());
+  const [endDate, setEndDate] = useState<string>(() => getCairoTodayDateOnly());
+
+  // Calendar range modal state
+  const [calendarVisible, setCalendarVisible] = useState(false);
+  const [selectingField, setSelectingField] = useState<"start" | "end">("start");
+  const [draftStartDate, setDraftStartDate] = useState<string>(cairoToday);
+  const [draftEndDate, setDraftEndDate] = useState<string>(cairoToday);
+  const [calendarError, setCalendarError] = useState("");
+  const [calendarCursor, setCalendarCursor] = useState<{ year: number; month: number }>(() => {
+    const parsed = parseLocalDateOnly(cairoToday);
+    return parsed
+      ? { year: parsed.getFullYear(), month: parsed.getMonth() }
+      : { year: new Date().getFullYear(), month: new Date().getMonth() };
+  });
+
+  // Delivery detail modal
+  const [selectedDetail, setSelectedDetail] = useState<{
+    event: NotificationEvent;
+    delivery: NotificationDelivery;
+    studentName?: string;
+  } | null>(null);
+
+  // Direct SMS compose state
   const [smsGroupId, setSmsGroupId] = useState("");
   const [smsGroupSearch, setSmsGroupSearch] = useState("");
   const [smsRecipient, setSmsRecipient] = useState<"parent" | "student">("parent");
   const [smsMessage, setSmsMessage] = useState("");
   const [sendingSms, setSendingSms] = useState(false);
+  const sendingRef = useRef(false);
+  const [confirmSendVisible, setConfirmSendVisible] = useState(false);
+  const [sendFeedback, setSendFeedback] = useState<{
+    type: "success" | "error";
+    message: string;
+  } | null>(null);
   const [currentSessionDate, setCurrentSessionDate] = useState<string | null>(null);
   const [sessionDateError, setSessionDateError] = useState("");
 
@@ -90,7 +181,7 @@ export default function NotificationsScreen() {
     } catch (error) {
       console.warn("Failed to resolve center session date for SMS recipients:", error);
       setCurrentSessionDate(null);
-      setSessionDateError("تعذر تحديد تاريخ المركز؛ تحقق من إعداد المنطقة الزمنية قبل تجهيز الرسائل.");
+      setSessionDateError("تعذر تحديد تاريخ المركز؛ تحقق من إعداد المنطقة الزمنية.");
       return null;
     }
   }, [activeCenterId]);
@@ -102,26 +193,24 @@ export default function NotificationsScreen() {
     }, [notificationsEnabled, refreshCenterSessionDate, services.loaded]),
   );
 
-  const loadData = () => {
+  const loadData = useCallback(() => {
     if (!activeCenterId) return;
     setLoading(true);
     try {
       NotificationTemplateRepository.ensureDefaultTemplates();
-      const tmpls = NotificationTemplateRepository.getTemplates();
-      setTemplates(tmpls);
+      setTemplates(NotificationTemplateRepository.getTemplates());
       setStudents(StudentRepository.getAll(false));
       setGroups(GroupRepository.getAll().filter((group) => group.status === "active"));
 
-      // Fetch recent notification events
       const db = DatabaseService.getDb();
-      const recentEvents = db.getAllSync(
+      const recentEvents = db.getAllSync<NotificationEvent>(
         `SELECT id, operation_id as operationId, center_id as centerId,
                 student_id as studentId, session_id as sessionId, attendance_id as attendanceId,
                 event_type as eventType, created_by as createdBy, created_at as createdAt
          FROM notification_events
          WHERE center_id = ?
          ORDER BY created_at DESC
-         LIMIT 50`,
+         LIMIT 1000`,
         [activeCenterId],
       );
       setEvents(recentEvents);
@@ -131,35 +220,102 @@ export default function NotificationsScreen() {
         dMap[ev.id] = NotificationService.getDeliveriesForEvent(ev.id);
       }
       setDeliveries(dMap);
-      const stats: Record<string, { absence: number; grades: number; custom: number; total: number }> = {};
-      for (const month of [statsMonthA, statsMonthB]) {
-        const row = db.getFirstSync<any>(`SELECT
-          SUM(CASE WHEN e.event_type = 'absence' THEN 1 ELSE 0 END) as absence,
-          SUM(CASE WHEN e.event_type = 'grades' THEN 1 ELSE 0 END) as grades,
-          SUM(CASE WHEN e.event_type NOT IN ('absence', 'grades', 'attendance') THEN 1 ELSE 0 END) as custom,
-          COUNT(*) as total
-          FROM notification_events e JOIN notification_deliveries d ON d.notification_event_id = e.id
-          WHERE e.center_id = ? AND d.channel = 'sms' AND substr(e.created_at, 1, 7) = ?`, [activeCenterId, month]);
-        stats[month] = { absence: Number(row?.absence || 0), grades: Number(row?.grades || 0), custom: Number(row?.custom || 0), total: Number(row?.total || 0) };
-      }
-      setMessageStats(stats);
     } catch (err: any) {
-      console.warn("Failed to load notifications data:", err.message);
+      console.warn("Failed to load notifications data:", err?.message || err);
     } finally {
       setLoading(false);
     }
+  }, [activeCenterId]);
+
+  useFocusEffect(
+    useCallback(() => {
+      if (!services.loaded || !notificationsEnabled) return;
+      loadData();
+    }, [activeCenterId, notificationsEnabled, services.loaded, loadData]),
+  );
+
+  const studentById = useMemo(() => {
+    const map = new Map<string, Student>();
+    for (const s of students) map.set(s.id, s);
+    return map;
+  }, [students]);
+
+  const filteredEvents = useMemo(() => {
+    return events.filter((ev) => {
+      const evDate = getCairoDateOnlyFromTimestamp(ev.createdAt);
+      if (!evDate) return false;
+      return evDate >= startDate && evDate <= endDate;
+    });
+  }, [events, startDate, endDate]);
+
+  const stats = useMemo(
+    () => computeNotificationCenterStats(events, deliveries, startDate, endDate),
+    [events, deliveries, startDate, endDate],
+  );
+
+  const applyPreset = (preset: Exclude<DateRangePreset, "custom">) => {
+    const range = getDateRangeForPreset(preset);
+    setDatePreset(preset);
+    setStartDate(range.startDate);
+    setEndDate(range.endDate);
   };
 
-  useEffect(() => {
-    if (!services.loaded || !notificationsEnabled) return;
-    loadData();
-  }, [activeCenterId, notificationsEnabled, services.loaded, statsMonthA, statsMonthB]);
+  const openCustomCalendar = () => {
+    setDraftStartDate(startDate);
+    setDraftEndDate(endDate);
+    setSelectingField("start");
+    setCalendarError("");
+    const parsed = parseLocalDateOnly(startDate) || parseLocalDateOnly(cairoToday);
+    if (parsed) {
+      setCalendarCursor({ year: parsed.getFullYear(), month: parsed.getMonth() });
+    }
+    setCalendarVisible(true);
+  };
+
+  const handleSelectCalendarDay = (dateStr: string) => {
+    setCalendarError("");
+    if (selectingField === "start") {
+      setDraftStartDate(dateStr);
+      if (dateStr > draftEndDate) {
+        setDraftEndDate(dateStr);
+      }
+      setSelectingField("end");
+    } else {
+      if (dateStr < draftStartDate) {
+        setCalendarError("تاريخ النهاية يجب أن يكون مساوياً أو بعد تاريخ البداية.");
+        return;
+      }
+      setDraftEndDate(dateStr);
+    }
+  };
+
+  const applyCustomDateRange = () => {
+    if (!isValidDateRange(draftStartDate, draftEndDate)) {
+      setCalendarError("نطاق التاريخ غير صالح؛ تأكد من أن البداية قبل أو تساوي النهاية.");
+      return;
+    }
+    setDatePreset("custom");
+    setStartDate(draftStartDate);
+    setEndDate(draftEndDate);
+    setCalendarVisible(false);
+  };
+
+  const shiftCalendarMonth = (delta: number) => {
+    setCalendarCursor((prev) => {
+      const next = new Date(prev.year, prev.month + delta, 1, 12, 0, 0, 0);
+      return { year: next.getFullYear(), month: next.getMonth() };
+    });
+  };
+
+  const calendarCells = useMemo(
+    () => buildCalendarMonthGrid(calendarCursor.year, calendarCursor.month),
+    [calendarCursor],
+  );
 
   const handleSaveTemplate = () => {
     if (!editingTemplate) return;
     try {
       NotificationTemplateRepository.updateTemplate(editingTemplate.id, templateBodyInput);
-      Alert.alert("تم الحفظ", "تم تحديث قالب الإشعار بنجاح.");
       setEditingTemplate(null);
       loadData();
     } catch (err: any) {
@@ -167,227 +323,517 @@ export default function NotificationsScreen() {
     }
   };
 
-  const getStatusBadge = (status: string) => {
-    switch (status) {
-      case "sent":
-        return { text: "تم الإرسال", bg: Colors.successLight, color: Colors.successText };
-      case "failed":
-        return { text: "فشل الإرسال", bg: Colors.dangerLight, color: Colors.dangerText };
-      case "sending":
-        return { text: "جارٍ الإرسال", bg: Colors.warningLight, color: Colors.warningText };
-      default:
-        return { text: "قيد الانتظار", bg: Colors.slate100, color: Colors.slate700 };
-    }
-  };
+  const filteredSmsGroups = groups
+    .filter((group) => {
+      const query = smsGroupSearch.trim().toLocaleLowerCase();
+      if (!query) return true;
+      return [group.name, group.subjectName, group.teacherName, group.grade]
+        .filter(Boolean)
+        .some((value) => String(value).toLocaleLowerCase().includes(query));
+    })
+    .slice(0, 30);
 
-  const sendDirectSms = async () => {
-    if (!smsGroupId) return Alert.alert("تنبيه", "اختر المجموعة أولًا.");
-    if (!smsMessage.trim()) return Alert.alert("تنبيه", "اكتب نص الرسالة أولًا.");
-    const selectedGroup = groups.find((group) => group.id === smsGroupId);
-    if (!selectedGroup) return Alert.alert("تنبيه", "المجموعة المختارة لم تعد متاحة.");
-    const sessionDate = refreshCenterSessionDate();
-    if (!sessionDate) {
-      return Alert.alert("تعذر تجهيز الرسائل", "تحقق من إعداد المنطقة الزمنية للمركز ثم أعد المحاولة.");
-    }
-    // Use the same roster calculation as attendance: package subscribers are
-    // expected in their selected group even when they have no ordinary
-    // student_group_enrollments row.
-    const expectedStudentIds = AttendanceSessionService.getExpectedStudentIdsForGroup(
-      selectedGroup,
-      selectedGroup.id,
-      sessionDate,
+  const selectedSmsGroup = groups.find((group) => group.id === smsGroupId);
+  const smsGroupTargets = useMemo(() => {
+    if (!selectedSmsGroup || !currentSessionDate) return null;
+    const expectedIds = AttendanceSessionService.getExpectedStudentIdsForGroup(
+      selectedSmsGroup,
+      selectedSmsGroup.id,
+      currentSessionDate,
     );
-    const targets = Array.from(new Set(expectedStudentIds))
-      .map((studentId) => students.find((student) => student.id === studentId))
+    const targets = Array.from(new Set(expectedIds))
+      .map((studentId) => studentById.get(studentId))
       .filter(Boolean) as Student[];
-    if (!targets.length) return Alert.alert("لا يوجد طلاب", "لا يوجد طلاب نشطون في هذه المجموعة.");
-    // Respect the selected recipient. Do not silently send a parent-directed
-    // message to the student when the guardian number is missing.
-    const sendableTargets = targets.filter((target) =>
+    const sendable = targets.filter((target) =>
       (smsRecipient === "student" ? target.phone : target.parentPhone)?.trim(),
     );
-    if (!sendableTargets.length) return Alert.alert("لا توجد أرقام", "لا يوجد أي رقم صالح للمستلمين في هذه المجموعة.");
+    return { total: targets.length, sendable };
+  }, [currentSessionDate, selectedSmsGroup, smsRecipient, studentById]);
+
+  const requestSendDirectSms = () => {
+    setSendFeedback(null);
+    if (!smsGroupId) {
+      setSendFeedback({ type: "error", message: "اختر المجموعة أولاً." });
+      return;
+    }
+    if (!smsMessage.trim()) {
+      setSendFeedback({ type: "error", message: "اكتب نص الرسالة أولاً." });
+      return;
+    }
+    const sessionDate = refreshCenterSessionDate();
+    if (!sessionDate || !smsGroupTargets) {
+      setSendFeedback({
+        type: "error",
+        message: "تعذر تجهيز الرسائل؛ تحقق من تاريخ المركز.",
+      });
+      return;
+    }
+    if (!smsGroupTargets.total) {
+      setSendFeedback({ type: "error", message: "لا يوجد طلاب نشطون في هذه المجموعة." });
+      return;
+    }
+    if (!smsGroupTargets.sendable.length) {
+      setSendFeedback({
+        type: "error",
+        message: "لا يوجد أي رقم صالح للمستلمين في هذه المجموعة.",
+      });
+      return;
+    }
+    setConfirmSendVisible(true);
+  };
+
+  const executeDirectSms = async () => {
+    if (sendingRef.current) return;
+    if (!smsGroupTargets?.sendable.length) {
+      setConfirmSendVisible(false);
+      return;
+    }
+    sendingRef.current = true;
     setSendingSms(true);
+    setConfirmSendVisible(false);
     let queuedCount = 0;
     try {
-      for (const target of sendableTargets) {
-        const event = NotificationService.notifyCustomSms({ studentId: target.id, message: smsMessage, recipientType: smsRecipient });
+      for (const target of smsGroupTargets.sendable) {
+        const event = NotificationService.notifyCustomSms({
+          studentId: target.id,
+          message: smsMessage,
+          recipientType: smsRecipient,
+        });
         await NotificationService.sendPendingDeliveries(event.id);
         queuedCount += 1;
       }
+      const missingCount = smsGroupTargets.total - smsGroupTargets.sendable.length;
       setSmsMessage("");
       setSmsGroupId("");
       setSmsGroupSearch("");
+      setSendFeedback({
+        type: "success",
+        message: `تم تجهيز ${queuedCount} رسالة في طابور الإرسال.${missingCount ? ` (تخطي ${missingCount} لعدم وجود رقم)` : ""}`,
+      });
       setActiveTab("history");
       loadData();
-      const missingRecipientCount = targets.length - sendableTargets.length;
-      Alert.alert(
-        "تم تجهيز الرسائل",
-        `تم تجهيز ${queuedCount} رسالة وإضافتها إلى طابور SMS للمزامنة.${missingRecipientCount ? `\nتم تخطي ${missingRecipientCount} طالبًا لعدم وجود رقم ${smsRecipient === "parent" ? "ولي أمر" : "طالب"}.` : ""}`,
-      );
     } catch (error: any) {
-      Alert.alert(
-        "تعذر إكمال تجهيز الرسائل",
-        `${queuedCount ? `تم تجهيز ${queuedCount} رسالة بالفعل. ` : ""}${error?.message || "حاول مرة أخرى."}`,
-      );
+      setSendFeedback({
+        type: "error",
+        message: `${queuedCount ? `تم تجهيز ${queuedCount} رسالة. ` : ""}${error?.message || "تعذر إكمال تجهيز الرسائل."}`,
+      });
     } finally {
+      sendingRef.current = false;
       setSendingSms(false);
     }
   };
 
-  const filteredSmsGroups = groups.filter((group) => {
-    const query = smsGroupSearch.trim().toLocaleLowerCase();
-    if (!query) return true;
-    return [group.name, group.subjectName, group.teacherName, group.grade]
-      .filter(Boolean)
-      .some((value) => String(value).toLocaleLowerCase().includes(query));
-  }).slice(0, 30);
-  const selectedSmsGroup = groups.find((group) => group.id === smsGroupId);
-  const smsGroupMemberCount = useMemo(
-    () => {
-      if (!selectedSmsGroup) return 0;
-      if (!currentSessionDate) return null;
-      return AttendanceSessionService.getExpectedStudentIdsForGroup(
-        selectedSmsGroup,
-        selectedSmsGroup.id,
-        currentSessionDate,
-      ).length;
-    },
-    [currentSessionDate, selectedSmsGroup],
-  );
+  const renderToneColors = (tone: "success" | "info" | "warning" | "danger" | "neutral") => {
+    switch (tone) {
+      case "success":
+        return { bg: Colors.successLight, text: Colors.successText };
+      case "info":
+        return { bg: Colors.primaryLight, text: Colors.primary };
+      case "warning":
+        return { bg: Colors.warningLight, text: Colors.warningText };
+      case "danger":
+        return { bg: Colors.dangerLight, text: Colors.dangerText };
+      default:
+        return { bg: Colors.slate100, text: Colors.slate700 };
+    }
+  };
 
-  if (!services.loaded) return <View style={styles.centered}><Text style={styles.loadingText}>جار تحميل حالة الخدمات...</Text></View>;
-  if (!notificationsEnabled) return <View style={styles.centered}><Text style={styles.loadingText}>خدمة الإشعارات غير مفعلة لهذا المركز.</Text></View>;
+  if (!services.loaded) {
+    return (
+      <View style={styles.centered}>
+        <Text style={styles.loadingText}>جارٍ تحميل حالة الخدمات...</Text>
+      </View>
+    );
+  }
+  if (!notificationsEnabled) {
+    return (
+      <View style={styles.centered}>
+        <Text style={styles.loadingText}>خدمة الإشعارات غير مفعلة لهذا المركز.</Text>
+      </View>
+    );
+  }
 
   return (
-    <View style={styles.container}>
-      {/* Header */}
+    <SafeAreaView style={styles.container}>
+      {/* Compact Header */}
       <View style={styles.header}>
-        <Text style={styles.headerTitle}>مركز الإشعارات</Text>
-        <Text style={styles.headerSubtitle}>إدارة القوالب وسجل الإشعارات الفورية و SMS</Text>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.headerTitle}>مركز الإشعارات</Text>
+          <Text style={styles.headerSubtitle}>متابعة التسليم الفعلي والقوالب والإرسال المباشر</Text>
+        </View>
+        <TouchableOpacity style={styles.refreshBtn} onPress={loadData}>
+          <Ionicons name="refresh-outline" size={18} color={colors.primary} />
+        </TouchableOpacity>
       </View>
 
-      <View style={styles.counterPanel}><Text style={styles.counterPanelTitle}>عداد رسائل SMS</Text><View style={styles.counterMonthRow}><TextInput style={styles.counterMonthInput} value={statsMonthA} onChangeText={setStatsMonthA} placeholder="YYYY-MM" /><Text style={styles.counterMonthLabel}>الشهر الأول</Text><TextInput style={styles.counterMonthInput} value={statsMonthB} onChangeText={setStatsMonthB} placeholder="YYYY-MM" /><Text style={styles.counterMonthLabel}>الشهر الثاني</Text></View><View style={styles.counterGrid}>{[statsMonthA, statsMonthB].map((month) => <View key={month} style={styles.counterMonthCard}><Text style={styles.counterMonthTitle}>{month}</Text><Text style={styles.counterValue}>الإجمالي: {messageStats[month]?.total || 0}</Text><Text style={styles.counterDetail}>غياب: {messageStats[month]?.absence || 0} · درجات: {messageStats[month]?.grades || 0} · أخرى: {messageStats[month]?.custom || 0}</Text></View>)}</View></View>
+      {/* Date Range Quick Filters + Calendar Trigger */}
+      <View style={styles.dateFilterBar}>
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={styles.presetRow}
+        >
+          {(
+            [
+              { key: "today", label: "اليوم" },
+              { key: "last7", label: "آخر 7 أيام" },
+              { key: "thisMonth", label: "هذا الشهر" },
+              { key: "all", label: "الكل" },
+            ] as const
+          ).map((preset) => (
+            <TouchableOpacity
+              key={preset.key}
+              style={[styles.presetChip, datePreset === preset.key && styles.presetChipActive]}
+              onPress={() => applyPreset(preset.key)}
+            >
+              <Text
+                style={[
+                  styles.presetChipText,
+                  datePreset === preset.key && styles.presetChipTextActive,
+                ]}
+              >
+                {preset.label}
+              </Text>
+            </TouchableOpacity>
+          ))}
+          <TouchableOpacity
+            style={[styles.presetChip, datePreset === "custom" && styles.presetChipActive]}
+            onPress={openCustomCalendar}
+          >
+            <Ionicons
+              name="calendar-outline"
+              size={13}
+              color={datePreset === "custom" ? Colors.white : colors.primary}
+            />
+            <Text
+              style={[
+                styles.presetChipText,
+                datePreset === "custom" && styles.presetChipTextActive,
+              ]}
+            >
+              نطاق مخصص
+            </Text>
+          </TouchableOpacity>
+        </ScrollView>
+        <Text style={styles.activeRangeText}>
+          {datePreset === "all"
+            ? "جميع الإشعارات"
+            : startDate === endDate
+              ? formatLocalDate(startDate)
+              : `${formatLocalDate(startDate)} — ${formatLocalDate(endDate)}`}
+        </Text>
+      </View>
 
-      {/* Tabs */}
+      {/* Compact Delivery Statistics (Separated SMS vs Instant) */}
+      <View style={styles.statsCard}>
+        <View style={styles.statsRow}>
+          <View style={styles.statBox}>
+            <Text style={[styles.statVal, { color: Colors.successText }]}>
+              {toArabicDigits(String(stats.overall.sentOrAccepted))}
+            </Text>
+            <Text style={styles.statLbl}>تم الإرسال / مقبول</Text>
+          </View>
+          <View style={styles.statBox}>
+            <Text style={[styles.statVal, { color: Colors.warningText }]}>
+              {toArabicDigits(String(stats.overall.inProgress))}
+            </Text>
+            <Text style={styles.statLbl}>قيد الإرسال</Text>
+          </View>
+          <View style={styles.statBox}>
+            <Text style={[styles.statVal, { color: Colors.dangerText }]}>
+              {toArabicDigits(String(stats.overall.failedOrAmbiguous))}
+            </Text>
+            <Text style={styles.statLbl}>فشل / غير مؤكد</Text>
+          </View>
+        </View>
+        <View style={styles.channelBreakdownRow}>
+          <Text style={styles.channelBreakdownText}>
+            SMS: {toArabicDigits(String(stats.sms.sentOrAccepted))} (مقبول:{" "}
+            {toArabicDigits(String(stats.sms.accepted))} · مؤكد:{" "}
+            {toArabicDigits(String(stats.sms.confirmedSent + stats.sms.delivered))})
+          </Text>
+          <Text style={styles.channelBreakdownText}>
+            فوري: {toArabicDigits(String(stats.push.sentOrAccepted))}
+          </Text>
+        </View>
+      </View>
+
+      {/* Preserved 3-Tab Navigation */}
       <View style={styles.tabBar}>
-        <TouchableOpacity
-          style={[styles.tabButton, activeTab === "history" && styles.tabButtonActive]}
-          onPress={() => setActiveTab("history")}
-        >
-          <Text style={[styles.tabText, activeTab === "history" && styles.tabTextActive]}>
-            سجل الإشعارات
-          </Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={[styles.tabButton, activeTab === "templates" && styles.tabButtonActive]}
-          onPress={() => setActiveTab("templates")}
-        >
-          <Text style={[styles.tabText, activeTab === "templates" && styles.tabTextActive]}>
-            قوالب الإشعارات
-          </Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={[styles.tabButton, activeTab === "compose" && styles.tabButtonActive]}
-          onPress={() => setActiveTab("compose")}
-        >
-          <Text style={[styles.tabText, activeTab === "compose" && styles.tabTextActive]}>SMS مباشر</Text>
-        </TouchableOpacity>
+        {(
+          [
+            { key: "history", label: "سجل الإشعارات" },
+            { key: "templates", label: "قوالب الإشعارات" },
+            { key: "compose", label: "إرسال مباشر" },
+          ] as const
+        ).map((tab) => (
+          <TouchableOpacity
+            key={tab.key}
+            style={[styles.tabButton, activeTab === tab.key && styles.tabButtonActive]}
+            onPress={() => setActiveTab(tab.key)}
+          >
+            <Text style={[styles.tabText, activeTab === tab.key && styles.tabTextActive]}>
+              {tab.label}
+            </Text>
+          </TouchableOpacity>
+        ))}
       </View>
+
+      {sendFeedback ? (
+        <View
+          style={[
+            styles.feedbackBanner,
+            sendFeedback.type === "error" ? styles.feedbackError : styles.feedbackSuccess,
+          ]}
+        >
+          <Text
+            style={[
+              styles.feedbackText,
+              { color: sendFeedback.type === "error" ? Colors.dangerText : Colors.successText },
+            ]}
+          >
+            {sendFeedback.message}
+          </Text>
+          <TouchableOpacity onPress={() => setSendFeedback(null)}>
+            <Ionicons name="close" size={16} color={Colors.slate600} />
+          </TouchableOpacity>
+        </View>
+      ) : null}
 
       {loading ? (
         <View style={styles.centered}>
-          <ActivityIndicator size="large" color={Colors.primary} />
+          <ActivityIndicator size="small" color={Colors.primary} />
           <Text style={styles.loadingText}>جارٍ تحميل البيانات...</Text>
         </View>
       ) : activeTab === "compose" ? (
         <ScrollView contentContainerStyle={styles.listContent} keyboardShouldPersistTaps="handled">
-          <View style={styles.composeHero}>
-            <View style={styles.composeIcon}><Ionicons name="chatbubble-ellipses-outline" size={26} color={Colors.primary} /></View>
-            <Text style={styles.composeTitle}>رسالة SMS مخصصة</Text>
-            <Text style={styles.composeHint}>اكتب رسالتك بحرية واختر إرسالها للطالب أو لولي الأمر.</Text>
-          </View>
           <View style={styles.card}>
-            <Text style={styles.fieldLabel}>المجموعة</Text>
-            <TextInput style={styles.composeInput} value={smsGroupSearch} onChangeText={setSmsGroupSearch} placeholder="ابحث باسم المجموعة أو المادة أو المدرس" placeholderTextColor={Colors.slate400} textAlign="right" />
+            <Text style={styles.fieldLabel}>المجموعة المستهدفة</Text>
+            <TextInput
+              style={styles.composeInput}
+              value={smsGroupSearch}
+              onChangeText={setSmsGroupSearch}
+              placeholder="ابحث باسم المجموعة أو المادة أو المدرس"
+              placeholderTextColor={Colors.slate400}
+              textAlign="right"
+            />
             <ScrollView style={styles.studentPicker} nestedScrollEnabled>
-              {filteredSmsGroups.map((group) => <TouchableOpacity key={group.id} style={[styles.studentChoice, smsGroupId === group.id && styles.studentChoiceActive]} onPress={() => { setSmsGroupId(group.id); setSmsGroupSearch(group.name); }}><View style={{ flex: 1 }}><Text style={styles.studentChoiceName}>{group.name}</Text><Text style={styles.studentChoiceMeta}>{[group.subjectName, group.teacherName, group.grade].filter(Boolean).join(" · ")}</Text><Text style={styles.studentChoiceSchedule}>{groupScheduleLabel(group.id)}</Text><Text style={styles.studentChoiceMeta}>{smsGroupId === group.id ? `${smsGroupMemberCount ?? "—"} طالب` : "اضغط للاختيار"}</Text></View><Ionicons name={smsGroupId === group.id ? "checkmark-circle" : "ellipse-outline"} size={20} color={smsGroupId === group.id ? Colors.primary : Colors.slate400} /></TouchableOpacity>)}
+              {filteredSmsGroups.map((group) => (
+                <TouchableOpacity
+                  key={group.id}
+                  style={[styles.studentChoice, smsGroupId === group.id && styles.studentChoiceActive]}
+                  onPress={() => {
+                    setSmsGroupId(group.id);
+                    setSmsGroupSearch(group.name);
+                  }}
+                >
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.studentChoiceName}>{group.name}</Text>
+                    <Text style={styles.studentChoiceMeta}>
+                      {[group.subjectName, group.teacherName, group.grade].filter(Boolean).join(" · ")}
+                    </Text>
+                    <Text style={styles.studentChoiceSchedule}>{groupScheduleLabel(group.id)}</Text>
+                  </View>
+                  <Ionicons
+                    name={smsGroupId === group.id ? "checkmark-circle" : "ellipse-outline"}
+                    size={18}
+                    color={smsGroupId === group.id ? Colors.primary : Colors.slate400}
+                  />
+                </TouchableOpacity>
+              ))}
             </ScrollView>
-            {selectedSmsGroup ? <Text style={styles.selectedGroupHint}>{smsGroupMemberCount === null ? "تعذر حساب المستلمين قبل تحديد تاريخ المركز." : `تم اختيار ${selectedSmsGroup.name} · سيتم الإرسال إلى ${smsGroupMemberCount} طالب`}</Text> : null}
-            {sessionDateError ? <Text style={{ color: Colors.dangerText, textAlign: "right" }}>{sessionDateError}</Text> : null}
-            <Text style={styles.fieldLabel}>إرسال إلى</Text>
+            {selectedSmsGroup && smsGroupTargets ? (
+              <Text style={styles.selectedGroupHint}>
+                المختار: {selectedSmsGroup.name} · صالح للإرسال:{" "}
+                {toArabicDigits(String(smsGroupTargets.sendable.length))} من{" "}
+                {toArabicDigits(String(smsGroupTargets.total))} طالب
+              </Text>
+            ) : null}
+            {sessionDateError ? (
+              <Text style={{ color: Colors.dangerText, fontSize: 11, textAlign: "right" }}>
+                {sessionDateError}
+              </Text>
+            ) : null}
+
+            <Text style={styles.fieldLabel}>المستلم</Text>
             <View style={styles.recipientRow}>
-              {(["parent", "student"] as const).map((recipient) => <TouchableOpacity key={recipient} style={[styles.recipientButton, smsRecipient === recipient && styles.recipientButtonActive]} onPress={() => setSmsRecipient(recipient)}><Ionicons name={recipient === "parent" ? "people-outline" : "person-outline"} size={18} color={smsRecipient === recipient ? Colors.primary : Colors.slate500} /><Text style={[styles.recipientTextButton, smsRecipient === recipient && styles.recipientTextButtonActive]}>{recipient === "parent" ? "ولي الأمر" : "الطالب"}</Text></TouchableOpacity>)}
+              {(["parent", "student"] as const).map((recipient) => (
+                <TouchableOpacity
+                  key={recipient}
+                  style={[
+                    styles.recipientButton,
+                    smsRecipient === recipient && styles.recipientButtonActive,
+                  ]}
+                  onPress={() => setSmsRecipient(recipient)}
+                >
+                  <Ionicons
+                    name={recipient === "parent" ? "people-outline" : "person-outline"}
+                    size={16}
+                    color={smsRecipient === recipient ? Colors.primary : Colors.slate500}
+                  />
+                  <Text
+                    style={[
+                      styles.recipientTextButton,
+                      smsRecipient === recipient && styles.recipientTextButtonActive,
+                    ]}
+                  >
+                    {recipient === "parent" ? "ولي الأمر" : "الطالب"}
+                  </Text>
+                </TouchableOpacity>
+              ))}
             </View>
+
             <Text style={styles.fieldLabel}>نص الرسالة</Text>
-            <TextInput style={styles.composeTextArea} value={smsMessage} onChangeText={setSmsMessage} placeholder="اكتب رسالة SMS هنا..." placeholderTextColor={Colors.slate400} multiline numberOfLines={6} textAlign="right" textAlignVertical="top" maxLength={480} />
-            <Text style={styles.composeCounter}>{smsMessage.length}/480</Text>
-            <Text style={styles.variablesHint}>يمكنك استخدام: {"{{student_name}}"} · {"{{student_first_name}}"} · {"{{parent_name}}"} · {"{{center_name}}"}</Text>
-            <TouchableOpacity style={styles.sendSmsButton} onPress={sendDirectSms} disabled={sendingSms} activeOpacity={0.8}><Ionicons name="send-outline" size={19} color={Colors.white} /><Text style={styles.sendSmsText}>{sendingSms ? "جاري التجهيز..." : "تجهيز وإرسال SMS"}</Text></TouchableOpacity>
+            <TextInput
+              style={styles.composeTextArea}
+              value={smsMessage}
+              onChangeText={setSmsMessage}
+              placeholder="اكتب رسالة SMS هنا..."
+              placeholderTextColor={Colors.slate400}
+              multiline
+              numberOfLines={4}
+              textAlign="right"
+              textAlignVertical="top"
+              maxLength={480}
+            />
+            <View style={styles.composeMetaRow}>
+              <Text style={styles.composeCounter}>
+                {toArabicDigits(String(smsMessage.length))}/480 حرف ·{" "}
+                {toArabicDigits(String(Math.max(1, Math.ceil(smsMessage.length / 70))))} شريحة SMS
+              </Text>
+            </View>
+            {smsMessage.trim() ? (
+              <View style={styles.previewBox}>
+                <Text style={styles.previewLabel}>معاينة الرسالة:</Text>
+                <Text style={styles.previewText}>{smsMessage.trim()}</Text>
+              </View>
+            ) : null}
+
+            <TouchableOpacity
+              style={[styles.sendSmsButton, sendingSms && { opacity: 0.6 }]}
+              onPress={requestSendDirectSms}
+              disabled={sendingSms}
+              activeOpacity={0.8}
+            >
+              <Ionicons name="send-outline" size={16} color={Colors.white} />
+              <Text style={styles.sendSmsText}>
+                {sendingSms ? "جارٍ التجهيز..." : "مراجعة وإرسال SMS"}
+              </Text>
+            </TouchableOpacity>
           </View>
         </ScrollView>
       ) : activeTab === "history" ? (
         <FlatList
-          data={events}
+          data={filteredEvents}
           keyExtractor={(item) => item.id}
           contentContainerStyle={styles.listContent}
           ListEmptyComponent={
             <View style={styles.emptyContainer}>
-              <Ionicons name="notifications-off-outline" size={48} color={Colors.slate400} />
-              <Text style={styles.emptyText}>لا توجد إشعارات مسجلة حتى الآن.</Text>
+              <Ionicons name="notifications-off-outline" size={34} color={Colors.slate400} />
+              <Text style={styles.emptyText}>لا توجد إشعارات في الفترة المختارة.</Text>
+              {events.length > 0 && datePreset !== "all" ? (
+                <TouchableOpacity
+                  style={[styles.presetChip, styles.presetChipActive, { marginTop: 6 }]}
+                  onPress={() => applyPreset("all")}
+                >
+                  <Text style={[styles.presetChipText, styles.presetChipTextActive]}>
+                    عرض كل الإشعارات ({toArabicDigits(String(events.length))})
+                  </Text>
+                </TouchableOpacity>
+              ) : null}
             </View>
           }
           renderItem={({ item }) => {
             const itemDeliveries = deliveries[item.id] || [];
+            const student = studentById.get(item.studentId);
+            const primaryDelivery = itemDeliveries[0];
             return (
-              <View style={styles.card}>
+              <TouchableOpacity
+                style={styles.card}
+                activeOpacity={primaryDelivery ? 0.75 : 1}
+                onPress={() => {
+                  if (primaryDelivery) {
+                    setSelectedDetail({
+                      event: item,
+                      delivery: primaryDelivery,
+                      studentName: student?.fullName,
+                    });
+                  }
+                }}
+              >
                 <View style={styles.cardHeader}>
                   <View style={styles.eventTypeTag}>
-                    <Text style={styles.eventTypeText}>
-                      {item.eventType === "attendance" ? "إشعار حضور" : item.eventType === "absence" ? "إشعار غياب" : item.eventType === "grades" ? "إرسال درجات" : "SMS مخصصة"}
-                    </Text>
+                    <Text style={styles.eventTypeText}>{eventTypeLabel(item.eventType)}</Text>
                   </View>
                   <Text style={styles.timestampText}>
-                    {formatLocalDateTime(item.createdAt)}
+                    {formatCairoDateTimeArabic(item.createdAt)}
                   </Text>
                 </View>
 
+                {student ? (
+                  <Text style={styles.recipientNameText} numberOfLines={1}>
+                    الطالب: {student.fullName}
+                  </Text>
+                ) : null}
+
                 {itemDeliveries.map((del) => {
-                  const badge = getStatusBadge(del.status);
+                  const presentation = getDeliveryStatusPresentation(del.status);
+                  const tone = renderToneColors(presentation.tone);
+                  const safeFailure = formatUserFailureReason(del.failureReason, del.status);
                   return (
-                    <View key={del.id} style={styles.deliveryRow}>
+                    <TouchableOpacity
+                      key={del.id}
+                      style={styles.deliveryRow}
+                      onPress={() =>
+                        setSelectedDetail({
+                          event: item,
+                          delivery: del,
+                          studentName: student?.fullName,
+                        })
+                      }
+                    >
                       <View style={styles.deliveryMeta}>
                         <Ionicons
-                          name={del.channel === "push" ? "phone-portrait-outline" : "chatbubble-ellipses-outline"}
-                          size={18}
+                          name={
+                            del.channel === "push"
+                              ? "phone-portrait-outline"
+                              : "chatbubble-ellipses-outline"
+                          }
+                          size={15}
                           color={Colors.primary}
                         />
                         <Text style={styles.channelText}>
-                          {del.channel === "push" ? "إشعار فوري" : "رسالة نصية SMS"}
+                          {del.channel === "push" ? "إشعار فوري" : "SMS"}
                         </Text>
-                        <Text style={styles.recipientText}>({del.recipient || "بدون رقم"})</Text>
-                      </View>
-                      <View style={[styles.statusBadge, { backgroundColor: badge.bg }]}>
-                        <Text style={[styles.statusBadgeText, { color: badge.color }]}>
-                          {badge.text}
+                        <Text style={styles.recipientText} numberOfLines={1}>
+                          {del.recipient || "بدون رقم"}
                         </Text>
                       </View>
-                    </View>
+                      <View style={[styles.statusBadge, { backgroundColor: tone.bg }]}>
+                        <Text style={[styles.statusBadgeText, { color: tone.text }]}>
+                          {presentation.label}
+                        </Text>
+                      </View>
+                      {safeFailure ? (
+                        <Text style={styles.failureReasonText} numberOfLines={2}>
+                          {safeFailure}
+                        </Text>
+                      ) : null}
+                    </TouchableOpacity>
                   );
                 })}
-              </View>
+              </TouchableOpacity>
             );
           }}
         />
       ) : (
         <ScrollView contentContainerStyle={styles.listContent}>
-          <Text style={styles.sectionHeader}>القوالب المعتمدة للإرسال التلقائي واليدوي</Text>
           {templates.map((tmpl) => (
             <View key={tmpl.id} style={styles.card}>
               <View style={styles.cardHeader}>
                 <Text style={styles.tmplTitle}>
-                  {tmpl.eventType === "attendance" ? "قالب حضور" : tmpl.eventType === "absence" ? "قالب غياب" : tmpl.eventType === "grades" ? "قالب درجات" : "قالب مخصص"} (
-                  {tmpl.channel === "push" ? "تطبيق / Push" : "رسالة نصية / SMS"})
+                  {eventTypeLabel(tmpl.eventType)} ·{" "}
+                  {tmpl.channel === "push" ? "إشعار فوري" : "SMS"}
                 </Text>
                 <PermissionGate
                   permission="notifications.templates.update"
@@ -400,7 +846,7 @@ export default function NotificationsScreen() {
                       setTemplateBodyInput(tmpl.templateBody);
                     }}
                   >
-                    <Ionicons name="create-outline" size={16} color={Colors.white} />
+                    <Ionicons name="create-outline" size={14} color={Colors.white} />
                     <Text style={styles.editBtnText}>تعديل</Text>
                   </TouchableOpacity>
                 </PermissionGate>
@@ -410,26 +856,259 @@ export default function NotificationsScreen() {
           ))}
 
           <View style={styles.variablesInfo}>
-            <Text style={styles.varItem}>{"{{student_first_name}}"} : الاسم الأول للطالب</Text>
-            <Text style={styles.varTitle}>المتغيرات المتاحة في القوالب:</Text>
-            <Text style={styles.varItem}>• {"{{student_name}}"} : اسم الطالب</Text>
-            <Text style={styles.varItem}>• {"{{parent_name}}"} : اسم ولي الأمر</Text>
-            <Text style={styles.varItem}>• {"{{center_name}}"} : اسم السنتر</Text>
-            <Text style={styles.varItem}>• {"{{subject_name}}"} : اسم المادة</Text>
-            <Text style={styles.varItem}>• {"{{teacher_name}}"} : اسم المدرس</Text>
-            <Text style={styles.varItem}>• {"{{session_date}}"} : تاريخ الحصة</Text>
-            <Text style={styles.varItem}>• {"{{session_time}}"} : وقت الحصة</Text>
-            <Text style={styles.varItem}>• {"{{attendance_status}}"} : حالة الحضور</Text>
-            <Text style={styles.varItem}>• {"{{exam_name}}"} : اسم الامتحان</Text>
-            <Text style={styles.varItem}>• {"{{score}}"} و{"{{max_score}}"} : الدرجة والدرجة النهائية</Text>
-            <Text style={styles.varItem}>• {"{{grades_summary}}"} : ملخص درجات الامتحان</Text>
-            <Text style={styles.varItem}>• {"{{homework_evaluation}}"} : تقييم الواجب للحصة المرتبطة بالامتحان (يُحذف سطره عند عدم وجود تقييم)</Text>
+            <Text style={styles.varTitle}>المتغيرات الديناميكية المدعومة:</Text>
+            <Text style={styles.varItem}>
+              {"{{student_name}}"} · {"{{student_first_name}}"} · {"{{parent_name}}"} ·{" "}
+              {"{{center_name}}"} · {"{{group_name}}"} · {"{{subject_name}}"} ·{" "}
+              {"{{teacher_name}}"} · {"{{session_date}}"} · {"{{session_time}}"} ·{" "}
+              {"{{attendance_status}}"} · {"{{exam_name}}"} · {"{{score}}"} ·{" "}
+              {"{{max_score}}"} · {"{{grades_summary}}"} · {"{{homework_status}}"} ·{" "}
+              {"{{homework_evaluation}}"}
+            </Text>
           </View>
         </ScrollView>
       )}
 
+      {/* Delivery Details Modal */}
+      <Modal
+        visible={!!selectedDetail}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setSelectedDetail(null)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <Text style={styles.modalTitle}>تفاصيل الإشعار</Text>
+            {selectedDetail ? (
+              (() => {
+                const { event, delivery, studentName } = selectedDetail;
+                const pres = getDeliveryStatusPresentation(delivery.status);
+                const tone = renderToneColors(pres.tone);
+                const safeFailure = formatUserFailureReason(
+                  delivery.failureReason,
+                  delivery.status,
+                );
+                const body = getDisplayMessageBody(delivery.renderedMessage);
+                return (
+                  <ScrollView
+                    style={styles.detailScroll}
+                    contentContainerStyle={styles.detailList}
+                    showsVerticalScrollIndicator
+                  >
+                    <View style={styles.detailMetaRow}>
+                      <View style={[styles.statusBadge, { backgroundColor: tone.bg }]}>
+                        <Text style={[styles.statusBadgeText, { color: tone.text }]}>
+                          {pres.label}
+                        </Text>
+                      </View>
+                      <View style={styles.eventTypeTag}>
+                        <Text style={styles.eventTypeText}>
+                          {eventTypeLabel(event.eventType)}
+                        </Text>
+                      </View>
+                    </View>
+
+                    <Text style={styles.detailRow}>
+                      الطالب / المستلم: {studentName || delivery.recipient || "غير متوفر"}
+                    </Text>
+                    <Text style={styles.detailRow}>
+                      قناة الإرسال: {delivery.channel === "sms" ? "SMS" : "إشعار فوري"}
+                    </Text>
+                    {delivery.channel === "sms" && delivery.recipient ? (
+                      <Text style={styles.detailRow}>
+                        رقم الهاتف: {delivery.recipient}
+                      </Text>
+                    ) : null}
+                    <Text style={styles.detailRow}>
+                      تاريخ ووقت الإرسال:{" "}
+                      {formatCairoDateTimeArabic(delivery.sentAt || event.createdAt)}
+                    </Text>
+                    {safeFailure ? (
+                      <Text style={[styles.detailRow, { color: Colors.dangerText }]}>
+                        سبب الفشل: {safeFailure}
+                      </Text>
+                    ) : null}
+
+                    <View
+                      style={
+                        delivery.channel === "sms" && !body.isMissing
+                          ? styles.smsMessageBubble
+                          : styles.previewBox
+                      }
+                    >
+                      <Text style={styles.previewLabel}>نص الرسالة الفعلي:</Text>
+                      <Text
+                        style={[
+                          styles.smsMessageText,
+                          body.isMissing && styles.missingMessageText,
+                        ]}
+                      >
+                        {body.text}
+                      </Text>
+                    </View>
+                  </ScrollView>
+                );
+              })()
+            ) : null}
+            <TouchableOpacity
+              style={styles.cancelBtn}
+              onPress={() => setSelectedDetail(null)}
+            >
+              <Text style={styles.cancelBtnText}>إغلاق</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Confirm Direct Send Modal */}
+      <Modal
+        visible={confirmSendVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setConfirmSendVisible(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <Text style={styles.modalTitle}>تأكيد إرسال SMS</Text>
+            <Text style={styles.detailRow}>
+              المجموعة: {selectedSmsGroup?.name || "—"}
+            </Text>
+            <Text style={styles.detailRow}>
+              عدد المستلمين الصالحين:{" "}
+              {toArabicDigits(String(smsGroupTargets?.sendable.length || 0))}
+            </Text>
+            <View style={styles.previewBox}>
+              <Text style={styles.previewLabel}>النص:</Text>
+              <Text style={styles.previewText}>{smsMessage.trim()}</Text>
+            </View>
+            <View style={styles.modalActions}>
+              <TouchableOpacity
+                style={styles.cancelBtn}
+                onPress={() => setConfirmSendVisible(false)}
+              >
+                <Text style={styles.cancelBtnText}>إلغاء</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.saveBtn}
+                onPress={executeDirectSms}
+                disabled={sendingSms}
+              >
+                <Text style={styles.saveBtnText}>تأكيد الإرسال</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Arabic Calendar Date Range Modal */}
+      <Modal
+        visible={calendarVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setCalendarVisible(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <Text style={styles.modalTitle}>اختيار نطاق التاريخ</Text>
+            <View style={styles.rangeToggleRow}>
+              <TouchableOpacity
+                style={[
+                  styles.rangeToggleBtn,
+                  selectingField === "start" && styles.rangeToggleBtnActive,
+                ]}
+                onPress={() => setSelectingField("start")}
+              >
+                <Text style={styles.rangeToggleLabel}>من: {formatLocalDate(draftStartDate)}</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[
+                  styles.rangeToggleBtn,
+                  selectingField === "end" && styles.rangeToggleBtnActive,
+                ]}
+                onPress={() => setSelectingField("end")}
+              >
+                <Text style={styles.rangeToggleLabel}>إلى: {formatLocalDate(draftEndDate)}</Text>
+              </TouchableOpacity>
+            </View>
+
+            {calendarError ? (
+              <Text style={{ color: Colors.dangerText, fontSize: 11, textAlign: "right" }}>
+                {calendarError}
+              </Text>
+            ) : null}
+
+            <View style={styles.calendarHeader}>
+              <TouchableOpacity
+                onPress={() => shiftCalendarMonth(-1)}
+                style={styles.calendarNavBtn}
+              >
+                <Ionicons name="chevron-forward" size={18} color={colors.textPrimary} />
+              </TouchableOpacity>
+              <Text style={styles.calendarMonthTitle}>
+                {formatArabicMonthYear(calendarCursor.year, calendarCursor.month)}
+              </Text>
+              <TouchableOpacity
+                onPress={() => shiftCalendarMonth(1)}
+                style={styles.calendarNavBtn}
+              >
+                <Ionicons name="chevron-back" size={18} color={colors.textPrimary} />
+              </TouchableOpacity>
+            </View>
+
+            <View style={styles.calendarWeekRow}>
+              {CALENDAR_WEEKDAYS.map((d) => (
+                <Text key={d} style={styles.calendarWeekdayText}>
+                  {d}
+                </Text>
+              ))}
+            </View>
+
+            <View style={styles.calendarGrid}>
+              {calendarCells.map((dateStr, idx) => {
+                if (!dateStr) return <View key={`e-${idx}`} style={styles.calendarCell} />;
+                const dayNum = Number(dateStr.slice(8, 10));
+                const inRange = dateStr >= draftStartDate && dateStr <= draftEndDate;
+                const isEdge = dateStr === draftStartDate || dateStr === draftEndDate;
+                return (
+                  <TouchableOpacity
+                    key={dateStr}
+                    style={[
+                      styles.calendarCell,
+                      inRange && styles.calendarCellInRange,
+                      isEdge && styles.calendarCellSelected,
+                    ]}
+                    onPress={() => handleSelectCalendarDay(dateStr)}
+                  >
+                    <Text
+                      style={[
+                        styles.calendarDayText,
+                        isEdge && styles.calendarDayTextSelected,
+                      ]}
+                    >
+                      {toArabicDigits(String(dayNum))}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+
+            <View style={styles.modalActions}>
+              <TouchableOpacity
+                style={styles.cancelBtn}
+                onPress={() => setCalendarVisible(false)}
+              >
+                <Text style={styles.cancelBtnText}>إلغاء</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.saveBtn} onPress={applyCustomDateRange}>
+                <Text style={styles.saveBtnText}>تطبيق</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
       {/* Edit Template Modal */}
-      <Modal visible={!!editingTemplate} transparent animationType="slide">
+      <Modal visible={!!editingTemplate} transparent animationType="fade">
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
             <Text style={styles.modalTitle}>تعديل قالب الإشعار</Text>
@@ -440,179 +1119,391 @@ export default function NotificationsScreen() {
               value={templateBodyInput}
               onChangeText={setTemplateBodyInput}
               textAlignVertical="top"
+              textAlign="right"
             />
             <View style={styles.modalActions}>
               <TouchableOpacity
-                style={[styles.modalBtn, styles.saveBtn]}
-                onPress={handleSaveTemplate}
-              >
-                <Text style={styles.saveBtnText}>حفظ التعديلات</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.modalBtn, styles.cancelBtn]}
+                style={styles.cancelBtn}
                 onPress={() => setEditingTemplate(null)}
               >
                 <Text style={styles.cancelBtnText}>إلغاء</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.saveBtn} onPress={handleSaveTemplate}>
+                <Text style={styles.saveBtnText}>حفظ</Text>
               </TouchableOpacity>
             </View>
           </View>
         </View>
       </Modal>
-    </View>
+    </SafeAreaView>
   );
 }
 
-const createStyles = () => StyleSheet.create({
-  container: { flex: 1, backgroundColor: Colors.slate50 },
-  header: {
-    padding: 22,
-    backgroundColor: Colors.cardBackground,
-    borderBottomWidth: 1,
-    borderBottomColor: Colors.border,
-    shadowColor: Colors.slate900,
-    shadowOpacity: 0.05,
-    shadowRadius: 8,
-    shadowOffset: { width: 0, height: 3 },
-    elevation: 2,
-  },
-  headerTitle: { fontSize: 20, fontWeight: "700", color: Colors.slate900, textAlign: "right" },
-  headerSubtitle: { fontSize: 13, color: Colors.slate500, textAlign: "right", marginTop: 4 },
-  tabBar: {
-    flexDirection: "row",
-    backgroundColor: Colors.white,
-    paddingHorizontal: 16,
-    borderBottomWidth: 1,
-    borderBottomColor: Colors.border,
-  },
-  tabButton: {
-    flex: 1,
-    paddingVertical: 12,
-    alignItems: "center",
-    borderBottomWidth: 2,
-    borderBottomColor: "transparent",
-  },
-  tabButtonActive: { borderBottomColor: Colors.primary },
-  tabText: { fontSize: 14, fontWeight: "600", color: Colors.slate500 },
-  tabTextActive: { color: Colors.primary },
-  listContent: { padding: 16 },
-  composeHero: { backgroundColor: Colors.primaryLight, borderRadius: 18, padding: 18, marginBottom: 12, alignItems: "flex-end", borderWidth: 1, borderColor: Colors.primaryMuted },
-  composeIcon: { width: 48, height: 48, borderRadius: 15, backgroundColor: Colors.white, alignItems: "center", justifyContent: "center", marginBottom: 10 },
-  composeTitle: { color: Colors.slate900, fontSize: 18, fontWeight: "900", textAlign: "right" },
-  composeHint: { color: Colors.slate600, fontSize: 12, textAlign: "right", marginTop: 5, lineHeight: 19 },
-  fieldLabel: { color: Colors.slate800, fontSize: 13, fontWeight: "800", textAlign: "right", marginTop: 4, marginBottom: 7 },
-  composeInput: { height: 46, borderWidth: 1, borderColor: Colors.border, borderRadius: 12, paddingHorizontal: 12, color: Colors.slate900, backgroundColor: Colors.slate50, fontSize: 13 },
-  studentPicker: { maxHeight: 190, marginTop: 7, marginBottom: 10 },
-  studentChoice: { minHeight: 52, flexDirection: "row", alignItems: "center", gap: 10, padding: 10, borderRadius: 12, borderWidth: 1, borderColor: Colors.border, backgroundColor: Colors.white, marginBottom: 6 },
-  studentChoiceActive: { borderColor: Colors.primary, backgroundColor: Colors.primaryLight },
-  studentChoiceName: { color: Colors.slate900, fontSize: 13, fontWeight: "800", textAlign: "right" },
-  studentChoiceMeta: { color: Colors.slate500, fontSize: 11, textAlign: "right", marginTop: 2 },
-  studentChoiceSchedule: { color: Colors.primary, fontSize: 11, fontWeight: "800", textAlign: "right", marginTop: 3 },
-  selectedGroupHint: { color: Colors.primary, backgroundColor: Colors.primaryLight, borderRadius: 10, padding: 9, fontSize: 11, fontWeight: "800", textAlign: "right", marginBottom: 10 },
-  recipientRow: { flexDirection: "row", gap: 8, marginBottom: 12 },
-  recipientButton: { flex: 1, minHeight: 48, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 7, borderWidth: 1, borderColor: Colors.border, borderRadius: 12, backgroundColor: Colors.white },
-  recipientButtonActive: { borderColor: Colors.primary, backgroundColor: Colors.primaryLight },
-  recipientTextButton: { color: Colors.slate600, fontSize: 13, fontWeight: "800" },
-  recipientTextButtonActive: { color: Colors.primary },
-  composeTextArea: { minHeight: 132, borderWidth: 1, borderColor: Colors.border, borderRadius: 12, padding: 12, color: Colors.slate900, backgroundColor: Colors.slate50, fontSize: 14, lineHeight: 21 },
-  composeCounter: { color: Colors.slate400, fontSize: 10, textAlign: "left", marginTop: 4 },
-  variablesHint: { color: Colors.slate500, fontSize: 11, textAlign: "right", lineHeight: 18, marginTop: 10 },
-  sendSmsButton: { minHeight: 50, borderRadius: 13, backgroundColor: Colors.primary, flexDirection: "row-reverse", alignItems: "center", justifyContent: "center", gap: 8, marginTop: 16 },
-  sendSmsText: { color: Colors.white, fontSize: 14, fontWeight: "900" },
-  card: {
-    backgroundColor: Colors.white,
-    borderRadius: 18,
-    padding: 17,
-    marginBottom: 12,
-    borderWidth: 1,
-    borderColor: Colors.border,
-  },
-  cardHeader: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    marginBottom: 10,
-  },
-  eventTypeTag: {
-    backgroundColor: Colors.primaryLight || "#EBF5FF",
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 6,
-  },
-  eventTypeText: { fontSize: 12, fontWeight: "700", color: Colors.primary },
-  timestampText: { fontSize: 12, color: Colors.slate400 },
-  deliveryRow: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    marginTop: 8,
-    paddingTop: 8,
-    borderTopWidth: 1,
-    borderTopColor: Colors.slate100,
-  },
-  deliveryMeta: { flexDirection: "row", alignItems: "center", gap: 6 },
-  channelText: { fontSize: 13, fontWeight: "600", color: Colors.slate700 },
-  recipientText: { fontSize: 12, color: Colors.slate400 },
-  statusBadge: { paddingHorizontal: 8, paddingVertical: 3, borderRadius: 6 },
-  statusBadgeText: { fontSize: 11, fontWeight: "600" },
-  centered: { flex: 1, justifyContent: "center", alignItems: "center" },
-  loadingText: { marginTop: 10, fontSize: 14, color: Colors.slate500 },
-  counterPanel: { marginHorizontal: 16, marginBottom: 10, padding: 12, borderRadius: 14, backgroundColor: Colors.white, borderWidth: 1, borderColor: Colors.border },
-  counterPanelTitle: { color: Colors.slate900, fontSize: 15, fontWeight: "800", textAlign: "right", marginBottom: 8 },
-  counterMonthRow: { flexDirection: "row", alignItems: "center", gap: 6, marginBottom: 8 }, counterMonthInput: { width: 76, height: 34, borderWidth: 1, borderColor: Colors.border, borderRadius: 8, textAlign: "center", color: Colors.slate900, fontSize: 11 }, counterMonthLabel: { color: Colors.slate500, fontSize: 10 },
-  counterGrid: { flexDirection: "row", gap: 8 }, counterMonthCard: { flex: 1, padding: 9, borderRadius: 10, backgroundColor: Colors.slate50 }, counterMonthTitle: { color: Colors.primary, fontWeight: "800", textAlign: "right" }, counterValue: { color: Colors.slate800, fontSize: 12, fontWeight: "700", textAlign: "right", marginTop: 4 }, counterDetail: { color: Colors.slate600, fontSize: 10, textAlign: "right", marginTop: 3 },
-  emptyContainer: { alignItems: "center", justifyContent: "center", paddingVertical: 48 },
-  emptyText: { marginTop: 12, fontSize: 14, color: Colors.slate500 },
-  sectionHeader: { fontSize: 14, fontWeight: "700", color: Colors.slate700, marginBottom: 12, textAlign: "right" },
-  tmplTitle: { fontSize: 14, fontWeight: "700", color: Colors.slate800 },
-  tmplBody: { fontSize: 13, color: Colors.slate600, lineHeight: 20, textAlign: "right", marginTop: 6 },
-  editBtn: {
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: Colors.primary,
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 6,
-    gap: 4,
-  },
-  editBtnText: { color: Colors.white, fontSize: 12, fontWeight: "600" },
-  variablesInfo: {
-    backgroundColor: Colors.accentLight,
-    borderWidth: 1,
-    borderColor: Colors.accent,
-    borderRadius: 12,
-    padding: 16,
-    marginTop: 8,
-  },
-  varTitle: { fontSize: 13, fontWeight: "700", color: Colors.warningText, textAlign: "right", marginBottom: 6 },
-  varItem: { fontSize: 12, color: Colors.warningText, textAlign: "right", marginVertical: 2 },
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: "rgba(0,0,0,0.5)",
-    justifyContent: "center",
-    alignItems: "center",
-    padding: 20,
-  },
-  modalContent: {
-    width: "100%",
-    backgroundColor: Colors.white,
-    borderRadius: 16,
-    padding: 20,
-  },
-  modalTitle: { fontSize: 16, fontWeight: "700", color: Colors.slate900, textAlign: "right" },
-  textArea: {
-    borderWidth: 1,
-    borderColor: Colors.border,
-    borderRadius: 8,
-    padding: 12,
-    fontSize: 14,
-    minHeight: 100,
-    textAlign: "right",
-    color: Colors.slate800,
-  },
-  modalActions: { flexDirection: "row", justifyContent: "flex-end", gap: 10, marginTop: 16 },
-  modalBtn: { paddingHorizontal: 16, paddingVertical: 10, borderRadius: 8 },
-  saveBtn: { backgroundColor: Colors.primary },
-  saveBtnText: { color: Colors.white, fontWeight: "700" },
-  cancelBtn: { backgroundColor: Colors.slate200 },
-  cancelBtnText: { color: Colors.slate700, fontWeight: "600" },
-});
+const createStyles = (colors: any) =>
+  StyleSheet.create({
+    container: { flex: 1, backgroundColor: colors.background },
+    centered: { flex: 1, justifyContent: "center", alignItems: "center", gap: 8 },
+    loadingText: { fontSize: 13, color: colors.textSecondary },
+    header: {
+      flexDirection: "row-reverse",
+      alignItems: "center",
+      paddingHorizontal: Spacing.md,
+      paddingTop: 10,
+      paddingBottom: 8,
+      backgroundColor: colors.cardBackground,
+      borderBottomWidth: 1,
+      borderBottomColor: colors.border,
+      gap: 10,
+    },
+    headerTitle: { fontSize: 18, fontWeight: "900", color: colors.textPrimary, textAlign: "right" },
+    headerSubtitle: { fontSize: 11, color: colors.textSecondary, textAlign: "right", marginTop: 1 },
+    refreshBtn: {
+      width: 34,
+      height: 34,
+      borderRadius: 9,
+      backgroundColor: colors.primaryLight,
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    dateFilterBar: {
+      paddingHorizontal: Spacing.md,
+      paddingTop: 8,
+      paddingBottom: 4,
+      gap: 4,
+    },
+    presetRow: { flexDirection: "row-reverse", gap: 6 },
+    presetChip: {
+      flexDirection: "row-reverse",
+      alignItems: "center",
+      gap: 4,
+      paddingHorizontal: 10,
+      paddingVertical: 5,
+      borderRadius: 9,
+      backgroundColor: colors.cardBackground,
+      borderWidth: 1,
+      borderColor: colors.border,
+    },
+    presetChipActive: { backgroundColor: colors.primary, borderColor: colors.primary },
+    presetChipText: { fontSize: 11, fontWeight: "800", color: colors.textPrimary },
+    presetChipTextActive: { color: Colors.white },
+    activeRangeText: { fontSize: 11, fontWeight: "700", color: colors.primary, textAlign: "right" },
+    statsCard: {
+      marginHorizontal: Spacing.md,
+      marginVertical: 4,
+      backgroundColor: colors.cardBackground,
+      borderRadius: 12,
+      borderWidth: 1,
+      borderColor: colors.border,
+      padding: 8,
+      gap: 6,
+    },
+    statsRow: { flexDirection: "row-reverse" },
+    statBox: { flex: 1, alignItems: "center" },
+    statVal: { fontSize: 16, fontWeight: "900" },
+    statLbl: { fontSize: 10, fontWeight: "700", color: colors.textSecondary, marginTop: 1 },
+    channelBreakdownRow: {
+      flexDirection: "row-reverse",
+      justifyContent: "space-between",
+      borderTopWidth: 1,
+      borderTopColor: colors.border,
+      paddingTop: 5,
+    },
+    channelBreakdownText: { fontSize: 10, fontWeight: "700", color: colors.textSecondary },
+    tabBar: {
+      flexDirection: "row-reverse",
+      marginHorizontal: Spacing.md,
+      marginTop: 4,
+      backgroundColor: colors.cardBackground,
+      borderRadius: 10,
+      borderWidth: 1,
+      borderColor: colors.border,
+      padding: 3,
+      gap: 4,
+    },
+    tabButton: { flex: 1, paddingVertical: 7, alignItems: "center", borderRadius: 8 },
+    tabButtonActive: { backgroundColor: colors.primary },
+    tabText: { fontSize: 12, fontWeight: "800", color: colors.textSecondary },
+    tabTextActive: { color: Colors.white },
+    feedbackBanner: {
+      flexDirection: "row-reverse",
+      alignItems: "center",
+      justifyContent: "space-between",
+      marginHorizontal: Spacing.md,
+      marginTop: 6,
+      paddingHorizontal: 10,
+      paddingVertical: 7,
+      borderRadius: 9,
+      borderWidth: 1,
+    },
+    feedbackSuccess: { backgroundColor: Colors.successLight, borderColor: Colors.success },
+    feedbackError: { backgroundColor: Colors.dangerLight, borderColor: Colors.danger },
+    feedbackText: { flex: 1, fontSize: 12, fontWeight: "700", textAlign: "right" },
+    listContent: { padding: Spacing.md, gap: 8, paddingBottom: 32 },
+    card: {
+      backgroundColor: colors.cardBackground,
+      borderRadius: 12,
+      padding: 11,
+      borderWidth: 1,
+      borderColor: colors.border,
+      gap: 6,
+    },
+    cardHeader: {
+      flexDirection: "row-reverse",
+      justifyContent: "space-between",
+      alignItems: "center",
+      gap: 8,
+    },
+    eventTypeTag: {
+      backgroundColor: colors.primaryLight,
+      paddingHorizontal: 8,
+      paddingVertical: 3,
+      borderRadius: 6,
+    },
+    eventTypeText: { color: colors.primary, fontSize: 11, fontWeight: "800" },
+    timestampText: { fontSize: 10, color: colors.textSecondary },
+    recipientNameText: { fontSize: 13, fontWeight: "800", color: colors.textPrimary, textAlign: "right" },
+    deliveryRow: {
+      flexDirection: "row-reverse",
+      flexWrap: "wrap",
+      justifyContent: "space-between",
+      alignItems: "center",
+      paddingTop: 6,
+      borderTopWidth: 1,
+      borderTopColor: colors.border,
+      gap: 6,
+    },
+    deliveryMeta: { flexDirection: "row-reverse", alignItems: "center", gap: 5, flex: 1 },
+    channelText: { fontSize: 12, fontWeight: "800", color: colors.textPrimary },
+    recipientText: { fontSize: 11, color: colors.textSecondary },
+    statusBadge: { paddingHorizontal: 8, paddingVertical: 3, borderRadius: 6 },
+    statusBadgeText: { fontSize: 10, fontWeight: "800" },
+    failureReasonText: { width: "100%", fontSize: 11, color: Colors.dangerText, textAlign: "right" },
+    tmplTitle: { flex: 1, fontSize: 13, fontWeight: "800", color: colors.textPrimary, textAlign: "right" },
+    editBtn: {
+      flexDirection: "row-reverse",
+      alignItems: "center",
+      backgroundColor: colors.primary,
+      paddingHorizontal: 9,
+      paddingVertical: 4,
+      borderRadius: 7,
+      gap: 4,
+    },
+    editBtnText: { color: Colors.white, fontSize: 11, fontWeight: "800" },
+    tmplBody: {
+      fontSize: 12,
+      color: colors.textSecondary,
+      lineHeight: 19,
+      textAlign: "right",
+      backgroundColor: colors.background,
+      padding: 8,
+      borderRadius: 8,
+    },
+    variablesInfo: {
+      backgroundColor: colors.cardBackground,
+      padding: 10,
+      borderRadius: 10,
+      borderWidth: 1,
+      borderColor: colors.border,
+      gap: 4,
+    },
+    varTitle: { fontSize: 12, fontWeight: "800", color: colors.primary, textAlign: "right" },
+    varItem: { fontSize: 11, color: colors.textSecondary, textAlign: "right", lineHeight: 18 },
+    emptyContainer: { alignItems: "center", justifyContent: "center", paddingVertical: 36, gap: 6 },
+    emptyText: { fontSize: 13, color: colors.textSecondary },
+    fieldLabel: { fontSize: 12, fontWeight: "800", color: colors.textPrimary, textAlign: "right" },
+    composeInput: {
+      borderWidth: 1,
+      borderColor: colors.border,
+      borderRadius: 9,
+      paddingHorizontal: 10,
+      height: 38,
+      color: colors.textPrimary,
+      backgroundColor: colors.background,
+      fontSize: 12,
+    },
+    studentPicker: {
+      maxHeight: 130,
+      borderWidth: 1,
+      borderColor: colors.border,
+      borderRadius: 9,
+      padding: 5,
+    },
+    studentChoice: {
+      flexDirection: "row-reverse",
+      justifyContent: "space-between",
+      alignItems: "center",
+      padding: 8,
+      borderRadius: 8,
+      marginBottom: 4,
+      backgroundColor: colors.background,
+    },
+    studentChoiceActive: { backgroundColor: colors.primaryLight },
+    studentChoiceName: { fontSize: 12, fontWeight: "800", color: colors.textPrimary, textAlign: "right" },
+    studentChoiceMeta: { fontSize: 10, color: colors.textSecondary, textAlign: "right" },
+    studentChoiceSchedule: { fontSize: 10, color: colors.primary, textAlign: "right" },
+    selectedGroupHint: { fontSize: 11, fontWeight: "800", color: colors.primary, textAlign: "right" },
+    recipientRow: { flexDirection: "row-reverse", gap: 8 },
+    recipientButton: {
+      flex: 1,
+      flexDirection: "row-reverse",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 5,
+      paddingVertical: 8,
+      borderRadius: 9,
+      borderWidth: 1,
+      borderColor: colors.border,
+    },
+    recipientButtonActive: { borderColor: colors.primary, backgroundColor: colors.primaryLight },
+    recipientTextButton: { fontSize: 12, fontWeight: "700", color: colors.textSecondary },
+    recipientTextButtonActive: { color: colors.primary, fontWeight: "800" },
+    composeTextArea: {
+      borderWidth: 1,
+      borderColor: colors.border,
+      borderRadius: 9,
+      padding: 9,
+      minHeight: 84,
+      color: colors.textPrimary,
+      backgroundColor: colors.background,
+      fontSize: 13,
+    },
+    composeMetaRow: { flexDirection: "row-reverse", justifyContent: "space-between" },
+    composeCounter: { fontSize: 11, color: colors.textSecondary },
+    previewBox: {
+      backgroundColor: colors.background,
+      borderRadius: 8,
+      padding: 8,
+      borderWidth: 1,
+      borderColor: colors.border,
+      gap: 3,
+    },
+    previewLabel: { fontSize: 10, fontWeight: "800", color: colors.primary, textAlign: "right" },
+    previewText: { fontSize: 12, color: colors.textPrimary, textAlign: "right", lineHeight: 18 },
+    sendSmsButton: {
+      flexDirection: "row-reverse",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 6,
+      backgroundColor: colors.primary,
+      borderRadius: 10,
+      minHeight: 40,
+    },
+    sendSmsText: { color: Colors.white, fontSize: 13, fontWeight: "800" },
+    modalOverlay: {
+      flex: 1,
+      backgroundColor: "rgba(15, 23, 42, 0.45)",
+      justifyContent: "center",
+      padding: 18,
+    },
+    modalContent: {
+      backgroundColor: colors.cardBackground,
+      borderRadius: 14,
+      padding: 14,
+      gap: 10,
+      borderWidth: 1,
+      borderColor: colors.border,
+    },
+    modalTitle: { fontSize: 15, fontWeight: "900", color: colors.textPrimary, textAlign: "right" },
+    detailScroll: { maxHeight: 420 },
+    detailList: { gap: 6 },
+    detailMetaRow: {
+      flexDirection: "row-reverse",
+      alignItems: "center",
+      justifyContent: "space-between",
+      marginBottom: 2,
+    },
+    detailRow: { fontSize: 12, color: colors.textPrimary, textAlign: "right", lineHeight: 18 },
+    smsMessageBubble: {
+      backgroundColor: colors.primaryLight,
+      borderRadius: 12,
+      borderTopRightRadius: 4,
+      padding: 12,
+      borderWidth: 1,
+      borderColor: colors.primary,
+      marginTop: 4,
+      gap: 4,
+    },
+    smsMessageText: {
+      fontSize: 13,
+      color: colors.textPrimary,
+      textAlign: "right",
+      lineHeight: 20,
+    },
+    missingMessageText: {
+      color: colors.textSecondary,
+      fontStyle: "italic",
+    },
+    textArea: {
+      borderWidth: 1,
+      borderColor: colors.border,
+      borderRadius: 9,
+      padding: 10,
+      minHeight: 96,
+      fontSize: 13,
+      color: colors.textPrimary,
+      backgroundColor: colors.background,
+    },
+    modalActions: { flexDirection: "row-reverse", gap: 8, justifyContent: "flex-end" },
+    cancelBtn: {
+      paddingHorizontal: 14,
+      paddingVertical: 8,
+      borderRadius: 8,
+      backgroundColor: colors.background,
+      alignItems: "center",
+    },
+    cancelBtnText: { color: colors.textPrimary, fontSize: 12, fontWeight: "800" },
+    saveBtn: {
+      paddingHorizontal: 14,
+      paddingVertical: 8,
+      borderRadius: 8,
+      backgroundColor: colors.primary,
+      alignItems: "center",
+    },
+    saveBtnText: { color: Colors.white, fontSize: 12, fontWeight: "800" },
+    rangeToggleRow: { flexDirection: "row-reverse", gap: 6 },
+    rangeToggleBtn: {
+      flex: 1,
+      paddingVertical: 6,
+      paddingHorizontal: 8,
+      borderRadius: 8,
+      borderWidth: 1,
+      borderColor: colors.border,
+      alignItems: "center",
+    },
+    rangeToggleBtnActive: { borderColor: colors.primary, backgroundColor: colors.primaryLight },
+    rangeToggleLabel: { fontSize: 11, fontWeight: "800", color: colors.textPrimary },
+    calendarHeader: {
+      flexDirection: "row-reverse",
+      alignItems: "center",
+      justifyContent: "space-between",
+    },
+    calendarNavBtn: {
+      width: 32,
+      height: 32,
+      borderRadius: 8,
+      backgroundColor: colors.background,
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    calendarMonthTitle: { fontSize: 14, fontWeight: "900", color: colors.textPrimary },
+    calendarWeekRow: { flexDirection: "row-reverse" },
+    calendarWeekdayText: {
+      flex: 1,
+      textAlign: "center",
+      fontSize: 11,
+      fontWeight: "800",
+      color: colors.textSecondary,
+    },
+    calendarGrid: { flexDirection: "row-reverse", flexWrap: "wrap" },
+    calendarCell: {
+      width: "14.2857%",
+      height: 34,
+      alignItems: "center",
+      justifyContent: "center",
+      borderRadius: 8,
+    },
+    calendarCellInRange: { backgroundColor: colors.primaryLight },
+    calendarCellSelected: { backgroundColor: colors.primary },
+    calendarDayText: { fontSize: 12, fontWeight: "700", color: colors.textPrimary },
+    calendarDayTextSelected: { color: Colors.white, fontWeight: "900" },
+  });

@@ -245,12 +245,11 @@ function orderSyncOperations(operations) {
     }
     return 0;
   });
-  const byEntity = new Map(
-    base.map((operation) => [
-      `${canonicalSyncEntity(operation.entityType)}:${String(operation.entityId || "")}`,
-      operation,
-    ]),
-  );
+  const byEntity = new Map();
+  for (const operation of base) {
+    const key = `${canonicalSyncEntity(operation.entityType)}:${String(operation.entityId || "")}`;
+    if (!byEntity.has(key)) byEntity.set(key, operation);
+  }
   const byEnrollmentMember = new Map();
   for (const operation of base) {
     if (canonicalSyncEntity(operation.entityType) !== "enrollment") continue;
@@ -1963,10 +1962,16 @@ class SyncProcessor {
             continue;
           }
           if (canonicalSyncEntity(entityType) === "session") {
-            const retryPayload =
-              typeof payload === "string"
-                ? JSON.parse(payload || "{}")
-                : payload || {};
+            let retryPayload = {};
+            if (typeof payload === "string") {
+              try {
+                retryPayload = JSON.parse(payload || "{}");
+              } catch {
+                retryPayload = {};
+              }
+            } else {
+              retryPayload = payload || {};
+            }
             const canonicalSessionId =
               (await SyncProcessor.resolveSessionAlias(
                 client,
@@ -2291,7 +2296,7 @@ class SyncProcessor {
              (id, operation_id, center_id, user_id, device_id, entity_type, entity_id, action, timestamp, payload)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), $9);`,
             [
-              `aud-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+              `aud-${crypto.randomUUID()}`,
               operationId,
               centerId,
               userId,
@@ -2412,10 +2417,15 @@ class SyncProcessor {
     });
 
     if (pendingSmsDeliveryIds.length > 0) {
-      await SyncProcessor.dispatchPendingSmsDeliveries(
+      void SyncProcessor.dispatchPendingSmsDeliveries(
         centerId,
         pendingSmsDeliveryIds,
-      );
+      ).catch((err) => {
+        console.warn(
+          "[SyncProcessor] Background SMS dispatch failed:",
+          err?.message || err,
+        );
+      });
     }
 
     return txResult;
@@ -3041,7 +3051,11 @@ class SyncProcessor {
             }
             const update = await client.query(
               `UPDATE attendance
-                  SET status = 'absent', is_late = FALSE, operation_id = $6
+                  SET status = 'absent',
+                      is_late = FALSE,
+                      attendance_type = 'present',
+                      original_absence_id = NULL,
+                      operation_id = $6
                 WHERE center_id = $1 AND id = $2 AND session_id = $3
                   AND student_id = $4 AND operation_id = $5
                   AND status <> 'absent'`,
@@ -3671,13 +3685,40 @@ class SyncProcessor {
         );
         if (requestedObligationId) {
           await client.query(
-            `UPDATE student_payment_request_obligations
-                SET amount_paid = amount_due,
-                    status = 'paid',
+            `UPDATE student_payment_request_obligations o
+                SET amount_paid = LEAST(
+                      o.amount_due,
+                      COALESCE((
+                        SELECT SUM(p.amount)
+                        FROM payments p
+                        WHERE p.center_id = o.center_id
+                          AND p.payment_request_obligation_id = o.id
+                          AND p.is_reversed = false
+                      ), 0)
+                    ),
+                    status = CASE
+                      WHEN COALESCE((
+                        SELECT SUM(p.amount)
+                        FROM payments p
+                        WHERE p.center_id = o.center_id
+                          AND p.payment_request_obligation_id = o.id
+                          AND p.is_reversed = false
+                      ), 0) >= o.amount_due - 0.000001 THEN 'paid'
+                      ELSE 'unpaid'
+                    END,
                     payment_id = $3,
-                    paid_at = COALESCE(paid_at, NOW()),
+                    paid_at = CASE
+                      WHEN COALESCE((
+                        SELECT SUM(p.amount)
+                        FROM payments p
+                        WHERE p.center_id = o.center_id
+                          AND p.payment_request_obligation_id = o.id
+                          AND p.is_reversed = false
+                      ), 0) >= o.amount_due - 0.000001 THEN COALESCE(o.paid_at, NOW())
+                      ELSE NULL
+                    END,
                     updated_at = NOW()
-              WHERE center_id = $1 AND id = $2 AND status != 'cancelled'`,
+              WHERE o.center_id = $1 AND o.id = $2 AND o.status != 'cancelled'`,
             [centerId, requestedObligationId, pay.id],
           );
         }
@@ -4263,6 +4304,20 @@ class SyncProcessor {
                 )`,
             [centerId, sessionId],
           );
+          const sessionPaymentsSum =
+            sess.totalSessionPayments !== undefined &&
+            sess.totalSessionPayments !== null
+              ? Number(sess.totalSessionPayments)
+              : Number(
+                  (
+                    await client.query(
+                      `SELECT COALESCE(SUM(amount), 0)::numeric AS total
+                         FROM payments
+                        WHERE center_id = $1 AND session_id = $2 AND is_reversed = false`,
+                      [centerId, sessionId],
+                    )
+                  ).rows[0]?.total || 0,
+                );
           await client.query(
             `INSERT INTO session_closing_records
              (id, center_id, session_id, closed_by, total_expected, total_present, total_absent, total_collected, discrepancy_notes, closed_at)
@@ -4280,7 +4335,7 @@ class SyncProcessor {
               Number(sess.totalExpected ?? expected.rows[0]?.count ?? 0),
               Number(sess.totalAttendance ?? attendance.rows[0]?.count ?? 0),
               Number(absent.rows[0]?.count ?? 0),
-              Number(sess.totalSessionPayments ?? 0),
+              sessionPaymentsSum,
               sess.reason || null,
             ],
           );
@@ -5357,7 +5412,19 @@ class SyncProcessor {
           operationType.toLowerCase().includes("delete") ||
           statusVal === "deleted" ||
           statusVal === "inactive";
-        if (name && !isDelete) {
+        const existingStatus = await client.query(
+          "SELECT center_id FROM homework_evaluation_statuses WHERE id = $1",
+          [id],
+        );
+        if (
+          existingStatus.rows[0] &&
+          String(existingStatus.rows[0].center_id) !== String(centerId)
+        ) {
+          throw new Error(
+            "Homework evaluation status does not belong to the authenticated center.",
+          );
+        }
+        if (name && (!isDelete || !existingStatus.rows[0])) {
           await client.query(
             `INSERT INTO homework_evaluation_statuses (id, center_id, name, status, created_at, updated_at)
              VALUES ($1,$2,$3,$4,COALESCE($5,NOW()),COALESCE($6,NOW()))
@@ -5367,7 +5434,7 @@ class SyncProcessor {
               id,
               centerId,
               name,
-              statusVal,
+              statusVal || "active",
               statusObj.created_at || statusObj.createdAt || null,
               statusObj.updated_at || statusObj.updatedAt || null,
             ],
@@ -5395,10 +5462,29 @@ class SyncProcessor {
         const evaluation = payload.evaluation || payload;
         const id = evaluation.id || context.entityId;
         const studentId = evaluation.student_id || evaluation.studentId;
-        const sessionId = evaluation.session_id || evaluation.sessionId;
+        const rawSessionId = evaluation.session_id || evaluation.sessionId;
+        const sessionId = rawSessionId
+          ? (await SyncProcessor.resolveSessionAlias(
+              client,
+              centerId,
+              rawSessionId,
+            )) || rawSessionId
+          : null;
         const statusId = evaluation.status_id || evaluation.statusId || null;
         if (!id || !studentId || !sessionId)
           throw new Error("Homework evaluation requires student and session.");
+        const existingEval = await client.query(
+          "SELECT center_id FROM session_homework_evaluations WHERE id = $1",
+          [id],
+        );
+        if (
+          existingEval.rows[0] &&
+          String(existingEval.rows[0].center_id) !== String(centerId)
+        ) {
+          throw new Error(
+            "Homework evaluation does not belong to the authenticated center.",
+          );
+        }
         const student = await client.query(
           "SELECT id FROM students WHERE center_id = $1 AND id = $2",
           [centerId, studentId],
@@ -5413,7 +5499,7 @@ class SyncProcessor {
           );
         if (statusId) {
           const status = await client.query(
-            "SELECT id FROM homework_evaluation_statuses WHERE center_id = $1 AND id = $2 AND status = 'active'",
+            "SELECT id FROM homework_evaluation_statuses WHERE center_id = $1 AND id = $2 AND status != 'deleted'",
             [centerId, statusId],
           );
           if (!status.rows[0])
@@ -5441,13 +5527,15 @@ class SyncProcessor {
           await client.query(
             `UPDATE session_homework_evaluations
                 SET deleted_at = COALESCE($1,NOW()), deleted_by = $2, updated_at = COALESCE($3,NOW())
-              WHERE center_id = $4 AND id = $5`,
+              WHERE center_id = $4 AND (id = $5 OR (student_id = $6 AND session_id = $7))`,
             [
               evaluation.deleted_at || evaluation.deletedAt || null,
               evaluation.deleted_by || evaluation.deletedBy || userId,
               evaluation.updated_at || evaluation.updatedAt || null,
               centerId,
               id,
+              studentId,
+              sessionId,
             ],
           );
         }
@@ -5485,17 +5573,22 @@ class SyncProcessor {
         const id = score.id || context.entityId;
         const examId = score.exam_id || score.examId;
         const studentId = score.student_id || score.studentId;
+        const sessionId = score.session_id || score.sessionId || null;
         if (!id || !examId || !studentId)
           throw new Error("Grade score requires exam and student.");
         await client.query(
-          `INSERT INTO grade_scores (id, center_id, exam_id, student_id, score, created_at, updated_at)
-          VALUES ($1,$2,$3,$4,$5,COALESCE($6,NOW()),NOW())
-          ON CONFLICT (center_id, exam_id, student_id) DO UPDATE SET score=EXCLUDED.score, updated_at=NOW()`,
+          `INSERT INTO grade_scores (id, center_id, exam_id, student_id, session_id, score, created_at, updated_at)
+          VALUES ($1,$2,$3,$4,$5,$6,COALESCE($7,NOW()),NOW())
+          ON CONFLICT (center_id, exam_id, student_id) DO UPDATE SET
+            score=EXCLUDED.score,
+            session_id=COALESCE(grade_scores.session_id, EXCLUDED.session_id),
+            updated_at=NOW()`,
           [
             id,
             centerId,
             examId,
             studentId,
+            sessionId,
             score.score === "" ? null : (score.score ?? null),
             score.created_at || score.createdAt || null,
           ],
@@ -5508,7 +5601,53 @@ class SyncProcessor {
         const id = event.id || event.eventId || context.entityId;
         const studentId = event.student_id || event.studentId;
         const eventType = event.event_type || event.eventType || "attendance";
-        const sessionId = event.session_id || event.sessionId || null;
+        const rawSessionId = event.session_id || event.sessionId || null;
+        let sessionId = rawSessionId
+          ? (await SyncProcessor.resolveSessionAlias(
+              client,
+              centerId,
+              rawSessionId,
+            )) || rawSessionId
+          : null;
+        const existingEvent = await client.query(
+          "SELECT center_id FROM notification_events WHERE id = $1",
+          [id],
+        );
+        if (
+          existingEvent.rows[0] &&
+          String(existingEvent.rows[0].center_id) !== String(centerId)
+        ) {
+          throw new Error(
+            "Notification event does not belong to the authenticated center.",
+          );
+        }
+        const studentCheck = await client.query(
+          "SELECT id, phone, parent_phone FROM students WHERE center_id = $1 AND id = $2",
+          [centerId, studentId],
+        );
+        if (!studentCheck.rows[0]) {
+          throw new Error(
+            "Notification event student must belong to the authenticated center.",
+          );
+        }
+        if (sessionId) {
+          const sessionCheck = await client.query(
+            "SELECT id FROM sessions WHERE center_id = $1 AND id = $2",
+            [centerId, sessionId],
+          );
+          if (!sessionCheck.rows[0]) {
+            if (
+              eventType === "homework" ||
+              eventType === "attendance" ||
+              eventType === "absence"
+            ) {
+              throw new Error(
+                "Notification event session must belong to the authenticated center.",
+              );
+            }
+            sessionId = null;
+          }
+        }
         let validatedEvent = event;
         if (eventType === "absence") {
           const absence =
@@ -5525,22 +5664,13 @@ class SyncProcessor {
         const phone =
           event.recipient_phone ||
           event.recipientPhone ||
-          (
-            await client.query(
-              "SELECT phone, parent_phone FROM students WHERE center_id=$1 AND id=$2",
-              [centerId, studentId],
-            )
-          ).rows[0]?.parent_phone ||
-          (
-            await client.query(
-              "SELECT phone FROM students WHERE center_id=$1 AND id=$2",
-              [centerId, studentId],
-            )
-          ).rows[0]?.phone ||
+          studentCheck.rows[0]?.parent_phone ||
+          studentCheck.rows[0]?.phone ||
           "";
         await client.query(
           `INSERT INTO notification_events (id, center_id, student_id, session_id, event_type, recipient_phone, channel, status, payload, created_at)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,'pending',$8,NOW()) ON CONFLICT (id) DO UPDATE SET status=EXCLUDED.status, payload=EXCLUDED.payload`,
+          VALUES ($1,$2,$3,$4,$5,$6,$7,'pending',$8,NOW()) ON CONFLICT (id) DO UPDATE SET status=EXCLUDED.status, payload=EXCLUDED.payload
+          WHERE notification_events.center_id = EXCLUDED.center_id`,
           [
             id,
             centerId,
@@ -5818,11 +5948,12 @@ class SyncProcessor {
           Boolean(close.reopenedBy || close.reopened_by);
         await client.query(
           `INSERT INTO daily_closing_summaries (id, center_id, business_date, closed_by, total_sessions, total_attendees, total_revenue, cash_in_drawer, status, notes, closed_at)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,${reopen ? "NULL" : "NOW()"})
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NOW())
           ON CONFLICT (center_id, business_date) DO UPDATE SET closed_by=EXCLUDED.closed_by,
             total_sessions=EXCLUDED.total_sessions, total_attendees=EXCLUDED.total_attendees,
             total_revenue=EXCLUDED.total_revenue, cash_in_drawer=EXCLUDED.cash_in_drawer,
-            status=EXCLUDED.status, notes=EXCLUDED.notes, closed_at=EXCLUDED.closed_at`,
+            status=EXCLUDED.status, notes=EXCLUDED.notes,
+            closed_at=${reopen ? "COALESCE(daily_closing_summaries.closed_at, NOW())" : "EXCLUDED.closed_at"}`,
           [
             close.id || context.entityId || `daily-${centerId}-${date}`,
             centerId,
@@ -5890,6 +6021,24 @@ class SyncProcessor {
             req.updated_at || req.updatedAt || null,
           ],
         );
+        if (status === "archived") {
+          await client.query(
+            `UPDATE student_payment_request_obligations
+                SET status = 'cancelled',
+                    cancelled_at = COALESCE(cancelled_at, NOW()),
+                    updated_at = NOW()
+              WHERE center_id = $1 AND request_id = $2 AND status = 'unpaid'`,
+            [centerId, reqId],
+          );
+        } else if (Number.isFinite(Number(req.amount)) && Number(req.amount) > 0) {
+          await client.query(
+            `UPDATE student_payment_request_obligations
+                SET amount_due = $3,
+                    updated_at = NOW()
+              WHERE center_id = $1 AND request_id = $2 AND status = 'unpaid' AND COALESCE(amount_paid, 0) = 0`,
+            [centerId, reqId, Number(req.amount)],
+          );
+        }
         break;
       }
 
@@ -5985,6 +6134,39 @@ class SyncProcessor {
     return typeof raw === "object" && !Array.isArray(raw) ? { ...raw } : {};
   }
 
+  static mapSmsCategoryToReason(category) {
+    switch (category) {
+      case "interrupted_during_send":
+        return "انقطع الاتصال أثناء الإرسال؛ النتيجة غير مؤكدة لدى المزود.";
+      case "timeout_ambiguous":
+        return "انتهت مهلة الاتصال بالمزود؛ النتيجة غير مؤكدة.";
+      case "network_failure_ambiguous":
+        return "فشل الشبكة أثناء الاتصال بالمزود؛ النتيجة غير مؤكدة.";
+      case "authentication_failed":
+        return "فشل مصادقة مزود الرسائل (API credentials).";
+      case "provider_rejected":
+        return "رفض المزود طلب الإرسال.";
+      case "invalid_phone":
+        return "رقم الهاتف غير صالح.";
+      case "insufficient_credits":
+        return "رصيد رسائل SMS غير كافٍ لدى المزود.";
+      case "rate_limited":
+        return "تم تجاوز حد الإرسال المؤقت لدى المزود (Rate limit).";
+      case "service_unavailable":
+        return "خدمة المزود غير متاحة مؤقتاً.";
+      case "sms_disabled":
+        return "خدمة SMS غير مفعلة أو غير مهيأة لهذا المركز.";
+      default:
+        return category ? `خطأ من المزود: ${category}` : null;
+    }
+  }
+
+  static maskRecipientSuffix(recipient) {
+    const clean = String(recipient || "").trim();
+    if (!clean) return null;
+    return clean.length <= 4 ? clean : `***${clean.slice(-4)}`;
+  }
+
   /**
    * Transitions expired 'sending' SMS rows to 'failed' with dispatchState='ambiguous_outcome'
    * and category='interrupted_during_send' without ever re-sending them to ZADX.
@@ -6019,6 +6201,18 @@ class SyncProcessor {
       );
       const expiredRows = expiredRes.rows || [];
       for (const row of expiredRows) {
+        const rowPayload = SyncProcessor.parseSmsResponsePayload(row.response_payload);
+        console.warn("SMS stale sending claim marked ambiguous_outcome", {
+          deliveryId: row.id,
+          centerId: row.center_id,
+          providerMessageId: row.provider_message_id || null,
+          operationId: rowPayload.operationId || null,
+          status: "failed",
+          dispatchState: "ambiguous_outcome",
+          category: "interrupted_during_send",
+          claimAtMs: rowPayload.claimAtMs || null,
+          ambiguousAtMs: nowMs,
+        });
         await db.query(
           `UPDATE server_sync_operations
               SET payload = $1, applied_at = NOW()
@@ -6032,6 +6226,8 @@ class SyncProcessor {
                 notification_event_id: row.notification_event_id,
                 provider: row.provider || "sms",
                 status: "failed",
+                dispatch_state: "ambiguous_outcome",
+                failure_reason: SyncProcessor.mapSmsCategoryToReason("interrupted_during_send"),
                 retry_count: Number(row.retry_count || 0),
                 provider_message_id: row.provider_message_id || null,
               },
@@ -6099,6 +6295,14 @@ class SyncProcessor {
             notification_event_id: updatedRow.notification_event_id,
             provider: updatedRow.provider || "sms",
             status: updatedRow.status,
+            dispatch_state: responsePayload?.dispatchState || null,
+            failure_reason:
+              updatedRow.status === "sent" || updatedRow.status === "delivered"
+                ? null
+                : SyncProcessor.mapSmsCategoryToReason(responsePayload?.category),
+            accepted_at: responsePayload?.acceptedAtMs
+              ? new Date(Number(responsePayload.acceptedAtMs)).toISOString()
+              : null,
             retry_count: Number(updatedRow.retry_count || 0),
             provider_message_id: updatedRow.provider_message_id || null,
           },
@@ -6284,12 +6488,14 @@ class SyncProcessor {
         continue;
       }
 
+      const providerRequestStartAtMs = Date.now();
       try {
         const result = await zadxSmsProvider.send({
           to: recipient,
           message: renderedMessage,
           idempotencyKey: `fixion-sms-${id}`,
         });
+        const providerRespondedAtMs = Date.now();
         const finalized = await SyncProcessor.finalizeClaimedSmsDelivery({
           id,
           centerId,
@@ -6301,9 +6507,12 @@ class SyncProcessor {
             ...payloadObj,
             httpStatus: result.httpStatus,
             providerMessageId: result.providerMessageId || null,
-            dispatchState: "sent",
+            dispatchState: "accepted",
             claimToken,
             claimAtMs,
+            providerRequestStartAtMs,
+            providerRespondedAtMs,
+            acceptedAtMs: providerRespondedAtMs,
             retry_count: currentRetryCount,
             nextRetryAtMs: null,
           },
@@ -6313,14 +6522,23 @@ class SyncProcessor {
           continue;
         }
         sent += 1;
-        console.info("SMS delivery accepted", {
+        console.info("SMS delivery accepted by provider", {
           deliveryId: id,
           centerId,
+          operationId: payloadObj.operationId || null,
+          recipientSuffix: SyncProcessor.maskRecipientSuffix(recipient),
           provider: "zadx",
+          status: "sent",
+          dispatchState: "accepted",
           httpStatus: result.httpStatus,
           providerMessageId: result.providerMessageId || null,
+          claimAtMs,
+          providerRequestStartAtMs,
+          providerRespondedAtMs,
+          durationMs: providerRespondedAtMs - providerRequestStartAtMs,
         });
       } catch (error) {
+        const providerRespondedAtMs = Date.now();
         const isAmbiguous =
           Boolean(error?.ambiguous) ||
           error?.category === "timeout_ambiguous" ||
@@ -6345,6 +6563,9 @@ class SyncProcessor {
               dispatchState: "ambiguous_outcome",
               claimToken,
               claimAtMs,
+              providerRequestStartAtMs,
+              providerRespondedAtMs,
+              ambiguousAtMs: providerRespondedAtMs,
               retry_count: nextRetryCount,
               nextRetryAtMs: null,
               recipient,
@@ -6386,6 +6607,8 @@ class SyncProcessor {
               dispatchState: "retry_scheduled",
               claimToken,
               claimAtMs,
+              providerRequestStartAtMs,
+              providerRespondedAtMs,
               retry_count: nextRetryCount,
               nextRetryAtMs,
               recipient,
@@ -6418,6 +6641,8 @@ class SyncProcessor {
               dispatchState: "failed",
               claimToken,
               claimAtMs,
+              providerRequestStartAtMs,
+              providerRespondedAtMs,
               retry_count: nextRetryCount,
               nextRetryAtMs: null,
               recipient,
@@ -6431,12 +6656,20 @@ class SyncProcessor {
             skipped += 1;
           }
         }
-        console.warn("SMS delivery failed", {
+        console.warn("SMS delivery error", {
           deliveryId: id,
           centerId,
+          operationId: payloadObj.operationId || null,
+          recipientSuffix: SyncProcessor.maskRecipientSuffix(recipient),
           provider: "zadx",
+          status: isAmbiguous ? "failed" : isConfirmedRetryable && currentRetryCount < SyncProcessor.MAX_SMS_RETRIES ? "queued" : "failed",
+          dispatchState: isAmbiguous ? "ambiguous_outcome" : isConfirmedRetryable && currentRetryCount < SyncProcessor.MAX_SMS_RETRIES ? "retry_scheduled" : "failed",
           category: error?.category || "provider_error",
           httpStatus: error?.httpStatus || null,
+          claimAtMs,
+          providerRequestStartAtMs,
+          providerRespondedAtMs,
+          durationMs: providerRespondedAtMs - providerRequestStartAtMs,
         });
       }
     }

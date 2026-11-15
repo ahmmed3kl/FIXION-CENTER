@@ -1430,6 +1430,29 @@ export const MIGRATIONS: Migration[] = [
       } catch {}
     },
   },
+  {
+    version: 36,
+    name: "homework_evaluation_groups_schedule_schema_guard",
+    up: (db: SqlDatabase) => {
+      try {
+        DatabaseService.ensureAcademicSchema(db);
+      } catch {}
+    },
+  },
+  {
+    version: 37,
+    name: "grade_scores_session_association",
+    up: (db: SqlDatabase) => {
+      try {
+        db.execSync("ALTER TABLE grade_scores ADD COLUMN session_id TEXT;");
+      } catch {}
+      try {
+        db.execSync(
+          "CREATE INDEX IF NOT EXISTS idx_grade_scores_session ON grade_scores(center_id, session_id);",
+        );
+      } catch {}
+    },
+  },
 ];
 
 const LATEST_MIGRATION_VERSION =
@@ -1590,11 +1613,27 @@ class InMemorySqliteMock implements SqlDatabase {
               : row.id != null
                 ? "id"
                 : "center_id";
-          const existingIndex = list.findIndex(
-            (r) => r[keyField] === row[keyField],
-          );
+          const existingIndex =
+            tableName === "session_homework_evaluations"
+              ? list.findIndex(
+                  (r) =>
+                    r.id === row.id ||
+                    (r.center_id === row.center_id &&
+                      r.student_id === row.student_id &&
+                      r.session_id === row.session_id),
+                )
+              : list.findIndex((r) => r[keyField] === row[keyField]);
           if (existingIndex >= 0) {
-            list[existingIndex] = { ...list[existingIndex], ...row };
+            const existingRow = list[existingIndex];
+            list[existingIndex] =
+              tableName === "session_homework_evaluations"
+                ? {
+                    ...existingRow,
+                    ...row,
+                    id: existingRow.id || row.id,
+                    created_at: existingRow.created_at || row.created_at,
+                  }
+                : { ...existingRow, ...row };
             this.tables.set(tableName, list);
             return { lastInsertRowId: existingIndex + 1, changes: 1 };
           }
@@ -2005,6 +2044,44 @@ class InMemorySqliteMock implements SqlDatabase {
             operation_id: operationId,
           });
           return { lastInsertRowId: 0, changes: 1 };
+        } else if (
+          tableName === "attendance" &&
+          trimmed.includes("status = 'absent'") &&
+          trimmed.includes("WHERE center_id = ? AND id = ? AND session_id = ? AND student_id = ?")
+        ) {
+          const [operationId, centerId, id, sessionId, studentId] = params;
+          const row = list.find(
+            (candidate) =>
+              candidate.center_id === centerId &&
+              candidate.id === id &&
+              candidate.session_id === sessionId &&
+              candidate.student_id === studentId,
+          );
+          if (!row) return { lastInsertRowId: 0, changes: 0 };
+          row.status = "absent";
+          row.is_late = 0;
+          row.attendance_type = "present";
+          row.original_absence_id = null;
+          row.operation_id = operationId;
+          return { lastInsertRowId: 0, changes: 1 };
+        } else if (
+          tableName === "payments" &&
+          trimmed.includes("is_reversed = 1") &&
+          trimmed.includes("WHERE center_id = ? AND id = ?")
+        ) {
+          const hasUpdatedAt = trimmed.includes("updated_at = ?");
+          const updatedAt = hasUpdatedAt ? params[0] : undefined;
+          const centerId = hasUpdatedAt ? params[1] : params[0];
+          const paymentId = hasUpdatedAt ? params[2] : params[1];
+          const row = list.find(
+            (candidate) => candidate.center_id === centerId && candidate.id === paymentId,
+          );
+          if (!row) return { lastInsertRowId: 0, changes: 0 };
+          row.is_reversed = 1;
+          if (hasUpdatedAt) {
+            row.updated_at = updatedAt;
+          }
+          return { lastInsertRowId: 0, changes: 1 };
         } else if (tableName === "sync_operations") {
           const statusMatch = trimmed.match(/status\s*=\s*'([^']+)'/i);
           const isRetryInc = trimmed.includes("retry_count = retry_count + 1");
@@ -2054,16 +2131,36 @@ class InMemorySqliteMock implements SqlDatabase {
             }
           }
         } else if (tableName === "sync_conflicts") {
-          const opId = params[params.length - 1];
-          const centerId =
-            params.length >= 2 ? params[params.length - 2] : undefined;
-          const matchingRows = list.filter(
-            (r) =>
-              (r.operation_id === opId || r.id === opId) &&
-              (!centerId ||
-                !trimmed.toLowerCase().includes("center_id = ?") ||
-                r.center_id === centerId),
-          );
+          if (
+            trimmed.includes("WHERE center_id = ?") &&
+            !trimmed.includes("operation_id = ?")
+          ) {
+            const resolvedAt = params[0];
+            const centerId = params[1];
+            list
+              .filter(
+                (r) =>
+                  r.center_id === centerId &&
+                  !r.resolved_at &&
+                  (!trimmed.includes("Homework evaluation status") ||
+                    String(r.reason || "").includes(
+                      "Homework evaluation status",
+                    )),
+              )
+              .forEach((row) => {
+                row.resolved_at = row.resolved_at || resolvedAt;
+              });
+          } else {
+            const opId = params[params.length - 1];
+            const centerId =
+              params.length >= 2 ? params[params.length - 2] : undefined;
+            const matchingRows = list.filter(
+              (r) =>
+                (r.operation_id === opId || r.id === opId) &&
+                (!centerId ||
+                  !trimmed.toLowerCase().includes("center_id = ?") ||
+                  r.center_id === centerId),
+            );
           const setClause = trimmed
             .split(/\bWHERE\b/i)[0]
             .replace(/^UPDATE\s+\w+\s+SET\s+/i, "");
@@ -2087,6 +2184,7 @@ class InMemorySqliteMock implements SqlDatabase {
               }
             }
           });
+          }
         } else if (tableName === "student_notes") {
           const id = params[params.length - 1];
           const row = list.find(
@@ -3156,6 +3254,7 @@ class InMemorySqliteMock implements SqlDatabase {
             (a) =>
               a.center_id === cId &&
               a.student_id === studentId &&
+              (a.status === "present" || a.status === "late") &&
               (a.original_absence_id === s.id ||
                 a.original_absence_id === `absence-${s.id}-${studentId}`),
           );
@@ -3466,6 +3565,52 @@ class InMemorySqliteMock implements SqlDatabase {
       }
 
       if (
+        params.length >= 2 &&
+        (trimmed.includes("center_id = ? AND group_id = ?") ||
+          trimmed.includes("s.center_id = ? AND s.group_id = ?"))
+      ) {
+        let filtered = joined.filter(
+          (r) => r.centerId === params[0] && r.groupId === params[1],
+        );
+        if (
+          trimmed.includes("status != 'cancelled'") ||
+          trimmed.includes("status <> 'cancelled'")
+        ) {
+          filtered = filtered.filter((r) => r.status !== "cancelled");
+        }
+        if (/ORDER\s+BY[\s\S]*session_date\s+ASC/i.test(trimmed)) {
+          filtered = [...filtered].sort((a, b) => {
+            const dateCmp = String(a.sessionDate || "").localeCompare(
+              String(b.sessionDate || ""),
+            );
+            if (dateCmp !== 0) return dateCmp;
+            const timeCmp = String(a.startTime || "").localeCompare(
+              String(b.startTime || ""),
+            );
+            if (timeCmp !== 0) return timeCmp;
+            const createdCmp = String(
+              (a as any).createdAt || (a as any).created_at || "",
+            ).localeCompare(
+              String((b as any).createdAt || (b as any).created_at || ""),
+            );
+            if (createdCmp !== 0) return createdCmp;
+            return String(a.id || "").localeCompare(String(b.id || ""));
+          });
+        } else if (/ORDER\s+BY[\s\S]*session_date\s+DESC/i.test(trimmed)) {
+          filtered = [...filtered].sort((a, b) => {
+            const dateCmp = String(b.sessionDate || "").localeCompare(
+              String(a.sessionDate || ""),
+            );
+            if (dateCmp !== 0) return dateCmp;
+            return String(b.startTime || "").localeCompare(
+              String(a.startTime || ""),
+            );
+          });
+        }
+        return filtered as T[];
+      }
+
+      if (
         params.length >= 1 &&
         (trimmed.includes("center_id = ?") ||
           trimmed.includes("s.center_id = ?"))
@@ -3661,6 +3806,9 @@ class InMemorySqliteMock implements SqlDatabase {
     }
 
     if (trimmed.includes("FROM groups")) {
+      if (/\bis_active\b/i.test(trimmed)) {
+        throw new Error("Error code 1: no such column: is_active");
+      }
       const list = this.tables.get("groups") || [];
       const teachers = this.tables.get("teachers") || [];
       const subjects = this.tables.get("subjects") || [];
@@ -3735,6 +3883,9 @@ class InMemorySqliteMock implements SqlDatabase {
     }
 
     if (trimmed.includes("FROM group_schedules")) {
+      if (/\bis_active\b/i.test(trimmed)) {
+        throw new Error("Error code 1: no such column: is_active");
+      }
       const list = this.tables.get("group_schedules") || [];
       if (
         trimmed.includes("JOIN groups other") &&
@@ -4236,6 +4387,22 @@ class InMemorySqliteMock implements SqlDatabase {
       }
 
       if (
+        (trimmed.includes("COUNT(*) as count") || trimmed.includes("COUNT(*) as cnt")) &&
+        trimmed.includes("center_id = ? AND session_id = ?")
+      ) {
+        const [centerId, sessionId] = params;
+        const count = mapped.filter(
+          (r) =>
+            r.centerId === centerId &&
+            r.sessionId === sessionId &&
+            (!trimmed.includes("status IN ('present', 'late')") ||
+              r.status === "present" ||
+              r.status === "late"),
+        ).length;
+        return [trimmed.includes("as cnt") ? { cnt: count } : { count }] as T[];
+      }
+
+      if (
         trimmed.includes("original_absence_id = ?") ||
         trimmed.includes("original_absence_id = ('absence-'") ||
         trimmed.includes("a.original_absence_id = ?")
@@ -4247,6 +4414,9 @@ class InMemorySqliteMock implements SqlDatabase {
           (r) =>
             r.centerId === centerId &&
             r.studentId === studentId &&
+            (!trimmed.includes("status IN ('present', 'late')") ||
+              r.status === "present" ||
+              r.status === "late") &&
             r.originalAbsenceId &&
             (r.originalAbsenceId === origAbsenceId ||
               r.originalAbsenceId ===
@@ -4827,6 +4997,22 @@ class InMemorySqliteMock implements SqlDatabase {
         };
       });
       if (
+        params.length === 3 &&
+        trimmed.includes("center_id = ? AND student_id = ? AND session_id = ?")
+      ) {
+        return mapped.filter(
+          (r) =>
+            r.centerId === params[0] &&
+            r.studentId === params[1] &&
+            r.sessionId === params[2] &&
+            (!trimmed.includes("is_reversed = 0") || !r.isReversed) &&
+            (!trimmed.includes("payment_type = 'session'") || r.paymentType === "session"),
+        ) as T[];
+      }
+      if (params.length === 1 && trimmed.includes("WHERE id = ?")) {
+        return mapped.filter((r) => r.id === params[0]) as T[];
+      }
+      if (
         params.length >= 2 &&
         trimmed.includes("payment_request_obligation_id = ?")
       ) {
@@ -5039,6 +5225,15 @@ class InMemorySqliteMock implements SqlDatabase {
 
       if (params.length >= 1 && trimmed.includes("WHERE operation_id = ?")) {
         return mapped.filter((r) => r.operationId === params[0]) as T[];
+      }
+      if (params.length >= 1 && trimmed.includes("LENGTH(operation_id) > 64")) {
+        return mapped.filter(
+          (r) =>
+            r.centerId === params[0] &&
+            r.status === "conflict" &&
+            Number(r.retryCount || 0) < 10 &&
+            String(r.operationId || "").length > 64,
+        ) as T[];
       }
       if (params.length >= 1 && trimmed.includes("status = 'pending'")) {
         const now = params[1] ? new Date(params[1]).getTime() : Date.now();
@@ -5443,12 +5638,14 @@ class InMemorySqliteMock implements SqlDatabase {
         centerId: r.center_id,
         examId: r.exam_id,
         studentId: r.student_id,
+        sessionId: r.session_id ?? null,
         score: r.score,
         createdAt: r.created_at,
         updatedAt: r.updated_at || null,
         center_id: r.center_id,
         exam_id: r.exam_id,
         student_id: r.student_id,
+        session_id: r.session_id ?? null,
         created_at: r.created_at,
         updated_at: r.updated_at || null,
       }));
@@ -5466,6 +5663,19 @@ class InMemorySqliteMock implements SqlDatabase {
             r.centerId === params[0] &&
             examIds.has(r.examId) &&
             studentIds.has(r.studentId),
+        ) as T[];
+      }
+      if (
+        params.length >= 3 &&
+        trimmed.includes("center_id = ?") &&
+        trimmed.includes("exam_id = ?") &&
+        trimmed.includes("student_id = ?")
+      ) {
+        return mapped.filter(
+          (r) =>
+            r.centerId === params[0] &&
+            r.examId === params[1] &&
+            r.studentId === params[2],
         ) as T[];
       }
       if (params.length >= 1 && trimmed.includes("center_id = ?")) {
@@ -5546,6 +5756,10 @@ class InMemorySqliteMock implements SqlDatabase {
             r.centerId === params[0] &&
             r.sessionId === params[1] &&
             r.studentId === params[2],
+        );
+      } else if (trimmed.includes("session_id = ?") && params.length >= 2) {
+        filtered = filtered.filter(
+          (r) => r.centerId === params[0] && r.sessionId === params[1],
         );
       } else if (trimmed.includes("student_id = ?") && params.length >= 2) {
         filtered = filtered.filter(
@@ -5693,6 +5907,32 @@ class InMemorySqliteMock implements SqlDatabase {
       if (params.length === 1 && trimmed.includes("WHERE operation_id = ?")) {
         return mapped.filter((r) => r.operationId === params[0]) as T[];
       }
+      if (
+        params.length >= 4 &&
+        trimmed.includes("session_id = ?") &&
+        trimmed.includes("student_id = ?") &&
+        trimmed.includes("event_type = ?")
+      ) {
+        return mapped.filter(
+          (r) =>
+            r.centerId === params[0] &&
+            r.sessionId === params[1] &&
+            r.studentId === params[2] &&
+            r.eventType === params[3],
+        ) as T[];
+      }
+      if (
+        params.length >= 3 &&
+        trimmed.includes("session_id = ?") &&
+        trimmed.includes("event_type = ?")
+      ) {
+        return mapped.filter(
+          (r) =>
+            r.centerId === params[0] &&
+            r.sessionId === params[1] &&
+            r.eventType === params[2],
+        ) as T[];
+      }
       if (params.length >= 2 && trimmed.includes("student_id = ?")) {
         return mapped.filter(
           (r) => r.centerId === params[0] && r.studentId === params[1],
@@ -5722,6 +5962,7 @@ class InMemorySqliteMock implements SqlDatabase {
         sentAt: r.sent_at || null,
         failureReason: r.failure_reason || null,
         retryCount: r.retry_count || 0,
+        providerMessageId: r.provider_message_id || null,
         createdAt: r.created_at,
         updatedAt: r.updated_at || null,
         // snake_case
@@ -5731,6 +5972,7 @@ class InMemorySqliteMock implements SqlDatabase {
         sent_at: r.sent_at,
         failure_reason: r.failure_reason,
         retry_count: r.retry_count || 0,
+        provider_message_id: r.provider_message_id || null,
         created_at: r.created_at,
         updated_at: r.updated_at,
       }));
@@ -6212,6 +6454,7 @@ export class DatabaseService {
       this.ensuringSchema = true;
       try {
         this.runMigrations(this.db);
+        this.ensureAcademicSchema(this.db);
         this.ensurePaymentRequestsSchema(this.db);
         this.initializedDbInstance = this.db;
         this.initializedMigrationVersion = LATEST_MIGRATION_VERSION;
@@ -6388,7 +6631,7 @@ export class DatabaseService {
       this.runMigrations(this.db);
       this.ensureSyncMetadataSchema(this.db);
       this.seedData();
-      this.ensureAcademicSchema();
+      this.ensureAcademicSchema(this.db);
       this.ensurePaymentRequestsSchema(this.db);
       this.initializedDbInstance = this.db;
       this.initializedMigrationVersion = LATEST_MIGRATION_VERSION;
@@ -6415,7 +6658,7 @@ export class DatabaseService {
       this.runMigrations(this.db);
       this.ensureSyncMetadataSchema(this.db);
       this.seedData();
-      this.ensureAcademicSchema();
+      this.ensureAcademicSchema(this.db);
       this.ensurePaymentRequestsSchema(this.db);
       this.initializedDbInstance = this.db;
       this.initializedMigrationVersion = LATEST_MIGRATION_VERSION;
@@ -6506,8 +6749,8 @@ export class DatabaseService {
    * Unconditionally guarantees all academic columns and tables exist in SQLite,
    * protecting against partial migration runs or legacy SQLite state.
    */
-  static ensureAcademicSchema(): void {
-    const db = this.db || this.getDb();
+  static ensureAcademicSchema(database?: SqlDatabase): void {
+    const db = database || this.db || this.getDb();
     const defensiveStatements = [
       // 1. Teachers
       "ALTER TABLE teachers ADD COLUMN status TEXT NOT NULL DEFAULT 'active';",
@@ -6543,11 +6786,14 @@ export class DatabaseService {
       "ALTER TABLE groups ADD COLUMN status TEXT NOT NULL DEFAULT 'active';",
       "ALTER TABLE groups ADD COLUMN created_at TEXT;",
       "ALTER TABLE groups ADD COLUMN updated_at TEXT;",
+      "UPDATE groups SET status = 'active' WHERE status IS NULL OR TRIM(status) = '';",
       // 5. Group Schedules
       "ALTER TABLE group_schedules ADD COLUMN center_id TEXT;",
       "ALTER TABLE group_schedules ADD COLUMN status TEXT NOT NULL DEFAULT 'active';",
       "ALTER TABLE group_schedules ADD COLUMN created_at TEXT;",
       "ALTER TABLE group_schedules ADD COLUMN updated_at TEXT;",
+      "UPDATE group_schedules SET center_id = (SELECT center_id FROM groups WHERE groups.id = group_schedules.group_id) WHERE center_id IS NULL;",
+      "UPDATE group_schedules SET status = 'active' WHERE status IS NULL OR TRIM(status) = '';",
       // Package subscriptions can select a concrete group per subject/teacher.
       // This is deliberately defensive (and runs on every startup): some
       // devices were upgraded from a schema where migration 15 was recorded

@@ -923,7 +923,6 @@ function ScannerContent() {
             isLate: lateCalc.isLate,
             attendanceType: makeup ? "makeup" : "present",
             isExternal,
-            suppressExternalPayment: isExternal,
           });
 
       setAttendanceResult(result);

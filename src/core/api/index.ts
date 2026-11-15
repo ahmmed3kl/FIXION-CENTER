@@ -65,7 +65,7 @@ export class ApiClient {
     if (!this.instance) {
       this.instance = axios.create({
         baseURL: env.apiUrl,
-        timeout: 15000,
+        timeout: 30000,
         headers: {
           "Content-Type": "application/json",
           Accept: "application/json",

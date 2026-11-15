@@ -831,6 +831,116 @@ export class SafeConflictRetryService {
       };
     }
 
+    if (normalizedEntityType === "homework_evaluation_status") {
+      const statusId = payloadObj?.id || op.entityId || conflict.entityId;
+      if (!statusId) {
+        return {
+          eligible: false,
+          reasonCode: "PARENT_NOT_ARRIVED",
+          userMessage: "معرف حالة تقييم الواجب غير موجود في العملية.",
+          entityType: normalizedEntityType,
+          operationId,
+          safeRetryCount: safeRetries,
+        };
+      }
+      return {
+        eligible: true,
+        reasonCode: "ELIGIBLE_FOR_RETRY",
+        userMessage: "العملية مؤهلة لإعادة المحاولة بأمان بمعرف العملية الأصلي.",
+        entityType: normalizedEntityType,
+        operationId,
+        safeRetryCount: safeRetries,
+      };
+    }
+
+    if (normalizedEntityType === "session_homework_evaluation") {
+      const evaluationObj = payloadObj?.evaluation || payloadObj;
+      const studentId = evaluationObj?.studentId || evaluationObj?.student_id;
+      const sessionId = evaluationObj?.sessionId || evaluationObj?.session_id;
+      const statusId = evaluationObj?.statusId || evaluationObj?.status_id;
+
+      if (!studentId || !sessionId) {
+        return {
+          eligible: false,
+          reasonCode: "PARENT_NOT_ARRIVED",
+          userMessage: "بيانات الطالب أو الحصة غير مكتملة في عملية تقييم الواجب.",
+          entityType: normalizedEntityType,
+          operationId,
+          safeRetryCount: safeRetries,
+        };
+      }
+
+      const studentRow = db.getFirstSync<{ id: string }>(
+        `SELECT id FROM students WHERE id = ? AND center_id = ?`,
+        [studentId, centerId],
+      );
+      const sessionRow = db.getFirstSync<{ id: string }>(
+        `SELECT id FROM sessions WHERE id = ? AND center_id = ?`,
+        [sessionId, centerId],
+      );
+
+      if (!studentRow || !sessionRow) {
+        return {
+          eligible: false,
+          reasonCode: "PARENT_NOT_ARRIVED",
+          userMessage: "السجل الأب (الطالب أو الحصة) لم يصل بعد من الخادم.",
+          entityType: normalizedEntityType,
+          operationId,
+          safeRetryCount: safeRetries,
+        };
+      }
+
+      if (!this.isParentConfirmedOnServer(db, centerId, ["student"], studentId)) {
+        return {
+          eligible: false,
+          reasonCode: "PARENT_UNCONFIRMED_ON_SERVER",
+          userMessage: "سجل الطالب المرتبط بتقييم الواجب لم يتم تأكيد مزامنته على الخادم بعد.",
+          entityType: normalizedEntityType,
+          operationId,
+          safeRetryCount: safeRetries,
+        };
+      }
+
+      if (!this.isParentConfirmedOnServer(db, centerId, ["session"], sessionId)) {
+        return {
+          eligible: false,
+          reasonCode: "PARENT_UNCONFIRMED_ON_SERVER",
+          userMessage: "سجل الحصة المرتبطة بتقييم الواجب لم يتم تأكيد مزامنته على الخادم بعد.",
+          entityType: normalizedEntityType,
+          operationId,
+          safeRetryCount: safeRetries,
+        };
+      }
+
+      if (
+        statusId &&
+        !this.isParentConfirmedOnServer(
+          db,
+          centerId,
+          ["homework_evaluation_status"],
+          statusId,
+        )
+      ) {
+        return {
+          eligible: false,
+          reasonCode: "PARENT_UNCONFIRMED_ON_SERVER",
+          userMessage: "حالة تقييم الواجب المرتبطة لم يتم تأكيد مزامنتها على الخادم بعد.",
+          entityType: normalizedEntityType,
+          operationId,
+          safeRetryCount: safeRetries,
+        };
+      }
+
+      return {
+        eligible: true,
+        reasonCode: "ELIGIBLE_FOR_RETRY",
+        userMessage: "العملية مؤهلة لإعادة المحاولة بأمان بعد تأكيد مزامنة الطالب والحصة وحالة التقييم.",
+        entityType: normalizedEntityType,
+        operationId,
+        safeRetryCount: safeRetries,
+      };
+    }
+
     return {
       eligible: false,
       reasonCode: "UNVERIFIED_CONFLICT_TYPE",

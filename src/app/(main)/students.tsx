@@ -945,21 +945,55 @@ export default function StudentsScreen() {
           (item) => selectedObligationIds.includes(item.id) && item.amountOwed > 0,
         );
         if (itemsToPay.length > 0) {
+          const totalSelectedOwed =
+            Math.round(
+              itemsToPay.reduce((sum, item) => sum + (Number(item.amountOwed) || 0), 0) *
+                100,
+            ) / 100;
+          if (amountNum > totalSelectedOwed + 0.000001) {
+            setPaymentFormError(
+              `المبلغ المدخل (${amountNum}) أكبر من إجمالي الالتزامات المحددة (${totalSelectedOwed}).`,
+            );
+            return;
+          }
+
+          let remainingToAllocate = Math.round(amountNum * 100) / 100;
+          const allocatedItems = itemsToPay
+            .map((item) => {
+              if (remainingToAllocate <= 0.000001) return null;
+              const alloc =
+                Math.round(Math.min(remainingToAllocate, Number(item.amountOwed) || 0) * 100) /
+                100;
+              remainingToAllocate =
+                Math.round((remainingToAllocate - alloc) * 100) / 100;
+              return alloc > 0
+                ? {
+                    type: item.type,
+                    id: item.id,
+                    amount: alloc,
+                    notes: paymentNotes.trim() || undefined,
+                    debtCycleId: item.debtCycleId,
+                    sessionId: item.sessionId,
+                    paymentRequestObligationId: item.paymentRequestObligationId,
+                  }
+                : null;
+            })
+            .filter((x): x is NonNullable<typeof x> => x !== null);
+
+          if (!paymentOperationIdentityRef.current) {
+            paymentOperationIdentityRef.current = {
+              signature: `batch:${selectedStudent.id}:${allocatedItems.map((i) => `${i.id}:${i.amount}`).join(",")}`,
+              operationId: `op-batch-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            };
+          }
+
           const collectResult = await PaymentRepository.collectMultipleObligations({
             studentId: selectedStudent.id,
-            items: itemsToPay.map((item) => ({
-              type: item.type,
-              id: item.id,
-              amount: item.amountOwed,
-              notes: paymentNotes.trim() || undefined,
-              debtCycleId: item.debtCycleId,
-              sessionId: item.sessionId,
-              paymentRequestObligationId: item.paymentRequestObligationId,
-            })),
+            items: allocatedItems,
             paymentMethod: "cash",
             paymentDate: SessionDateService.getCurrentSessionDate(activeCenterId || selectedStudent.centerId),
             batchNotes: paymentNotes.trim() || undefined,
-            operationId: paymentOperationIdentityRef.current?.operationId,
+            operationId: paymentOperationIdentityRef.current.operationId,
           });
 
           setIsPaymentModalOpen(false);

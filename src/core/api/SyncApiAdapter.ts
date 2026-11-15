@@ -87,9 +87,9 @@ export interface ISyncApiAdapter {
 }
 
 // Different timeouts for different sync operations
-const PUSH_TIMEOUT_MS = 15_000;        // Push operations should be fast
-const PULL_TIMEOUT_MS = 20_000;        // Pull is medium priority
-const BOOTSTRAP_TIMEOUT_MS = 45_000;   // Bootstrap can take longer
+const PUSH_TIMEOUT_MS = 35_000;        // Allow for Neon/Render latency & batch processing
+const PULL_TIMEOUT_MS = 35_000;
+const BOOTSTRAP_TIMEOUT_MS = 65_000;   // Full snapshot can take longer
 
 /**
  * Real HTTP Axios adapter connecting to FIXION backend contracts:
@@ -99,6 +99,7 @@ const BOOTSTRAP_TIMEOUT_MS = 45_000;   // Bootstrap can take longer
  */
 export class HttpSyncApiAdapter implements ISyncApiAdapter {
   private readonly registeredDevices = new Map<string, number>();
+  private readonly registrationInFlight = new Map<string, Promise<void>>();
 
   private async ensureDeviceRegistered(
     centerId: string,
@@ -107,36 +108,48 @@ export class HttpSyncApiAdapter implements ISyncApiAdapter {
     const deviceName = DeviceService.getDeviceModelName();
     const registrationKey = `${centerId}:${deviceId}:${deviceName}`;
     const lastRegisteredAt = this.registeredDevices.get(registrationKey);
-    if (lastRegisteredAt && Date.now() - lastRegisteredAt < 5 * 60_000) {
+    if (lastRegisteredAt && Date.now() - lastRegisteredAt < 15 * 60_000) {
       return;
     }
 
-    try {
-      const client = ApiClient.getInstance();
-      await client.post(
-        "/devices/register",
-        {
-          deviceId,
-          deviceName,
-          platform: Platform.OS,
-          appVersion: env.appVersion,
-        },
-        {
-          timeout: PUSH_TIMEOUT_MS,
-          headers: {
-            "X-Center-Id": centerId,
-            "X-Device-Id": deviceId,
-            "X-Device-Name": deviceName,
-          },
-        },
-      );
-      this.registeredDevices.set(registrationKey, Date.now());
-    } catch (e: any) {
-      Logger.info("sync", "device_auto_register_attempt", {
-        centerId,
-        metadata: { deviceSuffix: deviceId.slice(-4), error: e?.message },
-      });
+    const existingPromise = this.registrationInFlight.get(registrationKey);
+    if (existingPromise) {
+      return existingPromise;
     }
+
+    const requestPromise = (async () => {
+      try {
+        const client = ApiClient.getInstance();
+        await client.post(
+          "/devices/register",
+          {
+            deviceId,
+            deviceName,
+            platform: Platform.OS,
+            appVersion: env.appVersion,
+          },
+          {
+            timeout: 15_000,
+            headers: {
+              "X-Center-Id": centerId,
+              "X-Device-Id": deviceId,
+              "X-Device-Name": deviceName,
+            },
+          },
+        );
+        this.registeredDevices.set(registrationKey, Date.now());
+      } catch (e: any) {
+        Logger.info("sync", "device_auto_register_attempt", {
+          centerId,
+          metadata: { deviceSuffix: deviceId.slice(-4), error: e?.message },
+        });
+      } finally {
+        this.registrationInFlight.delete(registrationKey);
+      }
+    })();
+
+    this.registrationInFlight.set(registrationKey, requestPromise);
+    return requestPromise;
   }
 
   async pushOperations(

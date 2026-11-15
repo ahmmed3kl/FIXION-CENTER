@@ -24,6 +24,7 @@ const SUPPORTED_VARIABLES = [
   "{{max_score}}",
   "{{grades_summary}}",
   "{{homework_evaluation}}",
+  "{{homework_status}}",
 ];
 
 // Default Arabic templates
@@ -39,6 +40,10 @@ export const DEFAULT_TEMPLATES: Record<NotificationEventType, Record<Notificatio
   grades: {
     push: "تم تسجيل درجات {{student_name}}: {{grades_summary}}.\n{{homework_evaluation}}\n{{center_name}}",
     sms: "درجات {{student_name}}: {{grades_summary}}.\n{{homework_evaluation}}\nللاستفسار تواصل مع {{center_name}}.",
+  },
+  homework: {
+    push: "ولي أمر الطالب/ة {{student_name}}، نحيطكم علماً بأن تقييم الواجب في مجموعة {{group_name}} ({{subject_name}}) مع {{teacher_name}} بتاريخ {{session_date}} هو: {{homework_status}}. {{center_name}}",
+    sms: "تقييم واجب {{student_name}} في مجموعة {{group_name}} ({{subject_name}}) بتاريخ {{session_date}}: {{homework_status}}. {{center_name}}",
   },
   custom: {
     push: "رسالة من المركز إلى {{student_name}}",
@@ -56,15 +61,23 @@ function generateUUID(): string {
 
 /**
  * Safely renders a template, replacing supported variables.
+ * Supports both {{variable}} and {variable} placeholders.
  * Unknown variables are left as-is (no crash).
  */
 export function renderTemplate(templateBody: string, vars: Record<string, string>): string {
   const homeworkValue = vars.homework_evaluation?.trim();
   let result = homeworkValue
     ? templateBody
-    : templateBody.split(/\r?\n/).filter((line) => !line.includes("{{homework_evaluation}}")).join("\n").replace(/\n[ \t]*\n/g, "\n");
+    : templateBody
+        .split(/\r?\n/)
+        .filter((line) => !line.includes("{{homework_evaluation}}"))
+        .join("\n")
+        .replace(/\n[ \t]*\n/g, "\n");
   for (const [key, value] of Object.entries(vars)) {
-    result = result.replace(new RegExp(`\\{\\{${key}\\}\\}`, "g"), value || "");
+    result = result.replace(
+      new RegExp(`\\{\\{${key}\\}\\}|\\{${key}\\}`, "g"),
+      value || "",
+    );
   }
   return result;
 }

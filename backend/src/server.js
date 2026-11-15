@@ -179,6 +179,8 @@ if (require.main === module) {
         smsRecoveryWorker = createSmsRecoveryWorker();
         void smsRecoveryWorker.start();
       });
+      server.keepAliveTimeout = 65000;
+      server.headersTimeout = 66000;
     })
     .catch((err) => {
       console.error("Database compatibility migration failed:", err);

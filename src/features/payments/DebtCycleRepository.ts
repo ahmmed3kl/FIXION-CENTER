@@ -1083,7 +1083,20 @@ export class DebtCycleRepository {
            WHERE center_id = ? AND id = ?`,
           [centerId, cycle.enrollmentId],
         );
-        if (enrollment?.specialMonthlyPrice != null) {
+        const group = db.getFirstSync<{ monthlyPrice: number | null; defaultFee: number | null }>(
+          `SELECT monthly_price as monthlyPrice, default_fee as defaultFee
+           FROM groups
+           WHERE center_id = ? AND id = ?`,
+          [centerId, cycle.groupId],
+        );
+        const groupStandardPrice = group
+          ? Number(group.monthlyPrice ?? group.defaultFee ?? 0)
+          : null;
+        const hasCustomMonthlyRate =
+          enrollment?.specialMonthlyPrice != null &&
+          (groupStandardPrice === null ||
+            Math.abs(Number(enrollment.specialMonthlyPrice) - groupStandardPrice) > 0.01);
+        if (hasCustomMonthlyRate) {
           throw new ValidationError(
             "هذا التسجيل له سعر شهري خاص، ولا يمكن تحويله إلى الدفع بالحصة لأن النظام لا يحدد خصمًا لكل حصة.",
           );

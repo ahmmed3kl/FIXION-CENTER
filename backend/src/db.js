@@ -9,6 +9,7 @@ const pool = new Pool({
   max: 10,
   idleTimeoutMillis: 20000,
   connectionTimeoutMillis: 15000,
+  statement_timeout: 30000,
   keepAlive: true,
   keepAliveInitialDelayMillis: 10000,
 });
@@ -17,6 +18,17 @@ pool.on("error", (err) => {
   console.warn("Transient idle client error in PostgreSQL pool:", err.message);
 });
 
+function isTransientDbConnectionError(err) {
+  return Boolean(
+    err &&
+      (err.message?.includes("Connection terminated") ||
+        err.code === "ECONNRESET" ||
+        err.code === "ETIMEDOUT" ||
+        err.code === "57P01" ||
+        err.code === "57P03"),
+  );
+}
+
 /**
  * Execute a single query with automatic connection management and transient drop retry
  */
@@ -24,12 +36,7 @@ async function query(text, params = [], retries = 2) {
   try {
     return await pool.query(text, params);
   } catch (err) {
-    if (
-      retries > 0 &&
-      (err.message?.includes("Connection terminated") ||
-        err.code === "ECONNRESET" ||
-        err.code === "57P01")
-    ) {
+    if (retries > 0 && isTransientDbConnectionError(err)) {
       console.warn(
         "Retrying database query after transient connection drop...",
       );
@@ -42,19 +49,36 @@ async function query(text, params = [], retries = 2) {
 /**
  * Execute multiple database operations within a true ACID transaction (BEGIN ... COMMIT / ROLLBACK)
  */
-async function withTransaction(callback) {
-  const client = await pool.connect();
+async function withTransaction(callback, retries = 1) {
+  let client;
+  try {
+    client = await pool.connect();
+  } catch (err) {
+    if (retries > 0 && isTransientDbConnectionError(err)) {
+      console.warn("Retrying pool.connect() after transient connection drop...");
+      return withTransaction(callback, retries - 1);
+    }
+    throw err;
+  }
   const errorHandler = (err) => {
     // Prevent unhandled 'error' event crash if connection drops
     console.warn("Client connection event during transaction:", err.message);
   };
   client.on("error", errorHandler);
+  let began = false;
   try {
     await client.query("BEGIN");
+    began = true;
     const result = await callback(client);
     await client.query("COMMIT");
     return result;
   } catch (err) {
+    if (!began && retries > 0 && isTransientDbConnectionError(err)) {
+      client.removeListener("error", errorHandler);
+      client.release(true);
+      console.warn("Retrying transaction BEGIN after transient connection drop...");
+      return withTransaction(callback, retries - 1);
+    }
     try {
       await client.query("ROLLBACK");
     } catch {
@@ -62,8 +86,10 @@ async function withTransaction(callback) {
     }
     throw err;
   } finally {
-    client.removeListener("error", errorHandler);
-    client.release();
+    if (began || retries === 0) {
+      client.removeListener("error", errorHandler);
+      client.release();
+    }
   }
 }
 
@@ -146,6 +172,7 @@ async function ensureSchemaCompatibility() {
       center_id TEXT NOT NULL,
       exam_id TEXT NOT NULL REFERENCES grade_exams(id) ON DELETE CASCADE,
       student_id TEXT NOT NULL,
+      session_id VARCHAR(64),
       score NUMERIC(10, 2),
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ,
@@ -154,15 +181,17 @@ async function ensureSchemaCompatibility() {
     CREATE INDEX IF NOT EXISTS idx_grade_exams_grade ON grade_exams(center_id, grade, status);
     ALTER TABLE grade_exams ADD COLUMN IF NOT EXISTS group_id VARCHAR(64);
     ALTER TABLE grade_exams ADD COLUMN IF NOT EXISTS session_id VARCHAR(64);
+    ALTER TABLE grade_scores ADD COLUMN IF NOT EXISTS session_id VARCHAR(64);
     CREATE INDEX IF NOT EXISTS idx_grade_exams_group ON grade_exams(center_id, group_id, grade, status);
     CREATE INDEX IF NOT EXISTS idx_grade_exams_session ON grade_exams(center_id, session_id);
     CREATE INDEX IF NOT EXISTS idx_grade_scores_exam ON grade_scores(center_id, exam_id);
+    CREATE INDEX IF NOT EXISTS idx_grade_scores_session ON grade_scores(center_id, session_id);
   `);
   await pool.query(`
     CREATE TABLE IF NOT EXISTS homework_evaluation_statuses (
-      id VARCHAR(64) PRIMARY KEY,
+      id VARCHAR(255) PRIMARY KEY,
       center_id VARCHAR(64) NOT NULL REFERENCES centers(id) ON DELETE CASCADE,
-      name VARCHAR(120) NOT NULL,
+      name VARCHAR(255) NOT NULL,
       status VARCHAR(16) NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive', 'deleted')),
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ,
@@ -177,15 +206,15 @@ async function ensureSchemaCompatibility() {
     CREATE INDEX IF NOT EXISTS idx_homework_statuses_active
       ON homework_evaluation_statuses(center_id, status, name);
     CREATE TABLE IF NOT EXISTS session_homework_evaluations (
-      id VARCHAR(64) PRIMARY KEY,
+      id VARCHAR(255) PRIMARY KEY,
       center_id VARCHAR(64) NOT NULL REFERENCES centers(id) ON DELETE CASCADE,
-      student_id VARCHAR(64) NOT NULL REFERENCES students(id) ON DELETE CASCADE,
-      session_id VARCHAR(64) NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-      status_id VARCHAR(64) NOT NULL REFERENCES homework_evaluation_statuses(id),
+      student_id VARCHAR(255) NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+      session_id VARCHAR(255) NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+      status_id VARCHAR(255) NOT NULL REFERENCES homework_evaluation_statuses(id),
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ,
       deleted_at TIMESTAMPTZ,
-      deleted_by VARCHAR(64),
+      deleted_by VARCHAR(255),
       CONSTRAINT uq_session_homework_evaluation UNIQUE (center_id, student_id, session_id)
     );
     CREATE INDEX IF NOT EXISTS idx_session_homework_student
@@ -580,9 +609,33 @@ SELECT s.center_id, s.id, snk.session_id
     CREATE INDEX IF NOT EXISTS idx_payments_request_obligation
       ON payments(center_id, payment_request_obligation_id);
 
-    -- Migration: Widen payment_request_obligation and sync operation identifier columns to VARCHAR(255)
+    -- Migration: Widen payment_request_obligation, homework, notification, and sync operation identifier columns to VARCHAR(255)
+    ALTER TABLE students ALTER COLUMN id TYPE VARCHAR(255);
+    ALTER TABLE groups ALTER COLUMN id TYPE VARCHAR(255);
+    ALTER TABLE sessions ALTER COLUMN id TYPE VARCHAR(255);
+    ALTER TABLE sessions ALTER COLUMN group_id TYPE VARCHAR(255);
+    ALTER TABLE attendance ALTER COLUMN id TYPE VARCHAR(255);
+    ALTER TABLE attendance ALTER COLUMN session_id TYPE VARCHAR(255);
+    ALTER TABLE attendance ALTER COLUMN student_id TYPE VARCHAR(255);
+    ALTER TABLE session_expected_students ALTER COLUMN session_id TYPE VARCHAR(255);
+    ALTER TABLE session_expected_students ALTER COLUMN student_id TYPE VARCHAR(255);
+    ALTER TABLE homework_evaluation_statuses ALTER COLUMN id TYPE VARCHAR(255);
+    ALTER TABLE homework_evaluation_statuses ALTER COLUMN name TYPE VARCHAR(255);
+    ALTER TABLE session_homework_evaluations ALTER COLUMN id TYPE VARCHAR(255);
+    ALTER TABLE session_homework_evaluations ALTER COLUMN student_id TYPE VARCHAR(255);
+    ALTER TABLE session_homework_evaluations ALTER COLUMN session_id TYPE VARCHAR(255);
+    ALTER TABLE session_homework_evaluations ALTER COLUMN status_id TYPE VARCHAR(255);
+    ALTER TABLE session_homework_evaluations ALTER COLUMN deleted_by TYPE VARCHAR(255);
+    ALTER TABLE notification_templates ALTER COLUMN id TYPE VARCHAR(255);
+    ALTER TABLE notification_events ALTER COLUMN id TYPE VARCHAR(255);
+    ALTER TABLE notification_events ALTER COLUMN student_id TYPE VARCHAR(255);
+    ALTER TABLE notification_events ALTER COLUMN session_id TYPE VARCHAR(255);
+    ALTER TABLE notification_deliveries ALTER COLUMN id TYPE VARCHAR(255);
+    ALTER TABLE notification_deliveries ALTER COLUMN notification_event_id TYPE VARCHAR(255);
     ALTER TABLE student_payment_request_obligations ALTER COLUMN operation_id TYPE VARCHAR(255);
     ALTER TABLE student_payment_request_obligations ALTER COLUMN id TYPE VARCHAR(255);
+    ALTER TABLE student_payment_request_obligations ALTER COLUMN student_id TYPE VARCHAR(255);
+    ALTER TABLE student_payment_request_obligations ALTER COLUMN group_id TYPE VARCHAR(255);
     ALTER TABLE server_sync_operations ALTER COLUMN operation_id TYPE VARCHAR(255);
     ALTER TABLE server_sync_operations ALTER COLUMN entity_id TYPE VARCHAR(255);
     ALTER TABLE audit_logs ALTER COLUMN operation_id TYPE VARCHAR(255);

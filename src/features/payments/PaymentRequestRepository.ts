@@ -82,7 +82,9 @@ export class PaymentRequestRepository {
     const allowed: Permission[] =
       action === "create"
         ? ["payments.create", "payments.adjust", "payments.edit"]
-        : ["payments.edit", "payments.adjust", "payments.create"];
+        : action === "archive"
+          ? ["payments.edit", "payments.adjust"]
+          : ["payments.edit", "payments.adjust", "payments.create"];
     if (!PermissionService.hasAnyPermission(permissions, allowed)) {
       const actionLabel =
         action === "create"

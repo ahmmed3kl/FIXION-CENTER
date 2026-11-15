@@ -83,7 +83,8 @@ export class SessionClosingService {
 
     // Calculate totals
     const attendanceRows = db.getAllSync<any>(
-      `SELECT COUNT(*) as cnt FROM attendance WHERE center_id = ? AND session_id = ?`,
+      `SELECT COUNT(*) as cnt FROM attendance
+       WHERE center_id = ? AND session_id = ? AND status IN ('present', 'late')`,
       [centerId, sessionId],
     );
     const totalAttendance = attendanceRows[0]?.cnt || 0;

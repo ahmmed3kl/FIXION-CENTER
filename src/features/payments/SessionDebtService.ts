@@ -41,7 +41,9 @@ export class SessionDebtService {
     const { activeCenterId } = useAuthStore.getState();
     if (!activeCenterId) throw new Error("يجب تحديد السنتر أولاً.");
 
-    const target = new Date(`${targetDate}T12:00:00`);
+    const dateOnlyMatch = /^(\d{4}-\d{2}-\d{2})/.exec(String(targetDate || "").trim());
+    const safeTargetDate = dateOnlyMatch ? dateOnlyMatch[1] : isoDate(new Date());
+    const target = new Date(`${safeTargetDate}T12:00:00`);
     const monthStart = new Date(target.getFullYear(), target.getMonth(), 1, 12);
     const monthEnd = new Date(target.getFullYear(), target.getMonth() + 1, 0, 12);
     const periodStart = isoDate(monthStart);
@@ -60,18 +62,14 @@ export class SessionDebtService {
       (!enrollment.endDate || enrollment.endDate >= periodStart),
     );
     for (const enrollment of enrollments) {
-      const billingCycle = db.getFirstSync<any>(
+      const enrollmentCycles = db.getAllSync<any>(
         `SELECT id, billing_mode as billingMode, cycle_type as cycleType,
-                status
+                status, start_date as startDate, end_date as endDate
            FROM debt_cycles
           WHERE center_id = ? AND enrollment_id = ?
             AND start_date <= ? AND end_date >= ?
-          ORDER BY cycle_number DESC LIMIT 1`,
+          ORDER BY cycle_number DESC`,
         [activeCenterId, enrollment.id, periodEnd, periodStart],
-      );
-      const isPerSession = isPerSessionBillingMode(
-        billingCycle?.billingMode,
-        billingCycle?.cycleType,
       );
       const group = db.getFirstSync<any>(
         `SELECT id, name, session_price as sessionPrice,
@@ -96,13 +94,20 @@ export class SessionDebtService {
           }
         }
       }
-      // Monthly price is spread over this month's actual scheduled meetings;
-      // otherwise the configured session price is used directly.
-      const perSessionPrice = !isPerSession && Number(group.monthlyPrice || 0) > 0
-        ? Number(group.monthlyPrice) / Math.max(1, dates.length)
-        : Number(group.sessionPrice || group.defaultFee || 0);
       for (const slot of dates) {
         const date = slot.date;
+        const billingCycle =
+          enrollmentCycles.find((c) => c.startDate <= date && c.endDate >= date) ||
+          enrollmentCycles[0];
+        const isPerSession = isPerSessionBillingMode(
+          billingCycle?.billingMode,
+          billingCycle?.cycleType,
+        );
+        // Monthly price is spread over this month's actual scheduled meetings;
+        // otherwise the configured session price is used directly.
+        const perSessionPrice = !isPerSession && Number(group.monthlyPrice || 0) > 0
+          ? Number(group.monthlyPrice) / Math.max(1, dates.length)
+          : Number(group.sessionPrice || group.defaultFee || 0);
         const session = db.getFirstSync<any>(
           `SELECT id, status FROM sessions
            WHERE center_id = ? AND group_id = ? AND schedule_id = ? AND session_date = ?

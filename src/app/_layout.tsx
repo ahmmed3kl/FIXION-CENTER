@@ -116,7 +116,7 @@ function AuthGuard({ children }: { children: React.ReactNode }) {
     );
 
     // 4. Background periodic retry while app remains active
-    const interval = setInterval(sync, 30_000);
+    const interval = setInterval(sync, 90_000);
 
     return () => {
       disposed = true;

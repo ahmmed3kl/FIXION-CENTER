@@ -171,7 +171,7 @@ export class ConnectivityService {
     try {
       const response = await axios.get(
         `${env.apiUrl.replace(/\/+$/, "")}/health`,
-        { timeout: 8_000, validateStatus: () => true },
+        { timeout: 12_000, validateStatus: () => true },
       );
       status = response.status;
       body = response.data;

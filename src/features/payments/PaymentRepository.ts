@@ -160,6 +160,12 @@ export class PaymentRepository {
     operationId?: string;
     allowCreditBalance?: boolean;
   }): Promise<PaymentEvent> {
+    return this.recordPaymentSync(params);
+  }
+
+  private static recordPaymentSync(
+    params: Parameters<typeof PaymentRepository.recordPayment>[0],
+  ): PaymentEvent {
     const { centerId, user } = this.getActiveContext();
     if (!PermissionService.hasPermission(user.permissions, "payments.create")) {
       throw new ForbiddenError("ليس لديك صلاحية تسجيل المدفوعات.");
@@ -290,37 +296,6 @@ export class PaymentRepository {
       if (parentRequest.status === "archived" || obligation.status === "cancelled") {
         throw new ValidationError("لا يمكن تسجيل دفعة لمطالبة ملغاة أو مؤرشفة.");
       }
-      const existingObligationPayments = db.getAllSync<any>(
-        `SELECT id, operation_id as operationId, amount, is_reversed as isReversed
-         FROM payments
-         WHERE center_id = ? AND payment_request_obligation_id = ? AND is_reversed = 0`,
-        [centerId, obligation.id],
-      );
-      const seenPaymentKeys = new Set<string>();
-      let confirmedPaidSoFar = 0;
-      for (const p of existingObligationPayments) {
-        if (p.isReversed === 1 || p.isReversed === true) continue;
-        const key = String(p.operationId || p.operation_id || p.id);
-        if (seenPaymentKeys.has(key)) continue;
-        seenPaymentKeys.add(key);
-        confirmedPaidSoFar += Number(p.amount) || 0;
-      }
-      confirmedPaidSoFar = Math.round(confirmedPaidSoFar * 100) / 100;
-
-      const expectedDue = Math.round((Number(obligation.amountDue) || 0) * 100) / 100;
-      const remainingDue = Math.round(Math.max(0, expectedDue - confirmedPaidSoFar) * 100) / 100;
-      if (obligation.status === "paid" && remainingDue <= 0.000001) {
-        throw new ConflictError("تم سداد هذه المطالبة مسبقًا لهذا الطالب.");
-      }
-      if (remainingDue <= 0.000001) {
-        throw new ConflictError("تم سداد هذه المطالبة مسبقًا لهذا الطالب.");
-      }
-      if (params.amount > remainingDue + 0.000001) {
-        throw new ValidationError(
-          `مبلغ الدفعة (${params.amount}) يتجاوز قيمة المطالبة المستحقة المتبقية (${remainingDue}).`,
-        );
-      }
-
       const paymentId = `pay-${generateUUID()}`;
       const paymentNotes =
         [
@@ -348,12 +323,6 @@ export class PaymentRepository {
         userId: user.id,
       };
 
-      const newTotalPaid =
-        Math.round(Math.min(expectedDue, confirmedPaidSoFar + params.amount) * 100) / 100;
-      const newObligationStatus =
-        newTotalPaid >= expectedDue - 0.000001 ? "paid" : "unpaid";
-      const newPaidAt = newObligationStatus === "paid" ? createdAt : null;
-
       DatabaseService.runInTransaction(() => {
         const latestOb = db.getFirstSync<any>(
           `SELECT status, amount_due as amountDue
@@ -361,12 +330,47 @@ export class PaymentRepository {
            WHERE center_id = ? AND id = ?`,
           [centerId, obligation.id],
         );
-        if (!latestOb || (latestOb.status === "paid" && remainingDue <= 0.000001)) {
-          throw new ConflictError("تم سداد هذه المطالبة مسبقًا لهذا الطالب.");
+        if (!latestOb) {
+          throw new NotFoundError("المطالبة المالية غير موجودة.");
         }
         if (latestOb.status === "cancelled") {
           throw new ValidationError("لا يمكن تسجيل دفعة لمطالبة ملغاة.");
         }
+
+        const existingObligationPayments = db.getAllSync<any>(
+          `SELECT id, operation_id as operationId, amount, is_reversed as isReversed
+           FROM payments
+           WHERE center_id = ? AND payment_request_obligation_id = ? AND is_reversed = 0`,
+          [centerId, obligation.id],
+        );
+        const seenPaymentKeys = new Set<string>();
+        let confirmedPaidSoFar = 0;
+        for (const p of existingObligationPayments) {
+          if (p.isReversed === 1 || p.isReversed === true) continue;
+          const key = String(p.operationId || p.operation_id || p.id);
+          if (seenPaymentKeys.has(key)) continue;
+          seenPaymentKeys.add(key);
+          confirmedPaidSoFar += Number(p.amount) || 0;
+        }
+        confirmedPaidSoFar = Math.round(confirmedPaidSoFar * 100) / 100;
+
+        const expectedDue = Math.round((Number(latestOb.amountDue) || 0) * 100) / 100;
+        const remainingDue = Math.round(Math.max(0, expectedDue - confirmedPaidSoFar) * 100) / 100;
+        if (remainingDue <= 0.000001) {
+          throw new ConflictError("تم سداد هذه المطالبة مسبقًا لهذا الطالب.");
+        }
+        if (params.amount > remainingDue + 0.000001) {
+          throw new ValidationError(
+            `مبلغ الدفعة (${params.amount}) يتجاوز قيمة المطالبة المستحقة المتبقية (${remainingDue}).`,
+          );
+        }
+
+        const newTotalPaid =
+          Math.round(Math.min(expectedDue, confirmedPaidSoFar + params.amount) * 100) / 100;
+        const newObligationStatus =
+          newTotalPaid >= expectedDue - 0.000001 ? "paid" : "unpaid";
+        const newPaidAt = newObligationStatus === "paid" ? createdAt : null;
+
         db.runSync(
           `INSERT INTO payments (id, operation_id, center_id, student_id, subscription_id, debt_cycle_id, session_id, payment_request_obligation_id, payment_request_id, amount, payment_type, payment_method, payment_date, notes, is_reversed, created_at, user_id)
            VALUES (?, ?, ?, ?, NULL, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
@@ -802,6 +806,11 @@ export class PaymentRepository {
       );
       SyncRepository.enqueueOperation({ centerId, userId: user.id, deviceId, operationType: "payment.create", entityType: "payment", entityId: paymentId, payload: paymentEvent, operationId });
       AuditService.recordEvent({ operationId, centerId, userId: user.id, deviceId, entityType: "payment", entityId: paymentId, action: "payment.record", payload: { studentId: params.studentId, amount: params.amount, paymentType: normType, debtCycleId: assignedCycleId, sessionId: params.sessionId, subscriptionId: params.subscriptionId, notes: paymentNotes || null, actorName: user.fullName } });
+      DatabaseService.notifyLocalChange({
+        centerId,
+        entityType: "payment",
+        entityId: paymentId,
+      });
     });
 
     FinancialCalculationService.getStudentFinancialStatus(
@@ -863,7 +872,7 @@ export class PaymentRepository {
     const recordedPayments: PaymentEvent[] = [];
     let totalCollected = 0;
 
-    await DatabaseService.runInTransaction(async () => {
+    DatabaseService.runInTransaction(() => {
       for (let i = 0; i < params.items.length; i++) {
         const item = params.items[i];
         const itemOpId = params.operationId
@@ -887,7 +896,7 @@ export class PaymentRepository {
           if (paymentAmount <= 0) {
             throw new ConflictError("تم سداد هذه المطالبة مسبقًا لهذا الطالب.");
           }
-          payment = await this.recordPayment({
+          payment = this.recordPaymentSync({
             studentId: params.studentId,
             amount: paymentAmount,
             paymentType: "payment_request",
@@ -902,18 +911,29 @@ export class PaymentRepository {
           const cycleId = item.debtCycleId || item.id.replace(/^cycle-/, "");
           let paymentAmount = item.amount;
           if (paymentAmount === undefined) {
-            const db = DatabaseService.getDb();
-            const cyc = db.getFirstSync<any>(
-              `SELECT cycle_price as cyclePrice, remaining_debt as remainingDebt FROM debt_cycles WHERE center_id = ? AND id = ?`,
-              [centerId, cycleId],
+            const latestStatus = FinancialCalculationService.getStudentFinancialStatus(
+              params.studentId,
+              params.paymentDate,
             );
-            if (!cyc) throw new NotFoundError("دورة المديونية غير موجودة.");
-            paymentAmount = Math.max(0, Number(cyc.remainingDebt ?? cyc.cyclePrice) || 0);
+            const matchedCycle = (latestStatus.cycles || []).find(
+              (c: any) => c.id === cycleId,
+            );
+            if (matchedCycle) {
+              paymentAmount = Math.max(0, Number(matchedCycle.remainingDebt) || 0);
+            } else {
+              const db = DatabaseService.getDb();
+              const cyc = db.getFirstSync<any>(
+                `SELECT cycle_price as cyclePrice FROM debt_cycles WHERE center_id = ? AND id = ?`,
+                [centerId, cycleId],
+              );
+              if (!cyc) throw new NotFoundError("دورة المديونية غير موجودة.");
+              paymentAmount = Math.max(0, Number(cyc.cyclePrice) || 0);
+            }
           }
           if (paymentAmount <= 0) {
             throw new ConflictError("تم سداد هذه الدورة مسبقًا لهذا الطالب.");
           }
-          payment = await this.recordPayment({
+          payment = this.recordPaymentSync({
             studentId: params.studentId,
             amount: paymentAmount,
             paymentType: "monthly",
@@ -930,7 +950,7 @@ export class PaymentRepository {
           if (paymentAmount === undefined || paymentAmount <= 0) {
             throw new ValidationError("مبلغ دفع الحصة مطلوب.");
           }
-          payment = await this.recordPayment({
+          payment = this.recordPaymentSync({
             studentId: params.studentId,
             amount: paymentAmount,
             paymentType: "session",
@@ -1050,7 +1070,8 @@ export class PaymentRepository {
         const remainingPayments = db.getAllSync<any>(
           `SELECT id, operation_id as operationId, amount, created_at as createdAt, is_reversed as isReversed
            FROM payments
-           WHERE center_id = ? AND payment_request_obligation_id = ? AND is_reversed = 0`,
+           WHERE center_id = ? AND payment_request_obligation_id = ? AND is_reversed = 0
+           ORDER BY created_at DESC`,
           [centerId, linkedObligation.id],
         );
         const seenKeys = new Set<string>();

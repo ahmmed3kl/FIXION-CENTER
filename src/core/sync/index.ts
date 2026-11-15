@@ -18,6 +18,7 @@ import {
 import { SyncOperationPayload } from "../api/contracts";
 import { AuditService } from "../audit";
 import { ConnectivityService } from "../connectivity";
+import { formatUserFailureReason } from "../../features/notifications/notificationStats";
 import { DatabaseService, SqlDatabase } from "../database";
 import { LocalDataEvents } from "../database/localDataEvents";
 import { DeviceRepository, DeviceService } from "../device";
@@ -26,6 +27,134 @@ import { Logger } from "../logger";
 import { PermissionService } from "../permissions";
 
 export type SyncEngineState = "online" | "offline" | "syncing" | "error";
+
+function mapServerNotificationDelivery(d: any) {
+  const rawPayload = d?.response_payload ?? d?.responsePayload;
+  const parsedPayload =
+    typeof rawPayload === "string"
+      ? (() => {
+          try {
+            return JSON.parse(rawPayload);
+          } catch {
+            return {};
+          }
+        })()
+      : rawPayload && typeof rawPayload === "object"
+        ? rawPayload
+        : {};
+  const dispatchState = String(
+    d?.dispatch_state || d?.dispatchState || parsedPayload?.dispatchState || "",
+  );
+  const rawStatus = String(d?.status || "pending");
+  const mappedStatus =
+    rawStatus === "delivered"
+      ? "delivered"
+      : dispatchState === "ambiguous_outcome"
+        ? "ambiguous_outcome"
+        : rawStatus === "sent" && dispatchState === "accepted"
+          ? "accepted"
+          : rawStatus === "sent"
+            ? "sent"
+            : dispatchState === "sending"
+              ? "sending"
+              : rawStatus === "queued"
+                ? "queued"
+                : rawStatus;
+
+  const rawFailure =
+    d?.failure_reason ||
+    d?.failureReason ||
+    (parsedPayload?.category &&
+    mappedStatus !== "sent" &&
+    mappedStatus !== "accepted" &&
+    mappedStatus !== "delivered"
+      ? JSON.stringify({
+          category: parsedPayload.category,
+          dispatchState,
+        })
+      : null);
+  const mappedFailureReason = formatUserFailureReason(rawFailure, mappedStatus);
+
+  return {
+    mappedStatus,
+    mappedFailureReason,
+    recipient: String(d?.recipient || parsedPayload?.recipient || ""),
+    renderedMessage: String(
+      d?.rendered_message ||
+        d?.renderedMessage ||
+        parsedPayload?.renderedMessage ||
+        parsedPayload?.rendered_message ||
+        "",
+    ),
+    effectiveSentAt: d?.sent_at || d?.sentAt || d?.accepted_at || null,
+    providerMessageId: d?.provider_message_id || d?.providerMessageId || null,
+  };
+}
+
+function recomputeLocalObligationPaymentState(
+  db: SqlDatabase,
+  centerId: string,
+  obligationId: string,
+  nowIso: string,
+  preferredPaymentId?: string | null,
+) {
+  const ob = db.getFirstSync<{
+    amount_due: number;
+    status: string;
+    paid_at?: string | null;
+  }>(
+    `SELECT amount_due, status, paid_at
+     FROM student_payment_request_obligations
+     WHERE center_id = ? AND id = ?`,
+    [centerId, obligationId],
+  );
+  if (!ob || ob.status === "cancelled") return;
+
+  const activePayments = db.getAllSync<{
+    id: string;
+    amount: number;
+    payment_date?: string | null;
+  }>(
+    `SELECT id, amount, payment_date
+     FROM payments
+     WHERE center_id = ? AND payment_request_obligation_id = ? AND is_reversed = 0
+     ORDER BY created_at DESC`,
+    [centerId, obligationId],
+  );
+  const totalPaid =
+    Math.round(
+      activePayments.reduce((sum, p) => sum + (Number(p.amount) || 0), 0) * 100,
+    ) / 100;
+  const due = Math.round((Number(ob.amount_due) || 0) * 100) / 100;
+  const clampedPaid = Math.min(due, Math.max(0, totalPaid));
+  const isPaid = due > 0 && clampedPaid >= due - 0.000001;
+  const latestPaymentId =
+    preferredPaymentId && activePayments.some((p) => p.id === preferredPaymentId)
+      ? preferredPaymentId
+      : activePayments[0]?.id || null;
+  const paidAt = isPaid
+    ? ob.paid_at || activePayments[0]?.payment_date || nowIso
+    : null;
+
+  db.runSync(
+    `UPDATE student_payment_request_obligations
+       SET amount_paid = ?,
+           status = ?,
+           payment_id = ?,
+           paid_at = ?,
+           updated_at = ?
+     WHERE center_id = ? AND id = ? AND status != 'cancelled'`,
+    [
+      clampedPaid,
+      isPaid ? "paid" : "unpaid",
+      latestPaymentId,
+      paidAt,
+      nowIso,
+      centerId,
+      obligationId,
+    ],
+  );
+}
 
 export const ARABIC_SYNC_STATES: Record<SyncEngineState, string> = {
   online: "متصل",
@@ -756,7 +885,7 @@ function retryDelayMs(retryCount: number): number {
 // can send the parent first; these are not permanent manual-review conflicts.
 export function isRetryableDependencyConflict(reason: unknown): boolean {
   const text = String(reason || "");
-  return /SESSION_ACTIVATION_TARGET_NOT_FOUND|ATTENDANCE_SESSION_NOT_FOUND|ATTENDANCE_TARGET_NOT_FOUND|ATTENDANCE_CANCEL_TARGET_NOT_FOUND|ADVANCE_COVERAGE_SESSION_NOT_FOUND|ABSENCE_NOTIFICATION_TARGET_NOT_FOUND|NOTIFICATION_EVENT_NOT_FOUND|PAYMENT_DEBT_CYCLE_NOT_FOUND|PAYMENT_SESSION_NOT_FOUND|attendance_session_id_fkey/i.test(
+  return /SESSION_ACTIVATION_TARGET_NOT_FOUND|ATTENDANCE_SESSION_NOT_FOUND|ATTENDANCE_TARGET_NOT_FOUND|ATTENDANCE_CANCEL_TARGET_NOT_FOUND|ADVANCE_COVERAGE_SESSION_NOT_FOUND|ABSENCE_NOTIFICATION_TARGET_NOT_FOUND|NOTIFICATION_EVENT_NOT_FOUND|PAYMENT_DEBT_CYCLE_NOT_FOUND|PAYMENT_SESSION_NOT_FOUND|PAYMENT_REQUEST_NOT_FOUND|attendance_session_id_fkey/i.test(
     text,
   );
 }
@@ -3035,7 +3164,11 @@ export class SyncRepository {
     }
   }
 
-  static markAsFailed(operationId: string, errorReason: string): void {
+  static markAsFailed(
+    operationId: string,
+    errorReason: string,
+    options?: { preserveRetryCount?: boolean },
+  ): void {
     const db = DatabaseService.getDb();
     const current = db.getFirstSync<{ retryCount: number }>(
       `SELECT retry_count as retryCount FROM sync_operations WHERE operation_id = ?`,
@@ -3045,6 +3178,15 @@ export class SyncRepository {
     const nextRetryAt = new Date(
       Date.now() + retryDelayMs(retryCount),
     ).toISOString();
+    if (options?.preserveRetryCount) {
+      db.runSync(
+        `UPDATE sync_operations
+         SET status = 'failed', last_error = ?, next_retry_at = ?
+         WHERE operation_id = ?`,
+        [errorReason, nextRetryAt, operationId],
+      );
+      return;
+    }
     db.runSync(
       `UPDATE sync_operations
        SET status = 'failed', retry_count = retry_count + 1, last_error = ?, next_retry_at = ?
@@ -5314,6 +5456,15 @@ export class SyncEngine {
         }
         if (Array.isArray(data.debtAdjustments)) {
           for (const a of data.debtAdjustments) {
+            const adjCycleId = a.debt_cycle_id || a.debtCycleId || "";
+            let adjStudentId = a.student_id || a.studentId || "";
+            if (!adjStudentId && adjCycleId) {
+              const cycleRow = db.getFirstSync<{ student_id: string }>(
+                "SELECT student_id FROM debt_cycles WHERE center_id = ? AND id = ?",
+                [a.center_id || centerId, adjCycleId],
+              );
+              adjStudentId = cycleRow?.student_id || "";
+            }
             db.runSync(
               `INSERT INTO debt_adjustments (id, operation_id, center_id, student_id, enrollment_id, debt_cycle_id, amount_before, adjustment_amount, amount_after, reason, created_by, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -5324,9 +5475,9 @@ export class SyncEngine {
                   a.operationId ||
                   `bootstrap-adjustment-${a.id}`,
                 a.center_id || centerId,
-                a.student_id || a.studentId || "",
+                adjStudentId,
                 a.enrollment_id || a.enrollmentId || null,
-                a.debt_cycle_id || a.debtCycleId,
+                adjCycleId,
                 Number(a.amount_before || a.amountBefore || 0),
                 normalizeAdjustmentAmount(a),
                 Number(
@@ -5455,24 +5606,21 @@ export class SyncEngine {
         }
         if (Array.isArray(data.notificationDeliveries)) {
           for (const d of data.notificationDeliveries) {
+            const mapped = mapServerNotificationDelivery(d);
             db.runSync(
               `INSERT INTO notification_deliveries (id, center_id, notification_event_id, channel, status, recipient, rendered_message, sent_at, failure_reason, retry_count, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET channel=excluded.channel, status=excluded.status, sent_at=excluded.sent_at, failure_reason=excluded.failure_reason, retry_count=excluded.retry_count, updated_at=excluded.updated_at`,
+            ON CONFLICT(id) DO UPDATE SET channel=excluded.channel, status=excluded.status, recipient=CASE WHEN excluded.recipient <> '' THEN excluded.recipient ELSE notification_deliveries.recipient END, rendered_message=CASE WHEN excluded.rendered_message <> '' THEN excluded.rendered_message ELSE notification_deliveries.rendered_message END, sent_at=COALESCE(excluded.sent_at, notification_deliveries.sent_at), failure_reason=excluded.failure_reason, retry_count=excluded.retry_count, updated_at=excluded.updated_at`,
               [
                 d.id,
                 d.center_id || centerId,
                 d.notification_event_id || d.notificationEventId,
                 d.provider || d.channel || "push",
-                d.status || "pending",
-                d.recipient || "",
-                d.rendered_message || d.renderedMessage || "",
-                d.sent_at || d.sentAt || null,
-                d.failure_reason ||
-                  d.failureReason ||
-                  (d.response_payload
-                    ? JSON.stringify(d.response_payload)
-                    : null),
+                mapped.mappedStatus,
+                mapped.recipient,
+                mapped.renderedMessage,
+                mapped.effectiveSentAt,
+                mapped.mappedFailureReason,
                 Number(d.retry_count || 0),
                 d.created_at || new Date().toISOString(),
                 d.updated_at || new Date().toISOString(),
@@ -6765,23 +6913,12 @@ export class SyncEngine {
               ],
             );
             if (payObligationId && !pay.is_reversed) {
-              db.runSync(
-                `UPDATE student_payment_request_obligations
-                  SET amount_paid = amount_due,
-                      status = 'paid',
-                      payment_id = ?,
-                      paid_at = COALESCE(paid_at, ?),
-                      updated_at = ?
-                WHERE center_id = ? AND id = ? AND status != 'cancelled'`,
-                [
-                  payId,
-                  pay.payment_date ||
-                    pay.paymentDate ||
-                    new Date().toISOString(),
-                  new Date().toISOString(),
-                  centerId,
-                  payObligationId,
-                ],
+              recomputeLocalObligationPaymentState(
+                db,
+                centerId,
+                payObligationId,
+                pay.payment_date || pay.paymentDate || new Date().toISOString(),
+                payId,
               );
             }
             if (data.debtCycle) {
@@ -6817,24 +6954,25 @@ export class SyncEngine {
                 [new Date().toISOString(), paymentId, centerId],
               );
               if (payment.payment_request_obligation_id) {
-                db.runSync(
-                  `UPDATE student_payment_request_obligations
-                    SET amount_paid = 0,
-                        status = CASE WHEN status = 'cancelled' THEN 'cancelled' ELSE 'unpaid' END,
-                        payment_id = NULL,
-                        paid_at = NULL,
-                        updated_at = ?
-                  WHERE center_id = ? AND id = ?`,
-                  [
-                    new Date().toISOString(),
-                    centerId,
-                    payment.payment_request_obligation_id,
-                  ],
+                recomputeLocalObligationPaymentState(
+                  db,
+                  centerId,
+                  payment.payment_request_obligation_id,
+                  new Date().toISOString(),
                 );
               }
             }
           } else if (entityType === "debt_adjustment") {
             const a = data.adjustment || data;
+            const adjCycleId = a.debt_cycle_id || a.debtCycleId || "";
+            let adjStudentId = a.student_id || a.studentId || "";
+            if (!adjStudentId && adjCycleId) {
+              const cycleRow = db.getFirstSync<{ student_id: string }>(
+                "SELECT student_id FROM debt_cycles WHERE center_id = ? AND id = ?",
+                [centerId, adjCycleId],
+              );
+              adjStudentId = cycleRow?.student_id || "";
+            }
             db.runSync(
               `INSERT INTO debt_adjustments (id, operation_id, center_id, student_id, enrollment_id, debt_cycle_id, amount_before, adjustment_amount, amount_after, reason, created_by, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -6844,9 +6982,9 @@ export class SyncEngine {
                 change.operationId ||
                   `srv-adjustment-${a.id || change.entityId}`,
                 centerId,
-                a.student_id || a.studentId || "",
+                adjStudentId,
                 a.enrollment_id || a.enrollmentId || null,
-                a.debt_cycle_id || a.debtCycleId || "",
+                adjCycleId,
                 Number(a.amount_before ?? a.amountBefore ?? 0),
                 normalizeAdjustmentAmount(a),
                 Number(
@@ -7142,6 +7280,15 @@ export class SyncEngine {
             const delivEventId =
               d.notification_event_id || d.notificationEventId;
             const delivChannel = d.provider || d.channel || "push";
+            const {
+              mappedStatus,
+              mappedFailureReason,
+              recipient,
+              renderedMessage,
+              effectiveSentAt,
+              providerMessageId,
+            } = mapServerNotificationDelivery(d);
+
             // uq_notif_delivery UNIQUE(notification_event_id, channel) is not covered
             // by ON CONFLICT(id). Pre-check: if a row with the same event+channel exists,
             // update it in-place so we don't throw and abort the pull transaction.
@@ -7155,15 +7302,19 @@ export class SyncEngine {
              WHERE center_id = ? AND notification_event_id = ? AND channel = ?`,
               [centerId, delivEventId, delivChannel],
             );
+            const isTerminalSuccess = (s: string) =>
+              s === "delivered" || s === "sent" || s === "accepted";
             if (existingDelivery && existingDelivery.id !== delivId) {
-              // Never regress an already 'sent' delivery back to 'pending' or 'queued'.
-              const incomingStatus = d.status || "pending";
+              // Never regress an already accepted/sent/delivered delivery back to 'pending' or 'queued'.
               const effectiveStatus =
-                existingDelivery.status === "sent" && incomingStatus !== "sent"
-                  ? "sent"
-                  : incomingStatus;
-              const effectiveSentAt =
-                d.sent_at || d.sentAt || existingDelivery.sent_at || null;
+                isTerminalSuccess(existingDelivery.status) &&
+                !isTerminalSuccess(mappedStatus)
+                  ? existingDelivery.status
+                  : mappedStatus;
+              const mergedSentAt =
+                effectiveSentAt ||
+                existingDelivery.sent_at ||
+                null;
 
               db.runSync(
                 `UPDATE notification_deliveries
@@ -7171,8 +7322,8 @@ export class SyncEngine {
                WHERE id=? AND center_id=?`,
                 [
                   effectiveStatus,
-                  effectiveSentAt,
-                  d.failure_reason || d.failureReason || null,
+                  mergedSentAt,
+                  mappedFailureReason,
                   Number(d.retry_count || 0),
                   d.updated_at || new Date().toISOString(),
                   existingDelivery.id,
@@ -7182,10 +7333,8 @@ export class SyncEngine {
               // provider_message_id is added in migration v13; update it separately
               // so that an older local DB doesn't abort the pull, but never overwrite a valid existing ID with null.
               try {
-                const incomingPmId =
-                  d.provider_message_id || d.providerMessageId || null;
                 const effectivePmId =
-                  incomingPmId || existingDelivery.provider_message_id || null;
+                  providerMessageId || existingDelivery.provider_message_id || null;
                 if (effectivePmId !== null) {
                   db.runSync(
                     `UPDATE notification_deliveries SET provider_message_id=? WHERE id=? AND center_id=?`,
@@ -7198,19 +7347,19 @@ export class SyncEngine {
             } else {
               db.runSync(
                 `INSERT INTO notification_deliveries (id, center_id, notification_event_id, channel, status, recipient, rendered_message, sent_at, failure_reason, retry_count, provider_message_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-              ON CONFLICT(id) DO UPDATE SET channel=excluded.channel, status=excluded.status, sent_at=excluded.sent_at, failure_reason=excluded.failure_reason, retry_count=excluded.retry_count, provider_message_id=excluded.provider_message_id, updated_at=excluded.updated_at`,
+              ON CONFLICT(id) DO UPDATE SET channel=excluded.channel, status=excluded.status, recipient=CASE WHEN excluded.recipient <> '' THEN excluded.recipient ELSE notification_deliveries.recipient END, rendered_message=CASE WHEN excluded.rendered_message <> '' THEN excluded.rendered_message ELSE notification_deliveries.rendered_message END, sent_at=COALESCE(excluded.sent_at, notification_deliveries.sent_at), failure_reason=excluded.failure_reason, retry_count=excluded.retry_count, provider_message_id=COALESCE(excluded.provider_message_id, notification_deliveries.provider_message_id), updated_at=excluded.updated_at`,
                 [
                   delivId,
                   centerId,
                   delivEventId,
                   delivChannel,
-                  d.status || "pending",
-                  d.recipient || "",
-                  d.rendered_message || d.renderedMessage || "",
-                  d.sent_at || d.sentAt || null,
-                  d.failure_reason || d.failureReason || null,
+                  mappedStatus,
+                  recipient,
+                  renderedMessage,
+                  effectiveSentAt,
+                  mappedFailureReason,
                   Number(d.retry_count || 0),
-                  d.provider_message_id || d.providerMessageId || null,
+                  providerMessageId,
                   d.created_at || new Date().toISOString(),
                   d.updated_at || new Date().toISOString(),
                 ],
@@ -7836,10 +7985,22 @@ export class SyncEngine {
           // Cursor advances only through successful Pull batches below.
           // (pushResponse.serverCursor is intentionally ignored here.)
         } catch (pushErr: any) {
+          const status = Number(pushErr?.response?.status || pushErr?.status || 0);
+          const code = String(pushErr?.code || "");
+          const msg = String(pushErr?.message || "").toLowerCase();
+          const isTransientTransportError =
+            !status ||
+            status >= 500 ||
+            status === 429 ||
+            code === "ECONNABORTED" ||
+            code === "ERR_NETWORK" ||
+            msg.includes("timeout") ||
+            msg.includes("network");
           for (const op of pendingOps) {
             SyncRepository.markAsFailed(
               op.operationId,
               pushErr?.message || "فشل إرسال الدفعة",
+              { preserveRetryCount: isTransientTransportError },
             );
             errors++;
           }

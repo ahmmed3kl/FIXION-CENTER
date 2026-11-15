@@ -541,6 +541,7 @@ export class MakeupService {
         this.isSessionCoveredInAdvance(studentId, source.id);
       const alreadyMadeUp = db.getFirstSync<any>(
         `SELECT id FROM attendance WHERE center_id = ? AND student_id = ?
+           AND status IN ('present', 'late')
            AND (original_absence_id = ? OR original_absence_id = ('absence-' || ? || '-' || ?))`,
         [centerId, studentId, source.id, source.id, studentId],
       );

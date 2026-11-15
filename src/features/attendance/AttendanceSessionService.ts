@@ -150,6 +150,7 @@ export class AttendanceSessionService {
          AND NOT EXISTS (
            SELECT 1 FROM attendance makeup
            WHERE makeup.center_id = s.center_id AND makeup.student_id = ?
+             AND makeup.status IN ('present', 'late')
              AND (makeup.original_absence_id = s.id
                   OR makeup.original_absence_id = ('absence-' || s.id || '-' || ?))
          )

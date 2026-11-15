@@ -139,25 +139,6 @@ export class DebtAdjustmentRepository {
     const deviceId = await DeviceService.getDeviceId();
     const now = new Date().toISOString();
 
-    db.runSync(
-      `INSERT INTO debt_adjustments (id, operation_id, center_id, student_id, enrollment_id, debt_cycle_id, amount_before, adjustment_amount, amount_after, reason, created_by, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        adjustmentId,
-        operationId,
-        centerId,
-        cycle.studentId,
-        cycle.enrollmentId,
-        params.debtCycleId,
-        amountBefore,
-        params.adjustmentAmount,
-        amountAfter,
-        params.reason.trim(),
-        user.id,
-        now,
-      ],
-    );
-
     const adjustment: DebtAdjustment = {
       id: adjustmentId,
       operationId,
@@ -173,34 +154,61 @@ export class DebtAdjustmentRepository {
       createdAt: now,
     };
 
-    // Queue for sync
-    SyncRepository.enqueueOperation({
-      centerId,
-      userId: user.id,
-      deviceId,
-      operationType: "debt_adjustment.create",
-      entityType: "debt_adjustment",
-      entityId: adjustmentId,
-      payload: adjustment,
-      operationId,
-    });
+    DatabaseService.runInTransaction(() => {
+      db.runSync(
+        `INSERT INTO debt_adjustments (id, operation_id, center_id, student_id, enrollment_id, debt_cycle_id, amount_before, adjustment_amount, amount_after, reason, created_by, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          adjustmentId,
+          operationId,
+          centerId,
+          cycle.studentId,
+          cycle.enrollmentId,
+          params.debtCycleId,
+          amountBefore,
+          params.adjustmentAmount,
+          amountAfter,
+          params.reason.trim(),
+          user.id,
+          now,
+        ],
+      );
 
-    // Record in audit log
-    AuditService.recordEvent({
-      operationId,
-      centerId,
-      userId: user.id,
-      deviceId,
-      entityType: "debt_adjustment",
-      entityId: adjustmentId,
-      action: "debt_adjustment.create",
-      payload: {
-        debtCycleId: params.debtCycleId,
-        amountBefore,
-        adjustmentAmount: params.adjustmentAmount,
-        amountAfter,
-        reason: params.reason.trim(),
-      },
+      // Queue for sync
+      SyncRepository.enqueueOperation({
+        centerId,
+        userId: user.id,
+        deviceId,
+        operationType: "debt_adjustment.create",
+        entityType: "debt_adjustment",
+        entityId: adjustmentId,
+        payload: adjustment,
+        operationId,
+      });
+
+      // Record in audit log
+      AuditService.recordEvent({
+        operationId,
+        centerId,
+        userId: user.id,
+        deviceId,
+        entityType: "debt_adjustment",
+        entityId: adjustmentId,
+        action: "debt_adjustment.create",
+        payload: {
+          debtCycleId: params.debtCycleId,
+          amountBefore,
+          adjustmentAmount: params.adjustmentAmount,
+          amountAfter,
+          reason: params.reason.trim(),
+        },
+      });
+
+      DatabaseService.notifyLocalChange({
+        centerId,
+        entityType: "debt_adjustment",
+        entityId: adjustmentId,
+      });
     });
 
     return adjustment;

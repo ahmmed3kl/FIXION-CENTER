@@ -1,21 +1,32 @@
 import { AuditService } from "../../core/audit";
 import { env } from "../../config/env";
 import { DatabaseService } from "../../core/database";
+import { LocalDataEvents } from "../../core/database/localDataEvents";
 import { DeviceService } from "../../core/device";
-import { ConflictError, ForbiddenError, UnauthorizedError } from "../../core/errors";
+import {
+  ConflictError,
+  ForbiddenError,
+  NotFoundError,
+  UnauthorizedError,
+  ValidationError,
+} from "../../core/errors";
 import { PermissionService } from "../../core/permissions";
 import { SyncRepository } from "../../core/sync";
 import {
-    NotificationChannel,
-    NotificationDelivery,
-    NotificationEvent,
-    NotificationEventType,
+  NotificationChannel,
+  NotificationDelivery,
+  NotificationEvent,
+  NotificationEventType,
 } from "../../shared/types";
 import { useAuthStore } from "../auth/useAuthStore";
-import { HomeworkEvaluationRepository } from "../homework/HomeworkEvaluationRepository";
 import {
-    NotificationTemplateRepository,
-    renderTemplate,
+  HomeworkEvaluationRepository,
+  normalizeSessionDateOnly,
+} from "../homework/HomeworkEvaluationRepository";
+import {
+  DEFAULT_TEMPLATES,
+  NotificationTemplateRepository,
+  renderTemplate,
 } from "./NotificationTemplateRepository";
 
 function generateUUID(): string {
@@ -24,6 +35,35 @@ function generateUUID(): string {
     const v = c === "x" ? r : (r & 0x3) | 0x8;
     return v.toString(16);
   });
+}
+
+function deterministicHash32(input: string): string {
+  let h1 = 0x811c9dc5;
+  let h2 = 0x01000193;
+  for (let i = 0; i < input.length; i++) {
+    const ch = input.charCodeAt(i);
+    h1 ^= ch;
+    h1 = Math.imul(h1, 0x01000193);
+    h2 ^= ch + (i & 0xff);
+    h2 = Math.imul(h2, 0x85ebca6b);
+  }
+  const hex1 = (h1 >>> 0).toString(16).padStart(8, "0");
+  const hex2 = (h2 >>> 0).toString(16).padStart(8, "0");
+  return `${hex1}${hex2}`;
+}
+
+export interface HomeworkNotificationPreviewItem {
+  studentId: string;
+  studentName: string;
+  studentCode: string;
+  groupName: string;
+  subjectName: string;
+  teacherName: string;
+  sessionDate: string;
+  homeworkStatus: string;
+  statusId: string;
+  recipientPhone: string;
+  renderedMessage: string;
 }
 
 /**
@@ -476,7 +516,8 @@ export class NotificationService {
       `SELECT id, center_id as centerId, notification_event_id as notificationEventId,
               channel, status, recipient, rendered_message as renderedMessage,
               sent_at as sentAt, failure_reason as failureReason,
-              retry_count as retryCount, created_at as createdAt, updated_at as updatedAt
+              retry_count as retryCount, provider_message_id as providerMessageId,
+              created_at as createdAt, updated_at as updatedAt
        FROM notification_deliveries
        WHERE center_id = ? AND notification_event_id = ?`,
       [centerId, eventId],
@@ -595,7 +636,16 @@ export class NotificationService {
         counts[row.status] = (counts[row.status] || 0) + 1;
         return counts;
       },
-      { pending: 0, sending: 0, sent: 0, failed: 0 },
+      {
+        pending: 0,
+        queued: 0,
+        sending: 0,
+        accepted: 0,
+        sent: 0,
+        delivered: 0,
+        failed: 0,
+        ambiguous_outcome: 0,
+      },
     );
   }
 
@@ -808,5 +858,303 @@ export class NotificationService {
       channels: ["sms"],
       recipientType: params.recipientType || "parent",
     });
+  }
+
+  /**
+   * Builds template variables for a student's homework evaluation in a session.
+   * Strictly validates that the student attended the session and has a saved homework evaluation.
+   */
+  static buildHomeworkNotificationVariables(
+    studentId: string,
+    sessionId: string,
+  ): {
+    vars: Record<string, string>;
+    studentName: string;
+    studentCode: string;
+    phone: string;
+    parentPhone: string;
+    groupName: string;
+    subjectName: string;
+    teacherName: string;
+    sessionDate: string;
+    homeworkStatus: string;
+    statusId: string;
+    evaluationId: string;
+  } {
+    const { centerId } = this.getActiveContext();
+    const db = DatabaseService.getDb();
+
+    const sessionRow = db.getFirstSync<any>(
+      `SELECT id, group_id as groupId, subject_id as subjectId, teacher_id as teacherId,
+              session_date as sessionDate, start_time as startTime
+       FROM sessions
+       WHERE center_id = ? AND id = ?`,
+      [centerId, sessionId],
+    );
+    if (!sessionRow) {
+      throw new NotFoundError("الحصة غير موجودة في هذا المركز.");
+    }
+
+    const studentRow = db.getFirstSync<any>(
+      `SELECT id, full_name, student_code, phone, parent_phone, deleted_at
+       FROM students
+       WHERE center_id = ? AND id = ? AND deleted_at IS NULL`,
+      [centerId, studentId],
+    );
+    if (!studentRow) {
+      throw new NotFoundError("الطالب غير موجود في هذا المركز.");
+    }
+
+    const attendanceRows = db.getAllSync<any>(
+      `SELECT id, status
+       FROM attendance
+       WHERE center_id = ? AND session_id = ? AND student_id = ?`,
+      [centerId, sessionId, studentId],
+    );
+    const attended = attendanceRows.some((r) =>
+      ["present", "late"].includes(String(r.status || "").toLowerCase()),
+    );
+    if (!attended) {
+      throw new ValidationError(
+        "لا يمكن إرسال حالة الواجب لطالب غائب أو لم يحضر الحصة.",
+      );
+    }
+
+    const evaluation = HomeworkEvaluationRepository.getForSession(
+      sessionId,
+      studentId,
+    );
+    if (!evaluation || !evaluation.statusId || !evaluation.statusName) {
+      throw new ValidationError(
+        "لا يمكن إرسال حالة الواجب لطالب لم يتم تقييمه بعد.",
+      );
+    }
+
+    const groupRow = sessionRow.groupId
+      ? db.getFirstSync<any>(
+          `SELECT g.name as groupName, g.name, s.name as subjectName, t.name as teacherName
+           FROM groups g
+           LEFT JOIN subjects s ON g.subject_id = s.id
+           LEFT JOIN teachers t ON g.teacher_id = t.id
+           WHERE g.center_id = ? AND g.id = ?`,
+          [centerId, sessionRow.groupId],
+        )
+      : null;
+
+    const center = db.getFirstSync<any>(
+      `SELECT name FROM centers WHERE id = ?`,
+      [centerId],
+    );
+
+    const fullName = String(studentRow.full_name || "").trim();
+    const groupName = String(
+      groupRow?.groupName || groupRow?.name || sessionRow.groupName || "",
+    );
+    const subjectName = String(
+      groupRow?.subjectName || sessionRow.subjectName || "",
+    );
+    const teacherName = String(
+      groupRow?.teacherName || sessionRow.teacherName || "",
+    );
+    const sessionDate = normalizeSessionDateOnly(sessionRow.sessionDate);
+    const homeworkStatus = String(evaluation.statusName || "");
+
+    const vars: Record<string, string> = {
+      student_name: fullName,
+      student_first_name: fullName.split(/\s+/)[0] || "",
+      parent_name: "ولي الأمر",
+      center_name: String(center?.name || ""),
+      group_name: groupName,
+      subject_name: subjectName,
+      teacher_name: teacherName,
+      session_date: sessionDate,
+      session_time: String(sessionRow.startTime || ""),
+      homework_status: homeworkStatus,
+      homework_evaluation: `حالة الواجب: ${homeworkStatus}`,
+    };
+
+    return {
+      vars,
+      studentName: fullName,
+      studentCode: String(studentRow.student_code || ""),
+      phone: String(studentRow.phone || ""),
+      parentPhone: String(studentRow.parent_phone || ""),
+      groupName,
+      subjectName,
+      teacherName,
+      sessionDate,
+      homeworkStatus,
+      statusId: evaluation.statusId,
+      evaluationId: evaluation.id,
+    };
+  }
+
+  /**
+   * Generates personalized preview messages for selected evaluated students in a session
+   * using the active homework notification template.
+   */
+  static previewHomeworkNotifications(params: {
+    sessionId: string;
+    studentIds: string[];
+    channel?: NotificationChannel;
+    recipientType?: "parent" | "student";
+    customTemplateBody?: string;
+  }): HomeworkNotificationPreviewItem[] {
+    const { user } = this.getActiveContext();
+    if (
+      !PermissionService.hasAnyPermission(user.permissions, [
+        "notifications.view",
+        "notifications.send",
+        "homework.manage",
+        "grades.manage",
+        "attendance.create",
+      ])
+    ) {
+      throw new ForbiddenError("ليس لديك صلاحية معاينة إشعارات الواجب.");
+    }
+
+    const uniqueStudentIds = Array.from(
+      new Set((params.studentIds || []).filter(Boolean)),
+    );
+    if (uniqueStudentIds.length === 0) {
+      throw new ValidationError("يرجى اختيار طالب واحد على الأقل لمعاينة الإشعار.");
+    }
+
+    NotificationTemplateRepository.ensureDefaultTemplates();
+    const channel: NotificationChannel = params.channel || "sms";
+    const activeTemplate = NotificationTemplateRepository.getActiveTemplate(
+      "homework",
+      channel,
+    );
+    const templateBody =
+      params.customTemplateBody?.trim() ||
+      activeTemplate?.templateBody ||
+      DEFAULT_TEMPLATES.homework[channel];
+
+    return uniqueStudentIds.map((studentId) => {
+      const info = this.buildHomeworkNotificationVariables(
+        studentId,
+        params.sessionId,
+      );
+      const renderedMessage = renderTemplate(templateBody, info.vars);
+      const recipientPhone =
+        params.recipientType === "student"
+          ? info.phone
+          : info.parentPhone || info.phone;
+
+      return {
+        studentId,
+        studentName: info.studentName,
+        studentCode: info.studentCode,
+        groupName: info.groupName,
+        subjectName: info.subjectName,
+        teacherName: info.teacherName,
+        sessionDate: info.sessionDate,
+        homeworkStatus: info.homeworkStatus,
+        statusId: info.statusId,
+        recipientPhone,
+        renderedMessage,
+      };
+    });
+  }
+
+  /**
+   * Sends individual homework evaluation notifications for one or more evaluated students.
+   * - Rejects unevaluated or absent students.
+   * - Uses a deterministic compact operationId (<= 48 chars) per (center, session, student, status)
+   *   so repeated presses or sync retries never create duplicate notifications or exceed VARCHAR(64).
+   */
+  static notifyHomeworkEvaluations(params: {
+    sessionId: string;
+    studentIds: string[];
+    recipientType?: "parent" | "student";
+    channels?: NotificationChannel[];
+    customTemplateBody?: string;
+    operationIdByStudent?: Record<string, string>;
+  }): NotificationEvent[] {
+    const { centerId, user } = this.getActiveContext();
+    if (
+      !PermissionService.hasPermission(user.permissions, "notifications.send")
+    ) {
+      throw new ForbiddenError("ليس لديك صلاحية إرسال الإشعارات.");
+    }
+
+    const uniqueStudentIds = Array.from(
+      new Set((params.studentIds || []).filter(Boolean)),
+    );
+    if (uniqueStudentIds.length === 0) {
+      throw new ValidationError(
+        "يرجى اختيار طالب واحد على الأقل لإرسال حالة الواجب.",
+      );
+    }
+
+    NotificationTemplateRepository.ensureDefaultTemplates();
+
+    // Validate all selected students upfront before creating any notification events
+    const prepared = uniqueStudentIds.map((studentId) => {
+      const info = this.buildHomeworkNotificationVariables(
+        studentId,
+        params.sessionId,
+      );
+      const explicitOpId = params.operationIdByStudent?.[studentId];
+      const deterministicOpId = `op-hw-notif-${deterministicHash32(
+        `${centerId}:${params.sessionId}:${studentId}:${info.statusId}`,
+      )}`;
+      return {
+        studentId,
+        info,
+        operationId: explicitOpId || deterministicOpId,
+      };
+    });
+
+    const events: NotificationEvent[] = [];
+    for (const item of prepared) {
+      const event = this.createNotificationEvent({
+        operationId: item.operationId,
+        studentId: item.studentId,
+        sessionId: params.sessionId,
+        eventType: "homework",
+        vars: item.info.vars,
+        customMessage: params.customTemplateBody?.trim() || undefined,
+        channels: params.channels || ["push", "sms"],
+        recipientType: params.recipientType || "parent",
+      });
+      events.push(event);
+    }
+
+    LocalDataEvents.emit();
+    return events;
+  }
+
+  static hasHomeworkNotification(
+    sessionId: string,
+    studentId?: string,
+  ): boolean {
+    const { centerId, user } = this.getActiveContext();
+    if (
+      !PermissionService.hasPermission(user.permissions, "notifications.view") &&
+      !PermissionService.hasPermission(user.permissions, "notifications.send")
+    ) {
+      return false;
+    }
+    const db = DatabaseService.getDb();
+    if (studentId) {
+      return Boolean(
+        db.getFirstSync<any>(
+          `SELECT id FROM notification_events
+           WHERE center_id = ? AND session_id = ? AND student_id = ? AND event_type = 'homework'
+           LIMIT 1`,
+          [centerId, sessionId, studentId],
+        ),
+      );
+    }
+    return Boolean(
+      db.getFirstSync<any>(
+        `SELECT id FROM notification_events
+         WHERE center_id = ? AND session_id = ? AND event_type = 'homework'
+         LIMIT 1`,
+        [centerId, sessionId],
+      ),
+    );
   }
 }

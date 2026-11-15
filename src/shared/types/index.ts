@@ -741,10 +741,19 @@ export type ConnectivityState = "online" | "offline" | "syncing" | "degraded";
 export type NotificationChannel = "push" | "sms";
 export type NotificationDeliveryStatus =
   | "pending"
+  | "queued"
   | "sending"
+  | "accepted"
   | "sent"
-  | "failed";
-export type NotificationEventType = "attendance" | "absence" | "grades" | "custom";
+  | "delivered"
+  | "failed"
+  | "ambiguous_outcome";
+export type NotificationEventType =
+  | "attendance"
+  | "absence"
+  | "grades"
+  | "homework"
+  | "custom";
 
 export interface NotificationEvent {
   id: string;
@@ -770,6 +779,7 @@ export interface NotificationDelivery {
   sentAt?: string | null;
   failureReason?: string | null;
   retryCount: number;
+  providerMessageId?: string | null;
   createdAt: string;
   updatedAt?: string | null;
 }

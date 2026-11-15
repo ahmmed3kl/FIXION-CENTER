@@ -552,7 +552,7 @@ export default function AcademicScreen() {
             style={styles.homeworkHeaderButton}
             onPress={() => router.push("/(main)/homework-evaluations" as any)}
           >
-            <Ionicons name="checkmark-circle-outline" size={18} color={Colors.white} />
+            <Ionicons name="checkbox-outline" size={18} color={Colors.white} />
             <Text style={styles.homeworkHeaderButtonText}>تقييم الواجب</Text>
           </TouchableOpacity>
         ) : null}

@@ -388,8 +388,9 @@ export class OperationalReportsService {
       (s) => s.status === "covered",
     ).length;
     const total = sessionDetails.length;
+    const attendedCount = presentCount + makeupCount + coveredCount;
     const attendanceRate =
-      total > 0 ? Math.round((presentCount / total) * 100) : 0;
+      total > 0 ? Math.round((attendedCount / total) * 100) : 0;
 
     return {
       studentId,

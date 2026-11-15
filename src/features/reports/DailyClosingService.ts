@@ -118,7 +118,7 @@ export class DailyClosingService {
       );
       const pType = packagePayment ? "package" : (p.payment_type === "cash" ? "session" : p.payment_type);
 
-      if (pType === "monthly" || pType === "full" || pType === "package") {
+      if (pType === "monthly" || pType === "full") {
         monthlyTotal += amount;
       } else if (pType === "partial" || pType === "payment_request") {
         partialTotal += amount;
@@ -147,8 +147,12 @@ export class DailyClosingService {
     const opId = operationId || `op-${generateUUID()}`;
     const now = new Date().toISOString();
 
-    // If day was previously reopened (status === 'open'), re-closing updates the existing record with fresh aggregates
-    if (existing.length > 0 && existing[0].status === "open") {
+    // If day was previously reopened ('open' locally or 'reopened' from server), re-closing updates the existing record
+    const existingStatus = existing.length > 0 ? String(existing[0].status) : "";
+    if (
+      existing.length > 0 &&
+      (existingStatus === "open" || existingStatus === "reopened")
+    ) {
       const summaryId = existing[0].id;
       db.runSync(
         `UPDATE daily_closing_summaries
@@ -349,7 +353,12 @@ export class DailyClosingService {
       entityType: "daily_closing",
       entityId: existing[0].id,
       operationId: opId,
-      payload: { businessDate, reason: reason.trim(), reopenedBy: user.id },
+      payload: {
+        action: "reopen",
+        businessDate,
+        reason: reason.trim(),
+        reopenedBy: user.id,
+      },
     });
 
     AuditService.recordEvent({

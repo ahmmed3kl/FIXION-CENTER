@@ -59,7 +59,10 @@ export class AttendanceRepository {
    */
   static isAlreadyAttended(sessionId: string, studentId: string): boolean {
     const attendance = this.getStudentAttendanceInSession(sessionId, studentId);
-    return Boolean(attendance && !this.isSessionStartAbsenceRecord(attendance));
+    return Boolean(
+      attendance &&
+        (attendance.status === "present" || attendance.status === "late"),
+    );
   }
 
   static isAlreadyRegisteredAsMakeup(sessionId: string, studentId: string): boolean {
@@ -208,7 +211,7 @@ export class AttendanceRepository {
     );
     if (
       existingAttendance &&
-      !this.isSessionStartAbsenceRecord(existingAttendance)
+      existingAttendance.status !== "absent"
     ) {
       if (
         requestedOperationId &&
@@ -313,7 +316,7 @@ export class AttendanceRepository {
         }
         const existingMakeup = db.getAllSync<{ originalAbsenceId?: string | null }>(
           `SELECT original_absence_id as originalAbsenceId FROM attendance
-           WHERE center_id = ? AND student_id = ?`,
+           WHERE center_id = ? AND student_id = ? AND status IN ('present', 'late')`,
           [centerId, params.studentId],
         ).some((row) =>
           row.originalAbsenceId === canonicalOriginalAbsenceId ||
@@ -402,6 +405,53 @@ export class AttendanceRepository {
         throw new ConflictError("تم استنفاد فرصة التعويض لهذا الأسبوع مع نفس المدرس.");
       }
     }
+
+    const advanceCoverageTargetSessionId =
+      params.attendanceType === "makeup" && !canonicalOriginalAbsenceId
+        ? db.getFirstSync<{ id: string }>(
+            `SELECT s.id
+             FROM sessions s
+             JOIN groups g ON g.center_id = s.center_id AND g.id = s.group_id
+             JOIN student_group_enrollments e
+               ON e.center_id = s.center_id AND e.group_id = s.group_id
+              AND e.student_id = ? AND e.status = 'active'
+              AND (e.start_date <= s.session_date OR SUBSTR(e.created_at, 1, 10) <= s.session_date)
+              AND (e.end_date IS NULL OR e.end_date >= s.session_date)
+             WHERE s.center_id = ?
+               AND s.group_id <> ?
+               AND COALESCE(s.subject_id, g.subject_id) = ?
+               AND COALESCE(s.teacher_id, g.teacher_id) = ?
+               AND s.status IN ('scheduled', 'open')
+               AND (s.session_date > ? OR (s.session_date = ? AND s.start_time > ?))
+               AND s.session_date <= ?
+               AND NOT EXISTS (
+                 SELECT 1 FROM advance_coverages ac
+                 WHERE ac.center_id = s.center_id
+                   AND ac.student_id = ?
+                   AND ac.target_future_session_id = s.id
+               )
+             ORDER BY s.session_date ASC, s.start_time ASC
+             LIMIT 1`,
+            [
+              params.studentId,
+              centerId,
+              session.groupId,
+              session.subjectId,
+              session.teacherId,
+              session.sessionDate,
+              session.sessionDate,
+              session.startTime,
+              getTeacherWeekBounds(
+                session.sessionDate,
+                db.getFirstSync<{ weekStartDay?: number | null }>(
+                  "SELECT week_start_day as weekStartDay FROM teachers WHERE center_id = ? AND id = ?",
+                  [centerId, session.teacherId],
+                )?.weekStartDay ?? DEFAULT_TEACHER_WEEK_START_DAY,
+              ).endDate,
+              params.studentId,
+            ],
+          )?.id || null
+        : null;
 
     // Do not rely only on the scanner UI for eligibility. Attendance can also
     // be recorded by imports, retries, or future screens, so enforce the same
@@ -627,6 +677,68 @@ export class AttendanceRepository {
         actorName: user.fullName,
       },
     });
+    if (advanceCoverageTargetSessionId) {
+      const existingAdv = db.getFirstSync<{ id: string }>(
+        `SELECT id FROM advance_coverages
+         WHERE center_id = ? AND student_id = ?
+           AND (advance_session_id = ? OR target_future_session_id = ?)
+         LIMIT 1`,
+        [centerId, params.studentId, params.sessionId, advanceCoverageTargetSessionId],
+      );
+      if (!existingAdv) {
+        const covId = `adv-cov-${generateUUID()}`;
+        const covOpId = `op-adv-cov-${generateUUID()}`;
+        const covCreatedAt = now.toISOString();
+        db.runSync(
+          `INSERT INTO advance_coverages (id, operation_id, center_id, student_id, advance_session_id, target_future_session_id, created_by, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            covId,
+            covOpId,
+            centerId,
+            params.studentId,
+            params.sessionId,
+            advanceCoverageTargetSessionId,
+            user.id,
+            covCreatedAt,
+          ],
+        );
+        SyncRepository.enqueueOperation({
+          operationId: covOpId,
+          centerId,
+          userId: user.id,
+          deviceId,
+          operationType: "advance_coverage.create",
+          entityType: "advance_coverage",
+          entityId: covId,
+          payload: {
+            id: covId,
+            operationId: covOpId,
+            centerId,
+            studentId: params.studentId,
+            advanceSessionId: params.sessionId,
+            targetFutureSessionId: advanceCoverageTargetSessionId,
+            createdBy: user.id,
+            createdAt: covCreatedAt,
+          },
+        });
+        AuditService.recordEvent({
+          operationId: covOpId,
+          centerId,
+          userId: user.id,
+          deviceId,
+          entityType: "advance_coverage",
+          entityId: covId,
+          action: "advance_coverage.create",
+          payload: {
+            studentId: params.studentId,
+            advanceSessionId: params.sessionId,
+            targetFutureSessionId: advanceCoverageTargetSessionId,
+          },
+        });
+      }
+    }
+
     DatabaseService.notifyLocalChange({ centerId, entityType: "attendance", entityId: attendanceId });
     });
 
@@ -840,12 +952,101 @@ export class AttendanceRepository {
       if (!current || current.status === "absent") return;
 
       const updateResult = db.runSync(
-        `UPDATE attendance SET status = 'absent', is_late = 0
+        `UPDATE attendance
+         SET status = 'absent',
+             is_late = 0,
+             attendance_type = 'present',
+             original_absence_id = NULL,
+             operation_id = ?
          WHERE center_id = ? AND id = ? AND session_id = ? AND student_id = ?`,
-        [centerId, attendanceId, existing.sessionId, existing.studentId],
+        [operationId, centerId, attendanceId, existing.sessionId, existing.studentId],
       );
       if (updateResult.changes !== 1) return;
       canceled = true;
+
+      if (existing.isExternal) {
+        const externalPayment = db.getFirstSync<{
+          id: string;
+          amount: number;
+          operationId: string;
+        }>(
+          `SELECT id, amount, operation_id as operationId
+           FROM payments
+           WHERE center_id = ? AND student_id = ? AND session_id = ?
+             AND payment_type = 'session' AND is_reversed = 0
+             AND (notes = 'حضور خارجي' OR operation_id LIKE 'op-pay-ext-%')
+           ORDER BY created_at DESC
+           LIMIT 1`,
+          [centerId, existing.studentId, existing.sessionId],
+        );
+        if (externalPayment) {
+          const reversalId = `rev-${generateUUID()}`;
+          const reversalOpId = `op-rev-ext-${generateUUID()}`;
+          const reversalReason = "إلغاء حضور خارجي";
+          db.runSync(
+            `UPDATE payments SET is_reversed = 1, updated_at = ? WHERE center_id = ? AND id = ?`,
+            [canceledAt, centerId, externalPayment.id],
+          );
+          db.runSync(
+            `INSERT INTO payment_reversals (id, operation_id, center_id, payment_id, student_id, reversed_amount, reason, reversed_by, reversed_at, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              reversalId,
+              reversalOpId,
+              centerId,
+              externalPayment.id,
+              existing.studentId,
+              Number(externalPayment.amount),
+              reversalReason,
+              user.id,
+              canceledAt,
+              canceledAt,
+            ],
+          );
+          SyncRepository.enqueueOperation({
+            operationId: reversalOpId,
+            centerId,
+            userId: user.id,
+            deviceId,
+            operationType: "payment_reversal",
+            entityType: "payment_reversal",
+            entityId: reversalId,
+            payload: {
+              id: reversalId,
+              operationId: reversalOpId,
+              centerId,
+              paymentId: externalPayment.id,
+              studentId: existing.studentId,
+              reversedAmount: Number(externalPayment.amount),
+              reason: reversalReason,
+              reversedBy: user.id,
+              reversedAt: canceledAt,
+              createdAt: canceledAt,
+            },
+          });
+          AuditService.recordEvent({
+            operationId: reversalOpId,
+            centerId,
+            userId: user.id,
+            deviceId,
+            entityType: "payment_reversal",
+            entityId: reversalId,
+            action: "payment.reverse_external_attendance",
+            payload: {
+              paymentId: externalPayment.id,
+              sessionId: existing.sessionId,
+              reversedAmount: Number(externalPayment.amount),
+              reason: reversalReason,
+              actorName: user.fullName,
+            },
+          });
+          DatabaseService.notifyLocalChange({
+            centerId,
+            entityType: "payment",
+            entityId: externalPayment.id,
+          });
+        }
+      }
 
       const previousEffectiveStatus = existing.isLate ? "late" : existing.status;
 
@@ -891,7 +1092,14 @@ export class AttendanceRepository {
           canceledAt,
         },
       });
-      result = { ...result, status: "absent", isLate: false };
+      result = {
+        ...result,
+        status: "absent",
+        isLate: false,
+        attendanceType: "present",
+        originalAbsenceId: undefined,
+        operationId,
+      };
     });
 
     if (!canceled) {
@@ -1040,6 +1248,7 @@ export class AttendanceRepository {
       if (countedAttendance.has(attendance.id)) continue;
       const summary = ensure(attendance);
       if (!summary) continue;
+      summary.expectedSessions += 1;
       if (attendance.status === "absent") summary.absentCount += 1;
       else {
         summary.presentCount += 1;

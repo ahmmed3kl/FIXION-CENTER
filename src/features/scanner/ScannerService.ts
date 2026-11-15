@@ -196,20 +196,47 @@ export class ScannerService {
     sessionStartTime: string,
     checkInTimeStr?: string,
     graceMinutes = 15,
+    timeZone?: string,
   ): { isLate: boolean; status: "present" | "late" } {
     const now = new Date();
     const checkIn = checkInTimeStr || now.toISOString();
+
+    let resolvedTimeZone = timeZone;
+    if (!resolvedTimeZone) {
+      try {
+        const activeCenterId = useAuthStore.getState().activeCenterId;
+        if (activeCenterId) {
+          resolvedTimeZone = SessionDateService.getCenterTimeZone(activeCenterId);
+        }
+      } catch {
+        // Fall back to device local time if center timezone is unavailable.
+      }
+    }
 
     // Accept both HH:mm[:ss] and a full ISO timestamp.  The comparison is
     // intentionally made against the scheduled clock time, not against when
     // the attendance session was opened by the operator.
     const parseMinutes = (value: string): number | null => {
-      // ISO timestamps are stored in UTC but attendance schedules are local
-      // clock values. Convert ISO input back to the device's local time before
-      // comparing; otherwise Cairo check-ins would be shifted by two hours.
       if (value.includes("T")) {
         const parsed = new Date(value);
         if (Number.isNaN(parsed.getTime())) return null;
+        if (resolvedTimeZone) {
+          try {
+            const parts = new Intl.DateTimeFormat("en-GB", {
+              timeZone: resolvedTimeZone,
+              hour: "2-digit",
+              minute: "2-digit",
+              hour12: false,
+            }).formatToParts(parsed);
+            const h = Number(parts.find((p) => p.type === "hour")?.value);
+            const m = Number(parts.find((p) => p.type === "minute")?.value);
+            if (Number.isFinite(h) && Number.isFinite(m)) {
+              return (h % 24) * 60 + m;
+            }
+          } catch {
+            // Fall back to device local time if Intl timezone is unsupported.
+          }
+        }
         return parsed.getHours() * 60 + parsed.getMinutes();
       }
       const match = value.match(/^(\d{1,2}):(\d{2})/);

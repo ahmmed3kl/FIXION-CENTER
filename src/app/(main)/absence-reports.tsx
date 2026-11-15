@@ -438,7 +438,6 @@ export default function AbsenceReportsScreen() {
         .filter((student) => !compensatedIds.has(student.id))
         .map((student) => student.id);
     }
-    if (scope === "never-attended") return [];
     const absentIds = new Set(sourceReport.absent.map((student) => student.id));
     if (scope === "cross-group-makeups") {
       return monthlyCrossGroupMakeups

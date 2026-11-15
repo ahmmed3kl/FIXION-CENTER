@@ -59,7 +59,7 @@ export default function DebtAdjustmentsScreen() {
       { text: "تصفير", style: "destructive", onPress: async () => {
         setSaving(cycle.id);
         try {
-          await DebtAdjustmentRepository.createAdjustment({ debtCycleId: cycle.id, adjustmentAmount: -effectivePrice, reason: "تصفير المديونية بواسطة الإدارة" });
+          await DebtAdjustmentRepository.createAdjustment({ debtCycleId: cycle.id, adjustmentAmount: -remaining, reason: "تصفير المديونية بواسطة الإدارة" });
           reloadStatus();
           Alert.alert("تم التصفير", "تم تسجيل التعديل في السجل والمزامنة.");
         } catch (error: any) { Alert.alert("تعذر التصفير", error?.message || "حدث خطأ أثناء تعديل المديونية."); }
