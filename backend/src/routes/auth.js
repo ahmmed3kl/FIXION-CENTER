@@ -35,7 +35,7 @@ router.post("/login", async (req, res, next) => {
 
     // Lookup user by email or phone
     const userRes = await db.query(
-      `SELECT u.id, u.center_id, u.full_name, u.email, u.phone, u.password_hash, u.role, u.permissions, u.status as user_status,
+      `SELECT u.id, u.center_id, u.full_name, u.email, u.phone, u.password_hash, u.role, u.permissions, u.status as user_status, u.access_expires_at,
               c.name as center_name, c.code as center_code, c.time_zone as center_time_zone, c.status as center_status
        FROM users u
        JOIN centers c ON c.id = u.center_id
@@ -81,6 +81,20 @@ router.post("/login", async (req, res, next) => {
         "FORBIDDEN",
         "User account is deactivated.",
         "تم تعطيل هذا الحساب. يرجى التواصل مع الإدارة.",
+        403,
+      );
+    }
+
+    if (
+      user.role !== "admin" &&
+      user.role !== "owner" &&
+      user.access_expires_at &&
+      new Date(user.access_expires_at).getTime() <= Date.now()
+    ) {
+      throw new AppError(
+        "FORBIDDEN",
+        "Account timed session has expired.",
+        "انتهت مدة الجلسة المحددة لهذا الحساب. يرجى التواصل مع الإدارة.",
         403,
       );
     }
@@ -145,6 +159,7 @@ router.post("/login", async (req, res, next) => {
         centerIds,
         centers,
         permissions,
+        accessExpiresAt: user.access_expires_at || null,
       },
       expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
     });
@@ -175,6 +190,7 @@ router.get("/me", authMiddleware, async (req, res, next) => {
         centerIds: centersResult.rows.map((center) => center.id),
         centers: centersResult.rows,
         permissions: req.user.permissions,
+        accessExpiresAt: req.user.access_expires_at || null,
       },
     });
   } catch (error) {

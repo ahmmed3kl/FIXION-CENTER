@@ -95,6 +95,11 @@ const activityTypes: Record<
   "homework_evaluation_status.create": { title: "إضافة حالة تقييم واجب", icon: "document-text-outline", tone: "primary" },
   "homework_evaluation_status.update": { title: "تعديل حالة تقييم واجب", icon: "create-outline", tone: "primary" },
   "homework_evaluation_status.delete": { title: "حذف حالة تقييم واجب", icon: "trash-outline", tone: "danger" },
+  "homework_evaluation.save": { title: "تسجيل تقييم واجب", icon: "checkbox-outline", tone: "primary" },
+  "session_homework_evaluation.save": { title: "تسجيل تقييم واجب", icon: "checkbox-outline", tone: "primary" },
+  "payment_request.create": { title: "إنشاء مطالبة دفع", icon: "receipt-outline", tone: "primary" },
+  "payment_request.pay": { title: "سداد مطالبة دفع", icon: "wallet-outline", tone: "success" },
+  "debt_cycle.create": { title: "إنشاء دورة مديونية", icon: "calendar-outline", tone: "neutral" },
   "academic_stages.update": { title: "تحديث المراحل الدراسية", icon: "school-outline", tone: "neutral" },
   notification_created: { title: "إرسال إشعار", icon: "notifications-outline", tone: "primary" },
   template_updated: { title: "تحديث قالب إشعار", icon: "document-text-outline", tone: "neutral" },
@@ -109,32 +114,87 @@ function getDescription(action: string, payload: Record<string, unknown>): strin
       ? String(candidate).trim()
       : "";
   };
+  const firstValue = (...keys: string[]) => {
+    for (const key of keys) {
+      const v = value(key);
+      if (v) return v;
+    }
+    return "";
+  };
   switch (action) {
     case "student.create":
-      return value("fullName") ? `الاسم: ${value("fullName")}` : undefined;
-    case "student.update": {
+      return firstValue("fullName", "full_name") ? `الاسم: ${firstValue("fullName", "full_name")}` : undefined;
+    case "student.update":
       return "تم حفظ تعديلات بيانات الطالب.";
-    }
     case "student.color.update":
       return value("colorName") ? `اللون: ${value("colorName")}` : undefined;
     case "student.color.reset":
       return undefined;
+    case "student_card.issue":
+    case "student_card.deactivate":
+    case "student_card.reactivate":
+    case "student.card_code.updated": {
+      const card = firstValue("cardCode", "card_code");
+      return card ? `الكارت: ${card}` : undefined;
+    }
     case "absence.note.upsert":
       return value("text") ? value("text") : "تم حفظ ملاحظة الغياب.";
     case "grade.score.save":
       return value("score") ? `الدرجة: ${value("score")}` : undefined;
+    case "homework_evaluation.save":
+    case "session_homework_evaluation.save":
+      return firstValue("statusName", "status_name") || undefined;
     case "payment.record":
     case "payment.create":
     case "payment.create_external_session":
-      return value("amount") ? `المبلغ: ${value("amount")} جنيه` : undefined;
+    case "payment_request.pay": {
+      const amt = value("amount");
+      return amt ? `المبلغ: ${amt} جنيه` : undefined;
+    }
+    case "payment.reverse": {
+      const amt = firstValue("reversedAmount", "reversed_amount", "amount");
+      const reason = value("reason");
+      if (amt && reason) return `المبلغ: ${amt} جنيه · السبب: ${reason}`;
+      if (amt) return `المبلغ: ${amt} جنيه`;
+      return reason || "تم عكس الدفعة.";
+    }
+    case "debt_adjustment.create": {
+      const adj = firstValue("adjustmentAmount", "adjustment_amount", "amount");
+      const reason = value("reason");
+      if (adj && reason) return `التعديل: ${adj} جنيه · ${reason}`;
+      if (adj) return `التعديل: ${adj} جنيه`;
+      return reason || undefined;
+    }
+    case "payment_request.create": {
+      const title = value("title");
+      const amt = value("amount");
+      if (title && amt) return `${title} · ${amt} جنيه`;
+      return title || (amt ? `${amt} جنيه` : undefined);
+    }
     case "attendance.record":
       if (payload.isLate === true || value("status") === "late") return "حضور متأخر";
       return payload.attendanceType === "makeup" ? "حضور تعويض" : "تم تسجيل الحضور.";
+    case "attendance.makeup": {
+      const groupName = firstValue("groupName", "group_name");
+      return groupName ? `تعويض في مجموعة: ${groupName}` : "تم تسجيل حضور تعويض.";
+    }
+    case "attendance.cancel":
+      return "تم إلغاء تسجيل الحضور.";
     case "student.note.create":
     case "student.note.update":
       return value("text") || undefined;
     case "enrollment.create":
-      return value("groupName") ? `المجموعة: ${value("groupName")}` : undefined;
+    case "enrollment.end":
+    case "enrollment.transfer":
+    case "enrollment.transfer_end": {
+      const groupName = firstValue("groupName", "group_name");
+      return groupName ? `المجموعة: ${groupName}` : undefined;
+    }
+    case "package_subscription.create":
+    case "package_subscription.cancel": {
+      const pkg = firstValue("packageName", "package_name");
+      return pkg ? `الباقة: ${pkg}` : undefined;
+    }
     default:
       return undefined;
   }
@@ -164,7 +224,7 @@ export function getStudentActivityPresentation(
   const payloadActor = typeof payload.actorName === "string" ? payload.actorName.trim() : "";
   const actorName = payloadActor ||
     (currentUser?.id === log.userId ? currentUser.fullName : "") ||
-    "مستخدم غير معروف";
+    (log.userId === "system" ? "النظام" : "مستخدم غير معروف");
 
   return {
     ...type,

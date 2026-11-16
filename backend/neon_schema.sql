@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS users (
     role VARCHAR(32) NOT NULL CHECK (role IN ('owner', 'admin', 'manager', 'secretary', 'accountant', 'assistant')),
     permissions JSONB NOT NULL DEFAULT '{}',
     status VARCHAR(32) NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'suspended', 'inactive')),
+    access_expires_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );

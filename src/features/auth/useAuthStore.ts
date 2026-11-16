@@ -191,6 +191,24 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
         const refreshedUser = await AuthRepository.refreshSessionUser();
         const effectiveUser = refreshedUser || session.user;
+        if (
+          effectiveUser.role !== "admin" &&
+          effectiveUser.role !== "owner" &&
+          effectiveUser.accessExpiresAt &&
+          new Date(effectiveUser.accessExpiresAt).getTime() <= Date.now()
+        ) {
+          await AuthRepository.logout();
+          set({
+            currentUser: null,
+            activeCenterId: null,
+            activeCenter: null,
+            availableCenters: [],
+            isAuthenticated: false,
+            isLoading: false,
+            error: "انتهت مدة الجلسة المحددة لهذا الحساب. يرجى التواصل مع الإدارة.",
+          });
+          return false;
+        }
         const centers = AuthRepository.getCentersForUser(effectiveUser.centerIds);
         const savedCenterId =
           (await SecureStorageService.getItem("active_center_id")) ||

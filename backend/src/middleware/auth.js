@@ -62,7 +62,7 @@ async function authMiddleware(req, res, next) {
     // Live permission & status resolution from PostgreSQL database
     // Ensures status changes or role updates take effect immediately without token expiration
     const userRes = await db.query(
-      "SELECT id, center_id, full_name, email, phone, role, permissions, status FROM users WHERE id = $1",
+      "SELECT id, center_id, full_name, email, phone, role, permissions, status, access_expires_at FROM users WHERE id = $1",
       [decoded.sub],
     );
 
@@ -83,6 +83,20 @@ async function authMiddleware(req, res, next) {
         "User account has been suspended or deactivated.",
         "تم تعطيل أو تعليق هذا الحساب. يرجى التواصل مع الإدارة.",
         403,
+      );
+    }
+
+    if (
+      user.role !== "admin" &&
+      user.role !== "owner" &&
+      user.access_expires_at &&
+      new Date(user.access_expires_at).getTime() <= Date.now()
+    ) {
+      throw new AppError(
+        "UNAUTHORIZED",
+        "Account timed session has expired.",
+        "انتهت مدة الجلسة المحددة لهذا الحساب. يرجى التواصل مع الإدارة.",
+        401,
       );
     }
 

@@ -128,6 +128,27 @@ function AuthGuard({ children }: { children: React.ReactNode }) {
   }, [isAuthenticated, activeCenterId, refreshPermissions]);
 
   useEffect(() => {
+    if (!isAuthenticated || !currentUser) return;
+    if (currentUser.role === "admin" || currentUser.role === "owner") return;
+    const expiresAt = currentUser.accessExpiresAt;
+    if (!expiresAt) return;
+    const expiryMs = new Date(expiresAt).getTime();
+    if (!Number.isFinite(expiryMs)) return;
+
+    const remainingMs = expiryMs - Date.now();
+    if (remainingMs <= 0) {
+      void useAuthStore.getState().logout();
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      void useAuthStore.getState().logout();
+    }, Math.min(remainingMs, 2_147_483_647));
+
+    return () => clearTimeout(timer);
+  }, [isAuthenticated, currentUser?.id, currentUser?.role, currentUser?.accessExpiresAt]);
+
+  useEffect(() => {
     if (isLoading) return;
 
     const inAuthGroup = segments[0] === "(auth)";

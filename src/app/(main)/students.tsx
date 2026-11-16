@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
     Alert,
     FlatList,
+    KeyboardAvoidingView,
     Linking,
     Modal,
     Platform,
@@ -15,7 +16,7 @@ import {
     View,
     useWindowDimensions,
 } from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
+import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { LocalDataEvents } from "../../core/database/localDataEvents";
 import { useLocalDataRevision } from "../../core/database/useLocalDataRevision";
 import { getUserErrorMessage } from "../../core/errors";
@@ -135,6 +136,7 @@ export default function StudentsScreen() {
   const hasInitialLoadedRef = useRef(false);
   const isFocusedRef = useRef(true);
   const { colors } = useTheme();
+  const insets = useSafeAreaInsets();
   const { width: screenWidth, height: screenHeight, gutter, isTablet, isLandscape } = useResponsiveLayout();
   const styles = useMemo(() => createStyles(screenWidth, screenHeight, gutter, isTablet, isLandscape), [colors, screenWidth, screenHeight, gutter, isTablet, isLandscape]);
   const { studentId, add, attendanceSessionId, groupId, returnTo } = useLocalSearchParams<{
@@ -684,7 +686,13 @@ export default function StudentsScreen() {
           : []);
       } catch { setStudentHomeworkEvaluations([]); }
       try { setStudentNotes(StudentNoteRepository.listForStudent(student.id)); } catch { setStudentNotes([]); }
-      try { setStudentAuditLogs(AuditService.getEntityLogs(activeCenterId || student.centerId, student.id)); } catch { setStudentAuditLogs([]); }
+      try {
+        setStudentAuditLogs(
+          PermissionService.hasPermission(permissions, "audit.view")
+            ? AuditService.getEntityLogs(activeCenterId || student.centerId, student.id)
+            : [],
+        );
+      } catch { setStudentAuditLogs([]); }
       try {
         setAttendanceSummaries(AttendanceRepository.getStudentGroupAttendanceSummaries(student.id));
       } catch {
@@ -1378,6 +1386,7 @@ export default function StudentsScreen() {
   const canViewAttendance = PermissionService.hasAnyPermission(permissions, ["attendance.view", "reports.attendance.view", "reports.view"]);
   const canEditAttendance = PermissionService.hasPermission(permissions, "attendance.edit");
   const canViewGrades = PermissionService.hasAnyPermission(permissions, ["grades.view", "grades.manage", "groups.view"]);
+  const canViewAudit = PermissionService.hasPermission(permissions, "audit.view");
   const canCreatePayment = paymentsEnabled && PermissionService.hasPermission(
     permissions,
     "payments.create",
@@ -1807,13 +1816,14 @@ export default function StudentsScreen() {
       {/* Student profile, rebuilt as a full-screen profile with section navigation. */}
       {selectedStudent && (
         <Modal visible animationType="slide" presentationStyle="fullScreen" onRequestClose={() => { setGroupDetailsModalOpen(false); setSelectedStudent(null); }}>
-          <SafeAreaView style={styles.profileScreen}>
+          <View style={[styles.profileScreen, { paddingTop: insets.top, paddingBottom: insets.bottom }]}>
             <View style={styles.profileTopBar}>
               <TouchableOpacity style={styles.profileTopButton} accessibilityLabel="رجوع" onPress={() => { setGroupDetailsModalOpen(false); setSelectedStudent(null); }}><Ionicons name="chevron-forward" size={22} color={Colors.slate900} /></TouchableOpacity>
               <Text style={styles.profileTopTitle}>بيانات الطالب</Text>
               {canUpdateStudent ? <TouchableOpacity style={styles.profileTopButton} accessibilityLabel="تعديل بيانات الطالب" onPress={openStudentEdit}><Ionicons name="create-outline" size={21} color={Colors.primary} /></TouchableOpacity> : <View style={{ width: 40 }} />}
             </View>
-            <ScrollView style={styles.profileMainScroll} contentContainerStyle={styles.profileContent} showsVerticalScrollIndicator={false}>
+            <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+            <ScrollView style={styles.profileMainScroll} contentContainerStyle={styles.profileContent} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
               <View style={styles.profileHero}>
                 <View style={styles.profileAvatarLarge}><Text style={styles.profileAvatarLargeText}>{selectedStudent.fullName.trim().charAt(0) || "ط"}</Text></View>
                 <Text style={styles.profileStudentName}>{selectedStudent.fullName}</Text>
@@ -1841,7 +1851,7 @@ export default function StudentsScreen() {
                 {([
                   ["groups", "المجموعات", "people-outline"], ...(canViewPackages ? [["packages", "الباقات", "card-outline"] as const] : []), ...(canViewAttendance ? [["attendance", "الحضور والغياب", "calendar-outline"] as const] : []), ...(canViewGrades ? [["exams", "الامتحانات", "school-outline"] as const] : []), ...(canViewPayments ? [["payments", "المدفوعات", "wallet-outline"] as const] : []), ["notes", "الملاحظات", "document-text-outline"],
                 ] as const).map(([key, label, icon]) => <TouchableOpacity key={key} style={[styles.profileTab, profileTab === key && styles.profileTabActive]} onPress={() => setProfileTab(key)}><Ionicons name={icon} size={16} color={profileTab === key ? Colors.primary : Colors.slate500} /><Text style={[styles.profileTabText, profileTab === key && styles.profileTabTextActive]}>{label}</Text></TouchableOpacity>)}
-                <TouchableOpacity key="activity" style={[styles.profileTab, profileTab === "activity" && styles.profileTabActive]} onPress={() => setProfileTab("activity")}><Ionicons name="time-outline" size={16} color={profileTab === "activity" ? Colors.primary : Colors.slate500} /><Text style={[styles.profileTabText, profileTab === "activity" && styles.profileTabTextActive]}>سجل النشاط</Text></TouchableOpacity>
+                {canViewAudit && <TouchableOpacity key="activity" style={[styles.profileTab, profileTab === "activity" && styles.profileTabActive]} onPress={() => setProfileTab("activity")}><Ionicons name="time-outline" size={16} color={profileTab === "activity" ? Colors.primary : Colors.slate500} /><Text style={[styles.profileTabText, profileTab === "activity" && styles.profileTabTextActive]}>سجل النشاط</Text></TouchableOpacity>}
               </ScrollView>
 
               {profileTab === "exams" && canViewGrades && <View style={styles.profileSection}>
@@ -2451,7 +2461,7 @@ export default function StudentsScreen() {
                   ) : null}
                 </View>
               )}
-              {profileTab === "activity" && (
+              {profileTab === "activity" && canViewAudit && (
                 <View style={styles.profileSection}>
                   <View style={styles.profileSectionHeader}>
                     <View>
@@ -2460,7 +2470,11 @@ export default function StudentsScreen() {
                     </View>
                   </View>
                   {studentAuditLogs.length === 0 ? (
-                    <Text style={styles.profileEmptyText}>لا يوجد نشاط مسجل لهذا الطالب.</Text>
+                    <View style={styles.profileEmpty}>
+                      <Ionicons name="time-outline" size={25} color={Colors.slate400} />
+                      <Text style={styles.profileEmptyTitle}>لا يوجد نشاط مسجل</Text>
+                      <Text style={styles.profileEmptyText}>ستظهر هنا كل الحركات المسجلة على ملف الطالب.</Text>
+                    </View>
                   ) : studentAuditLogs.slice(0, 100).map((log) => {
                     const presentation = getStudentActivityPresentation(log, currentUser);
                     const toneStyles = {
@@ -2503,7 +2517,8 @@ export default function StudentsScreen() {
                 })}
               </View> : null}
             </ScrollView>
-          </SafeAreaView>
+            </KeyboardAvoidingView>
+          </View>
         </Modal>
       )}
 
@@ -3036,8 +3051,9 @@ export default function StudentsScreen() {
       )}
 
       <Modal visible={isStudentEditModalOpen} animationType="slide" presentationStyle="fullScreen" onRequestClose={() => setIsStudentEditModalOpen(false)}>
-        <SafeAreaView style={styles.profileScreen}>
+        <View style={[styles.profileScreen, { paddingTop: insets.top, paddingBottom: insets.bottom }]}>
           <View style={styles.profileTopBar}><TouchableOpacity style={styles.profileTopButton} onPress={() => setIsStudentEditModalOpen(false)} accessibilityLabel="إغلاق التعديل"><Ionicons name="close" size={22} color={Colors.slate900} /></TouchableOpacity><Text style={styles.profileTopTitle}>تعديل بيانات الطالب</Text><View style={{ width: 40 }} /></View>
+          <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
           <ScrollView contentContainerStyle={styles.editProfileContent} keyboardShouldPersistTaps="handled">
             <Text style={styles.profileSectionTitle}>البيانات الأساسية</Text><Text style={styles.profileSectionCaption}>حدّث البيانات المسموح بها للطالب.</Text>
             <AppInput label="اسم الطالب" value={editFullName} onChangeText={setEditFullName} containerStyle={styles.editField} />
@@ -3050,7 +3066,8 @@ export default function StudentsScreen() {
             <View style={styles.profileInfoNotice}><Ionicons name="information-circle-outline" size={18} color={Colors.slate500} /><Text style={styles.profileInfoNoticeText}>كود الطالب ثابت. يمكنك إدارة كود البطاقة من صفحة الملف. إدارة المجموعات والباقات متاحة من تبويباتها.</Text></View>
             <View style={styles.editProfileActions}><AppButton title="حفظ التعديلات" onPress={saveStudentEdit} style={{ flex: 1 }} /><AppButton title="إلغاء" variant="outline" onPress={() => setIsStudentEditModalOpen(false)} style={{ flex: 1 }} /></View>
           </ScrollView>
-        </SafeAreaView>
+          </KeyboardAvoidingView>
+        </View>
       </Modal>
 
       <Modal visible={isCustomSmsModalOpen} animationType="slide" transparent>
@@ -4873,7 +4890,7 @@ const createStyles = (screenWidth = 390, screenHeight = 844, gutter = Spacing.lg
   profileDeactivateButton: { flexDirection: "row-reverse", alignItems: "center", justifyContent: "center", gap: 6, paddingVertical: 7, marginBottom: 8 },
   profileDeactivateText: { color: Colors.danger, fontSize: 12, fontWeight: "700" },
   profileTabsScroller: { marginHorizontal: -Spacing.md, borderBottomWidth: 1, borderBottomColor: Colors.border, backgroundColor: Colors.cardBackground },
-  profileTabs: { flexDirection: "row-reverse", paddingHorizontal: Spacing.sm, gap: 3 },
+  profileTabs: { flexDirection: "row", flexGrow: 1, paddingHorizontal: Spacing.sm, gap: 4 },
   profileTab: { minHeight: 47, flexDirection: "row-reverse", alignItems: "center", justifyContent: "center", gap: 6, paddingHorizontal: 12, borderBottomWidth: 2, borderBottomColor: "transparent" },
   profileTabActive: { borderBottomColor: Colors.primary },
   profileTabText: { color: Colors.slate500, fontSize: 11, fontWeight: "700" },
@@ -4881,7 +4898,7 @@ const createStyles = (screenWidth = 390, screenHeight = 844, gutter = Spacing.lg
   profileSection: { paddingTop: 16, paddingBottom: 10 },
   profileSectionHeader: { flexDirection: "row-reverse", alignItems: "center", justifyContent: "space-between", gap: 10 },
   profileExamCard: { flexDirection: "row-reverse", alignItems: "center", justifyContent: "space-between", gap: 10, padding: 12, marginTop: 9, borderRadius: 14, borderWidth: 1, borderColor: Colors.border, backgroundColor: Colors.cardBackground },
-  profileExamCopy: { flex: 1, alignItems: "flex-end" },
+  profileExamCopy: { flex: 1, minWidth: 0, flexShrink: 1, alignItems: "flex-end" },
   profileExamGradeRow: { flexDirection: "row-reverse", alignItems: "center", gap: 6 },
   profileExamInput: { minWidth: 86, minHeight: 40, paddingHorizontal: 9, borderRadius: 10, borderWidth: 1, borderColor: Colors.border, backgroundColor: Colors.white, color: Colors.slate900, fontWeight: "800" },
   profileExamScore: { color: Colors.slate900, fontWeight: "800", fontSize: 12 },
@@ -4898,7 +4915,7 @@ const createStyles = (screenWidth = 390, screenHeight = 844, gutter = Spacing.lg
   profileListRow: { marginTop: 9, padding: 11, borderRadius: 14, borderWidth: 1, borderColor: Colors.border, backgroundColor: Colors.cardBackground },
   profileRowMain: { flexDirection: "row-reverse", alignItems: "center", gap: 9 },
   profileRowIcon: { width: 42, height: 42, borderRadius: 13, alignItems: "center", justifyContent: "center", backgroundColor: Colors.primaryLight + "50" },
-  profileRowCopy: { flex: 1, alignItems: "flex-end" },
+  profileRowCopy: { flex: 1, minWidth: 0, flexShrink: 1, alignItems: "flex-end" },
   profileRowTitle: { color: Colors.slate900, fontSize: 13, fontWeight: "800", textAlign: "right" },
   profileRowMeta: { color: Colors.slate500, fontSize: 10, marginTop: 3, textAlign: "right" },
   profileRowActions: { flexDirection: "row-reverse", alignItems: "center", gap: 18, marginTop: 9, paddingTop: 8, borderTopWidth: 1, borderTopColor: Colors.slate100 },
@@ -4910,7 +4927,7 @@ const createStyles = (screenWidth = 390, screenHeight = 844, gutter = Spacing.lg
   profilePackagePrice: { color: Colors.slate700, fontSize: 11, fontWeight: "700", marginTop: 9, textAlign: "right" },
   profileSmallDangerButton: { alignSelf: "flex-start", paddingVertical: 6, paddingHorizontal: 9, marginTop: 8, borderRadius: 8, backgroundColor: Colors.dangerLight },
   profileAttendanceGroup: { padding: 12, marginTop: 9, borderRadius: 14, borderWidth: 1, borderColor: Colors.border, backgroundColor: Colors.cardBackground },
-  profileAttendanceMetrics: { flexDirection: "row-reverse", justifyContent: "space-around", marginTop: 12, paddingTop: 9, borderTopWidth: 1, borderTopColor: Colors.slate100 },
+  profileAttendanceMetrics: { flexDirection: "row-reverse", flexWrap: "wrap", justifyContent: "space-around", rowGap: 10, marginTop: 12, paddingTop: 9, borderTopWidth: 1, borderTopColor: Colors.slate100 },
   profileAttendanceValue: { color: Colors.slate900, fontSize: 16, fontWeight: "900", textAlign: "center" },
   profileAttendanceLabel: { color: Colors.slate500, fontSize: 9, marginTop: 2, textAlign: "center" },
   profileAttendanceRecord: {
@@ -5048,7 +5065,7 @@ const createStyles = (screenWidth = 390, screenHeight = 844, gutter = Spacing.lg
   editTypeTextActive: { color: Colors.primary, fontWeight: "900" },
   editProfileContent: { padding: Spacing.lg, paddingBottom: 36 },
   editField: { marginTop: 13 },
-  editProfileActions: { flexDirection: "row", gap: 9, marginTop: 20 },
+  editProfileActions: { flexDirection: "row-reverse", gap: 9, marginTop: 20 },
   profileInfoNotice: { flexDirection: "row-reverse", alignItems: "flex-start", gap: 7, padding: 11, marginTop: 12, borderRadius: 11, backgroundColor: Colors.slate100 },
   profileInfoNoticeText: { flex: 1, color: Colors.slate600, fontSize: 10, lineHeight: 16, textAlign: "right" },
   profileObligationCard: { padding: 13, marginTop: 10, borderWidth: 1, borderColor: Colors.slate200, borderRadius: 14, backgroundColor: Colors.white },

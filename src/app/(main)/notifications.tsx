@@ -16,7 +16,7 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import { DatabaseService } from "../../core/database";
 import { formatTimeArabic } from "../../core/localization";
-import { PermissionGate } from "../../core/permissions";
+import { PermissionGate, PermissionService } from "../../core/permissions";
 import { useServiceVisibility } from "../../core/services/ServiceVisibilityContext";
 import { Colors, Spacing, useTheme } from "../../core/theme";
 import { AttendanceSessionService } from "../../features/attendance/AttendanceSessionService";
@@ -112,8 +112,25 @@ export default function NotificationsScreen() {
   const styles = useMemo(() => createStyles(colors), [colors]);
   const services = useServiceVisibility();
   const { currentUser, activeCenterId } = useAuthStore();
+  const userPermissions = currentUser?.permissions || [];
+  const canViewHistory = PermissionService.hasAnyPermission(userPermissions, [
+    "notifications.view",
+    "notifications.send",
+  ]);
+  const canViewTemplates = PermissionService.hasAnyPermission(userPermissions, [
+    "notifications.templates.view",
+    "notifications.templates.update",
+    "notifications.templates.manage",
+    "notifications.view",
+  ]);
+  const canSendNotifications = PermissionService.hasPermission(
+    userPermissions,
+    "notifications.send",
+  );
   const notificationsEnabled = services.isEnabled("notifications");
-  const [activeTab, setActiveTab] = useState<"history" | "templates" | "compose">("history");
+  const [activeTab, setActiveTab] = useState<"history" | "templates" | "compose">(() =>
+    canViewHistory ? "history" : canViewTemplates ? "templates" : "compose",
+  );
 
   const [loading, setLoading] = useState(false);
   const [templates, setTemplates] = useState<NotificationTemplate[]>([]);
@@ -562,10 +579,10 @@ export default function NotificationsScreen() {
       <View style={styles.tabBar}>
         {(
           [
-            { key: "history", label: "سجل الإشعارات" },
-            { key: "templates", label: "قوالب الإشعارات" },
-            { key: "compose", label: "إرسال مباشر" },
-          ] as const
+            ...(canViewHistory ? [{ key: "history", label: "سجل الإشعارات" } as const] : []),
+            ...(canViewTemplates ? [{ key: "templates", label: "قوالب الإشعارات" } as const] : []),
+            ...(canSendNotifications ? [{ key: "compose", label: "إرسال مباشر" } as const] : []),
+          ]
         ).map((tab) => (
           <TouchableOpacity
             key={tab.key}

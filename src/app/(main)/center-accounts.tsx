@@ -32,8 +32,41 @@ type Account = {
   phone?: string | null;
   role: "manager" | "assistant";
   status: string;
+  accessExpiresAt?: string | null;
   permissions?: Permission[] | Record<string, boolean>;
 };
+
+const TIMED_PRESETS = [
+  { label: "30 دقيقة", minutes: 30 },
+  { label: "ساعة", minutes: 60 },
+  { label: "ساعتان", minutes: 120 },
+  { label: "4 ساعات", minutes: 240 },
+  { label: "8 ساعات", minutes: 480 },
+  { label: "24 ساعة", minutes: 1440 },
+];
+
+function formatTimedAccessSummary(accessExpiresAt?: string | null): { text: string; expired: boolean } | null {
+  if (!accessExpiresAt) return null;
+  const expiryMs = new Date(accessExpiresAt).getTime();
+  if (!Number.isFinite(expiryMs)) return null;
+  const diffMs = expiryMs - Date.now();
+  if (diffMs <= 0) {
+    return { text: "انتهى المؤقت — الحساب مقفول", expired: true };
+  }
+  const totalMinutes = Math.ceil(diffMs / 60_000);
+  const formattedTime = new Intl.DateTimeFormat("ar-EG", {
+    hour: "numeric",
+    minute: "2-digit",
+    day: "numeric",
+    month: "short",
+    timeZone: "Africa/Cairo",
+  }).format(new Date(expiryMs));
+  const remainingLabel =
+    totalMinutes >= 60
+      ? `${Math.floor(totalMinutes / 60)} س ${totalMinutes % 60 ? `و ${totalMinutes % 60} د` : ""}`
+      : `${totalMinutes} د`;
+  return { text: `مؤقت (${remainingLabel.trim()}) حتى ${formattedTime}`, expired: false };
+}
 
 export default function CenterAccountsScreen() {
   const router = useRouter();
@@ -67,6 +100,8 @@ export default function CenterAccountsScreen() {
   const [resettingAccount, setResettingAccount] = useState<Account | null>(null);
   const [newPassword, setNewPassword] = useState("");
   const [passwordConfirmation, setPasswordConfirmation] = useState("");
+  const [timedAccount, setTimedAccount] = useState<Account | null>(null);
+  const [durationMinutesInput, setDurationMinutesInput] = useState("60");
   const [accountActionError, setAccountActionError] = useState("");
   const [accountActionSaving, setAccountActionSaving] = useState(false);
 
@@ -169,6 +204,39 @@ export default function CenterAccountsScreen() {
       Alert.alert("تم التحديث", "تم تغيير كلمة مرور الحساب.");
     } catch (resetError: any) {
       setAccountActionError(resetError?.userMessage || resetError?.message || "تعذر تغيير كلمة المرور.");
+    } finally {
+      setAccountActionSaving(false);
+    }
+  };
+
+  const openTimedModal = (account: Account) => {
+    setTimedAccount(account);
+    setDurationMinutesInput("60");
+    setAccountActionError("");
+  };
+
+  const applyTimedAccess = async (payload: { durationMinutes?: number; clearTimer?: boolean; expireNow?: boolean }) => {
+    if (!timedAccount || accountActionSaving) return;
+    setAccountActionSaving(true);
+    setAccountActionError("");
+    try {
+      await ApiClient.getInstance().post(
+        "/center/users/" + timedAccount.id + "/timed-access",
+        payload,
+        requestConfig,
+      );
+      setTimedAccount(null);
+      await load();
+      Alert.alert(
+        "تم التحديث",
+        payload.expireNow
+          ? "تم إيقاف الحساب فوراً."
+          : payload.clearTimer
+            ? "تم فتح الحساب بدون مؤقت."
+            : "تم تفعيل الجلسة المؤقتة للحساب.",
+      );
+    } catch (timedError: any) {
+      setAccountActionError(timedError?.userMessage || timedError?.message || "تعذر تحديث مؤقت الحساب.");
     } finally {
       setAccountActionSaving(false);
     }
@@ -288,68 +356,97 @@ export default function CenterAccountsScreen() {
               ? <View style={styles.emptyError}><Text style={styles.error}>{error}</Text><AppButton title="إعادة المحاولة" variant="outline" onPress={() => void load()} /></View>
               : <EmptyState message="لا توجد حسابات مدير أو مساعد." />
           }
-          renderItem={({ item }) => (
-            <TouchableOpacity
-              activeOpacity={0.75}
-              accessibilityRole="button"
-              accessibilityLabel={`تعديل صلاحيات ${item.fullName}`}
-              onPress={() => router.push({
-                pathname: "/(main)/center-account-permissions",
-                params: { userId: item.id },
-              } as any)}
-              style={[styles.row, { backgroundColor: colors.cardBackground, borderColor: colors.border }]}
-            >
-              <View style={[styles.icon, { backgroundColor: colors.primaryLight }]}>
-                <Ionicons
-                  name={item.role === "manager" ? "person-circle-outline" : "person-outline"}
-                  size={22}
-                  color={colors.primary}
-                />
-              </View>
-              <View style={styles.rowCopy}>
-                <Text style={[styles.nameText, { color: colors.textPrimary }]}>{item.fullName}</Text>
-                <Text style={[styles.meta, { color: colors.textSecondary }]}>
-                  {item.email} · {item.role === "manager" ? "مدير" : "مساعد"}
-                </Text>
-              </View>
-              <Ionicons name="chevron-back" size={19} color={colors.slate400} />
+          renderItem={({ item }) => {
+            const timedInfo = formatTimedAccessSummary(item.accessExpiresAt);
+            const isEffectivelyActive = item.status === "active" && !timedInfo?.expired;
+            return (
               <TouchableOpacity
+                activeOpacity={0.75}
                 accessibilityRole="button"
-                accessibilityLabel={"تعديل بيانات " + item.fullName}
-                onPress={(event) => {
-                  event.stopPropagation();
-                  openEditForm(item);
-                }}
-                style={styles.rowAction}
+                accessibilityLabel={`تعديل صلاحيات ${item.fullName}`}
+                onPress={() => router.push({
+                  pathname: "/(main)/center-account-permissions",
+                  params: { userId: item.id },
+                } as any)}
+                style={[styles.row, { backgroundColor: colors.cardBackground, borderColor: colors.border }]}
               >
-                <Ionicons name="create-outline" size={19} color={colors.primary} />
+                <View style={[styles.icon, { backgroundColor: colors.primaryLight }]}>
+                  <Ionicons
+                    name={item.role === "manager" ? "person-circle-outline" : "person-outline"}
+                    size={22}
+                    color={colors.primary}
+                  />
+                </View>
+                <View style={styles.rowCopy}>
+                  <Text style={[styles.nameText, { color: colors.textPrimary }]}>{item.fullName}</Text>
+                  <Text style={[styles.meta, { color: colors.textSecondary }]}>
+                    {item.email} · {item.role === "manager" ? "مدير" : "مساعد"}
+                  </Text>
+                  {timedInfo ? (
+                    <Text
+                      style={[
+                        styles.timedMeta,
+                        { color: timedInfo.expired ? Colors.dangerText : colors.primary },
+                      ]}
+                    >
+                      {timedInfo.text}
+                    </Text>
+                  ) : null}
+                </View>
+                <Ionicons name="chevron-back" size={19} color={colors.slate400} />
+                <TouchableOpacity
+                  accessibilityRole="button"
+                  accessibilityLabel={"مؤقت جلسة " + item.fullName}
+                  onPress={(event) => {
+                    event.stopPropagation();
+                    openTimedModal(item);
+                  }}
+                  style={styles.rowAction}
+                >
+                  <Ionicons
+                    name="time-outline"
+                    size={19}
+                    color={timedInfo && !timedInfo.expired ? colors.primary : colors.textSecondary}
+                  />
+                </TouchableOpacity>
+                <TouchableOpacity
+                  accessibilityRole="button"
+                  accessibilityLabel={"تعديل بيانات " + item.fullName}
+                  onPress={(event) => {
+                    event.stopPropagation();
+                    openEditForm(item);
+                  }}
+                  style={styles.rowAction}
+                >
+                  <Ionicons name="create-outline" size={19} color={colors.primary} />
+                </TouchableOpacity>
+                <TouchableOpacity
+                  accessibilityRole="button"
+                  accessibilityLabel={"تغيير كلمة مرور " + item.fullName}
+                  onPress={(event) => {
+                    event.stopPropagation();
+                    openPasswordReset(item);
+                  }}
+                  style={styles.rowAction}
+                >
+                  <Ionicons name="key-outline" size={18} color={colors.primary} />
+                </TouchableOpacity>
+                <TouchableOpacity
+                  accessibilityRole="button"
+                  accessibilityLabel={isEffectivelyActive ? "تعطيل الحساب" : "تفعيل الحساب"}
+                  onPress={(event) => {
+                    event.stopPropagation();
+                    void toggleStatus(item);
+                  }}
+                >
+                  <StatusBadge
+                    text={timedInfo?.expired ? "منتهي" : isEffectivelyActive ? "نشط" : "معطل"}
+                    type={timedInfo?.expired ? "danger" : isEffectivelyActive ? "success" : "neutral"}
+                  />
+                </TouchableOpacity>
               </TouchableOpacity>
-              <TouchableOpacity
-                accessibilityRole="button"
-                accessibilityLabel={"تغيير كلمة مرور " + item.fullName}
-                onPress={(event) => {
-                  event.stopPropagation();
-                  openPasswordReset(item);
-                }}
-                style={styles.rowAction}
-              >
-                <Ionicons name="key-outline" size={18} color={colors.primary} />
-              </TouchableOpacity>
-              <TouchableOpacity
-                accessibilityRole="button"
-                accessibilityLabel={item.status === "active" ? "تعطيل الحساب" : "تفعيل الحساب"}
-                onPress={(event) => {
-                  event.stopPropagation();
-                  void toggleStatus(item);
-                }}
-              >
-                <StatusBadge
-                  text={item.status === "active" ? "نشط" : "معطل"}
-                  type={item.status === "active" ? "success" : "neutral"}
-                />
-              </TouchableOpacity>
-            </TouchableOpacity>
-          )}
+            );
+          }}
         />
       )}
 
@@ -501,6 +598,82 @@ export default function CenterAccountsScreen() {
           </View>
         </View>
       </Modal>
+
+      <Modal visible={Boolean(timedAccount)} transparent animationType="slide" onRequestClose={() => setTimedAccount(null)}>
+        <View style={styles.backdrop}>
+          <View style={[styles.sheet, { backgroundColor: colors.cardBackground }]}>
+            <Text style={[styles.sheetTitle, { color: colors.textPrimary }]}>جلسة بمؤقت: {timedAccount?.fullName}</Text>
+            <Text style={[styles.permissionHint, { color: colors.textSecondary }]}>
+              افتح الحساب لمدة محددة وبعد انتهائها يتوقف تلقائياً، أو افتحه بشكل دائم.
+            </Text>
+            <View style={styles.presetRow}>
+              {TIMED_PRESETS.map((preset) => {
+                const selected = Number(durationMinutesInput) === preset.minutes;
+                return (
+                  <TouchableOpacity
+                    key={preset.minutes}
+                    onPress={() => setDurationMinutesInput(String(preset.minutes))}
+                    style={[
+                      styles.presetChip,
+                      { borderColor: colors.border },
+                      selected && { backgroundColor: colors.primary, borderColor: colors.primary },
+                    ]}
+                  >
+                    <Text style={{ fontSize: 12, fontWeight: "800", color: selected ? colors.white : colors.textPrimary }}>
+                      {preset.label}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+            <AppInput
+              label="المدة بالدقائق"
+              value={durationMinutesInput}
+              onChangeText={setDurationMinutesInput}
+              keyboardType="numeric"
+            />
+            {accountActionError ? <Text style={styles.error}>{accountActionError}</Text> : null}
+            <View style={styles.buttons}>
+              <AppButton
+                title={accountActionSaving ? "جارٍ الحفظ..." : "تفعيل المؤقت"}
+                onPress={() => {
+                  const mins = Number(durationMinutesInput);
+                  if (!Number.isFinite(mins) || mins <= 0) {
+                    setAccountActionError("أدخل عدد دقائق صحيح أكبر من صفر.");
+                    return;
+                  }
+                  void applyTimedAccess({ durationMinutes: mins });
+                }}
+                disabled={accountActionSaving || !timedAccount}
+                style={{ flex: 1 }}
+              />
+              <AppButton
+                title="إلغاء"
+                variant="outline"
+                onPress={() => setTimedAccount(null)}
+                disabled={accountActionSaving}
+                style={{ flex: 1 }}
+              />
+            </View>
+            <View style={styles.buttons}>
+              <AppButton
+                title="فتح دائم (بدون مؤقت)"
+                variant="outline"
+                onPress={() => void applyTimedAccess({ clearTimer: true })}
+                disabled={accountActionSaving || !timedAccount}
+                style={{ flex: 1 }}
+              />
+              <AppButton
+                title="إيقاف الآن"
+                variant="outline"
+                onPress={() => void applyTimedAccess({ expireNow: true })}
+                disabled={accountActionSaving || !timedAccount}
+                style={{ flex: 1 }}
+              />
+            </View>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -524,6 +697,9 @@ const styles = StyleSheet.create({
   rowAction: { padding: 4 },
   nameText: { fontSize: 15, fontWeight: "900" },
   meta: { fontSize: 11, marginTop: 4, textAlign: "right" },
+  timedMeta: { fontSize: 11, fontWeight: "800", marginTop: 3, textAlign: "right" },
+  presetRow: { flexDirection: "row-reverse", flexWrap: "wrap", gap: 8 },
+  presetChip: { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 10, borderWidth: 1 },
   error: { color: Colors.dangerText, textAlign: "right", marginBottom: 10 },
   emptyError: { alignItems: "center", gap: 8, padding: Spacing.lg },
   locked: { flex: 1, alignItems: "center", justifyContent: "center", padding: 30 },

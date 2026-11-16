@@ -1,4 +1,6 @@
 import { DatabaseService } from "../../core/database";
+import { ForbiddenError } from "../../core/errors";
+import { PermissionService } from "../../core/permissions";
 import { DebtCycle, PaymentEvent } from "../../shared/types";
 import { isPerSessionBillingMode } from "../../shared/utils/billingMode";
 import { getDateOnlyInTimeZone } from "../../shared/utils/date";
@@ -91,9 +93,17 @@ export class PaymentStatisticsService {
     groupId: string,
     reportDate: string = getCairoTodayDateOnly(),
   ): GroupPaymentStatistics {
-    const { activeCenterId } = useAuthStore.getState();
-    if (!activeCenterId) {
+    const { activeCenterId, currentUser } = useAuthStore.getState();
+    if (!activeCenterId || !currentUser) {
       throw new Error("يجب تحديد السنتر أولاً.");
+    }
+    if (
+      !PermissionService.hasAnyPermission(currentUser.permissions, [
+        "reports.financial.view",
+        "payments.debt.view",
+      ])
+    ) {
+      throw new ForbiddenError("ليس لديك صلاحية عرض إحصائيات الدفع.");
     }
 
     const normalizedDate = getEffectiveDateOnly(reportDate) || getCairoTodayDateOnly();

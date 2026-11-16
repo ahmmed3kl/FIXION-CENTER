@@ -86,6 +86,7 @@ export interface User {
   centerId?: string;
   centerIds: string[];
   permissions: Permission[];
+  accessExpiresAt?: string | null;
 }
 
 export interface Center {

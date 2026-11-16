@@ -2,6 +2,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
+  Alert,
   Modal,
   ScrollView,
   StyleSheet,
@@ -11,11 +12,15 @@ import {
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { useLocalDataRevision } from "../../core/database/useLocalDataRevision";
 import { formatCurrency, formatTimeArabic } from "../../core/localization";
+import { PermissionService } from "../../core/permissions";
 import { Spacing, Typography, useTheme } from "../../core/theme";
 import { useAuthStore } from "../../features/auth/useAuthStore";
 import { GroupRepository } from "../../features/groups/GroupRepository";
 import { GroupScheduleRepository } from "../../features/groups/GroupScheduleRepository";
+import { FinancialCalculationService } from "../../features/payments/FinancialCalculationService";
+import { PaymentRepository } from "../../features/payments/PaymentRepository";
 import {
   getCairoTodayDateOnly,
   GroupPaymentStatistics,
@@ -85,7 +90,16 @@ function formatArabicMonthYear(year: number, monthIndex: number): string {
 export default function FinancialReportsScreen() {
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
-  const { activeCenterId } = useAuthStore();
+  const localDataRevision = useLocalDataRevision();
+  const { activeCenterId, currentUser } = useAuthStore();
+  const canView = PermissionService.hasAnyPermission(currentUser?.permissions || [], [
+    "reports.financial.view",
+    "payments.debt.view",
+  ]);
+  const canCollectPayment = PermissionService.hasPermission(
+    currentUser?.permissions || [],
+    "payments.create",
+  );
 
   const cairoToday = useMemo(() => getCairoTodayDateOnly(), []);
   const [groups, setGroups] = useState<GroupWithSchedules[]>([]);
@@ -111,6 +125,15 @@ export default function FinancialReportsScreen() {
       : { year: new Date().getFullYear(), month: new Date().getMonth() };
   });
 
+  const [payTarget, setPayTarget] = useState<{ studentId: string; studentName: string; remainingBalance: number } | null>(null);
+  const [payCycles, setPayCycles] = useState<Array<{ id: string; label: string; remainingDebt: number }>>([]);
+  const [selectedCycleId, setSelectedCycleId] = useState<string>("");
+  const [payAmount, setPayAmount] = useState<string>("");
+  const [payMethod, setPayMethod] = useState<string>("cash");
+  const [payNotes, setPayNotes] = useState<string>("");
+  const [paySaving, setPaySaving] = useState(false);
+  const [payError, setPayError] = useState<string>("");
+
   useEffect(() => {
     const trimmed = searchInput.trim();
     if (!trimmed) {
@@ -122,7 +145,7 @@ export default function FinancialReportsScreen() {
   }, [searchInput]);
 
   useEffect(() => {
-    if (!activeCenterId) {
+    if (!activeCenterId || !canView) {
       setGroups([]);
       return;
     }
@@ -144,10 +167,10 @@ export default function FinancialReportsScreen() {
     } catch {
       setGroups([]);
     }
-  }, [activeCenterId]);
+  }, [activeCenterId, canView]);
 
   useEffect(() => {
-    if (!activeCenterId || !selectedGroupId) {
+    if (!activeCenterId || !selectedGroupId || !canView) {
       setStats(null);
       setLoadError("");
       return;
@@ -166,7 +189,73 @@ export default function FinancialReportsScreen() {
       setLoadError(result.message);
     }
     setLoading(false);
-  }, [activeCenterId, selectedGroupId, reportDate, retryCount]);
+  }, [activeCenterId, selectedGroupId, reportDate, retryCount, localDataRevision, canView]);
+
+  const openPayModal = (row: PartialPaymentStatRow | UnpaidStatRow) => {
+    if (!canCollectPayment || !selectedGroupId) return;
+    try {
+      const fin = FinancialCalculationService.getStudentFinancialStatusForGroup(
+        row.studentId,
+        selectedGroupId,
+        reportDate,
+      );
+      const openCycles = fin.cycles
+        .filter((c) => Number(c.remainingDebt || 0) > 0 && c.status !== "cancelled")
+        .map((c) => ({
+          id: c.id,
+          label: `${c.startDate} - ${c.endDate}`,
+          remainingDebt: Number(c.remainingDebt || 0),
+        }));
+      setPayCycles(openCycles);
+      const firstCycle = openCycles[0] || null;
+      setSelectedCycleId(firstCycle?.id || "");
+      const initialAmount = firstCycle ? firstCycle.remainingDebt : row.remainingBalance;
+      setPayAmount(initialAmount > 0 ? String(initialAmount) : "");
+      setPayMethod("cash");
+      setPayNotes("");
+      setPayError("");
+      setPayTarget({
+        studentId: row.studentId,
+        studentName: row.studentName,
+        remainingBalance: row.remainingBalance,
+      });
+    } catch (err: any) {
+      Alert.alert("تعذر فتح الدفع", err?.userMessage || err?.message || "حدث خطأ أثناء تحميل المديونية.");
+    }
+  };
+
+  const submitPayment = async () => {
+    if (!payTarget || paySaving) return;
+    const numericAmount = Number(payAmount);
+    if (!Number.isFinite(numericAmount) || numericAmount <= 0) {
+      setPayError("أدخل مبلغاً صحيحاً أكبر من صفر.");
+      return;
+    }
+    const targetCycle = payCycles.find((c) => c.id === selectedCycleId);
+    const maxAllowed = targetCycle ? targetCycle.remainingDebt : payTarget.remainingBalance;
+    const isPartial = maxAllowed > 0 && numericAmount < maxAllowed;
+
+    setPaySaving(true);
+    setPayError("");
+    try {
+      await PaymentRepository.recordPayment({
+        studentId: payTarget.studentId,
+        amount: numericAmount,
+        paymentType: isPartial ? "partial" : "monthly",
+        paymentMethod: payMethod,
+        debtCycleId: selectedCycleId || undefined,
+        paymentDate: reportDate,
+        notes: payNotes.trim() || undefined,
+      });
+      setPayTarget(null);
+      setRetryCount((c) => c + 1);
+      Alert.alert("تم الدفع", `تم تسجيل دفعة بقيمة ${formatCurrency(numericAmount)} بنجاح.`);
+    } catch (err: any) {
+      setPayError(err?.userMessage || err?.message || "تعذر تسجيل الدفع.");
+    } finally {
+      setPaySaving(false);
+    }
+  };
 
   const selectedGroup = groups.find((g) => g.id === selectedGroupId) || null;
 
@@ -278,6 +367,15 @@ export default function FinancialReportsScreen() {
           <View style={styles.studentMetaRow}>
             <Text style={styles.metaText}>المستحق: {formatCurrency(row.originalDue)}</Text>
             <Text style={styles.metaText}>المدفوع: {formatCurrency(row.amountPaid)}</Text>
+            {canCollectPayment ? (
+              <TouchableOpacity
+                style={styles.payRowBtn}
+                onPress={() => openPayModal(row)}
+              >
+                <Ionicons name="wallet-outline" size={14} color={colors.white} />
+                <Text style={styles.payRowBtnText}>دفع</Text>
+              </TouchableOpacity>
+            ) : null}
           </View>
         </View>
       );
@@ -297,10 +395,31 @@ export default function FinancialReportsScreen() {
         <View style={styles.studentMetaRow}>
           <Text style={styles.metaText}>المستحق: {formatCurrency(row.originalDue)}</Text>
           <Text style={styles.metaText}>الحالة: لم يتم السداد</Text>
+          {canCollectPayment ? (
+            <TouchableOpacity
+              style={styles.payRowBtn}
+              onPress={() => openPayModal(row)}
+            >
+              <Ionicons name="wallet-outline" size={14} color={colors.white} />
+              <Text style={styles.payRowBtnText}>دفع</Text>
+            </TouchableOpacity>
+          ) : null}
         </View>
       </View>
     );
   };
+
+  if (!canView) {
+    return (
+      <SafeAreaView style={styles.safe}>
+        <View style={[styles.emptyCard, { margin: Spacing.lg }]}>
+          <Ionicons name="lock-closed-outline" size={28} color={colors.textSecondary} />
+          <Text style={styles.emptyTitle}>القسم مقفول</Text>
+          <Text style={styles.emptyText}>ليس لديك صلاحية عرض إحصائيات الدفع.</Text>
+        </View>
+      </SafeAreaView>
+    );
+  }
 
   return (
     <SafeAreaView style={styles.safe}>
@@ -622,6 +741,126 @@ export default function FinancialReportsScreen() {
           </View>
         </View>
       </Modal>
+
+      <Modal
+        visible={Boolean(payTarget)}
+        transparent
+        animationType="fade"
+        onRequestClose={() => {
+          if (!paySaving) setPayTarget(null);
+        }}
+      >
+        <View style={styles.modalBackdrop}>
+          <View style={styles.calendarCard}>
+            <Text style={styles.sectionTitle}>تحصيل دفعة: {payTarget?.studentName}</Text>
+            <Text style={styles.metaText}>
+              المتبقي: {formatCurrency(payTarget?.remainingBalance || 0)}
+            </Text>
+
+            {payCycles.length > 1 ? (
+              <View style={{ gap: 6 }}>
+                <Text style={styles.payFieldLabel}>الدورة المالية</Text>
+                <View style={styles.payOptionsRow}>
+                  {payCycles.map((cycle) => {
+                    const selected = cycle.id === selectedCycleId;
+                    return (
+                      <TouchableOpacity
+                        key={cycle.id}
+                        style={[
+                          styles.payChip,
+                          selected && { backgroundColor: colors.primary, borderColor: colors.primary },
+                        ]}
+                        onPress={() => {
+                          setSelectedCycleId(cycle.id);
+                          setPayAmount(String(cycle.remainingDebt));
+                        }}
+                      >
+                        <Text style={[styles.payChipText, selected && { color: colors.white }]}>
+                          {cycle.label} ({formatCurrency(cycle.remainingDebt)})
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              </View>
+            ) : null}
+
+            <View style={{ gap: 4 }}>
+              <Text style={styles.payFieldLabel}>المبلغ المدفوع</Text>
+              <TextInput
+                style={styles.payInput}
+                value={payAmount}
+                onChangeText={setPayAmount}
+                keyboardType="decimal-pad"
+                placeholder="0"
+                placeholderTextColor={colors.textSecondary}
+                textAlign="right"
+              />
+            </View>
+
+            <View style={{ gap: 6 }}>
+              <Text style={styles.payFieldLabel}>طريقة الدفع</Text>
+              <View style={styles.payOptionsRow}>
+                {[
+                  { key: "cash", label: "كاش" },
+                  { key: "vodafone_cash", label: "فودافون كاش" },
+                  { key: "instapay", label: "إنستاباي" },
+                  { key: "card", label: "بطاقة" },
+                ].map((method) => {
+                  const selected = payMethod === method.key;
+                  return (
+                    <TouchableOpacity
+                      key={method.key}
+                      style={[
+                        styles.payChip,
+                        selected && { backgroundColor: colors.primary, borderColor: colors.primary },
+                      ]}
+                      onPress={() => setPayMethod(method.key)}
+                    >
+                      <Text style={[styles.payChipText, selected && { color: colors.white }]}>
+                        {method.label}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            </View>
+
+            <View style={{ gap: 4 }}>
+              <Text style={styles.payFieldLabel}>ملاحظات (اختياري)</Text>
+              <TextInput
+                style={styles.payInput}
+                value={payNotes}
+                onChangeText={setPayNotes}
+                placeholder="ملاحظة اختيارية"
+                placeholderTextColor={colors.textSecondary}
+                textAlign="right"
+              />
+            </View>
+
+            {payError ? <Text style={styles.payErrorText}>{payError}</Text> : null}
+
+            <View style={styles.calendarActions}>
+              <TouchableOpacity
+                style={[styles.todayShortcutBtn, paySaving && { opacity: 0.6 }]}
+                onPress={() => void submitPayment()}
+                disabled={paySaving}
+              >
+                <Text style={styles.todayShortcutText}>
+                  {paySaving ? "جارٍ الحفظ..." : "تأكيد الدفع"}
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.closeModalBtn}
+                onPress={() => setPayTarget(null)}
+                disabled={paySaving}
+              >
+                <Text style={styles.closeModalText}>إلغاء</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -630,6 +869,39 @@ const createStyles = (colors: any) =>
   StyleSheet.create({
     safe: { flex: 1, backgroundColor: colors.background },
     content: { padding: Spacing.md, paddingBottom: 36, gap: 10 },
+    payRowBtn: {
+      flexDirection: "row-reverse",
+      alignItems: "center",
+      gap: 4,
+      backgroundColor: colors.primary,
+      paddingHorizontal: 10,
+      paddingVertical: 5,
+      borderRadius: 8,
+    },
+    payRowBtnText: { color: colors.white, fontSize: 11, fontWeight: "800" },
+    payFieldLabel: { color: colors.textPrimary, fontSize: 12, fontWeight: "800", textAlign: "right" },
+    payInput: {
+      borderWidth: 1,
+      borderColor: colors.border,
+      borderRadius: 10,
+      paddingHorizontal: 12,
+      paddingVertical: 9,
+      color: colors.textPrimary,
+      backgroundColor: colors.background,
+      fontSize: 14,
+      fontWeight: "700",
+    },
+    payOptionsRow: { flexDirection: "row-reverse", flexWrap: "wrap", gap: 6 },
+    payChip: {
+      borderWidth: 1,
+      borderColor: colors.border,
+      borderRadius: 9,
+      paddingHorizontal: 10,
+      paddingVertical: 6,
+      backgroundColor: colors.background,
+    },
+    payChipText: { color: colors.textPrimary, fontSize: 11, fontWeight: "700" },
+    payErrorText: { color: colors.dangerText, fontSize: 12, fontWeight: "700", textAlign: "right" },
     header: {
       flexDirection: "row-reverse",
       justifyContent: "space-between",

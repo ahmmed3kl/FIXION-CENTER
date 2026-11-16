@@ -650,6 +650,8 @@ SELECT s.center_id, s.id, snk.session_id
     ALTER TABLE payments DROP CONSTRAINT IF EXISTS payments_payment_type_check;
     ALTER TABLE payments ADD CONSTRAINT payments_payment_type_check
       CHECK (payment_type IN ('monthly', 'partial', 'session', 'payment_request', 'full'));
+
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS access_expires_at TIMESTAMPTZ;
   `);
 
   // Client concurrency tokens carry millisecond ISO timestamps. Guarantee

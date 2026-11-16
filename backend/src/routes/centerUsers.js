@@ -8,7 +8,7 @@ const { authMiddleware, requirePermission, defaultPermissionsForRole } = require
 const router = express.Router();
 router.use(authMiddleware, requirePermission("users.manage"));
 const roles = new Set(["manager", "assistant"]);
-const safeFields = "id,center_id,full_name,email,phone,role,permissions,status,created_at,updated_at";
+const safeFields = "id,center_id,full_name,email,phone,role,permissions,status,access_expires_at,created_at,updated_at";
 const allowedPermissions = new Set([
   "dashboard.view", "students.view", "students.create", "students.edit", "students.update", "students.deactivate", "students.delete", "students.restore", "students.profile.view", "students.cards.manage",
   "teachers.view", "teachers.create", "teachers.update", "teachers.deactivate", "subjects.view", "subjects.create", "subjects.update", "subjects.deactivate", "subjects.teachers.manage",
@@ -24,7 +24,7 @@ const allowedPermissions = new Set([
   "daily_closing.view", "daily_closing.close", "daily_closing.reopen",
 ]);
 function passwordValid(value) { return typeof value === "string" && value.length >= 12 && /[A-Za-z]/.test(value) && /\d/.test(value); }
-function safeUser(row) { return { id: row.id, centerId: row.center_id, fullName: row.full_name, email: row.email, phone: row.phone || null, role: row.role, permissions: typeof row.permissions === "string" ? JSON.parse(row.permissions || "[]") : (row.permissions || []), status: row.status, createdAt: row.created_at, updatedAt: row.updated_at }; }
+function safeUser(row) { return { id: row.id, centerId: row.center_id, fullName: row.full_name, email: row.email, phone: row.phone || null, role: row.role, permissions: typeof row.permissions === "string" ? JSON.parse(row.permissions || "[]") : (row.permissions || []), status: row.status, accessExpiresAt: row.access_expires_at || null, createdAt: row.created_at, updatedAt: row.updated_at }; }
 function cleanPermissions(value) {
   // The auth middleware evaluates permissions as a JSON object keyed by the
   // permission name. Accept both the mobile-friendly array form and the
@@ -179,12 +179,65 @@ router.post("/:userId/reset-password", async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
+router.post("/:userId/timed-access", async (req, res, next) => {
+  try {
+    if (req.user?.role === "manager" && req.params.userId === req.user.id) {
+      throw new AppError("FORBIDDEN", "Managers cannot modify their own timed access.", "لا يمكن لمدير السنتر تعديل مؤقت حسابه من هنا.", 403);
+    }
+    const roleFilter = req.user?.role === "manager" ? " AND role='assistant'" : "";
+    const { durationMinutes, clearTimer, expireNow } = req.body || {};
+
+    let result;
+    if (expireNow) {
+      result = await db.query(
+        `UPDATE users SET status='inactive', access_expires_at=NOW(), updated_at=NOW()
+         WHERE center_id=$1 AND id=$2 AND role IN ('manager','assistant')${roleFilter}
+         RETURNING ${safeFields}`,
+        [req.centerId, req.params.userId],
+      );
+    } else if (clearTimer || durationMinutes === null) {
+      result = await db.query(
+        `UPDATE users SET status='active', access_expires_at=NULL, updated_at=NOW()
+         WHERE center_id=$1 AND id=$2 AND role IN ('manager','assistant')${roleFilter}
+         RETURNING ${safeFields}`,
+        [req.centerId, req.params.userId],
+      );
+    } else {
+      const minutes = Number(durationMinutes);
+      if (!Number.isFinite(minutes) || minutes <= 0 || minutes > 60 * 24 * 30) {
+        throw new AppError(
+          "VALIDATION_ERROR",
+          "durationMinutes must be between 1 and 43200.",
+          "المدة يجب أن تكون بين دقيقة واحدة و30 يومًا.",
+          400,
+        );
+      }
+      result = await db.query(
+        `UPDATE users
+         SET status='active',
+             access_expires_at = NOW() + ($3::numeric * INTERVAL '1 minute'),
+             updated_at=NOW()
+         WHERE center_id=$1 AND id=$2 AND role IN ('manager','assistant')${roleFilter}
+         RETURNING ${safeFields}`,
+        [req.centerId, req.params.userId, Math.round(minutes)],
+      );
+    }
+
+    if (!result.rows[0]) throw new AppError("NOT_FOUND", "Account not found.", "الحساب غير موجود.", 404);
+    res.json({ user: safeUser(result.rows[0]) });
+  } catch (error) { next(error); }
+});
+
 router.post("/:userId/:action", async (req, res, next) => {
   try {
     if (req.user?.role === "manager" && req.params.userId === req.user.id) throw new AppError("FORBIDDEN", "Managers cannot change their own account status.", "لا يمكن لمدير السنتر تغيير حالة حسابه من هنا.", 403);
     if (!["activate", "deactivate"].includes(req.params.action)) throw new AppError("NOT_FOUND", "Action not found.", "الإجراء غير موجود.", 404);
-    const status = req.params.action === "activate" ? "active" : "inactive";
-    const result = await db.query(`UPDATE users SET status=$1,updated_at=NOW() WHERE center_id=$2 AND id=$3 AND role IN ('manager','assistant')${req.user?.role === "manager" ? " AND role='assistant'" : ""} RETURNING ${safeFields}`, [status, req.centerId, req.params.userId]);
+    const isActivate = req.params.action === "activate";
+    const status = isActivate ? "active" : "inactive";
+    const sql = isActivate
+      ? `UPDATE users SET status=$1, access_expires_at=NULL, updated_at=NOW() WHERE center_id=$2 AND id=$3 AND role IN ('manager','assistant')${req.user?.role === "manager" ? " AND role='assistant'" : ""} RETURNING ${safeFields}`
+      : `UPDATE users SET status=$1, updated_at=NOW() WHERE center_id=$2 AND id=$3 AND role IN ('manager','assistant')${req.user?.role === "manager" ? " AND role='assistant'" : ""} RETURNING ${safeFields}`;
+    const result = await db.query(sql, [status, req.centerId, req.params.userId]);
     if (!result.rows[0]) throw new AppError("NOT_FOUND", "Account not found.", "الحساب غير موجود.", 404);
     res.json({ user: safeUser(result.rows[0]) });
   } catch (error) { next(error); }

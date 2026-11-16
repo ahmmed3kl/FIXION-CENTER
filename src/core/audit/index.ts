@@ -88,9 +88,9 @@ export class AuditService {
               device_id as deviceId, entity_type as entityType, entity_id as entityId,
               action, timestamp, payload
        FROM audit_logs
-       WHERE center_id = ? AND (entity_id = ? OR payload LIKE ?)
+       WHERE center_id = ? AND (entity_id = ? OR payload LIKE ? OR payload LIKE ?)
        ORDER BY timestamp DESC, rowid DESC LIMIT ?`,
-      [centerId, entityId, `%\"studentId\":\"${entityId}\"%`, limit],
+      [centerId, entityId, `%\"studentId\":\"${entityId}\"%`, `%\"student_id\":\"${entityId}\"%`, limit],
     );
     return [...rows].sort((a, b) => {
       const diff = new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime();

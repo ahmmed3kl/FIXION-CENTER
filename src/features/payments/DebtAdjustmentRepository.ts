@@ -121,40 +121,46 @@ export class DebtAdjustmentRepository {
       );
     }
 
-    // 2. Calculate current effective price before this adjustment
-    const existingAdjustments = this.getAdjustmentsForCycle(params.debtCycleId);
-    const sumAdjustments = existingAdjustments.reduce(
-      (acc, adj) => acc + (Number(adj.adjustmentAmount) || 0),
-      0,
-    );
-    const amountBefore = Number(cycle.cyclePrice) + sumAdjustments;
-    const amountAfter = amountBefore + Number(params.adjustmentAmount);
-
-    if (amountAfter < 0) {
-      throw new ValidationError("المبلغ بعد التعديل لا يمكن أن يكون سالباً.");
-    }
-
     const adjustmentId = `adj-${generateUUID()}`;
     const operationId = params.operationId || `op-adj-${generateUUID()}`;
     const deviceId = await DeviceService.getDeviceId();
     const now = new Date().toISOString();
 
-    const adjustment: DebtAdjustment = {
-      id: adjustmentId,
-      operationId,
-      centerId,
-      studentId: cycle.studentId,
-      enrollmentId: cycle.enrollmentId,
-      debtCycleId: params.debtCycleId,
-      amountBefore,
-      adjustmentAmount: params.adjustmentAmount,
-      amountAfter,
-      reason: params.reason.trim(),
-      createdBy: user.id,
-      createdAt: now,
-    };
+    let adjustment!: DebtAdjustment;
 
     DatabaseService.runInTransaction(() => {
+      const existingAdjustments = db.getAllSync<{ adjustmentAmount: number }>(
+        `SELECT adjustment_amount as adjustmentAmount
+         FROM debt_adjustments
+         WHERE center_id = ? AND debt_cycle_id = ?`,
+        [centerId, params.debtCycleId],
+      );
+      const sumAdjustments = existingAdjustments.reduce(
+        (acc, adj) => acc + (Number(adj.adjustmentAmount) || 0),
+        0,
+      );
+      const amountBefore = Number(cycle.cyclePrice) + sumAdjustments;
+      const amountAfter = amountBefore + Number(params.adjustmentAmount);
+
+      if (amountAfter < 0) {
+        throw new ValidationError("المبلغ بعد التعديل لا يمكن أن يكون سالباً.");
+      }
+
+      adjustment = {
+        id: adjustmentId,
+        operationId,
+        centerId,
+        studentId: cycle.studentId,
+        enrollmentId: cycle.enrollmentId,
+        debtCycleId: params.debtCycleId,
+        amountBefore,
+        adjustmentAmount: params.adjustmentAmount,
+        amountAfter,
+        reason: params.reason.trim(),
+        createdBy: user.id,
+        createdAt: now,
+      };
+
       db.runSync(
         `INSERT INTO debt_adjustments (id, operation_id, center_id, student_id, enrollment_id, debt_cycle_id, amount_before, adjustment_amount, amount_after, reason, created_by, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -196,6 +202,7 @@ export class DebtAdjustmentRepository {
         entityId: adjustmentId,
         action: "debt_adjustment.create",
         payload: {
+          studentId: cycle.studentId,
           debtCycleId: params.debtCycleId,
           amountBefore,
           adjustmentAmount: params.adjustmentAmount,
