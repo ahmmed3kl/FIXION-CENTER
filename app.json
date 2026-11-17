@@ -5,11 +5,17 @@
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
+    "splash": {
+      "image": "./assets/images/fixion-wordmark.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#F8FBFF"
+    },
     "scheme": "fixion",
     "userInterfaceStyle": "light",
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.fixion.center"
+      "bundleIdentifier": "com.fixion.center",
+      "supportsRTL": true
     },
     "android": {
       "package": "com.fixion.center",
@@ -17,6 +23,7 @@
         "backgroundColor": "#000000",
         "foregroundImage": "./assets/images/android-icon-foreground.png"
       },
+      "supportsRTL": true,
       "permissions": [
         "android.permission.CAMERA"
       ]
@@ -40,11 +47,7 @@
         {
           "cameraPermission": "السماح بالوصول للكاميرا لمسح كروت الطلاب"
         }
-      ],
-      "expo-font",
-      "expo-image",
-      "expo-status-bar",
-      "expo-web-browser"
+      ]
     ],
     "extra": {
       "supportsRTL": true,

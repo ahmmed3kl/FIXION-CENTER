@@ -1,8 +1,8 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Stack, useRouter, useSegments } from "expo-router";
 import { StatusBar } from "expo-status-bar";
-import React, { useEffect } from "react";
-import { AppState, View } from "react-native";
+import React, { useEffect, useState } from "react";
+import { AppState, ScrollView, Text, TouchableOpacity, View } from "react-native";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import { ConnectivityService } from "../core/connectivity";
 import { DatabaseService } from "../core/database";
@@ -18,9 +18,53 @@ import { LoadingState } from "../shared/components";
 
 const queryClient = new QueryClient();
 
-// Initialize RTL layout and SQLite tables once at startup
-initializeRTL();
-DatabaseService.init();
+try {
+  initializeRTL();
+} catch (error) {
+  console.warn("RTL initialization warning:", error);
+}
+
+class StartupErrorBoundary extends React.Component<
+  { children: React.ReactNode },
+  { error: Error | null }
+> {
+  constructor(props: { children: React.ReactNode }) {
+    super(props);
+    this.state = { error: null };
+  }
+
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+
+  componentDidCatch(error: Error) {
+    console.error("RootLayout error boundary caught:", error);
+  }
+
+  render() {
+    if (this.state.error) {
+      return (
+        <View style={{ flex: 1, justifyContent: "center", padding: 24, backgroundColor: "#F8FAFC" }}>
+          <Text style={{ fontSize: 18, fontWeight: "800", color: "#B91C1C", textAlign: "right", marginBottom: 8 }}>
+            تعذر تشغيل التطبيق
+          </Text>
+          <ScrollView style={{ maxHeight: 260, backgroundColor: "#FFFFFF", padding: 12, borderRadius: 12 }}>
+            <Text selectable style={{ fontSize: 12, color: "#334155" }}>
+              {this.state.error.message || String(this.state.error)}
+            </Text>
+          </ScrollView>
+          <TouchableOpacity
+            onPress={() => this.setState({ error: null })}
+            style={{ marginTop: 16, backgroundColor: "#2563EB", padding: 12, borderRadius: 10, alignItems: "center" }}
+          >
+            <Text style={{ color: "#FFFFFF", fontWeight: "700" }}>إعادة المحاولة</Text>
+          </TouchableOpacity>
+        </View>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 function AuthGuard({ children }: { children: React.ReactNode }) {
   const {
@@ -184,22 +228,73 @@ function ThemeChrome({ children }: { children: React.ReactNode }) {
 }
 
 export default function RootLayout() {
+  const [dbError, setDbError] = useState<string | null>(null);
+  const [dbReady, setDbReady] = useState<boolean>(() => {
+    try {
+      DatabaseService.init();
+      return true;
+    } catch (error: any) {
+      return false;
+    }
+  });
+
+  const retryInit = () => {
+    try {
+      DatabaseService.init();
+      setDbError(null);
+      setDbReady(true);
+    } catch (error: any) {
+      setDbError(error?.message || String(error));
+    }
+  };
+
+  useEffect(() => {
+    if (!dbReady && !dbError) {
+      retryInit();
+    }
+  }, [dbReady, dbError]);
+
+  if (!dbReady) {
+    return (
+      <SafeAreaProvider>
+        <View style={{ flex: 1, justifyContent: "center", padding: 24, backgroundColor: "#F8FAFC" }}>
+          <Text style={{ fontSize: 18, fontWeight: "800", color: "#B91C1C", textAlign: "right", marginBottom: 8 }}>
+            تعذر تهيئة قاعدة البيانات
+          </Text>
+          <ScrollView style={{ maxHeight: 260, backgroundColor: "#FFFFFF", padding: 12, borderRadius: 12 }}>
+            <Text selectable style={{ fontSize: 12, color: "#334155" }}>
+              {dbError || "حدث خطأ أثناء فتح قاعدة البيانات المحلية."}
+            </Text>
+          </ScrollView>
+          <TouchableOpacity
+            onPress={retryInit}
+            style={{ marginTop: 16, backgroundColor: "#2563EB", padding: 12, borderRadius: 10, alignItems: "center" }}
+          >
+            <Text style={{ color: "#FFFFFF", fontWeight: "700" }}>إعادة المحاولة</Text>
+          </TouchableOpacity>
+        </View>
+      </SafeAreaProvider>
+    );
+  }
+
   return (
-    <SafeAreaProvider>
-      <QueryClientProvider client={queryClient}>
-        <ThemeProvider>
-          <ThemeChrome>
-            <AuthGuard>
-              <ServiceVisibilityProvider>
-                <Stack screenOptions={{ headerShown: false }}>
-                  <Stack.Screen name="(auth)" />
-                  <Stack.Screen name="(main)" />
-                </Stack>
-              </ServiceVisibilityProvider>
-            </AuthGuard>
-          </ThemeChrome>
-        </ThemeProvider>
-      </QueryClientProvider>
-    </SafeAreaProvider>
+    <StartupErrorBoundary>
+      <SafeAreaProvider>
+        <QueryClientProvider client={queryClient}>
+          <ThemeProvider>
+            <ThemeChrome>
+              <AuthGuard>
+                <ServiceVisibilityProvider>
+                  <Stack screenOptions={{ headerShown: false }}>
+                    <Stack.Screen name="(auth)" />
+                    <Stack.Screen name="(main)" />
+                  </Stack>
+                </ServiceVisibilityProvider>
+              </AuthGuard>
+            </ThemeChrome>
+          </ThemeProvider>
+        </QueryClientProvider>
+      </SafeAreaProvider>
+    </StartupErrorBoundary>
   );
 }

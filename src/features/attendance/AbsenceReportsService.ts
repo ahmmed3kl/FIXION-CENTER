@@ -126,7 +126,7 @@ export class AbsenceReportsService {
     const activationTimes = SessionRepository.getActivationTimestamps(reportSessions.map((session) => session.id));
 
     return sortSessionsByActivation(reportSessions, activationTimes).map((session) => {
-      const report = this.getSessionReport(session.id);
+      const report = this.getSessionReport(session.id, { summaryOnly: true });
       const sessionNumber = (counters.get(session.groupId) || 0) + 1;
       counters.set(session.groupId, sessionNumber);
       return { session, sessionNumber, total: report.expected.length, present: report.present.length, absent: report.absent.length, compensated: report.compensated };
@@ -321,7 +321,10 @@ export class AbsenceReportsService {
     );
   }
 
-  static getSessionReport(sessionId: string): AbsenceSessionReport {
+  static getSessionReport(
+    sessionId: string,
+    options: { summaryOnly?: boolean } = {},
+  ): AbsenceSessionReport {
     const session = SessionRepository.findById(sessionId);
     if (!session) throw new Error("الحصة غير موجودة في المركز الحالي.");
     if (!parseLocalDateOnly(session.sessionDate)) {
@@ -431,11 +434,15 @@ export class AbsenceReportsService {
       AbsenceNoteRepository.getForSession(sessionId).map((note) => [note.studentId, note.text]),
     );
 
+    const advancedSet = new Set(advancedStudentIds);
     for (const student of expected) {
-      if (advancedStudentIds.includes(student.id)) {
+      if (advancedSet.has(student.id)) {
         compensation.push({ student, kind: "advanced" });
         continue;
       }
+      // Summary lists only need counts, and "eligible" rows are not counted,
+      // so skip the expensive per-student opportunity scan there.
+      if (options.summaryOnly) continue;
       const opportunity = MakeupService.getMakeupOpportunities(student.id)
         .find((item) => item.nextEligibleSessionId === sessionId);
       if (opportunity) compensation.push({ student, kind: "eligible", opportunity });
