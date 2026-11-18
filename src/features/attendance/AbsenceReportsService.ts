@@ -108,8 +108,46 @@ export function calculateAbsenceReportCounts(
   return { total: expected.length, present, absent: absentFinal, compensated: makeupIds.size + advancedIds.size };
 }
 
+// Scoped memo used only while a screen load runs several monthly computations
+// back to back. Outside of AbsenceReportsService.withSharedCache nothing is cached.
+let sharedCache: {
+  expected: Map<string, Student[]>;
+  attendance: Map<string, Attendance[]>;
+} | null = null;
+
+function expectedFor(sessionId: string): Student[] {
+  if (!sharedCache) return SessionRepository.getExpectedStudents(sessionId);
+  let value = sharedCache.expected.get(sessionId);
+  if (!value) {
+    value = SessionRepository.getExpectedStudents(sessionId);
+    sharedCache.expected.set(sessionId, value);
+  }
+  return value;
+}
+
+function attendanceFor(sessionId: string): Attendance[] {
+  if (!sharedCache) return AttendanceRepository.getSessionAttendance(sessionId);
+  let value = sharedCache.attendance.get(sessionId);
+  if (!value) {
+    value = AttendanceRepository.getSessionAttendance(sessionId);
+    sharedCache.attendance.set(sessionId, value);
+  }
+  return value;
+}
+
 /** Read-only composition of the existing session, attendance, absence and makeup services. */
 export class AbsenceReportsService {
+  /** Runs `fn` with per-session reads memoized; the cache is dropped afterwards. */
+  static withSharedCache<T>(fn: () => T): T {
+    if (sharedCache) return fn();
+    sharedCache = { expected: new Map(), attendance: new Map() };
+    try {
+      return fn();
+    } finally {
+      sharedCache = null;
+    }
+  }
+
   static getSessionsForMonth(month: string): AbsenceSessionSummary[] {
     const counters = new Map<string, number>();
     const sessionsById = new Map<string, Session>();
@@ -185,9 +223,9 @@ export class AbsenceReportsService {
         cycles.set(key, cycle);
       }
       cycle.sessions.push(session);
-      const attendance = AttendanceRepository.getSessionAttendance(session.id);
+      const attendance = attendanceFor(session.id);
       attendanceBySession.set(session.id, attendance);
-      for (const student of SessionRepository.getExpectedStudents(session.id)) {
+      for (const student of expectedFor(session.id)) {
         const expected = cycle.expectedByStudent.get(student.id) || {
           student,
           groups: new Set<string>(),
@@ -224,7 +262,7 @@ export class AbsenceReportsService {
               targetSession.sessionDate,
               teacherWeekStarts.get(cycle.teacherId) ?? DEFAULT_TEACHER_WEEK_START_DAY,
             ) ||
-            !SessionRepository.getExpectedStudents(sourceSession.id)
+            !expectedFor(sourceSession.id)
               .some((student) => student.id === record.studentId) ||
             (() => {
               const sourceAtt = AttendanceRepository.getStudentAttendanceInSession(sourceSession.id, record.studentId);
@@ -263,7 +301,7 @@ export class AbsenceReportsService {
   ): MonthlyNeverAttendedRow[] {
     if (!session.teacherId || !session.subjectId || !session.centerId) return [];
     const expectedStudentIds = new Set(
-      SessionRepository.getExpectedStudents(session.id).map((student) => student.id),
+      expectedFor(session.id).map((student) => student.id),
     );
     if (!expectedStudentIds.size) return [];
     const teacher = DatabaseService.getDb().getFirstSync<{ weekStartDay?: unknown }>(
@@ -290,7 +328,7 @@ export class AbsenceReportsService {
   ): MonthlyCrossGroupMakeupRow[] {
     const rows: MonthlyCrossGroupMakeupRow[] = [];
     for (const { session: targetSession } of sessions) {
-      for (const attendance of AttendanceRepository.getSessionAttendance(targetSession.id)) {
+      for (const attendance of attendanceFor(targetSession.id)) {
         if (
           attendance.attendanceType !== "makeup" ||
           (attendance.status !== "present" && attendance.status !== "late") ||
@@ -304,7 +342,7 @@ export class AbsenceReportsService {
           originalSession.groupId === targetSession.groupId ||
           originalSession.teacherId !== targetSession.teacherId ||
           originalSession.subjectId !== targetSession.subjectId ||
-          !SessionRepository.getExpectedStudents(originalSession.id)
+          !expectedFor(originalSession.id)
             .some((student) => student.id === attendance.studentId) ||
           (() => {
             const origAtt = AttendanceRepository.getStudentAttendanceInSession(originalSession.id, attendance.studentId);
@@ -339,12 +377,25 @@ export class AbsenceReportsService {
       });
     }
 
-    const expected = SessionRepository.getExpectedStudents(sessionId);
-    const attendance = AttendanceRepository.getSessionAttendance(sessionId);
+    const expected = expectedFor(sessionId);
+    const attendance = attendanceFor(sessionId);
     const byStudent = new Map(expected.map((student) => [student.id, student]));
-    const advancedStudentIds = expected
-      .filter((student) => MakeupService.isSessionCoveredInAdvance(student.id, sessionId))
-      .map((student) => student.id);
+    let advancedStudentIds: string[];
+    try {
+      const coverageRows = DatabaseService.getDb().getAllSync<{ studentId: string }>(
+        `SELECT student_id as studentId FROM advance_coverages
+         WHERE center_id = ? AND target_future_session_id = ?`,
+        [session.centerId, sessionId],
+      );
+      const covered = new Set(coverageRows.map((row) => row.studentId));
+      advancedStudentIds = expected
+        .filter((student) => covered.has(student.id))
+        .map((student) => student.id);
+    } catch {
+      advancedStudentIds = expected
+        .filter((student) => MakeupService.isSessionCoveredInAdvance(student.id, sessionId))
+        .map((student) => student.id);
+    }
     const counts = calculateAbsenceReportCounts(
       expected,
       attendance,
@@ -370,7 +421,7 @@ export class AbsenceReportsService {
         const origAtt = AttendanceRepository.getStudentAttendanceInSession(item.originalAbsenceId!, item.studentId);
         if (
           !originalSession ||
-          !SessionRepository.getExpectedStudents(originalSession.id)
+          !expectedFor(originalSession.id)
             .some((student) => student.id === item.studentId) ||
           (origAtt && (origAtt.status === "present" || origAtt.status === "late"))
         ) return [];

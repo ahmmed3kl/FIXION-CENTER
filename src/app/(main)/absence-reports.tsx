@@ -299,6 +299,13 @@ export default function AbsenceReportsScreen() {
     resolveDefaultMonth("");
   }, [activeCenterId, resolveDefaultMonth]);
 
+  const loadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const detailTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (loadTimerRef.current) clearTimeout(loadTimerRef.current);
+    if (detailTimerRef.current) clearTimeout(detailTimerRef.current);
+  }, []);
+
   const loadSessions = useCallback(() => {
     if (!month) {
       setLoading(false);
@@ -306,34 +313,46 @@ export default function AbsenceReportsScreen() {
     }
     setLoading(true);
     setError("");
-    try {
-      const monthSessions = AbsenceReportsService.getSessionsForMonth(month);
-      setSessions(monthSessions);
-      setMonthlyNeverAttended(AbsenceReportsService.getMonthlyNeverAttended(month, monthSessions));
-      setMonthlyCrossGroupMakeups(AbsenceReportsService.getMonthlyCrossGroupMakeups(month, monthSessions));
-    } catch (err: any) {
-      setSessions([]);
-      setMonthlyNeverAttended([]);
-      setMonthlyCrossGroupMakeups([]);
-      setError(err?.message || "تعذر تحميل جلسات الشهر.");
-    } finally {
-      setLoading(false);
-    }
+    // Defer so React paints the loading state before the synchronous SQLite
+    // work starts; a newer call cancels the pending older one.
+    if (loadTimerRef.current) clearTimeout(loadTimerRef.current);
+    loadTimerRef.current = setTimeout(() => {
+      loadTimerRef.current = null;
+      try {
+        AbsenceReportsService.withSharedCache(() => {
+          const monthSessions = AbsenceReportsService.getSessionsForMonth(month);
+          setSessions(monthSessions);
+          setMonthlyNeverAttended(AbsenceReportsService.getMonthlyNeverAttended(month, monthSessions));
+          setMonthlyCrossGroupMakeups(AbsenceReportsService.getMonthlyCrossGroupMakeups(month, monthSessions));
+        });
+      } catch (err: any) {
+        setSessions([]);
+        setMonthlyNeverAttended([]);
+        setMonthlyCrossGroupMakeups([]);
+        setError(err?.message || "تعذر تحميل جلسات الشهر.");
+      } finally {
+        setLoading(false);
+      }
+    }, 50);
   }, [month]);
+
+  const selectedSessionIdRef = useRef<string | null>(null);
+  selectedSessionIdRef.current = selectedSessionId;
 
   useFocusEffect(useCallback(() => {
     if (!services.loaded || !canView) return;
     const resolvedMonth = resolveDefaultMonth(month);
     if (resolvedMonth !== month) return;
     loadSessions();
-    if (selectedSessionId) {
+    const openSessionId = selectedSessionIdRef.current;
+    if (openSessionId) {
       try {
-        setReport(AbsenceReportsService.getSessionReport(selectedSessionId));
+        setReport(AbsenceReportsService.getSessionReport(openSessionId));
       } catch (err: any) {
         setError(err?.message || "تعذر تحديث ملاحظات الحصة.");
       }
     }
-  }, [canView, loadSessions, localDataRevision, month, resolveDefaultMonth, selectedSessionId, services.loaded]));
+  }, [canView, loadSessions, localDataRevision, month, resolveDefaultMonth, services.loaded]));
 
   useFocusEffect(useCallback(() => () => {
     setSelectionModes({
@@ -367,14 +386,18 @@ export default function AbsenceReportsScreen() {
     setTab("absent");
     setAbsenceSubsection("session-absent");
     setDetailLoading(true);
-    try {
-      setReport(AbsenceReportsService.getSessionReport(sessionId));
-    } catch (err: any) {
-      Alert.alert("تعذر فتح التفاصيل", err?.message || "حدث خطأ أثناء تحميل بيانات الحصة.");
-      setSelectedSessionId(null);
-    } finally {
-      setDetailLoading(false);
-    }
+    if (detailTimerRef.current) clearTimeout(detailTimerRef.current);
+    detailTimerRef.current = setTimeout(() => {
+      detailTimerRef.current = null;
+      try {
+        setReport(AbsenceReportsService.getSessionReport(sessionId));
+      } catch (err: any) {
+        Alert.alert("تعذر فتح التفاصيل", err?.message || "حدث خطأ أثناء تحميل بيانات الحصة.");
+        setSelectedSessionId(null);
+      } finally {
+        setDetailLoading(false);
+      }
+    }, 30);
   };
 
   const filteredAbsent = useMemo(() => report ? smartSearch(report.absent, search, [{ get: (student) => student.fullName }, { get: (student) => student.studentCode }]) : [], [report, search]);
